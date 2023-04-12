@@ -171,11 +171,3 @@ fn renderRows(
 		}
 	}
 }
-
-pub fn getInput(self: *Self) std.os.ReadError!spoon.Input {
-	var buf: [16]u8 = undefined;
-	const bytes_read = try self.term.readInput(&buf);
-
-	var iter = spoon.inputParser(buf[0..bytes_read]);
-	return iter.next().?;
-}

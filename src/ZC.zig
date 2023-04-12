@@ -125,7 +125,7 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 }
 
 fn doCommandMode(self: *Self, input: []const u8) !void {
-	const status = try self.command_buf.handleInput(input);
+	const status = self.command_buf.handleInput(input);
 	switch (status) {
 		.waiting => {},
 		.cancelled => self.mode = .normal,
