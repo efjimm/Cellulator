@@ -11,6 +11,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const spoon_dep = b.dependency("spoon", .{});
+    const spoon = spoon_dep.module("spoon");
+    exe.addModule("spoon", spoon);
+
     exe.install();
 
     const run_cmd = exe.run();
