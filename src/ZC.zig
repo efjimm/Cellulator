@@ -6,6 +6,7 @@ const Tui = @import("Tui.zig");
 const TextInput = @import("text_input.zig").TextInput;
 
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 
 const Self = @This();
 
@@ -51,7 +52,7 @@ pub const Mode = enum {
 	}
 };
 
-const Pos = struct {
+pub const Pos = struct {
 	x: u16 = 0,
 	y: u16 = 0,
 };
@@ -79,6 +80,10 @@ pub fn run(self: *Self) !void {
 	}
 }
 
+fn setMode(self: *Self, new_mode: Mode) void {
+	self.mode = new_mode;
+}
+
 fn handleInput(self: *Self) !void {
 	var buf: [16]u8 = undefined;
 	const slice = try self.tui.term.readInput(&buf);
@@ -96,7 +101,7 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 		switch (in.content) {
 			.escape => self.running = false,
 			.codepoint => |cp| switch (cp) {
-				'g' => self.mode = .command,
+				'g' => self.setMode(.command),
 				'f' => {
 					if (self.sheet.columns.getPtr(self.cursor.x)) |col| {
 						col.precision +|= 1;
@@ -108,13 +113,11 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 					}
 				},
 				'j' => self.cursor.y +|= 1,
-				'J' => self.cursor.y *|= 10,
-				'L' => self.cursor.x *|= 26,
 				'k' => self.cursor.y -|= 1,
 				'l' => self.cursor.x +|= 1,
 				'h' => self.cursor.x -|= 1,
 				'=' => {
-					self.mode = .command;
+					self.setMode(.command);
 					self.command_buf.array.append('=') catch unreachable;
 				},
 				else => {},
@@ -128,9 +131,9 @@ fn doCommandMode(self: *Self, input: []const u8) !void {
 	const status = self.command_buf.handleInput(input);
 	switch (status) {
 		.waiting => {},
-		.cancelled => self.mode = .normal,
+		.cancelled => self.setMode(.normal),
 		.string => |arr| {
-			defer self.mode = .normal;
+			defer self.setMode(.normal);
 			const str = arr.slice();
 
 			if (str.len == 0)
@@ -138,8 +141,8 @@ fn doCommandMode(self: *Self, input: []const u8) !void {
 
 			switch (str[0]) {
 				'=' => {
-
-					const num = std.fmt.parseFloat(f64, str[1..]) catch return;
+					const slice = std.mem.trimLeft(u8, str[1..], &std.ascii.whitespace);
+					const num = std.fmt.parseFloat(f64, slice) catch return;
 					try self.sheet.setCell(self.allocator, self.cursor.y, self.cursor.x, num);
 				},
 				else => {},
@@ -159,35 +162,6 @@ pub fn leftReservedColumns(self: Self) u16 {
 		return 2;
 
 	return std.math.log10(y) + 2;
-}
-
-pub fn columnIndexToName(index: u16, buf: []u8) []const u8 {
-	if (index < 26) {
-		std.debug.assert(buf.len >= 1);
-		buf[0] = 'A' + @intCast(u8, index);
-		return buf[0..1];
-	}
-
-	var stream = std.io.fixedBufferStream(buf);
-	const writer = stream.writer();
-
-	var i = index +| 1;
-	while (i > 0) : (i /= 26) {
-		i -= 1;
-		const r = @intCast(u8, i % 26);
-		writer.writeByte('A' + r) catch break;
-	}
-
-	const slice = stream.getWritten();
-	std.mem.reverse(u8, slice);
-	return slice;
-}
-
-pub fn posToCellName(y: u16, x: u16, buf: []u8) []const u8 {
-	var _buf: [16]u8 = undefined;
-	const col_name = columnIndexToName(x, &_buf);
-
-	return std.fmt.bufPrint(buf, "{s}{d}", .{ col_name, y }) catch return "";
 }
 
 pub fn cursorUp(self: *Self) void {

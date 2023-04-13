@@ -1,6 +1,7 @@
 const std = @import("std");
-const ZC = @import("ZC.zig");
+const utils = @import("utils.zig");
 const spoon = @import("spoon");
+const ZC = @import("ZC.zig");
 const Sheet = @import("Sheet.zig");
 
 const Term = spoon.Term;
@@ -49,6 +50,7 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
 	var rc = try self.term.getRenderContext();
 	defer rc.done() catch {};
 
+	try rc.hideCursor();
 	try rc.clear();
 	try rc.moveCursorTo(0, 0);
 
@@ -60,12 +62,18 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
 	}
 
 	var buf: [64]u8 = undefined;
-	try writer.writeAll(ZC.posToCellName(zc.cursor.y, zc.cursor.x, &buf));
+	try writer.writeAll(utils.posToCellName(zc.cursor.y, zc.cursor.x, &buf));
 
-	try writer.print(" {} {s}", .{ zc.mode, zc.command_buf.slice() });
+	try writer.print(" {}", .{ zc.mode });
 
 	try self.renderColumnHeadings(&rc, zc.*);
 	try self.renderRows(&rc, zc.*);
+
+	if (zc.mode == .command) {
+		try rc.moveCursorTo(ZC.input_line, 0);
+		try rc.showCursor();
+		try writer.writeAll(zc.command_buf.slice());
+	}
 }
 
 fn renderColumnHeadings(
@@ -91,7 +99,7 @@ fn renderColumnHeadings(
 				Sheet.Column.default_width;
 
 		var buf: [16]u8 = undefined;
-		const name = ZC.columnIndexToName(x, &buf);
+		const name = utils.columnIndexToName(x, &buf);
 
 		if (x == zc.cursor.x) {
 			try rc.setStyle(.{ .fg = .black, .bg = .blue });

@@ -25,3 +25,9 @@ pub fn panic(msg: []const u8, trace: ?*std.builtin.StackTrace, ret_addr: ?usize)
     zc.tui.term.cook() catch {};
     std.builtin.default_panic(msg, trace, ret_addr);
 }
+
+comptime {
+	std.testing.refAllDecls(@import("Parser.zig"));
+	std.testing.refAllDecls(ZC);
+	std.testing.refAllDecls(@import("utils.zig"));
+}
