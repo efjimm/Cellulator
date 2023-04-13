@@ -1,5 +1,6 @@
 const std = @import("std");
 const utils = @import("utils.zig");
+const Ast = @import("Parser.zig");
 const spoon = @import("spoon");
 const Sheet = @import("Sheet.zig");
 const Tui = @import("Tui.zig");
@@ -118,7 +119,11 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 				'h' => self.cursor.x -|= 1,
 				'=' => {
 					self.setMode(.command);
-					self.command_buf.array.append('=') catch unreachable;
+					var _buf: [16]u8 = undefined;
+					const cell_name = utils.posToCellName(self.cursor.y, self.cursor.x, &_buf);
+
+					const writer = self.command_buf.writer();
+					writer.print("{s} = ", .{ cell_name }) catch unreachable;
 				},
 				else => {},
 			},
@@ -136,17 +141,11 @@ fn doCommandMode(self: *Self, input: []const u8) !void {
 			defer self.setMode(.normal);
 			const str = arr.slice();
 
-			if (str.len == 0)
-				return;
+			var ast = Ast.parse(self.allocator, str) catch return;
+			defer ast.deinit(self.allocator);
 
-			switch (str[0]) {
-				'=' => {
-					const slice = std.mem.trimLeft(u8, str[1..], &std.ascii.whitespace);
-					const num = std.fmt.parseFloat(f64, slice) catch return;
-					try self.sheet.setCell(self.allocator, self.cursor.y, self.cursor.x, num);
-				},
-				else => {},
-			}
+			const num = ast.evalNode(@intCast(u32, ast.nodes.len) - 1, 0);
+			try self.sheet.setCell(self.allocator, self.cursor.y, self.cursor.x, num);
 		},
 	}
 }

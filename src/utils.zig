@@ -65,6 +65,26 @@ pub fn cellNameToPosition(name: []const u8) Pos {
 	};
 }
 
+pub fn cellNameToPositionSafe(name: []const u8) !Pos {
+	if (
+		name.len <= 1 or
+		!std.ascii.isAlphabetic(name[0]) or
+		!std.ascii.isDigit(name[name.len - 1])
+	) {
+		return error.InvalidSyntax;
+	}
+
+	const letters_end = for (name, 0..) |c, i| {
+		if (!std.ascii.isAlphabetic(c))
+			break i;
+	} else unreachable;
+
+	return .{
+		.x = columnNameToIndex(name[0..letters_end]),
+		.y = std.fmt.parseInt(u16, name[letters_end..], 0) catch return error.InvalidSyntax,
+	};
+}
+
 test "cellNameToPosition" {
 	const t = std.testing;
 
