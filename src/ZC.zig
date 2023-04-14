@@ -26,7 +26,7 @@ running: bool = true,
 
 allocator: Allocator,
 
-command_buf: TextInput(1024) = .{},
+command_buf: TextInput(512) = .{},
 
 pub const status_line = 0;
 pub const input_line = 1;
@@ -83,6 +83,8 @@ pub fn run(self: *Self) !void {
 
 fn setMode(self: *Self, new_mode: Mode) void {
 	self.mode = new_mode;
+	if (new_mode == .command)
+		self.tui.dismissStatusMessage();
 }
 
 fn handleInput(self: *Self) !void {
@@ -91,7 +93,10 @@ fn handleInput(self: *Self) !void {
 
 	try switch (self.mode) {
 		.normal => self.doNormalMode(slice),
-		.command => self.doCommandMode(slice),
+		.command => self.doCommandMode(slice) catch |err| switch (err) {
+			error.UnexpectedToken => self.tui.setStatusMessage("Error: unexpected token", .{}),
+			else => return err,
+		},
 	};
 }
 
@@ -99,10 +104,11 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 	var iter = spoon.inputParser(buf);
 
 	while (iter.next()) |in| {
-		switch (in.content) {
-			.escape => self.running = false,
+		if (!in.mod_ctrl)  switch (in.content) {
+			.escape => self.tui.dismissStatusMessage(),
 			.codepoint => |cp| switch (cp) {
-				'g' => self.setMode(.command),
+				'q' => self.running = false,
+				':' => self.setMode(.command),
 				'f' => {
 					if (self.sheet.columns.getPtr(self.cursor.x)) |col| {
 						col.precision +|= 1;
@@ -128,6 +134,14 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 				else => {},
 			},
 			else => {},
+		} else switch (in.content) {
+			.codepoint => |cp| switch (cp) {
+				// C-[ is indistinguishable from Escape on most terminals. On terminals where they
+				// can be distinguished, we make them do the same thing for a consistent experience
+				'[' => self.tui.dismissStatusMessage(),
+				else => {},
+			},
+			else => {},
 		}
 	}
 }
@@ -141,7 +155,7 @@ fn doCommandMode(self: *Self, input: []const u8) !void {
 			defer self.setMode(.normal);
 			const str = arr.slice();
 
-			var ast = Ast.parse(self.allocator, str) catch return;
+			var ast = try Ast.parse(self.allocator, str);
 			defer ast.deinit(self.allocator);
 
 			const num = ast.evalNode(@intCast(u32, ast.nodes.len) - 1, 0);

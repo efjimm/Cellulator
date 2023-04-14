@@ -7,6 +7,7 @@ const Sheet = @import("Sheet.zig");
 const Term = spoon.Term;
 
 term: Term,
+status_message: std.BoundedArray(u8, 256) = .{},
 
 const Self = @This();
 
@@ -43,6 +44,16 @@ pub fn deinit(self: *Self) void {
 
 pub const RenderError = Term.WriteError;
 
+pub fn setStatusMessage(self: *Self, comptime fmt: []const u8, args: anytype) void {
+	self.dismissStatusMessage();
+	const writer = self.status_message.writer();
+	writer.print(fmt, args) catch {};
+}
+
+pub fn dismissStatusMessage(self: *Self) void {
+	self.status_message.len = 0;
+}
+
 pub fn render(self: *Self, zc: *ZC) RenderError!void {
 	if (needs_resize)
 		try self.term.fetchSize();
@@ -69,10 +80,16 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
 	try self.renderColumnHeadings(&rc, zc.*);
 	try self.renderRows(&rc, zc.*);
 
+	try rc.moveCursorTo(ZC.input_line, 0);
 	if (zc.mode == .command) {
-		try rc.moveCursorTo(ZC.input_line, 0);
 		try rc.showCursor();
 		try writer.writeAll(zc.command_buf.slice());
+	} else {
+		var rpw = rc.restrictedPaddingWriter(self.term.width);
+		defer rpw.finish() catch {};
+		const truncating_writer = rpw.writer();
+
+		try truncating_writer.writeAll(self.status_message.slice());
 	}
 }
 
@@ -123,6 +140,7 @@ fn renderRows(
 	const columns = zc.sheet.columns;
 	const reserved_cols = zc.leftReservedColumns();
 
+	// Loop over rows
 	for (ZC.content_line..self.term.height, zc.screen_pos.y..) |line, y| {
 		try rc.moveCursorTo(@intCast(u16, line), 0);
 
@@ -136,10 +154,12 @@ fn renderRows(
 		else
 			try rc.setStyle(.{ .fg = .blue, .bg = .black });
 
+		// Renders row number
 		try writer.print("{d: >[1]} ", .{ y, reserved_cols - 1 });
 
 		try rc.setStyle(.{});
 
+		// Loop over columns
 		var x = zc.screen_pos.x;
 		while (true) : (x +|= 1) {
 			if (y == zc.cursor.y and x == zc.cursor.x)

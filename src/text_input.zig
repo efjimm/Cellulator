@@ -23,7 +23,7 @@ pub fn TextInput(comptime size: usize) type {
 		array: Array = .{},
 
 		/// Parses the input contained in `buf` and acts accordingly. Returns a tagged union
-		/// representing the internal state.
+		/// representing whether we are finished gathering input or not.
 		pub fn handleInput(self: *Self, buf: []const u8) Status {
 			var iter = inputParser(buf);
 
