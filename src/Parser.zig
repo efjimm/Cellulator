@@ -1,3 +1,6 @@
+//! Basic expression parser. Does not attempt error recovery and returns immediately on fatal
+//! errors.
+
 const std = @import("std");
 const utils = @import("utils.zig");
 const Pos = @import("ZC.zig").Pos;
@@ -165,7 +168,7 @@ const Parser = struct {
 		});
 	}
 
-	const ParseError = error{ UnexpectedToken, InvalidCharacter, InvalidSyntax } || Allocator.Error;
+	const ParseError = error{ UnexpectedToken } || Allocator.Error;
 
 	/// Expression <- AddExpr
 	fn parseExpression(self: *Parser) ParseError!u32 {
@@ -229,7 +232,9 @@ const Parser = struct {
 		const i = try self.expectToken(.number);
 		const text = self.tokenContent(i).text(self.source);
 
-		const num = try std.fmt.parseFloat(f64, text);
+		// Correctness of the number is guaranteed because the tokenizer wouldn't have generated a
+		// number token on invalid format.
+		const num = std.fmt.parseFloat(f64, text) catch unreachable;
 
 		return self.addNode(.{
 			.number = num,
@@ -241,7 +246,8 @@ const Parser = struct {
 		const i = try self.expectToken(.cell_name);
 		const text = self.tokenContent(i).text(self.source);
 
-		const pos = try utils.cellNameToPositionSafe(text);
+		// TODO: check bounds
+		const pos = utils.cellNameToPosition(text);
 
 		return self.addNode(.{
 			.cell = pos,
