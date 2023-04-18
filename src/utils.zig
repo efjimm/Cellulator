@@ -10,7 +10,30 @@ pub fn writeCodepoint(cp: u21, writer: anytype) !void {
 	try writer.writeAll(buf[0..len]);
 }
 
-pub fn columnIndexToName(index: u16, buf: []u8) []const u8 {
+pub fn columnIndexToName(index: u16, writer: anytype) @TypeOf(writer).Error!void {
+	if (index < 26) {
+		try writer.writeByte('A' + @intCast(u8, index));
+		return;
+	}
+
+	// Max value is 'CRXO'
+	var buf: [4]u8 = undefined;
+	var stream = std.io.fixedBufferStream(&buf);
+	const bufwriter = stream.writer();
+
+	var i = index +| 1;
+	while (i > 0) : (i /= 26) {
+		i -= 1;
+		const r = @intCast(u8, i % 26);
+		bufwriter.writeByte('A' + r) catch unreachable;
+	}
+
+	const slice = stream.getWritten();
+	std.mem.reverse(u8, slice);
+	_ = try writer.writeAll(slice);
+}
+
+pub fn columnIndexToNameBuf(index: u16, buf: []u8) []const u8 {
 	if (index < 26) {
 		std.debug.assert(buf.len >= 1);
 		buf[0] = 'A' + @intCast(u8, index);
@@ -33,10 +56,10 @@ pub fn columnIndexToName(index: u16, buf: []u8) []const u8 {
 }
 
 pub fn posToCellName(y: u16, x: u16, buf: []u8) []const u8 {
-	var _buf: [16]u8 = undefined;
-	const col_name = columnIndexToName(x, &_buf);
+	var _buf: [4]u8 = undefined;
+	const col_name = columnIndexToNameBuf(x, &_buf);
 
-	return std.fmt.bufPrint(buf, "{s}{d}", .{ col_name, y }) catch return "";
+	return std.fmt.bufPrint(buf, "{s}{d}", .{ col_name, y }) catch buf[0..0];
 }
 
 pub fn columnNameToIndex(name: []const u8) u16 {
@@ -119,12 +142,12 @@ test "cellNameToPosition" {
 	}
 }
 
-test "columnIndexToName" {
+test "columnIndexToNameBuf" {
 	const t = std.testing;
 	var buf: [4]u8 = undefined;
 
-	try t.expectEqualStrings("A", columnIndexToName(0, &buf));
-	try t.expectEqualStrings("AA", columnIndexToName(26, &buf));
-	try t.expectEqualStrings("AAA", columnIndexToName(702, &buf));
-	try t.expectEqualStrings("AAAA", columnIndexToName(18278, &buf));
+	try t.expectEqualStrings("A", columnIndexToNameBuf(0, &buf));
+	try t.expectEqualStrings("AA", columnIndexToNameBuf(26, &buf));
+	try t.expectEqualStrings("AAA", columnIndexToNameBuf(702, &buf));
+	try t.expectEqualStrings("AAAA", columnIndexToNameBuf(18278, &buf));
 }

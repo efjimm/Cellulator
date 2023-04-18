@@ -78,7 +78,7 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
 	try writer.print(" {}", .{ zc.mode });
 
 	try self.renderColumnHeadings(&rc, zc.*);
-	try self.renderRows(&rc, zc.*);
+	try self.renderRows(&rc, zc);
 
 	try rc.moveCursorTo(ZC.input_line, 0);
 	if (zc.mode == .command) {
@@ -116,7 +116,7 @@ fn renderColumnHeadings(
 				Sheet.Column.default_width;
 
 		var buf: [16]u8 = undefined;
-		const name = utils.columnIndexToName(x, &buf);
+		const name = utils.columnIndexToNameBuf(x, &buf);
 
 		if (x == zc.cursor.x) {
 			try rc.setStyle(.{ .fg = .black, .bg = .blue });
@@ -135,7 +135,7 @@ fn renderColumnHeadings(
 fn renderRows(
 	self: Self,
 	rc: *Term.RenderContext,
-	zc: ZC,
+	zc: *ZC,
 ) RenderError!void {
 	const columns = zc.sheet.columns;
 	const reserved_cols = zc.leftReservedColumns();
@@ -169,8 +169,8 @@ fn renderRows(
 				if (rpw.width_left < col.width)
 					break;
 
-				const num_optional = if (col.cells.get(@intCast(u16, y))) |cell|
-						cell.num
+				const num_optional = if (col.cells.get(@intCast(u16, y))) |_|
+						zc.sheet.evalCell(.{ .y = @intCast(u16, y), .x = x })
 					else
 						null;
 				

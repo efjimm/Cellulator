@@ -1,6 +1,6 @@
 const std = @import("std");
 const utils = @import("utils.zig");
-const Ast = @import("Parser.zig");
+const Ast = @import("Parse.zig");
 const spoon = @import("spoon");
 const Sheet = @import("Sheet.zig");
 const Tui = @import("Tui.zig");
@@ -19,7 +19,7 @@ mode: Mode = .normal,
 /// The top left corner of the screen
 screen_pos: Pos = .{},
 
-// The cell position of the cursor
+/// The cell position of the cursor
 cursor: Pos = .{},
 
 running: bool = true,
@@ -156,10 +156,20 @@ fn doCommandMode(self: *Self, input: []const u8) !void {
 			const str = arr.slice();
 
 			var ast = try Ast.parse(self.allocator, str);
-			defer ast.deinit(self.allocator);
+			errdefer ast.deinit(self.allocator);
 
-			const num = ast.evalNode(@intCast(u32, ast.nodes.len) - 1, 0);
-			try self.sheet.setCell(self.allocator, self.cursor.y, self.cursor.x, num);
+			const root = ast.rootNode();
+			switch (root) {
+				.assignment => |op| {
+					const cell = ast.nodes.items(.data)[op.lhs].cell;
+					ast.splice(op.rhs); // Cut ast down to just the expression
+
+					try self.sheet.setCell(self.allocator, cell.y, cell.x, .{ .ast = ast });
+				},
+				else => {
+					ast.deinit(self.allocator);
+				},
+			}
 		},
 	}
 }

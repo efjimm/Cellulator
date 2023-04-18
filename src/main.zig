@@ -28,7 +28,7 @@ pub fn panic(msg: []const u8, trace: ?*std.builtin.StackTrace, ret_addr: ?usize)
 
 // Reference all tests in other modules
 comptime {
-	std.testing.refAllDecls(@import("Parser.zig"));
+	std.testing.refAllDecls(@import("Parse.zig"));
 	std.testing.refAllDecls(ZC);
 	std.testing.refAllDecls(@import("utils.zig"));
 }
