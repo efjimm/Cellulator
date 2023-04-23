@@ -169,8 +169,8 @@ fn renderRows(
 				if (rpw.width_left < col.width)
 					break;
 
-				const num_optional = if (col.cells.get(@intCast(u16, y))) |_|
-						zc.sheet.evalCell(.{ .y = @intCast(u16, y), .x = x })
+				const num_optional = if (col.cells.getPtr(@intCast(u16, y))) |cell|
+						cell.getValue(&zc.sheet)
 					else
 						null;
 				

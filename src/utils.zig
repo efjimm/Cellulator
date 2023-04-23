@@ -1,5 +1,5 @@
 const std = @import("std");
-const Pos = @import("ZC.zig").Pos;
+const Position = @import("ZC.zig").Position;
 const assert = std.debug.assert;
 
 /// Writes the utf-8 representation of a unicode codepoint to the given writer
@@ -72,7 +72,7 @@ pub fn columnNameToIndex(name: []const u8) u16 {
 	return ret - 1;
 }
 
-pub fn cellNameToPosition(name: []const u8) Pos {
+pub fn cellNameToPosition(name: []const u8) Position {
 	assert(name.len > 1);
 	assert(std.ascii.isAlphabetic(name[0]));
 	assert(std.ascii.isDigit(name[name.len-1]));
@@ -88,7 +88,7 @@ pub fn cellNameToPosition(name: []const u8) Pos {
 	};
 }
 
-pub fn cellNameToPositionSafe(name: []const u8) !Pos {
+pub fn cellNameToPositionSafe(name: []const u8) !Position {
 	if (
 		name.len <= 1 or
 		!std.ascii.isAlphabetic(name[0]) or
@@ -113,32 +113,32 @@ test "cellNameToPosition" {
 
 	{
 		const pos = cellNameToPosition("A1");
-		try t.expectEqual(Pos{ .y = 1, .x = 0 }, pos);
+		try t.expectEqual(Position{ .y = 1, .x = 0 }, pos);
 	}
 
 	{
 		const pos = cellNameToPosition("AA7865");
-		try t.expectEqual(Pos{ .y = 7865, .x = 26 }, pos);
+		try t.expectEqual(Position{ .y = 7865, .x = 26 }, pos);
 	}
 
 	{
 		const pos = cellNameToPosition("AAA100");
-		try t.expectEqual(Pos{ .y = 100, .x = 702 }, pos);
+		try t.expectEqual(Position{ .y = 100, .x = 702 }, pos);
 	}
 
 	{
 		const pos = cellNameToPosition("MM50000");
-		try t.expectEqual(Pos{ .y = 50000, .x = 350 }, pos);
+		try t.expectEqual(Position{ .y = 50000, .x = 350 }, pos);
 	}
 
 	{
 		const pos = cellNameToPosition("ZZ0");
-		try t.expectEqual(Pos{ .y = 0, .x = 701 }, pos);
+		try t.expectEqual(Position{ .y = 0, .x = 701 }, pos);
 	}
 
 	{
 		const pos = cellNameToPosition("AAAA0");
-		try t.expectEqual(Pos{ .y = 0, .x = 18278 }, pos);
+		try t.expectEqual(Position{ .y = 0, .x = 18278 }, pos);
 	}
 }
 

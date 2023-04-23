@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const utils = @import("utils.zig");
-const Pos = @import("ZC.zig").Pos;
+const Position = @import("ZC.zig").Position;
 
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -162,11 +162,11 @@ pub fn print(self: *Self, writer: anytype) @TypeOf(writer).Error!void {
 	try self.traverse(Context{ .ast = self, .writer = &writer });
 }
 
-pub fn traverse(self: *Self, context: anytype) !void {
+pub fn traverse(self: Self, context: anytype) !void {
 	return self.traverseFrom(self.rootNodeIndex(), context);
 }
 
-fn traverseFrom(self: *Self, index: u32, context: anytype) !void {
+fn traverseFrom(self: Self, index: u32, context: anytype) !void {
 	const node = self.nodes.get(index);
 
 	switch (node) {
@@ -181,8 +181,14 @@ fn traverseFrom(self: *Self, index: u32, context: anytype) !void {
 	}
 }
 
-pub fn eval(self: Self, context: anytype) f64 {
-	return self.evalNode(self.rootNodeIndex(), 0, context);
+pub fn eval(
+	ast: Self,
+	/// An instance of a type which has the function `fn evalCell(@TypeOf(context), Position) f64`.
+	/// This function should return the value of the cell at the given position. It may do this
+	/// by calling this function.
+	context: anytype,
+) f64 {
+	return ast.evalNode(ast.rootNodeIndex(), 0, context);
 }
 
 pub fn evalNode(self: Self, index: u32, total: f64, context: anytype) f64 {
@@ -203,7 +209,7 @@ pub fn evalNode(self: Self, index: u32, total: f64, context: anytype) f64 {
 const Node = union(enum) {
 	number: f64,
 	column: u16,
-	cell: Pos,
+	cell: Position,
 	assignment: BinaryOperator,
 	add: BinaryOperator,
 	sub: BinaryOperator,
@@ -550,7 +556,7 @@ test "Tokenizer" {
 test "Parse" {
 	const t = std.testing;
 	const Context = struct {
-		pub fn evalCell(_: @This(), _: Pos) f64 {
+		pub fn evalCell(_: @This(), _: Position) f64 {
 			return 0;
 		}
 	};

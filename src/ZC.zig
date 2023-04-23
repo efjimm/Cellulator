@@ -17,10 +17,10 @@ tui: Tui,
 mode: Mode = .normal,
 
 /// The top left corner of the screen
-screen_pos: Pos = .{},
+screen_pos: Position = .{},
 
 /// The cell position of the cursor
-cursor: Pos = .{},
+cursor: Position = .{},
 
 running: bool = true,
 
@@ -53,7 +53,7 @@ pub const Mode = enum {
 	}
 };
 
-pub const Pos = struct {
+pub const Position = struct {
 	x: u16 = 0,
 	y: u16 = 0,
 };
@@ -76,9 +76,14 @@ pub fn run(self: *Self) !void {
 	while (self.running) {
 		self.clampScreenToCursor();
 
+		try self.updateCells();
 		try self.tui.render(self);
 		try self.handleInput();
 	}
+}
+
+pub fn updateCells(self: *Self) Allocator.Error!void {
+	return self.sheet.update(self.allocator);
 }
 
 fn setMode(self: *Self, new_mode: Mode) void {
