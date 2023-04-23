@@ -60,14 +60,14 @@ pub const Position = struct {
 
 pub fn init(allocator: Allocator) !Self {
 	return .{
-		.sheet = Sheet.init(),
+		.sheet = Sheet.init(allocator),
 		.tui = try Tui.init(),
 		.allocator = allocator,
 	};
 }
 
 pub fn deinit(self: *Self) void {
-	self.sheet.deinit(self.allocator);
+	self.sheet.deinit();
 	self.tui.deinit();
 	self.* = undefined;
 }
@@ -83,7 +83,7 @@ pub fn run(self: *Self) !void {
 }
 
 pub fn updateCells(self: *Self) Allocator.Error!void {
-	return self.sheet.update(self.allocator);
+	return self.sheet.update();
 }
 
 fn setMode(self: *Self, new_mode: Mode) void {
@@ -166,10 +166,10 @@ fn doCommandMode(self: *Self, input: []const u8) !void {
 			const root = ast.rootNode();
 			switch (root) {
 				.assignment => |op| {
-					const cell = ast.nodes.items(.data)[op.lhs].cell;
+					const pos = ast.nodes.items(.data)[op.lhs].cell;
 					ast.splice(op.rhs); // Cut ast down to just the expression
 
-					try self.sheet.setCell(self.allocator, cell.y, cell.x, .{ .ast = ast });
+					try self.sheet.setCell(pos, .{ .ast = ast });
 				},
 				else => {
 					ast.deinit(self.allocator);

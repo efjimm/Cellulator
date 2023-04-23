@@ -4,6 +4,7 @@ const spoon = @import("spoon");
 const ZC = @import("ZC.zig");
 const Sheet = @import("Sheet.zig");
 
+const Position = ZC.Position;
 const Term = spoon.Term;
 
 term: Term,
@@ -105,7 +106,7 @@ fn renderColumnHeadings(
 
 	var x = zc.screen_pos.x;
 	var w = reserved_cols;
-	const columns = zc.sheet.columns;
+	const columns = &zc.sheet.columns;
 
 	try rc.setStyle(.{ .fg = .blue });
 
@@ -115,7 +116,7 @@ fn renderColumnHeadings(
 			else
 				Sheet.Column.default_width;
 
-		var buf: [16]u8 = undefined;
+		var buf: [4]u8 = undefined;
 		const name = utils.columnIndexToNameBuf(x, &buf);
 
 		if (x == zc.cursor.x) {
@@ -137,7 +138,6 @@ fn renderRows(
 	rc: *Term.RenderContext,
 	zc: *ZC,
 ) RenderError!void {
-	const columns = zc.sheet.columns;
 	const reserved_cols = zc.leftReservedColumns();
 
 	// Loop over rows
@@ -165,33 +165,26 @@ fn renderRows(
 			if (y == zc.cursor.y and x == zc.cursor.x)
 				try rc.setStyle(.{ .fg = .black, .bg = .blue });
 
-			if (columns.get(x)) |col| {
-				if (rpw.width_left < col.width)
-					break;
+			const col = zc.sheet.getColumn(x);
+			if (rpw.width_left < col.width)
+				break;
 
-				const num_optional = if (col.cells.getPtr(@intCast(u16, y))) |cell|
-						cell.getValue(&zc.sheet)
-					else
-						null;
-				
-				var buf: [256]u8 = undefined;
-				if (num_optional) |num| {
-					const slice = buf[0..col.width];
-					const text = std.fmt.bufPrint(slice, "{d: >[1].[2]}", .{
-						num, col.width, col.precision
-					}) catch slice;
+			const pos = Position{ .y = @intCast(u16, y), .x = x };
+			const num_optional = if (zc.sheet.getCellPtr(pos)) |cell|
+					cell.getValue(&zc.sheet)
+				else
+					null;
+			
+			var buf: [256]u8 = undefined;
+			if (num_optional) |num| {
+				const slice = buf[0..col.width];
+				const text = std.fmt.bufPrint(slice, "{d: >[1].[2]}", .{
+					num, col.width, col.precision
+				}) catch slice;
 
-					try writer.writeAll(text);
-				} else {
-					try writer.print("{s: >[1]}", .{ "", col.width });
-				}
+				try writer.writeAll(text);
 			} else {
-				const width = Sheet.Column.default_width;
-
-				if (rpw.width_left < width)
-					break;
-
-				try writer.print("{s: >[1]}", .{ "", width });
+				try writer.print("{s: >[1]}", .{ "", col.width });
 			}
 
 			if (y == zc.cursor.y and x == zc.cursor.x)

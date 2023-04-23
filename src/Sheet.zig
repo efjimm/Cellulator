@@ -6,65 +6,75 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 const Sheet = @This();
-
 const NodeList = std.ArrayList(Position);
 const NodeListUnmanaged = std.ArrayListUnmanaged(Position);
 
 const log = std.log.scoped(.sheet);
 
+const CellMapContext = struct {
+	pub fn eql(_: @This(), p1: Position, p2: Position, _: usize) bool {
+		return p1.y == p2.y and p1.x == p2.x;
+	}
+
+	pub fn hash(_: @This(), pos: Position) u32 {
+		return @as(u32, pos.y) * std.math.maxInt(u16) + pos.x;
+	}
+};
+
+const CellMap = std.ArrayHashMapUnmanaged(Position, Cell, CellMapContext, false);
+
+/// ArrayHashMap mapping spreadsheet positions to cells.
+cells: CellMap = .{},
+
+/// Maps column indexes (0 - 65536) to `Column` structs containing info about that column.
 columns: std.AutoArrayHashMapUnmanaged(u16, Column) = .{},
 filename: []const u8 = &.{},
+
+/// Cell positions sorted topologically, used for order of evaluation when evaluating all cells.
 sorted_nodes: NodeListUnmanaged = .{},
 needs_update: bool = false,
 
-pub fn init() Sheet {
-	return .{};
+allocator: Allocator,
+
+pub fn init(allocator: Allocator) Sheet {
+	return .{
+		.allocator = allocator,
+	};
 }
 
-pub fn deinit(self: *Sheet, allocator: Allocator) void {
-	for (self.columns.values()) |*c| {
-		c.deinit(allocator);
-	}
-
-	self.sorted_nodes.deinit(allocator);
-	self.columns.deinit(allocator);
-	self.* = undefined;
+pub fn deinit(sheet: *Sheet) void {
+	sheet.cells.deinit(sheet.allocator);
+	sheet.sorted_nodes.deinit(sheet.allocator);
+	sheet.columns.deinit(sheet.allocator);
+	sheet.* = undefined;
 }
 
 pub fn setCell(
 	sheet: *Sheet,
-	allocator: Allocator,
-	y: u16,
-	x: u16,
+	position: Position,
 	data: Cell,
 ) !void {
-	const entry = try sheet.columns.getOrPut(allocator, x);
-	if (!entry.found_existing) {
-		entry.value_ptr.* = .{};
-	}
-	const col_ptr = entry.value_ptr;
-	const cell_entry = try col_ptr.cells.getOrPut(allocator, y);
-
-	if (cell_entry.found_existing) {
-		cell_entry.value_ptr.ast.deinit(allocator);
+	const col_entry = try sheet.columns.getOrPut(sheet.allocator, position.x);
+	if (!col_entry.found_existing) {
+		col_entry.value_ptr.* = Column{};
 	}
 
-	cell_entry.value_ptr.* = data;
+	const entry = try sheet.cells.getOrPut(sheet.allocator, position);
+
+	if (entry.found_existing) {
+		entry.value_ptr.ast.deinit(sheet.allocator);
+	}
+
+	entry.value_ptr.* = data;
 	sheet.needs_update = true;
 }
 
 pub fn getCell(sheet: Sheet, pos: Position) ?Cell {
-	if (sheet.columns.get(pos.x)) |col| {
-		return col.cells.get(pos.y);
-	}
-	return null;
+	return sheet.cells.get(pos);
 }
 
 pub fn getCellPtr(sheet: *Sheet, pos: Position) ?*Cell {
-	if (sheet.columns.get(pos.x)) |col| {
-		return col.cells.getPtr(pos.y);
-	}
-	return null;
+	return sheet.cells.getPtr(pos);
 }
 
 const NodeMark = enum {
@@ -72,11 +82,11 @@ const NodeMark = enum {
 	permanent,
 };
 
-pub fn update(sheet: *Sheet, allocator: Allocator) Allocator.Error!void {
+pub fn update(sheet: *Sheet) Allocator.Error!void {
 	if (!sheet.needs_update)
 		return;
 
-	try sheet.rebuildSortedNodeList(allocator);
+	try sheet.rebuildSortedNodeList();
 
 	var iter = std.mem.reverseIterator(sheet.sorted_nodes.items);
 	while (iter.next()) |pos| {
@@ -87,32 +97,23 @@ pub fn update(sheet: *Sheet, allocator: Allocator) Allocator.Error!void {
 	sheet.needs_update = false;
 }
 
-pub fn rebuildSortedNodeList(sheet: *Sheet, allocator: Allocator) Allocator.Error!void {
-	const node_count = blk: {
-		var count: u32 = 0;
-		for (sheet.columns.values()) |col| {
-			count += @intCast(u32, col.cells.entries.len);
-		}
-		break :blk count;
-	};
+pub fn rebuildSortedNodeList(sheet: *Sheet) Allocator.Error!void {
+	const node_count = @intCast(u32, sheet.cells.entries.len);
 
 	// Topologically sorted set of cell positions
-	var nodes = sheet.sorted_nodes.toManaged(allocator);
+	var nodes = sheet.sorted_nodes.toManaged(sheet.allocator);
 	nodes.clearRetainingCapacity();
 
-	var visited_nodes = std.AutoHashMap(Position, NodeMark).init(allocator);
+	var visited_nodes = std.AutoHashMap(Position, NodeMark).init(sheet.allocator);
 	defer visited_nodes.deinit();
 
 	try nodes.ensureTotalCapacity(node_count + 1);
 	try visited_nodes.ensureTotalCapacity(node_count + 1);
 
 	while (visited_nodes.unmanaged.size < node_count) {
-		for (sheet.columns.keys(), sheet.columns.values()) |x, col| {
-			for (col.cells.keys()) |y| {
-				const pos = Position{ .y = y, .x = x };
-				if (!visited_nodes.contains(pos))
-					try visit(sheet, pos, &nodes, &visited_nodes);
-			}
+		for (sheet.cells.keys()) |pos| {
+			if (!visited_nodes.contains(pos))
+				try visit(sheet, pos, &nodes, &visited_nodes);
 		}
 	}
 
@@ -221,16 +222,26 @@ pub const Column = struct {
 	
 	pub const default_width = 10;
 
-	cells: CellMap = .{},
 	width: u16 = default_width,
 	precision: u8 = 2,
-
-	pub fn deinit(self: *Column, allocator: Allocator) void {
-		for (self.cells.values()) |*cell| {
-			cell.deinit(allocator);
-		}
-
-		self.cells.deinit(allocator);
-		self.* = undefined;
-	}
 };
+
+pub fn getColumn(sheet: Sheet, index: u16) Column {
+	return sheet.columns.get(index) orelse Column{};
+}
+
+pub fn setPrecision(
+	sheet: *Sheet,
+	column_index: u16,
+	new_precision: u8,
+) Allocator.Error!void {
+	const entry = try sheet.columns.getOrPut(sheet.allocator, column_index);
+
+	if (entry.found_existing) {
+		entry.value_ptr.precision = new_precision;
+	} else {
+		entry.value_ptr.* = Column{
+			.precision = new_precision,
+		};
+	}
+}
