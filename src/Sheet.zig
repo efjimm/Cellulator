@@ -11,7 +11,7 @@ const NodeListUnmanaged = std.ArrayListUnmanaged(Position);
 
 const log = std.log.scoped(.sheet);
 
-const CellMapContext = struct {
+const PositionContext = struct {
 	pub fn eql(_: @This(), p1: Position, p2: Position, _: usize) bool {
 		return p1.y == p2.y and p1.x == p2.x;
 	}
@@ -21,12 +21,12 @@ const CellMapContext = struct {
 	}
 };
 
-const CellMap = std.ArrayHashMapUnmanaged(Position, Cell, CellMapContext, false);
+const CellMap = std.ArrayHashMapUnmanaged(Position, Cell, PositionContext, false);
 
 /// ArrayHashMap mapping spreadsheet positions to cells.
 cells: CellMap = .{},
 
-/// Maps column indexes (0 - 65536) to `Column` structs containing info about that column.
+/// Maps column indexes (0 - 65535) to `Column` structs containing info about that column.
 columns: std.AutoArrayHashMapUnmanaged(u16, Column) = .{},
 filename: []const u8 = &.{},
 
@@ -82,6 +82,9 @@ const NodeMark = enum {
 	permanent,
 };
 
+/// Re-evaluates all cells in the sheet. It evaluates cells in reverse topological order to ensure
+/// that we only need to evaluate each cell once. Cell results are cached after they are evaluted
+/// (see Cell.eval)
 pub fn update(sheet: *Sheet) Allocator.Error!void {
 	if (!sheet.needs_update)
 		return;
@@ -97,34 +100,43 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
 	sheet.needs_update = false;
 }
 
-pub fn rebuildSortedNodeList(sheet: *Sheet) Allocator.Error!void {
+const NodeMap = std.HashMap(Position, NodeMark, struct {
+	pub fn eql(_: @This(), p1: Position, p2: Position) bool {
+		return p1.y == p2.y and p1.x == p2.x;
+	}
+
+	pub fn hash(_: @This(), pos: Position) u64 {
+		return @as(u32, pos.y) * std.math.maxInt(u16) + pos.x;
+	}
+}, 99);
+
+fn rebuildSortedNodeList(sheet: *Sheet) Allocator.Error!void {
 	const node_count = @intCast(u32, sheet.cells.entries.len);
 
 	// Topologically sorted set of cell positions
 	var nodes = sheet.sorted_nodes.toManaged(sheet.allocator);
 	nodes.clearRetainingCapacity();
 
-	var visited_nodes = std.AutoHashMap(Position, NodeMark).init(sheet.allocator);
+	var visited_nodes = NodeMap.init(sheet.allocator);
 	defer visited_nodes.deinit();
 
 	try nodes.ensureTotalCapacity(node_count + 1);
 	try visited_nodes.ensureTotalCapacity(node_count + 1);
 
-	while (visited_nodes.unmanaged.size < node_count) {
-		for (sheet.cells.keys()) |pos| {
-			if (!visited_nodes.contains(pos))
-				try visit(sheet, pos, &nodes, &visited_nodes);
-		}
+	for (sheet.cells.keys()) |pos| {
+		if (!visited_nodes.contains(pos))
+			try visit(sheet, pos, &nodes, &visited_nodes);
 	}
 
 	sheet.sorted_nodes = nodes.moveToUnmanaged();
 }
 
+/// Recursive function that visits every dependency of a cell.
 fn visit(
-	sheet: *Sheet,
+	sheet: *const Sheet,
 	node: Position,
 	nodes: *NodeList,
-	visited_nodes: *std.AutoHashMap(Position, NodeMark),
+	visited_nodes: *NodeMap,
 ) Allocator.Error!void {
 	if (visited_nodes.get(node)) |mark| {
 		switch (mark) {
@@ -138,17 +150,19 @@ fn visit(
 	visited_nodes.putAssumeCapacity(node, .temporary);
 
 	const Context = struct {
-		sheet: *Sheet,
+		sheet: *const Sheet,
 		node: Position,
 		nodes: *NodeList,
-		visited_nodes: *std.AutoHashMap(Position, NodeMark),
+		visited_nodes: *NodeMap,
 
-		pub fn func(context: @This(), index: u32) Allocator.Error!bool {
+		pub fn evalCell(context: @This(), index: u32) Allocator.Error!bool {
 			const _cell = context.sheet.getCell(context.node).?;
 			const ast_node = _cell.ast.nodes.get(index);
 			if (ast_node == .cell) {
+				// Stop traversal on cyclical reference
 				if (context.visited_nodes.contains(ast_node.cell))
 					return false;
+
 				try visit(context.sheet, ast_node.cell, context.nodes, context.visited_nodes);
 			}
 			return true;
@@ -228,20 +242,4 @@ pub const Column = struct {
 
 pub fn getColumn(sheet: Sheet, index: u16) Column {
 	return sheet.columns.get(index) orelse Column{};
-}
-
-pub fn setPrecision(
-	sheet: *Sheet,
-	column_index: u16,
-	new_precision: u8,
-) Allocator.Error!void {
-	const entry = try sheet.columns.getOrPut(sheet.allocator, column_index);
-
-	if (entry.found_existing) {
-		entry.value_ptr.precision = new_precision;
-	} else {
-		entry.value_ptr.* = Column{
-			.precision = new_precision,
-		};
-	}
 }

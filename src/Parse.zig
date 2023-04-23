@@ -11,7 +11,7 @@ const Position = @import("ZC.zig").Position;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-const Self = @This();
+const Ast = @This();
 
 const TokenList = std.MultiArrayList(Token);
 const NodeList = std.MultiArrayList(Node);
@@ -40,19 +40,19 @@ fn initParser(allocator: Allocator, source: []const u8) !Parser {
 	};
 }
 
-pub fn parse(allocator: Allocator, source: []const u8) !Self {
+pub fn parse(allocator: Allocator, source: []const u8) !Ast {
 	var parser = try initParser(allocator, source);
 	defer parser.tokens.deinit(allocator);
 	errdefer parser.nodes.deinit(allocator);
 
 	try parser.parse();
 
-	return Self{
+	return Ast{
 		.nodes = parser.nodes.toOwnedSlice(),
 	};
 }
 
-pub fn parseExpression(allocator: Allocator, source: []const u8) !Self {
+pub fn parseExpression(allocator: Allocator, source: []const u8) !Ast {
 	var parser = try initParser(allocator, source);
 	defer parser.tokens.deinit(allocator);
 	errdefer parser.nodes.deinit(allocator);
@@ -60,18 +60,18 @@ pub fn parseExpression(allocator: Allocator, source: []const u8) !Self {
 	_ = try parser.parseExpression();
 	_ = try parser.expectToken(.eof);
 
-	return Self{
+	return Ast{
 		.nodes = parser.nodes.toOwnedSlice(),
 	};
 }
 
-pub fn deinit(self: *Self, allocator: Allocator) void {
-	self.nodes.deinit(allocator);
-	self.* = undefined;
+pub fn deinit(ast: *Ast, allocator: Allocator) void {
+	ast.nodes.deinit(allocator);
+	ast.* = undefined;
 }
 
-pub fn isExpression(self: Self) bool {
-	for (self.nodes.items(.tags)) |tag| {
+pub fn isExpression(ast: Ast) bool {
+	for (ast.nodes.items(.tags)) |tag| {
 		switch (tag) {
 			.number, .cell,
 			.add, .sub, .mul, .div,
@@ -82,42 +82,42 @@ pub fn isExpression(self: Self) bool {
 	return true;
 }
 
-pub fn rootNode(self: Self) Node {
-	return self.nodes.get(self.rootNodeIndex());
+pub fn rootNode(ast: Ast) Node {
+	return ast.nodes.get(ast.rootNodeIndex());
 }
 
-pub fn rootNodeIndex(self: Self) u32 {
-	return @intCast(u32, self.nodes.len) - 1;
+pub fn rootNodeIndex(ast: Ast) u32 {
+	return @intCast(u32, ast.nodes.len) - 1;
 }
 
-pub fn rootTag(self: Self) std.meta.Tag(Node) {
-	return self.nodes.items(.tags)[self.nodes.len - 1];
+pub fn rootTag(ast: Ast) std.meta.Tag(Node) {
+	return ast.nodes.items(.tags)[ast.nodes.len - 1];
 }
 
 /// Removes all nodes except for the given index and its children
-pub fn splice(self: *Self, new_root: u32) void {
+pub fn splice(ast: *Ast, new_root: u32) void {
 	var j: u32 = 0;
-	var list = self.nodes.toMultiArrayList();
+	var list = ast.nodes.toMultiArrayList();
 
 	// The index of children nodes will always lower than the index of their parent
 	for (0..new_root) |i| {
 		const index = @intCast(u32, i);
-		if (self.isChildOf(new_root, index)) {
-			list.set(index, self.nodes.get(index));
+		if (ast.isChildOf(new_root, index)) {
+			list.set(index, ast.nodes.get(index));
 			j += 1;
 		}
 	}
 
 	list.len = new_root + 1;
-	self.nodes = list.toOwnedSlice();
+	ast.nodes = list.toOwnedSlice();
 }
 
-pub fn isChildOf(self: *Self, parent: u32, node: u32) bool {
+pub fn isChildOf(ast: *Ast, parent: u32, node: u32) bool {
 	const Context = struct {
 		target: u32,
 		found: bool = false,
 
-		pub fn func(context: *@This(), index: u32) !bool {
+		pub fn evalCell(context: *@This(), index: u32) !bool {
 			if (index == context.target) {
 				context.found = true;
 				return false;
@@ -127,17 +127,17 @@ pub fn isChildOf(self: *Self, parent: u32, node: u32) bool {
 	};
 
 	var context = Context{ .target = node };
-	try self.traverseFrom(parent, &context);
+	try ast.traverseFrom(parent, &context);
 
 	return context.found;
 }
 
-pub fn print(self: *Self, writer: anytype) @TypeOf(writer).Error!void {
+pub fn print(ast: *Ast, writer: anytype) @TypeOf(writer).Error!void {
 	const Context = struct {
-		ast: *const Self,
+		ast: *const Ast,
 		writer: *const @TypeOf(writer),
 
-		pub fn func(context: @This(), index: u32) !bool {
+		pub fn evalCell(context: @This(), index: u32) !bool {
 			const node = context.ast.nodes.get(index);
 
 			switch (node) {
@@ -159,30 +159,35 @@ pub fn print(self: *Self, writer: anytype) @TypeOf(writer).Error!void {
 		}
 	};
 
-	try self.traverse(Context{ .ast = self, .writer = &writer });
+	try ast.traverse(Context{ .ast = ast, .writer = &writer });
 }
 
-pub fn traverse(self: Self, context: anytype) !void {
-	return self.traverseFrom(self.rootNodeIndex(), context);
+/// Recursively visits every node in the tree. `context` is an instance of a type which must have
+/// the function `fn evalCell(@TypeOf(context), u32) !bool`. This function is run on every leaf
+/// node in the tree, with `index` being the index of the node in the `nodes` array. If the
+/// function returns false, traversal stops immediately.
+pub fn traverse(ast: Ast, context: anytype) !void {
+	return ast.traverseFrom(ast.rootNodeIndex(), context);
 }
 
-fn traverseFrom(self: Self, index: u32, context: anytype) !void {
-	const node = self.nodes.get(index);
+/// Same as `traverse`, but starting from the node at the given index.
+fn traverseFrom(ast: Ast, index: u32, context: anytype) !void {
+	const node = ast.nodes.get(index);
 
 	switch (node) {
 		.assignment, .add, .sub, .mul, .div, .mod => |b| {
-			try self.traverseFrom(b.lhs, context);
-			if (!try context.func(index)) return;
-			try self.traverseFrom(b.rhs, context);
+			try ast.traverseFrom(b.lhs, context);
+			if (!try context.evalCell(index)) return;
+			try ast.traverseFrom(b.rhs, context);
 		},
 		.number, .cell, .column => {
-			if (!try context.func(index)) return;
+			if (!try context.evalCell(index)) return;
 		},
 	}
 }
 
 pub fn eval(
-	ast: Self,
+	ast: Ast,
 	/// An instance of a type which has the function `fn evalCell(@TypeOf(context), Position) f64`.
 	/// This function should return the value of the cell at the given position. It may do this
 	/// by calling this function.
@@ -191,17 +196,17 @@ pub fn eval(
 	return ast.evalNode(ast.rootNodeIndex(), 0, context);
 }
 
-pub fn evalNode(self: Self, index: u32, total: f64, context: anytype) f64 {
-	const node = self.nodes.get(index);
+pub fn evalNode(ast: Ast, index: u32, total: f64, context: anytype) f64 {
+	const node = ast.nodes.get(index);
 
 	return switch (node) {
 		.number => |n| n,
 		.cell => |pos| total + context.evalCell(pos),
-		.add => |op| total + (self.evalNode(op.lhs, total, context) + self.evalNode(op.rhs, total, context)),
-		.sub => |op| total + (self.evalNode(op.lhs, total, context) - self.evalNode(op.rhs, total, context)),
-		.mul => |op| total + (self.evalNode(op.lhs, total, context) * self.evalNode(op.rhs, total, context)),
-		.div => |op| total + (self.evalNode(op.lhs, total, context) / self.evalNode(op.rhs, total, context)),
-		.mod => |op| total + @rem(self.evalNode(op.lhs, total, context), self.evalNode(op.rhs, total, context)),
+		.add => |op| total + (ast.evalNode(op.lhs, total, context) + ast.evalNode(op.rhs, total, context)),
+		.sub => |op| total + (ast.evalNode(op.lhs, total, context) - ast.evalNode(op.rhs, total, context)),
+		.mul => |op| total + (ast.evalNode(op.lhs, total, context) * ast.evalNode(op.rhs, total, context)),
+		.div => |op| total + (ast.evalNode(op.lhs, total, context) / ast.evalNode(op.rhs, total, context)),
+		.mod => |op| total + @rem(ast.evalNode(op.lhs, total, context), ast.evalNode(op.rhs, total, context)),
 		else => unreachable,
 	};
 }
@@ -238,23 +243,23 @@ const Parser = struct {
 
 	const log = std.log.scoped(.parser);
 
-	fn parse(self: *Parser) !void {
-		_ = try self.parseStatement();
-		_ = try self.expectToken(.eof);
+	fn parse(ast: *Parser) !void {
+		_ = try ast.parseStatement();
+		_ = try ast.expectToken(.eof);
 	}
 
 	/// Statement <- Assignment
-	fn parseStatement(self: *Parser) !u32 {
-		return self.parseAssignment();
+	fn parseStatement(ast: *Parser) !u32 {
+		return ast.parseAssignment();
 	}
 
 	/// Assignment <- CellName '=' Expression
-	fn parseAssignment(self: *Parser) !u32 {
-		const lhs = try self.parseCellName();
-		_ = try self.expectToken(.equals_sign);
-		const rhs = try self.parseExpression();
+	fn parseAssignment(ast: *Parser) !u32 {
+		const lhs = try ast.parseCellName();
+		_ = try ast.expectToken(.equals_sign);
+		const rhs = try ast.parseExpression();
 
-		return self.addNode(.{
+		return ast.addNode(.{
 			.assignment = .{
 				.lhs = lhs,
 				.rhs = rhs,
@@ -265,130 +270,130 @@ const Parser = struct {
 	const ParseError = error{ UnexpectedToken } || Allocator.Error;
 
 	/// Expression <- AddExpr
-	fn parseExpression(self: *Parser) ParseError!u32 {
-		return self.parseAddExpr();
+	fn parseExpression(ast: *Parser) ParseError!u32 {
+		return ast.parseAddExpr();
 	}
 
 	/// AddExpr <- MulExpr (('+' / '-') MulExpr)*
-	fn parseAddExpr(self: *Parser) !u32 {
-		var index = try self.parseMulExpr();
+	fn parseAddExpr(ast: *Parser) !u32 {
+		var index = try ast.parseMulExpr();
 
-		while (self.eatTokenMulti(.{ .plus, .minus })) |i| {
+		while (ast.eatTokenMulti(.{ .plus, .minus })) |i| {
 			const op = BinaryOperator{
 				.lhs = index,
-				.rhs = try self.parseMulExpr(),
+				.rhs = try ast.parseMulExpr(),
 			};
 
-			const node: Node = switch (self.token_tags[i]) {
+			const node: Node = switch (ast.token_tags[i]) {
 				.plus => .{ .add = op },
 				.minus => .{ .sub = op },
 				else => unreachable,
 			};
 
-			index = try self.addNode(node);
+			index = try ast.addNode(node);
 		}
 
 		return index;
 	}
 
 	/// MulExpr <- PrimaryExpr (('*' / '/' / '%') PrimaryExpr)*
-	fn parseMulExpr(self: *Parser) !u32 {
-		var index = try self.parsePrimaryExpr();
+	fn parseMulExpr(ast: *Parser) !u32 {
+		var index = try ast.parsePrimaryExpr();
 
-		while (self.eatTokenMulti(.{ .asterisk, .forward_slash, .percent })) |i| {
+		while (ast.eatTokenMulti(.{ .asterisk, .forward_slash, .percent })) |i| {
 			const op = BinaryOperator{
 				.lhs = index,
-				.rhs = try self.parsePrimaryExpr(),
+				.rhs = try ast.parsePrimaryExpr(),
 			};
 
-			const node: Node = switch (self.token_tags[i]) {
+			const node: Node = switch (ast.token_tags[i]) {
 				.asterisk => .{ .mul = op },
 				.forward_slash => .{ .div = op },
 				.percent => .{ .mod = op },
 				else => unreachable,
 			};
 
-			index = try self.addNode(node);
+			index = try ast.addNode(node);
 		}
 
 		return index;
 	}
 
 	/// PrimaryExpr <- Number / CellName / '(' Expression ')'
-	fn parsePrimaryExpr(self: *Parser) !u32 {
-		return switch (self.token_tags[self.tok_i]) {
-			.number => self.parseNumber(),
-			.cell_name => self.parseCellName(),
+	fn parsePrimaryExpr(ast: *Parser) !u32 {
+		return switch (ast.token_tags[ast.tok_i]) {
+			.number => ast.parseNumber(),
+			.cell_name => ast.parseCellName(),
 			.lparen => {
-				_ = try self.expectToken(.lparen);
-				const ret = self.parseExpression();
-				_ = try self.expectToken(.rparen);
+				_ = try ast.expectToken(.lparen);
+				const ret = ast.parseExpression();
+				_ = try ast.expectToken(.rparen);
 				return ret;
 			},
 			else => error.UnexpectedToken,
 		};
 	}
 
-	fn parseNumber(self: *Parser) !u32 {
-		const i = try self.expectToken(.number);
-		const text = self.tokenContent(i).text(self.source);
+	fn parseNumber(ast: *Parser) !u32 {
+		const i = try ast.expectToken(.number);
+		const text = ast.tokenContent(i).text(ast.source);
 
 		// Correctness of the number is guaranteed because the tokenizer wouldn't have generated a
 		// number token on invalid format.
 		const num = std.fmt.parseFloat(f64, text) catch unreachable;
 
-		return self.addNode(.{
+		return ast.addNode(.{
 			.number = num,
 		});
 	}
 
 	/// CellName <- ('a'-'z' / 'A'-'Z')+ ('0'-'9')+
-	fn parseCellName(self: *Parser) !u32 {
-		const i = try self.expectToken(.cell_name);
-		const text = self.tokenContent(i).text(self.source);
+	fn parseCellName(ast: *Parser) !u32 {
+		const i = try ast.expectToken(.cell_name);
+		const text = ast.tokenContent(i).text(ast.source);
 
 		// TODO: check bounds
 		const pos = utils.cellNameToPosition(text);
 
-		return self.addNode(.{
+		return ast.addNode(.{
 			.cell = pos,
 		});
 	}
 
-	fn tokenContent(self: Parser, index: u32) Token {
+	fn tokenContent(ast: Parser, index: u32) Token {
 		return .{
-			.tag = self.token_tags[index],
-			.start = self.token_starts[index],
-			.end = self.token_ends[index],
+			.tag = ast.token_tags[index],
+			.start = ast.token_starts[index],
+			.end = ast.token_ends[index],
 		};
 	}
 
-	fn addNode(self: *Parser, data: Node) Allocator.Error!u32 {
-		const ret = @intCast(u32, self.nodes.len);
-		try self.nodes.append(self.allocator, data);
+	fn addNode(ast: *Parser, data: Node) Allocator.Error!u32 {
+		const ret = @intCast(u32, ast.nodes.len);
+		try ast.nodes.append(ast.allocator, data);
 		return ret;
 	}
 
-	fn expectToken(self: *Parser, expected_tag: Token.Tag) !u32 {
-		return self.eatToken(expected_tag) orelse error.UnexpectedToken;
+	fn expectToken(ast: *Parser, expected_tag: Token.Tag) !u32 {
+		return ast.eatToken(expected_tag) orelse error.UnexpectedToken;
 	}
 
-	fn eatToken(self: *Parser, expected_tag: Token.Tag) ?u32 {
-		return if (self.token_tags[self.tok_i] == expected_tag) self.nextToken() else null;
+	fn eatToken(ast: *Parser, expected_tag: Token.Tag) ?u32 {
+		return if (ast.token_tags[ast.tok_i] == expected_tag) ast.nextToken() else null;
 	}
 
-	fn eatTokenMulti(self: *Parser, tags: anytype) ?u32 {
+	fn eatTokenMulti(ast: *Parser, tags: anytype) ?u32 {
 		inline for (tags) |tag| {
-			if (self.eatToken(tag)) |token|
+			if (ast.eatToken(tag)) |token|
 				return token;
 		}
 
 		return null;
 	}
 
-	fn nextToken(self: *Parser) u32 {
-		const ret = self.tok_i;
-		self.tok_i += 1;
+	fn nextToken(ast: *Parser) u32 {
+		const ret = ast.tok_i;
+		ast.tok_i += 1;
 		return ret;
 	}
 };
@@ -398,8 +403,8 @@ pub const Token = struct {
 	start: u32,
 	end: u32,
 
-	pub fn text(self: Token, source: []const u8) []const u8 {
-		return source[self.start..self.end];
+	pub fn text(ast: Token, source: []const u8) []const u8 {
+		return source[ast.start..ast.end];
 	}
 
 	pub const Tag = enum {
@@ -439,14 +444,14 @@ pub const Tokenizer = struct {
 		};
 	}
 
-	pub fn next(self: *Tokenizer) ?Token {
-		var start = self.pos;
+	pub fn next(ast: *Tokenizer) ?Token {
+		var start = ast.pos;
 
 		var state = State.start;
 		var tag = Token.Tag.eof;
 
-		while (self.pos < self.bytes.len) : (self.pos += 1) {
-			const c = self.bytes[self.pos];
+		while (ast.pos < ast.bytes.len) : (ast.pos += 1) {
+			const c = ast.bytes[ast.pos];
 
 			switch (state) {
 				.start => switch (c) {
@@ -456,7 +461,7 @@ pub const Tokenizer = struct {
 					},
 					'=' => {
 						tag = .equals_sign;
-						self.pos += 1;
+						ast.pos += 1;
 						break;
 					},
 					' ', '\t', '\r', '\n' => {
@@ -468,45 +473,45 @@ pub const Tokenizer = struct {
 					},
 					'+' => {
 						tag = .plus;
-						self.pos += 1;
+						ast.pos += 1;
 						break;
 					},
 					'-' => {
 						tag = .minus;
-						self.pos += 1;
+						ast.pos += 1;
 						break;
 					},
 					'*' => {
 						tag = .asterisk;
-						self.pos += 1;
+						ast.pos += 1;
 						break;
 					},
 					'/' => {
 						tag = .forward_slash;
-						self.pos += 1;
+						ast.pos += 1;
 						break;
 					},
 					'%' => {
 						tag = .percent;
-						self.pos += 1;
+						ast.pos += 1;
 						break;
 					},
 					'(' => {
 						tag = .lparen;
-						self.pos += 1;
+						ast.pos += 1;
 						break;
 					},
 					')' => {
 						tag = .rparen;
-						self.pos += 1;
+						ast.pos += 1;
 						break;
 					},
 					else => {
-						defer self.pos += 1;
+						defer ast.pos += 1;
 						return .{
 							.tag = .invalid,
 							.start = start,
-							.end = self.pos,
+							.end = ast.pos,
 						};
 					},
 				},
@@ -530,7 +535,7 @@ pub const Tokenizer = struct {
 		return Token{
 			.tag = tag,
 			.start = start,
-			.end = self.pos,
+			.end = ast.pos,
 		};
 	}
 

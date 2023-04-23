@@ -3,8 +3,10 @@
 	.version = "0.0.1",
 	.dependencies = .{
 		.spoon = .{
-			.url = "https://github.com/efjimm/zig-spoon/archive/4539fca437888466a5b3b5113c0d6e0703a133b8.tar.gz",
-			.hash = "12205fb2128e9e7538d08226ea3a480198f6ce8ec63b6db838dc9ace18f335cc0da3",
+			// Temporary workaround until https://github.com/ziglang/zig/issues/15419 is fixed
+			//.url = "http://127.0.0.1:8000/284c84c06662a0f77fe062401a700a8610c28254.tar.gz",
+			.url = "https://github.com/efjimm/zig-spoon/archive/284c84c06662a0f77fe062401a700a8610c28254.tar.gz",
+			.hash = "12206fd19c861aa62d9ae4fddd05cad3156a668dbdaf5feb322b5e1dd05b0561fdd2",
 		},
 	},
 }

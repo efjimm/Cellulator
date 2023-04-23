@@ -59,7 +59,7 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
 	if (needs_resize)
 		try self.term.fetchSize();
 
-	var rc = try self.term.getRenderContext();
+	var rc = try self.term.getRenderContext(8192);
 	defer rc.done() catch {};
 
 	try rc.hideCursor();
@@ -96,7 +96,7 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
 
 fn renderColumnHeadings(
 	self: Self,
-	rc: *Term.RenderContext,
+	rc: *Term.RenderContext(8192),
 	zc: ZC,
 ) RenderError!void {
 	const writer = rc.buffer.writer();
@@ -135,7 +135,7 @@ fn renderColumnHeadings(
 
 fn renderRows(
 	self: Self,
-	rc: *Term.RenderContext,
+	rc: *Term.RenderContext(8192),
 	zc: *ZC,
 ) RenderError!void {
 	const reserved_cols = zc.leftReservedColumns();

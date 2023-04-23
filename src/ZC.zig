@@ -114,15 +114,11 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 			.codepoint => |cp| switch (cp) {
 				'q' => self.running = false,
 				':' => self.setMode(.command),
-				'f' => {
-					if (self.sheet.columns.getPtr(self.cursor.x)) |col| {
-						col.precision +|= 1;
-					}
+				'f' => if (self.sheet.columns.getPtr(self.cursor.x)) |col| {
+					col.precision +|= 1;
 				},
-				'F' => {
-					if (self.sheet.columns.getPtr(self.cursor.x)) |col| {
-						col.precision -|= 1;
-					}
+				'F' => if (self.sheet.columns.getPtr(self.cursor.x)) |col| {
+					col.precision -|= 1;
 				},
 				'j' => self.cursor.y +|= 1,
 				'k' => self.cursor.y -|= 1,
