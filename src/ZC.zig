@@ -118,6 +118,9 @@ fn handleInput(self: *Self) !void {
 		.normal => self.doNormalMode(slice),
 		.command => self.doCommandMode(slice) catch |err| switch (err) {
 			error.UnexpectedToken => self.setStatusMessage("Error: unexpected token", .{}),
+			error.InvalidCommand => self.setStatusMessage("Error: invalid command", .{}),
+			error.EmptyFileName => self.setStatusMessage("Error: must specify a file name", .{}),
+			error.FileNotFound => self.setStatusMessage("Error: file not found", .{}),
 			else => return err,
 		},
 	};
@@ -201,17 +204,21 @@ pub fn runCommand(self: *Self, str: []const u8) !void {
 	const cmd = iter.next() orelse return error.InvalidCommand;
 	if (cmd.len == 0) return error.InvalidCommand;
 
+	// TODO: add confirmation for certain commands
 	switch (cmd[0]) {
 		'q' => self.running = false,
 		'w' => { // save
-			self.sheet.writeFile(.{ .filepath = iter.next() }) catch |err| switch (err) {
-				error.EmptyFileName => {
-					self.setStatusMessage("Error: must specify a file name", .{});
-				},
-				else => return err,
-			};
+			try self.sheet.writeFile(.{ .filepath = iter.next() });
+			self.tui.update_status = true;
 		},
-		else => {},
+		'e' => { // load
+			const filepath = iter.next() orelse return error.EmptyFileName;
+			self.sheet.clear();
+			try self.sheet.loadFile(filepath);
+			self.tui.update_status = true;
+			self.tui.update_cells = true;
+		},
+		else => return error.InvalidCommand,
 	}
 }
 

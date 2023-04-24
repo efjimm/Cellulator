@@ -28,17 +28,13 @@ cells: CellMap = .{},
 
 /// Maps column indexes (0 - 65535) to `Column` structs containing info about that column.
 columns: std.AutoArrayHashMapUnmanaged(u16, Column) = .{},
-filepath: []const u8 = &.{},
+filepath: std.BoundedArray(u8, std.fs.MAX_PATH_BYTES) = .{},
 
 /// Cell positions sorted topologically, used for order of evaluation when evaluating all cells.
 sorted_nodes: NodeListUnmanaged = .{},
 needs_update: bool = false,
 
 allocator: Allocator,
-
-pub fn getFilePath(sheet: Sheet) ?[]const u8 {
-	return if (sheet.filepath.len == 0) null else sheet.filepath;
-}
 
 pub fn init(allocator: Allocator) Sheet {
 	return .{
@@ -202,6 +198,19 @@ fn visit(
 	try nodes.insert(0, node);
 }
 
+pub fn clear(sheet: *Sheet) void {
+	sheet.cells.clearRetainingCapacity();
+}
+
+pub fn getFilePath(sheet: Sheet) []const u8 {
+	return sheet.filepath.slice();
+}
+
+pub fn setFilePath(sheet: *Sheet, filepath: []const u8) void {
+	sheet.filepath.len = 0;
+	sheet.filepath.appendSliceAssumeCapacity(filepath);
+}
+
 pub fn loadFile(sheet: *Sheet, filepath: []const u8) !void {
 	const file = try std.fs.cwd().openFile(filepath, .{});
 	defer file.close();
@@ -225,7 +234,7 @@ pub fn loadFile(sheet: *Sheet, filepath: []const u8) !void {
 		}
 	}
 
-	sheet.filepath = filepath;
+	sheet.setFilePath(filepath);
 }
 
 pub const WriteFileOptions = struct {
@@ -233,7 +242,7 @@ pub const WriteFileOptions = struct {
 };
 
 pub fn writeFile(sheet: *Sheet, opts: WriteFileOptions) !void {
-	const filepath = opts.filepath orelse sheet.filepath;
+	const filepath = opts.filepath orelse sheet.filepath.slice();
 	if (filepath.len == 0) {
 		return error.EmptyFileName;
 	}
@@ -255,7 +264,7 @@ pub fn writeFile(sheet: *Sheet, opts: WriteFileOptions) !void {
 	try atomic_file.finish();
 
 	if (opts.filepath) |path| {
-		sheet.filepath = path;
+		sheet.setFilePath(path);
 	}
 }
 

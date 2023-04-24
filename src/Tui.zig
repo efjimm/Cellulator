@@ -63,7 +63,7 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
 		return;
 	}
 
-	if (self.update_status) {
+	if (self.update_status or self.update_cursor) {
 		try self.renderStatus(&rc, zc);
 		self.update_status = false;
 	}
@@ -103,6 +103,17 @@ pub fn renderStatus(
 
 	var rpw = rc.restrictedPaddingWriter(self.term.width);
 	const writer = rpw.writer();
+
+	const filepath = zc.sheet.getFilePath();
+	if (filepath.len > 0) {
+		writer.writeByte('[') catch unreachable;
+		rc.setStyle(.{ .fg = .green }) catch unreachable;
+		try writer.writeAll(filepath);
+		try rc.setStyle(.{});
+		try writer.writeAll("] ");
+	} else {
+		writer.writeAll("[no file] ") catch unreachable;
+	}
 
 	try zc.cursor.writeCellAddress(writer);
 	try writer.print(" {}", .{ zc.mode });
