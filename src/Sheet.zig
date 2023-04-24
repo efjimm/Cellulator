@@ -1,5 +1,4 @@
 const std = @import("std");
-const Position = @import("ZC.zig").Position;
 const Ast = @import("Parse.zig");
 
 const Allocator = std.mem.Allocator;
@@ -180,6 +179,90 @@ fn visit(
 	try nodes.insert(0, node);
 }
 
+pub const Position = struct {
+	x: u16 = 0,
+	y: u16 = 0,
+
+	/// Writes the cell address of this position to the given writer.
+	pub fn writeCellAddress(pos: Position, writer: anytype) @TypeOf(writer).Error!void {
+		try writeColumnAddress(pos.x, writer);
+		try writer.print("{d}", .{ pos.y });
+	}
+
+	/// Writes the alphabetic bijective base-26 representation of the given number to the passed
+	/// writer.
+	pub fn writeColumnAddress(index: u16, writer: anytype) @TypeOf(writer).Error!void {
+		if (index < 26) {
+			try writer.writeByte('A' + @intCast(u8, index));
+			return;
+		}
+
+		// Max value is 'CRXO'
+		var buf: [4]u8 = undefined;
+		var stream = std.io.fixedBufferStream(&buf);
+		const bufwriter = stream.writer();
+
+		var i = index +| 1;
+		while (i > 0) : (i /= 26) {
+			i -= 1;
+			const r = @intCast(u8, i % 26);
+			bufwriter.writeByte('A' + r) catch unreachable;
+		}
+
+		const slice = stream.getWritten();
+		std.mem.reverse(u8, slice);
+		_ = try writer.writeAll(slice);
+	}
+
+	pub fn columnAddressBuf(index: u16, buf: []u8) []u8 {
+		if (index < 26) {
+			std.debug.assert(buf.len >= 1);
+			buf[0] = 'A' + @intCast(u8, index);
+			return buf[0..1];
+		}
+
+		var stream = std.io.fixedBufferStream(buf);
+		const writer = stream.writer();
+
+		var i = index +| 1;
+		while (i > 0) : (i /= 26) {
+			i -= 1;
+			const r = @intCast(u8, i % 26);
+			writer.writeByte('A' + r) catch break;
+		}
+
+		const slice = stream.getWritten();
+		std.mem.reverse(u8, slice);
+		return slice;
+	}
+
+	pub fn columnFromAddress(address: []const u8) u16 {
+		var ret: u16 = 0;
+		for (address) |c| {
+			if (!std.ascii.isAlphabetic(c))
+				break;
+			ret = ret * 26 + (std.ascii.toUpper(c) - 'A' + 1);
+		}
+
+		return ret - 1;
+	}
+
+	pub fn fromCellAddress(address: []const u8) Position {
+		assert(address.len > 1);
+		assert(std.ascii.isAlphabetic(address[0]));
+		assert(std.ascii.isDigit(address[address.len-1]));
+
+		const letters_end = for (address, 0..) |c, i| {
+			if (!std.ascii.isAlphabetic(c))
+				break i;
+		} else unreachable;
+
+		return .{
+			.x = columnFromAddress(address[0..letters_end]),
+			.y = std.fmt.parseInt(u16, address[letters_end..], 0) catch unreachable,
+		};
+	}
+};
 
 pub const Cell = struct {
 	num: ?f64 = null,

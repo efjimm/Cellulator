@@ -1,11 +1,11 @@
 const std = @import("std");
-const utils = @import("utils.zig");
 const Ast = @import("Parse.zig");
 const spoon = @import("spoon");
 const Sheet = @import("Sheet.zig");
 const Tui = @import("Tui.zig");
 const TextInput = @import("text_input.zig").TextInput;
 
+const Position = Sheet.Position;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
@@ -53,11 +53,6 @@ pub const Mode = enum {
 
 		try writer.writeAll(name);
 	}
-};
-
-pub const Position = struct {
-	x: u16 = 0,
-	y: u16 = 0,
 };
 
 pub fn init(allocator: Allocator) !Self {
@@ -126,11 +121,9 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 				'l' => self.setCursor(.{ .x = self.cursor.x +| 1, .y = self.cursor.y }),
 				'=' => {
 					self.setMode(.command);
-					var _buf: [16]u8 = undefined;
-					const cell_name = utils.posToCellName(self.cursor.y, self.cursor.x, &_buf);
-
 					const writer = self.command_buf.writer();
-					writer.print("{s} = ", .{ cell_name }) catch unreachable;
+					self.cursor.writeCellAddress(writer) catch unreachable;
+					writer.writeAll(" = ") catch unreachable;
 				},
 				else => {},
 			},

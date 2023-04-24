@@ -1,10 +1,9 @@
 const std = @import("std");
-const utils = @import("utils.zig");
 const spoon = @import("spoon");
 const ZC = @import("ZC.zig");
 const Sheet = @import("Sheet.zig");
 
-const Position = ZC.Position;
+const Position = Sheet.Position;
 const Term = spoon.Term;
 
 term: Term,
@@ -118,9 +117,7 @@ pub fn renderStatus(
 	var rpw = rc.restrictedPaddingWriter(self.term.width);
 	const writer = rpw.writer();
 
-	var buf: [64]u8 = undefined;
-	try writer.writeAll(utils.posToCellName(zc.cursor.y, zc.cursor.x, &buf));
-
+	try zc.cursor.writeCellAddress(writer);
 	try writer.print(" {}", .{ zc.mode });
 
 	try rpw.pad();
@@ -171,7 +168,7 @@ pub fn renderColumnHeadings(
 				Sheet.Column.default_width;
 
 		var buf: [4]u8 = undefined;
-		const name = utils.columnIndexToNameBuf(x, &buf);
+		const name = Position.columnAddressBuf(x, &buf);
 
 		if (x == zc.cursor.x) {
 			try rc.setStyle(.{ .fg = .black, .bg = .blue });
@@ -245,7 +242,7 @@ pub fn renderCursor(
 
 	try rc.moveCursorTo(ZC.col_heading_line, prev_pos.x);
 	try writer.print("{s: ^[1]}", .{
-		utils.columnIndexToNameBuf(zc.prev_cursor.x, &buf),
+		Position.columnAddressBuf(zc.prev_cursor.x, &buf),
 		prev_col.width,
 	});
 
@@ -273,7 +270,7 @@ pub fn renderCursor(
 	const col = zc.sheet.getColumn(pos.x);
 	try rc.moveCursorTo(ZC.col_heading_line, pos.x);
 	try writer.print("{s: ^[1]}", .{
-		utils.columnIndexToNameBuf(zc.cursor.x, &buf),
+		Position.columnAddressBuf(zc.cursor.x, &buf),
 		col.width,
 	});
 

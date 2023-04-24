@@ -5,8 +5,7 @@
 // Handle division by zero (seemingly works with @rem but docs say it's ub)
 
 const std = @import("std");
-const utils = @import("utils.zig");
-const Position = @import("ZC.zig").Position;
+const Position = @import("Sheet.zig").Position;
 
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -142,12 +141,8 @@ pub fn print(ast: *Ast, writer: anytype) @TypeOf(writer).Error!void {
 
 			switch (node) {
 				.number => |n| try context.writer.print("{d}", .{ n }),
-				.column => |col| try utils.columnIndexToName(col, context.writer.*),
-				.cell => |pos| {
-					var buf: [9]u8 = undefined;
-					const slice = utils.posToCellName(pos.y, pos.x, &buf);
-					try context.writer.writeAll(slice);
-				},
+				.column => |col| try Position.writeColumnAddress(col, context.writer.*),
+				.cell => |pos| try Position.writeCellAddress(pos),
 				.assignment => try context.writer.writeAll(" = "),
 				.add => try context.writer.writeAll(" + "),
 				.sub => try context.writer.writeAll(" - "),
@@ -353,7 +348,7 @@ const Parser = struct {
 		const text = ast.tokenContent(i).text(ast.source);
 
 		// TODO: check bounds
-		const pos = utils.cellNameToPosition(text);
+		const pos = Position.fromCellAddress(text);
 
 		return ast.addNode(.{
 			.cell = pos,
