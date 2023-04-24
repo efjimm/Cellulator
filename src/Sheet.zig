@@ -1,4 +1,5 @@
 const std = @import("std");
+const utils = @import("utils.zig");
 const Ast = @import("Parse.zig");
 
 const Allocator = std.mem.Allocator;
@@ -27,13 +28,17 @@ cells: CellMap = .{},
 
 /// Maps column indexes (0 - 65535) to `Column` structs containing info about that column.
 columns: std.AutoArrayHashMapUnmanaged(u16, Column) = .{},
-filename: []const u8 = &.{},
+filepath: []const u8 = &.{},
 
 /// Cell positions sorted topologically, used for order of evaluation when evaluating all cells.
 sorted_nodes: NodeListUnmanaged = .{},
 needs_update: bool = false,
 
 allocator: Allocator,
+
+pub fn getFilePath(sheet: Sheet) ?[]const u8 {
+	return if (sheet.filepath.len == 0) null else sheet.filepath;
+}
 
 pub fn init(allocator: Allocator) Sheet {
 	return .{
@@ -195,6 +200,63 @@ fn visit(
 
 	visited_nodes.putAssumeCapacity(node, .permanent);
 	try nodes.insert(0, node);
+}
+
+pub fn loadFile(sheet: *Sheet, filepath: []const u8) !void {
+	const file = try std.fs.cwd().openFile(filepath, .{});
+	defer file.close();
+
+	const slice = try file.reader().readAllAlloc(sheet.allocator, comptime std.math.maxInt(u30));
+	defer sheet.allocator.free(slice);
+
+	var line_iter = std.mem.tokenize(u8, slice, "\n");
+	while (line_iter.next()) |line| {
+		var ast = Ast.parse(sheet.allocator, line) catch continue;
+
+		const root = ast.rootNode();
+		switch (root) {
+			.assignment => {
+				const pos = ast.nodes.get(root.assignment.lhs).cell;
+
+				ast.splice(root.assignment.rhs);
+				try sheet.setCell(pos, .{ .ast = ast });
+			},
+			else => continue,
+		}
+	}
+
+	sheet.filepath = filepath;
+}
+
+pub const WriteFileOptions = struct {
+	filepath: ?[]const u8 = null,
+};
+
+pub fn writeFile(sheet: *Sheet, opts: WriteFileOptions) !void {
+	const filepath = opts.filepath orelse sheet.filepath;
+	if (filepath.len == 0) {
+		return error.EmptyFileName;
+	}
+
+	var atomic_file = try std.fs.cwd().atomicFile(filepath, .{});
+	defer atomic_file.deinit();
+
+	var buf = std.io.bufferedWriter(atomic_file.file.writer());
+	const writer = buf.writer();
+
+	for (sheet.cells.keys(), sheet.cells.values()) |pos, *cell| {
+		try pos.writeCellAddress(writer);
+		try writer.writeAll(" = ");
+		try cell.ast.print(writer);
+		try writer.writeByte('\n');
+	}
+
+	try buf.flush();
+	try atomic_file.finish();
+
+	if (opts.filepath) |path| {
+		sheet.filepath = path;
+	}
 }
 
 pub const Position = struct {

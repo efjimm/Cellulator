@@ -142,7 +142,7 @@ pub fn print(ast: *Ast, writer: anytype) @TypeOf(writer).Error!void {
 			switch (node) {
 				.number => |n| try context.writer.print("{d}", .{ n }),
 				.column => |col| try Position.writeColumnAddress(col, context.writer.*),
-				.cell => |pos| try Position.writeCellAddress(pos),
+				.cell => |pos| try pos.writeCellAddress(context.writer.*),
 				.assignment => try context.writer.writeAll(" = "),
 				.add => try context.writer.writeAll(" + "),
 				.sub => try context.writer.writeAll(" - "),
@@ -439,14 +439,14 @@ pub const Tokenizer = struct {
 		};
 	}
 
-	pub fn next(ast: *Tokenizer) ?Token {
-		var start = ast.pos;
+	pub fn next(tokenizer: *Tokenizer) ?Token {
+		var start = tokenizer.pos;
 
 		var state = State.start;
 		var tag = Token.Tag.eof;
 
-		while (ast.pos < ast.bytes.len) : (ast.pos += 1) {
-			const c = ast.bytes[ast.pos];
+		while (tokenizer.pos < tokenizer.bytes.len) : (tokenizer.pos += 1) {
+			const c = tokenizer.bytes[tokenizer.pos];
 
 			switch (state) {
 				.start => switch (c) {
@@ -456,7 +456,7 @@ pub const Tokenizer = struct {
 					},
 					'=' => {
 						tag = .equals_sign;
-						ast.pos += 1;
+						tokenizer.pos += 1;
 						break;
 					},
 					' ', '\t', '\r', '\n' => {
@@ -468,45 +468,45 @@ pub const Tokenizer = struct {
 					},
 					'+' => {
 						tag = .plus;
-						ast.pos += 1;
+						tokenizer.pos += 1;
 						break;
 					},
 					'-' => {
 						tag = .minus;
-						ast.pos += 1;
+						tokenizer.pos += 1;
 						break;
 					},
 					'*' => {
 						tag = .asterisk;
-						ast.pos += 1;
+						tokenizer.pos += 1;
 						break;
 					},
 					'/' => {
 						tag = .forward_slash;
-						ast.pos += 1;
+						tokenizer.pos += 1;
 						break;
 					},
 					'%' => {
 						tag = .percent;
-						ast.pos += 1;
+						tokenizer.pos += 1;
 						break;
 					},
 					'(' => {
 						tag = .lparen;
-						ast.pos += 1;
+						tokenizer.pos += 1;
 						break;
 					},
 					')' => {
 						tag = .rparen;
-						ast.pos += 1;
+						tokenizer.pos += 1;
 						break;
 					},
 					else => {
-						defer ast.pos += 1;
+						defer tokenizer.pos += 1;
 						return .{
 							.tag = .invalid,
 							.start = start,
-							.end = ast.pos,
+							.end = tokenizer.pos,
 						};
 					},
 				},
@@ -530,7 +530,7 @@ pub const Tokenizer = struct {
 		return Token{
 			.tag = tag,
 			.start = start,
-			.end = ast.pos,
+			.end = tokenizer.pos,
 		};
 	}
 

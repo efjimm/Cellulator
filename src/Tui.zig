@@ -7,7 +7,6 @@ const Position = Sheet.Position;
 const Term = spoon.Term;
 
 term: Term,
-status_message: std.BoundedArray(u8, 256) = .{},
 
 update_status: bool = true,
 update_command: bool = true,
@@ -51,18 +50,6 @@ pub fn deinit(self: *Self) void {
 }
 
 pub const RenderError = Term.WriteError;
-
-pub fn setStatusMessage(self: *Self, comptime fmt: []const u8, args: anytype) void {
-	self.dismissStatusMessage();
-	const writer = self.status_message.writer();
-	writer.print(fmt, args) catch {};
-	self.update_command = true;
-}
-
-pub fn dismissStatusMessage(self: *Self) void {
-	self.status_message.len = 0;
-	self.update_command = true;
-}
 
 pub fn render(self: *Self, zc: *ZC) RenderError!void {
 	if (needs_resize)
@@ -139,7 +126,7 @@ pub fn renderCommand(
 		var rpw = rc.restrictedPaddingWriter(self.term.width);
 		const writer = rpw.writer();
 
-		try writer.writeAll(self.status_message.slice());
+		try writer.writeAll(zc.status_message.slice());
 		try rpw.finish();
 	}
 }

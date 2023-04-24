@@ -1,4 +1,5 @@
 const std = @import("std");
+const utils = @import("utils.zig");
 const Ast = @import("Parse.zig");
 const spoon = @import("spoon");
 const Sheet = @import("Sheet.zig");
@@ -55,9 +56,15 @@ pub const Mode = enum {
 	}
 };
 
-pub fn init(allocator: Allocator) !Self {
+pub fn init(allocator: Allocator, filepath_opt: ?[]const u8) !Self {
 	return .{
-		.sheet = Sheet.init(allocator),
+		.sheet = blk: {
+			var sheet = Sheet.init(allocator);
+			if (filepath_opt) |filepath| {
+				try sheet.loadFile(filepath);
+			}
+			break :blk sheet;
+		},
 		.tui = try Tui.init(),
 		.allocator = allocator,
 	};
@@ -77,13 +84,25 @@ pub fn run(self: *Self) !void {
 	}
 }
 
+pub fn setStatusMessage(self: *Self, comptime fmt: []const u8, args: anytype) void {
+	self.dismissStatusMessage();
+	const writer = self.status_message.writer();
+	writer.print(fmt, args) catch {};
+	self.tui.update_command = true;
+}
+
+pub fn dismissStatusMessage(self: *Self) void {
+	self.status_message.len = 0;
+	self.tui.update_command = true;
+}
+
 pub fn updateCells(self: *Self) Allocator.Error!void {
 	return self.sheet.update();
 }
 
 fn setMode(self: *Self, new_mode: Mode) void {
 	if (new_mode == .command) {
-		self.tui.dismissStatusMessage();
+		self.dismissStatusMessage();
 	} else if (self.mode == .command) {
 		self.tui.update_command = true;
 	}
@@ -98,7 +117,7 @@ fn handleInput(self: *Self) !void {
 	try switch (self.mode) {
 		.normal => self.doNormalMode(slice),
 		.command => self.doCommandMode(slice) catch |err| switch (err) {
-			error.UnexpectedToken => self.tui.setStatusMessage("Error: unexpected token", .{}),
+			error.UnexpectedToken => self.setStatusMessage("Error: unexpected token", .{}),
 			else => return err,
 		},
 	};
@@ -109,10 +128,13 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 
 	while (iter.next()) |in| {
 		if (!in.mod_ctrl)  switch (in.content) {
-			.escape => self.tui.dismissStatusMessage(),
+			.escape => self.dismissStatusMessage(),
 			.codepoint => |cp| switch (cp) {
-				'q' => self.running = false,
-				':' => self.setMode(.command),
+				':' => {
+					self.setMode(.command);
+					const writer = self.command_buf.writer();
+					writer.writeByte(':') catch unreachable;
+				},
 				'f' => self.incPrecision(self.cursor.x, 1),
 				'F' => self.decPrecision(self.cursor.x, 1),
 				'k' => self.setCursor(.{ .y = self.cursor.y -| 1, .x = self.cursor.x }),
@@ -132,7 +154,7 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 			.codepoint => |cp| switch (cp) {
 				// C-[ is indistinguishable from Escape on most terminals. On terminals where they
 				// can be distinguished, we make them do the same thing for a consistent experience
-				'[' => self.tui.dismissStatusMessage(),
+				'[' => self.dismissStatusMessage(),
 				else => {},
 			},
 			else => {},
@@ -148,6 +170,10 @@ fn doCommandMode(self: *Self, input: []const u8) !void {
 		.string => |arr| {
 			defer self.setMode(.normal);
 			const str = arr.slice();
+
+			if (str.len > 0 and str[0] == ':') {
+				return self.runCommand(str[1..]);
+			}
 
 			var ast = try Ast.parse(self.allocator, str);
 			errdefer ast.deinit(self.allocator);
@@ -167,6 +193,25 @@ fn doCommandMode(self: *Self, input: []const u8) !void {
 				},
 			}
 		},
+	}
+}
+
+pub fn runCommand(self: *Self, str: []const u8) !void {
+	var iter = utils.wordIterator(str);
+	const cmd = iter.next() orelse return error.InvalidCommand;
+	if (cmd.len == 0) return error.InvalidCommand;
+
+	switch (cmd[0]) {
+		'q' => self.running = false,
+		'w' => { // save
+			self.sheet.writeFile(.{ .filepath = iter.next() }) catch |err| switch (err) {
+				error.EmptyFileName => {
+					self.setStatusMessage("Error: must specify a file name", .{});
+				},
+				else => return err,
+			};
+		},
+		else => {},
 	}
 }
 
