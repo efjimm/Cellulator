@@ -10,7 +10,15 @@ const Term = spoon.Term;
 term: Term,
 status_message: std.BoundedArray(u8, 256) = .{},
 
+update_status: bool = true,
+update_command: bool = true,
+update_column_headings: bool = true,
+update_row_numbers: bool = true,
+update_cells: bool = true,
+update_cursor: bool = true,
+
 const Self = @This();
+const RenderContext = Term.RenderContext(8192);
 
 pub const InitError = Term.InitError || Term.UncookError || error{ OperationNotSupported };
 
@@ -49,10 +57,12 @@ pub fn setStatusMessage(self: *Self, comptime fmt: []const u8, args: anytype) vo
 	self.dismissStatusMessage();
 	const writer = self.status_message.writer();
 	writer.print(fmt, args) catch {};
+	self.update_command = true;
 }
 
 pub fn dismissStatusMessage(self: *Self) void {
 	self.status_message.len = 0;
+	self.update_command = true;
 }
 
 pub fn render(self: *Self, zc: *ZC) RenderError!void {
@@ -60,41 +70,83 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
 		try self.term.fetchSize();
 
 	var rc = try self.term.getRenderContext(8192);
-	defer rc.done() catch {};
-
 	try rc.hideCursor();
-	try rc.clear();
-	try rc.moveCursorTo(0, 0);
 
-	const writer = rc.buffer.writer();
-
-	if (self.term.width < 10 or self.term.height < 4) {
-		try writer.writeAll("Terminal too small");
+	if (self.term.width < 15 or self.term.height < 5) {
+		try rc.writeAllWrapping("Terminal too small");
 		return;
 	}
+
+	if (self.update_status) {
+		try self.renderStatus(&rc, zc);
+		self.update_status = false;
+	}
+	if (self.update_command or zc.mode == .command) {
+		try self.renderCommand(&rc, zc);
+		self.update_command = false;
+	}
+	if (self.update_column_headings) {
+		try self.renderColumnHeadings(&rc, zc.*);
+		self.update_column_headings = false;
+	}
+	if (self.update_row_numbers) {
+		try self.renderRowNumbers(&rc, zc);
+		self.update_row_numbers = false;
+	}
+	if (self.update_cells) {
+		try self.renderRows(&rc, zc);
+		self.update_cells = false;
+	}
+	if (self.update_cursor) {
+		try renderCursor(&rc, zc);
+		self.update_cursor = false;
+	}
+
+	try rc.setStyle(.{});
+
+	try rc.done();
+}
+pub fn renderStatus(
+	self: Self,
+	rc: *RenderContext,
+	zc: *ZC,
+) RenderError!void {
+	try rc.moveCursorTo(ZC.status_line, 0);
+	try rc.hideCursor();
+
+	var rpw = rc.restrictedPaddingWriter(self.term.width);
+	const writer = rpw.writer();
 
 	var buf: [64]u8 = undefined;
 	try writer.writeAll(utils.posToCellName(zc.cursor.y, zc.cursor.x, &buf));
 
 	try writer.print(" {}", .{ zc.mode });
 
-	try self.renderColumnHeadings(&rc, zc.*);
-	try self.renderRows(&rc, zc);
+	try rpw.pad();
+}
 
+pub fn renderCommand(
+	self: Self,
+	rc: *RenderContext,
+	zc: *ZC,
+) RenderError!void {
 	try rc.moveCursorTo(ZC.input_line, 0);
+	try rc.clearToEol();
+
 	if (zc.mode == .command) {
-		try rc.showCursor();
+		const writer = rc.buffer.writer();
 		try writer.writeAll(zc.command_buf.slice());
+		try rc.showCursor();
 	} else {
 		var rpw = rc.restrictedPaddingWriter(self.term.width);
-		defer rpw.finish() catch {};
-		const truncating_writer = rpw.writer();
+		const writer = rpw.writer();
 
-		try truncating_writer.writeAll(self.status_message.slice());
+		try writer.writeAll(self.status_message.slice());
+		try rpw.finish();
 	}
 }
 
-fn renderColumnHeadings(
+pub fn renderColumnHeadings(
 	self: Self,
 	rc: *Term.RenderContext(8192),
 	zc: ZC,
@@ -103,6 +155,7 @@ fn renderColumnHeadings(
 
 	const reserved_cols = zc.leftReservedColumns();
 	try rc.moveCursorTo(ZC.col_heading_line, reserved_cols);
+	try rc.clearToBol();
 
 	var x = zc.screen_pos.x;
 	var w = reserved_cols;
@@ -133,62 +186,149 @@ fn renderColumnHeadings(
 	try rc.setStyle(.{});
 }
 
-fn renderRows(
+pub fn renderRowNumbers(self: Self, rc: *RenderContext, zc: *ZC) RenderError!void {
+	const width = zc.leftReservedColumns();
+	try rc.setStyle(.{ .fg = .blue, .bg = .black });
+
+	try rc.moveCursorTo(ZC.col_heading_line, 0);
+	try rc.buffer.writer().writeByteNTimes(' ', width);
+
+	for (ZC.content_line..self.term.height, zc.screen_pos.y..) |screen_line, sheet_line| {
+		try rc.moveCursorTo(@intCast(u16, screen_line), 0);
+
+		if (zc.cursor.y == sheet_line)
+			try rc.setStyle(.{ .fg = .black, .bg = .blue });
+
+		var rpw = rc.restrictedPaddingWriter(width);
+		const writer = rpw.writer();
+
+		try writer.print("{d: ^[1]}", .{ sheet_line, width });
+
+		try rpw.pad();
+
+		if (zc.cursor.y == sheet_line)
+			try rc.setStyle(.{ .fg = .blue, .bg = .black });
+	}
+}
+
+pub fn renderCursor(
+	rc: *RenderContext,
+	zc: *ZC,
+) RenderError!void {
+	var buf: [16]u8 = undefined;
+
+	try rc.setStyle(.{});
+	const left = zc.leftReservedColumns();
+	const writer = rc.buffer.writer();
+
+	// Overrwrite old cursor with a normal looking cell. Also overwrites the old column heading and
+	// line number.
+	const prev_pos = Position{
+		.y = zc.prev_cursor.y - zc.screen_pos.y + ZC.content_line,
+		.x = blk: {
+			var x: u16 = left;
+			for (zc.screen_pos.x..zc.prev_cursor.x) |i| {
+				const col = zc.sheet.getColumn(@intCast(u16, i));
+				x += col.width;
+			}
+			break :blk x;
+		},
+	};
+
+	try rc.moveCursorTo(prev_pos.y, prev_pos.x);
+	_ = try renderCell(rc, zc, zc.prev_cursor);
+
+	try rc.setStyle(.{ .fg = .blue, .bg = .black });
+
+	const prev_col = zc.sheet.getColumn(zc.prev_cursor.x);
+
+	try rc.moveCursorTo(ZC.col_heading_line, prev_pos.x);
+	try writer.print("{s: ^[1]}", .{
+		utils.columnIndexToNameBuf(zc.prev_cursor.x, &buf),
+		prev_col.width,
+	});
+
+	try rc.moveCursorTo(prev_pos.y, 0);
+	try writer.print("{d: ^[1]}", .{ zc.prev_cursor.y, left });
+
+
+	// Render the cells and headings at the current cursor position with a specific colour.
+	try rc.setStyle(.{ .fg = .black, .bg = .blue });
+
+	const pos = Position{
+		.y = zc.cursor.y - zc.screen_pos.y + ZC.content_line,
+		.x = blk: {
+			var x: u16 = left;
+			for (zc.screen_pos.x..zc.cursor.x) |i| {
+				const col = zc.sheet.getColumn(@intCast(u16, i));
+				x += col.width;
+			}
+			break :blk x;
+		},
+	};
+	try rc.moveCursorTo(pos.y, pos.x);
+	_ = try renderCell(rc, zc, zc.cursor);
+
+	const col = zc.sheet.getColumn(pos.x);
+	try rc.moveCursorTo(ZC.col_heading_line, pos.x);
+	try writer.print("{s: ^[1]}", .{
+		utils.columnIndexToNameBuf(zc.cursor.x, &buf),
+		col.width,
+	});
+
+	try rc.moveCursorTo(pos.y, 0);
+	try writer.print("{d: ^[1]}", .{ zc.cursor.y, left });
+}
+
+pub fn renderRows(
 	self: Self,
-	rc: *Term.RenderContext(8192),
+	rc: *RenderContext,
 	zc: *ZC,
 ) RenderError!void {
 	const reserved_cols = zc.leftReservedColumns();
+	const width = self.term.width - reserved_cols;
 
-	// Loop over rows
+	try rc.setStyle(.{});
+
 	for (ZC.content_line..self.term.height, zc.screen_pos.y..) |line, y| {
-		try rc.moveCursorTo(@intCast(u16, line), 0);
+		try rc.moveCursorTo(@intCast(u16, line), reserved_cols);
 
-		var rpw = rc.restrictedPaddingWriter(self.term.width + 1);
-		defer rpw.finish() catch {};
-
-		const writer = rpw.writer();
-
-		if (y == zc.cursor.y)
-			try rc.setStyle(.{ .fg = .black, .bg = .blue })
-		else
-			try rc.setStyle(.{ .fg = .blue, .bg = .black });
-
-		// Renders row number
-		try writer.print("{d: >[1]} ", .{ y, reserved_cols - 1 });
-
-		try rc.setStyle(.{});
-
-		// Loop over columns
-		var x = zc.screen_pos.x;
-		while (true) : (x +|= 1) {
-			if (y == zc.cursor.y and x == zc.cursor.x)
-				try rc.setStyle(.{ .fg = .black, .bg = .blue });
-
-			const col = zc.sheet.getColumn(x);
-			if (rpw.width_left < col.width)
+		var w: u16 = 0;
+		for (zc.screen_pos.x..std.math.maxInt(u16)) |x| {
+			w += try renderCell(rc, zc, Position{ .y = @intCast(u16, y), .x = @intCast(u16, x) });
+			if (w >= width)
 				break;
-
-			const pos = Position{ .y = @intCast(u16, y), .x = x };
-			const num_optional = if (zc.sheet.getCellPtr(pos)) |cell|
-					cell.getValue(&zc.sheet)
-				else
-					null;
-			
-			var buf: [256]u8 = undefined;
-			if (num_optional) |num| {
-				const slice = buf[0..col.width];
-				const text = std.fmt.bufPrint(slice, "{d: >[1].[2]}", .{
-					num, col.width, col.precision
-				}) catch slice;
-
-				try writer.writeAll(text);
-			} else {
-				try writer.print("{s: >[1]}", .{ "", col.width });
-			}
-
-			if (y == zc.cursor.y and x == zc.cursor.x)
-				try rc.setStyle(.{});
 		}
 	}
+}
+
+pub fn renderCell(
+	rc: *RenderContext,
+	zc: *ZC,
+	pos: Position,
+) RenderError!u16 {
+	const col = zc.sheet.getColumn(pos.x);
+	const num_optional = if (zc.sheet.getCellPtr(pos)) |cell|
+			cell.getValue(&zc.sheet)
+		else
+			null;
+
+	var rpw = rc.restrictedPaddingWriter(col.width);
+	const writer = rpw.writer();
+	
+	var buf: [256]u8 = undefined;
+	if (num_optional) |num| {
+		const slice = buf[0..col.width];
+		const text = std.fmt.bufPrint(slice, "{d: >[1].[2]}", .{
+			num, col.width, col.precision
+		}) catch slice;
+
+		try writer.writeAll(text);
+	} else {
+		try writer.print("{s: >[1]}", .{ "", col.width });
+	}
+
+	try rpw.finish();
+
+	return col.width;
 }

@@ -4,9 +4,9 @@
 	.dependencies = .{
 		.spoon = .{
 			// Temporary workaround until https://github.com/ziglang/zig/issues/15419 is fixed
-			//.url = "http://127.0.0.1:8000/284c84c06662a0f77fe062401a700a8610c28254.tar.gz",
-			.url = "https://github.com/efjimm/zig-spoon/archive/284c84c06662a0f77fe062401a700a8610c28254.tar.gz",
-			.hash = "12206fd19c861aa62d9ae4fddd05cad3156a668dbdaf5feb322b5e1dd05b0561fdd2",
+			//.url = "http://127.0.0.1:8000/ce15d6cd480387e0a89ddb92a73619453c41652f.tar.gz",
+			.url = "https://github.com/efjimm/zig-spoon/archive/ce15d6cd480387e0a89ddb92a73619453c41652f.tar.gz",
+			.hash = "12202c62e4fe5cd04f39e90dead86457c93851c8253a93f6eb4278cb7160affeb56e",
 		},
 	},
 }

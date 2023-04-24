@@ -19,6 +19,7 @@ mode: Mode = .normal,
 /// The top left corner of the screen
 screen_pos: Position = .{},
 
+prev_cursor: Position = .{},
 /// The cell position of the cursor
 cursor: Position = .{},
 
@@ -74,8 +75,6 @@ pub fn deinit(self: *Self) void {
 
 pub fn run(self: *Self) !void {
 	while (self.running) {
-		self.clampScreenToCursor();
-
 		try self.updateCells();
 		try self.tui.render(self);
 		try self.handleInput();
@@ -87,9 +86,13 @@ pub fn updateCells(self: *Self) Allocator.Error!void {
 }
 
 fn setMode(self: *Self, new_mode: Mode) void {
-	self.mode = new_mode;
-	if (new_mode == .command)
+	if (new_mode == .command) {
 		self.tui.dismissStatusMessage();
+	} else if (self.mode == .command) {
+		self.tui.update_command = true;
+	}
+
+	self.mode = new_mode;
 }
 
 fn handleInput(self: *Self) !void {
@@ -120,10 +123,10 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 				'F' => if (self.sheet.columns.getPtr(self.cursor.x)) |col| {
 					col.precision -|= 1;
 				},
-				'j' => self.cursor.y +|= 1,
-				'k' => self.cursor.y -|= 1,
-				'l' => self.cursor.x +|= 1,
-				'h' => self.cursor.x -|= 1,
+				'k' => self.setCursor(.{ .y = self.cursor.y -| 1, .x = self.cursor.x }),
+				'j' => self.setCursor(.{ .y = self.cursor.y +| 1, .x = self.cursor.x }),
+				'h' => self.setCursor(.{ .x = self.cursor.x -| 1, .y = self.cursor.y }),
+				'l' => self.setCursor(.{ .x = self.cursor.x +| 1, .y = self.cursor.y }),
 				'=' => {
 					self.setMode(.command);
 					var _buf: [16]u8 = undefined;
@@ -166,6 +169,8 @@ fn doCommandMode(self: *Self, input: []const u8) !void {
 					ast.splice(op.rhs); // Cut ast down to just the expression
 
 					try self.sheet.setCell(pos, .{ .ast = ast });
+					self.tui.update_cursor = true;
+					self.tui.update_cells = true;
 				},
 				else => {
 					ast.deinit(self.allocator);
@@ -173,6 +178,14 @@ fn doCommandMode(self: *Self, input: []const u8) !void {
 			}
 		},
 	}
+}
+
+pub fn setCursor(self: *Self, new_pos: Position) void {
+	self.prev_cursor = self.cursor;
+	self.cursor = new_pos;
+	self.clampScreenToCursor();
+
+	self.tui.update_cursor = true;
 }
 
 pub inline fn contentHeight(self: Self) u16 {
@@ -188,10 +201,6 @@ pub fn leftReservedColumns(self: Self) u16 {
 	return std.math.log10(y) + 2;
 }
 
-pub fn cursorUp(self: *Self) void {
-	self.cursor.y -|= 1;
-}
-
 pub fn clampScreenToCursor(self: *Self) void {
 	self.clampScreenToCursorY();
 	self.clampScreenToCursorX();
@@ -200,18 +209,24 @@ pub fn clampScreenToCursor(self: *Self) void {
 pub fn clampScreenToCursorY(self: *Self) void {
 	if (self.cursor.y < self.screen_pos.y) {
 		self.screen_pos.y = self.cursor.y;
+		self.tui.update_row_numbers = true;
+		self.tui.update_cells = true;
 		return;
 	}
 
 	const height = self.contentHeight();
 	if (self.cursor.y - self.screen_pos.y >= height) {
 		self.screen_pos.y = self.cursor.y - (height -| 1);
+		self.tui.update_row_numbers = true;
+		self.tui.update_cells = true;
 	}
 }
 
 pub fn clampScreenToCursorX(self: *Self) void {
 	if (self.cursor.x < self.screen_pos.x) {
 		self.screen_pos.x = self.cursor.x;
+		self.tui.update_column_headings = true;
+		self.tui.update_cells = true;
 		return;
 	}
 
@@ -242,5 +257,7 @@ pub fn clampScreenToCursorX(self: *Self) void {
 
 	if (x >= self.screen_pos.x) {
 		self.screen_pos.x = @intCast(u16, @max(0, x + 1));
+		self.tui.update_column_headings = true;
+		self.tui.update_cells = true;
 	}
 }
