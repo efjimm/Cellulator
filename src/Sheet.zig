@@ -42,6 +42,10 @@ pub fn init(allocator: Allocator) Sheet {
 }
 
 pub fn deinit(sheet: *Sheet) void {
+	for (sheet.cells.values()) |*cell| {
+		cell.deinit(sheet.allocator);
+	}
+
 	sheet.cells.deinit(sheet.allocator);
 	sheet.sorted_nodes.deinit(sheet.allocator);
 	sheet.columns.deinit(sheet.allocator);
@@ -53,19 +57,33 @@ pub fn setCell(
 	position: Position,
 	data: Cell,
 ) !void {
+	sheet.needs_update = true;
+
 	const col_entry = try sheet.columns.getOrPut(sheet.allocator, position.x);
 	if (!col_entry.found_existing) {
 		col_entry.value_ptr.* = Column{};
 	}
 
-	const entry = try sheet.cells.getOrPut(sheet.allocator, position);
-
-	if (entry.found_existing) {
-		entry.value_ptr.ast.deinit(sheet.allocator);
+	if (!sheet.cells.contains(position)) {
+		for (sheet.cells.keys(), 0..) |key, i| {
+			if (key.y > position.y or (key.y == position.y and key.x > position.x)) {
+				try sheet.cells.entries.insert(sheet.allocator, i, .{
+					.hash = {},
+					.key = position,
+					.value = data,
+				});
+				try sheet.cells.reIndex(sheet.allocator);
+				return;
+			}
+		}
+		try sheet.cells.put(sheet.allocator, position, data);
+		return;
 	}
 
-	entry.value_ptr.* = data;
-	sheet.needs_update = true;
+	// TODO: reuse ast
+	const ptr = sheet.cells.getPtr(position).?;
+	ptr.ast.deinit(sheet.allocator);
+	ptr.* = data;
 }
 
 pub fn getCell(sheet: Sheet, pos: Position) ?Cell {
