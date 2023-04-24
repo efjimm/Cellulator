@@ -28,6 +28,7 @@ running: bool = true,
 allocator: Allocator,
 
 command_buf: TextInput(512) = .{},
+status_message: std.BoundedArray(u8, 256) = .{},
 
 pub const status_line = 0;
 pub const input_line = 1;
@@ -117,12 +118,8 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 			.codepoint => |cp| switch (cp) {
 				'q' => self.running = false,
 				':' => self.setMode(.command),
-				'f' => if (self.sheet.columns.getPtr(self.cursor.x)) |col| {
-					col.precision +|= 1;
-				},
-				'F' => if (self.sheet.columns.getPtr(self.cursor.x)) |col| {
-					col.precision -|= 1;
-				},
+				'f' => self.incPrecision(self.cursor.x, 1),
+				'F' => self.decPrecision(self.cursor.x, 1),
 				'k' => self.setCursor(.{ .y = self.cursor.y -| 1, .x = self.cursor.x }),
 				'j' => self.setCursor(.{ .y = self.cursor.y +| 1, .x = self.cursor.x }),
 				'h' => self.setCursor(.{ .x = self.cursor.x -| 1, .y = self.cursor.y }),
@@ -258,6 +255,27 @@ pub fn clampScreenToCursorX(self: *Self) void {
 	if (x >= self.screen_pos.x) {
 		self.screen_pos.x = @intCast(u16, @max(0, x + 1));
 		self.tui.update_column_headings = true;
+		self.tui.update_cells = true;
+	}
+}
+
+pub fn setPrecision(self: *Self, column: u16, new_precision: u8) void {
+	if (self.sheet.columns.getPtr(column)) |col| {
+		col.precision = new_precision;
+		self.tui.update_cells = true;
+	}
+}
+
+pub fn incPrecision(self: *Self, column: u16, n: u8) void {
+	if (self.sheet.columns.getPtr(column)) |col| {
+		col.precision +|= n;
+		self.tui.update_cells = true;
+	}
+}
+
+pub fn decPrecision(self: *Self, column: u16, n: u8) void {
+	if (self.sheet.columns.getPtr(column)) |col| {
+		col.precision -|= n;
 		self.tui.update_cells = true;
 	}
 }

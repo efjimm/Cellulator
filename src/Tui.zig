@@ -95,9 +95,10 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
 	}
 	if (self.update_cells) {
 		try self.renderRows(&rc, zc);
+		try renderCursor(&rc, zc);
 		self.update_cells = false;
-	}
-	if (self.update_cursor) {
+		self.update_cursor = false;
+	} else if (self.update_cursor) {
 		try renderCursor(&rc, zc);
 		self.update_cursor = false;
 	}
