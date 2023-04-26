@@ -1,5 +1,5 @@
 //! Basic expression parser. Does not attempt error recovery and returns immediately on fatal
-//! errors.
+//! errors. Contains a `MultiArrayList` of `Node`s that is sorted in reverse topological order.
 
 // TODO
 // Handle division by zero (seemingly works with @rem but docs say it's ub)
@@ -15,7 +15,7 @@ const Ast = @This();
 const TokenList = std.MultiArrayList(Token);
 const NodeList = std.MultiArrayList(Node);
 
-nodes: NodeList.Slice = (NodeList{}).slice(),
+nodes: NodeList = .{},
 
 fn initParser(allocator: Allocator, source: []const u8) !Parser {
 	var tokens = TokenList{};
@@ -47,7 +47,7 @@ pub fn parse(allocator: Allocator, source: []const u8) !Ast {
 	try parser.parse();
 
 	return Ast{
-		.nodes = parser.nodes.toOwnedSlice(),
+		.nodes = parser.nodes,
 	};
 }
 
@@ -60,7 +60,7 @@ pub fn parseExpression(allocator: Allocator, source: []const u8) !Ast {
 	_ = try parser.expectToken(.eof);
 
 	return Ast{
-		.nodes = parser.nodes.toOwnedSlice(),
+		.nodes = parser.nodes,
 	};
 }
 
@@ -94,41 +94,36 @@ pub fn rootTag(ast: Ast) std.meta.Tag(Node) {
 }
 
 /// Removes all nodes except for the given index and its children
+/// Nodes in the list are already sorted in reverse topological order which allows us to overwrite
+/// nodes sequentially without loss. This function preserves reverse topological order.
 pub fn splice(ast: *Ast, new_root: u32) void {
-	var j: u32 = 0;
-	var list = ast.nodes.toMultiArrayList();
-
-	// The index of children nodes will always lower than the index of their parent
-	for (0..new_root) |i| {
-		const index = @intCast(u32, i);
-		if (ast.isChildOf(new_root, index)) {
-			list.set(index, ast.nodes.get(index));
-			j += 1;
-		}
-	}
-
-	list.len = new_root + 1;
-	ast.nodes = list.toOwnedSlice();
-}
-
-pub fn isChildOf(ast: *Ast, parent: u32, node: u32) bool {
 	const Context = struct {
-		target: u32,
-		found: bool = false,
+		slice: *NodeList.Slice,
+		len: u32 = 0,
 
 		pub fn evalCell(context: *@This(), index: u32) !bool {
-			if (index == context.target) {
-				context.found = true;
-				return false;
+			var node = context.slice.get(index);
+
+			switch (node) {
+				// Update indices for binary operators
+				.assignment, .add, .sub, .mul, .div, .mod => |*b| {
+					b.lhs = context.len - 2;
+					b.rhs = context.len - 1;
+				},
+				.cell, .number, .column => {},
 			}
+
+			context.slice.set(context.len, node);
+			context.len += 1;
+
 			return true;
 		}
 	};
 
-	var context = Context{ .target = node };
-	try ast.traverseFrom(parent, &context);
-
-	return context.found;
+	var slice = ast.nodes.slice();
+	var context = Context{ .slice = &slice };
+	ast.traverseFrom(new_root, .last, &context) catch unreachable;
+	ast.nodes.len = context.len;
 }
 
 pub fn print(ast: *Ast, writer: anytype) @TypeOf(writer).Error!void {
@@ -154,26 +149,51 @@ pub fn print(ast: *Ast, writer: anytype) @TypeOf(writer).Error!void {
 		}
 	};
 
-	try ast.traverse(Context{ .ast = ast, .writer = &writer });
+	try ast.traverse(.middle, Context{ .ast = ast, .writer = &writer });
 }
+
+/// The order in which nodes are evaluated.
+const TraverseOrder = enum {
+	/// Nodes with children will be evaluated before their children
+	first,
+	/// Nodes with children will have their left child evaluated first, then themselves, then their
+	/// right child.
+	middle,
+	/// Nodes with children will be evaluated after all their children.
+	last,
+};
 
 /// Recursively visits every node in the tree. `context` is an instance of a type which must have
 /// the function `fn evalCell(@TypeOf(context), u32) !bool`. This function is run on every leaf
 /// node in the tree, with `index` being the index of the node in the `nodes` array. If the
 /// function returns false, traversal stops immediately.
-pub fn traverse(ast: Ast, context: anytype) !void {
-	return ast.traverseFrom(ast.rootNodeIndex(), context);
+pub fn traverse(ast: Ast, order: TraverseOrder, context: anytype) !void {
+	return ast.traverseFrom(ast.rootNodeIndex(), order, context);
 }
 
 /// Same as `traverse`, but starting from the node at the given index.
-fn traverseFrom(ast: Ast, index: u32, context: anytype) !void {
+fn traverseFrom(ast: Ast, index: u32, order: TraverseOrder, context: anytype) !void {
 	const node = ast.nodes.get(index);
 
 	switch (node) {
 		.assignment, .add, .sub, .mul, .div, .mod => |b| {
-			try ast.traverseFrom(b.lhs, context);
-			if (!try context.evalCell(index)) return;
-			try ast.traverseFrom(b.rhs, context);
+			switch (order) {
+				.first => {
+					if (!try context.evalCell(index)) return;
+					try ast.traverseFrom(b.lhs, order, context);
+					try ast.traverseFrom(b.rhs, order, context);
+				},
+				.middle => {
+					try ast.traverseFrom(b.lhs, order, context);
+					if (!try context.evalCell(index)) return;
+					try ast.traverseFrom(b.rhs, order, context);
+				},
+				.last => {
+					try ast.traverseFrom(b.lhs, order, context);
+					try ast.traverseFrom(b.rhs, order, context);
+					if (!try context.evalCell(index)) return;
+				},
+			}
 		},
 		.number, .cell, .column => {
 			if (!try context.evalCell(index)) return;

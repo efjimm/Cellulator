@@ -187,7 +187,7 @@ fn visit(
 		}
 	};
 
-	try cell.ast.traverse(Context{
+	try cell.ast.traverse(.middle, Context{
 		.sheet = sheet,
 		.node = node,
 		.nodes = nodes,
@@ -221,12 +221,12 @@ pub fn loadFile(sheet: *Sheet, filepath: []const u8) !void {
 	var line_iter = std.mem.tokenize(u8, slice, "\n");
 	while (line_iter.next()) |line| {
 		var ast = Ast.parse(sheet.allocator, line) catch continue;
+		errdefer ast.deinit(sheet.allocator);
 
 		const root = ast.rootNode();
 		switch (root) {
 			.assignment => {
-				const pos = ast.nodes.get(root.assignment.lhs).cell;
-
+				const pos = ast.nodes.items(.data)[root.assignment.lhs].cell;
 				ast.splice(root.assignment.rhs);
 				try sheet.setCell(pos, .{ .ast = ast });
 			},

@@ -185,7 +185,7 @@ fn doCommandMode(self: *Self, input: []const u8) !void {
 			switch (root) {
 				.assignment => |op| {
 					const pos = ast.nodes.items(.data)[op.lhs].cell;
-					ast.splice(op.rhs); // Cut ast down to just the expression
+					ast.splice(op.rhs);
 
 					try self.sheet.setCell(pos, .{ .ast = ast });
 					self.tui.update_cursor = true;
