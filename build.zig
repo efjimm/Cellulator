@@ -13,7 +13,9 @@ pub fn build(b: *std.Build) void {
 
     const spoon_dep = b.dependency("spoon", .{});
     const spoon = spoon_dep.module("spoon");
+    const wcwidth = spoon_dep.module("wcwidth");
     exe.addModule("spoon", spoon);
+    exe.addModule("wcwidth", wcwidth);
 
     b.installArtifact(exe);
 
@@ -35,6 +37,7 @@ pub fn build(b: *std.Build) void {
     });
 
     tests.addModule("spoon", spoon);
+    tests.addModule("wcwidth", wcwidth);
 
     const run_tests = b.addRunArtifact(tests);
 

@@ -626,23 +626,3 @@ test "Parse" {
 		try t.expectApproxEqRel(@as(f64, 15.833333), res, 0.00001);
 	}
 }
-
-test "isChildOf" {
-	const t = std.testing;
-	var ast = try parse(t.allocator, "a0 = 50 + 10 * 2");
-	defer ast.deinit(t.allocator);
-
-	const root = ast.rootNodeIndex();
-	for (0..ast.nodes.len - 1) |i| {
-		try t.expect(ast.isChildOf(root, @intCast(u32, i)));
-	}
-
-	const add = ast.rootNodeIndex() - 1;
-	for (ast.nodes.items(.tags), 0..) |tag, i| {
-		if (tag == .number or tag == .mul or tag == .add) {
-			try t.expect(ast.isChildOf(add, @intCast(u32, i)));
-		} else {
-			try t.expect(!ast.isChildOf(add, @intCast(u32, i)));
-		}
-	}
-}

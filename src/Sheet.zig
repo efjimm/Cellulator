@@ -17,7 +17,7 @@ const PositionContext = struct {
 	}
 
 	pub fn hash(_: @This(), pos: Position) u32 {
-		return @as(u32, pos.y) * std.math.maxInt(u16) + pos.x;
+		return pos.hash();
 	}
 };
 
@@ -57,7 +57,7 @@ pub fn setCell(
 	sheet: *Sheet,
 	position: Position,
 	data: Cell,
-) !void {
+) Allocator.Error!void {
 	sheet.needs_update = true;
 
 	const col_entry = try sheet.columns.getOrPut(sheet.allocator, position.x);
@@ -67,7 +67,7 @@ pub fn setCell(
 
 	if (!sheet.cells.contains(position)) {
 		for (sheet.cells.keys(), 0..) |key, i| {
-			if (key.y > position.y or (key.y == position.y and key.x > position.x)) {
+			if (key.hash() > position.hash()) {
 				try sheet.cells.entries.insert(sheet.allocator, i, .{
 					.hash = {},
 					.key = position,
@@ -77,11 +77,12 @@ pub fn setCell(
 				return;
 			}
 		}
+
+		// Found no entries
 		try sheet.cells.put(sheet.allocator, position, data);
 		return;
 	}
 
-	// TODO: reuse ast
 	const ptr = sheet.cells.getPtr(position).?;
 	ptr.ast.deinit(sheet.allocator);
 	ptr.* = data;
@@ -124,7 +125,7 @@ const NodeMap = std.HashMap(Position, NodeMark, struct {
 	}
 
 	pub fn hash(_: @This(), pos: Position) u64 {
-		return @as(u32, pos.y) * std.math.maxInt(u16) + pos.x;
+		return pos.hash();
 	}
 }, 99);
 
@@ -271,6 +272,10 @@ pub fn writeFile(sheet: *Sheet, opts: WriteFileOptions) !void {
 pub const Position = struct {
 	x: u16 = 0,
 	y: u16 = 0,
+
+	pub fn hash(position: Position) u32 {
+		return @as(u32, position.y) * std.math.maxInt(u16) + position.x;
+	}
 
 	/// Writes the cell address of this position to the given writer.
 	pub fn writeCellAddress(pos: Position, writer: anytype) @TypeOf(writer).Error!void {

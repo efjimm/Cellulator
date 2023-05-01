@@ -2,6 +2,7 @@ const std = @import("std");
 const spoon = @import("spoon");
 const ZC = @import("ZC.zig");
 const Sheet = @import("Sheet.zig");
+const wcWidth = @import("wcwidth").wcWidth;
 
 const Position = Sheet.Position;
 const Term = spoon.Term;
@@ -68,7 +69,7 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
 		self.update_status = false;
 	}
 	if (self.update_command or zc.mode == .command) {
-		try self.renderCommand(&rc, zc);
+		try self.renderCommandLine(&rc, zc);
 		self.update_command = false;
 	}
 	if (self.update_column_headings) {
@@ -121,7 +122,7 @@ pub fn renderStatus(
 	try rpw.pad();
 }
 
-pub fn renderCommand(
+pub fn renderCommandLine(
 	self: Self,
 	rc: *RenderContext,
 	zc: *ZC,
@@ -131,7 +132,28 @@ pub fn renderCommand(
 
 	if (zc.mode == .command) {
 		const writer = rc.buffer.writer();
-		try writer.writeAll(zc.command_buf.slice());
+		const slice = zc.command_buf.slice();
+		try writer.writeAll(slice);
+
+		const cursor_pos = blk: {
+			var pos: u16 = 0;
+			var iter = std.unicode.Utf8Iterator{
+				.bytes = slice[0..zc.command_buf.cursor],
+				.i = 0,
+			};
+
+			while (iter.nextCodepoint()) |cp| {
+				pos += wcWidth(cp);
+			}
+
+			break :blk pos;
+		};
+
+		try rc.moveCursorTo(ZC.input_line, cursor_pos);
+		switch (zc.command_buf.mode) {
+			.normal => try rc.setCursorShape(.block),
+			.insert => try rc.setCursorShape(.bar),
+		}
 		try rc.showCursor();
 	} else {
 		var rpw = rc.restrictedPaddingWriter(self.term.width);

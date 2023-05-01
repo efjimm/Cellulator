@@ -12,6 +12,13 @@ pub fn writeCodepoint(cp: u21, writer: anytype) !void {
 	try writer.writeAll(buf[0..len]);
 }
 
+pub fn isWord(c: u8) bool {
+	return switch (c) {
+		'_', 'a'...'z', 'A'...'Z', '0'...'9' => true,
+		else => false,
+	};
+}
+
 pub fn wordIterator(string: []const u8) WordIterator {
 	return WordIterator{
 		.string = string,
