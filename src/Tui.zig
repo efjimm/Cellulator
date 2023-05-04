@@ -148,6 +148,8 @@ pub fn renderCommandLine(
 
 			break :blk pos;
 		};
+		try rc.setStyle(.{ .fg = .bright_black });
+		try writer.writeByte('|');
 
 		try rc.moveCursorTo(ZC.input_line, cursor_pos);
 		switch (zc.command_buf.mode) {
