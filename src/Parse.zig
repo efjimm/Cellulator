@@ -97,33 +97,35 @@ pub fn rootTag(ast: Ast) std.meta.Tag(Node) {
 /// Nodes in the list are already sorted in reverse topological order which allows us to overwrite
 /// nodes sequentially without loss. This function preserves reverse topological order.
 pub fn splice(ast: *Ast, new_root: u32) void {
+	// Gets the index of the left-most node that is a child of the new_root node
 	const Context = struct {
-		slice: *NodeList.Slice,
-		len: u32 = 0,
+		first_node: u32,
 
 		pub fn evalCell(context: *@This(), index: u32) !bool {
-			var node = context.slice.get(index);
-
-			switch (node) {
-				// Update indices for binary operators
-				.assignment, .add, .sub, .mul, .div, .mod => |*b| {
-					b.lhs = context.len - 2;
-					b.rhs = context.len - 1;
-				},
-				.cell, .number, .column => {},
-			}
-
-			context.slice.set(context.len, node);
-			context.len += 1;
-
-			return true;
+			context.first_node = index;
+			return false;
 		}
 	};
 
 	var slice = ast.nodes.slice();
-	var context = Context{ .slice = &slice };
-	ast.traverseFrom(new_root, .last, &context) catch unreachable;
-	ast.nodes.len = context.len;
+	var context = Context{ .first_node = new_root };
+	_ = ast.traverseFrom(new_root, .last, &context) catch unreachable;
+
+	const new_len = new_root + 1 - context.first_node;
+
+	for (0..new_len, context.first_node..new_root + 1) |i, j| {
+		var n = slice.get(j);
+		switch (n) {
+			.assignment, .add, .sub, .mul, .div, .mod => |*b| {
+				b.lhs -= context.first_node;
+				b.rhs -= context.first_node;
+			},
+			else => {},
+		}
+		slice.set(i, n);
+	}
+
+	ast.nodes.len = new_len;
 }
 
 pub fn print(ast: *Ast, writer: anytype) @TypeOf(writer).Error!void {
@@ -149,7 +151,7 @@ pub fn print(ast: *Ast, writer: anytype) @TypeOf(writer).Error!void {
 		}
 	};
 
-	try ast.traverse(.middle, Context{ .ast = ast, .writer = &writer });
+	_ = try ast.traverse(.middle, Context{ .ast = ast, .writer = &writer });
 }
 
 /// The order in which nodes are evaluated.
@@ -167,38 +169,40 @@ const TraverseOrder = enum {
 /// the function `fn evalCell(@TypeOf(context), u32) !bool`. This function is run on every leaf
 /// node in the tree, with `index` being the index of the node in the `nodes` array. If the
 /// function returns false, traversal stops immediately.
-pub fn traverse(ast: Ast, order: TraverseOrder, context: anytype) !void {
+pub fn traverse(ast: Ast, order: TraverseOrder, context: anytype) !bool {
 	return ast.traverseFrom(ast.rootNodeIndex(), order, context);
 }
 
 /// Same as `traverse`, but starting from the node at the given index.
-fn traverseFrom(ast: Ast, index: u32, order: TraverseOrder, context: anytype) !void {
+fn traverseFrom(ast: Ast, index: u32, order: TraverseOrder, context: anytype) !bool {
 	const node = ast.nodes.get(index);
 
 	switch (node) {
 		.assignment, .add, .sub, .mul, .div, .mod => |b| {
 			switch (order) {
 				.first => {
-					if (!try context.evalCell(index)) return;
-					try ast.traverseFrom(b.lhs, order, context);
-					try ast.traverseFrom(b.rhs, order, context);
+					if (!try context.evalCell(index)) return false;
+					if (!try ast.traverseFrom(b.lhs, order, context)) return false;
+					if (!try ast.traverseFrom(b.rhs, order, context)) return false;
 				},
 				.middle => {
-					try ast.traverseFrom(b.lhs, order, context);
-					if (!try context.evalCell(index)) return;
-					try ast.traverseFrom(b.rhs, order, context);
+					if (!try ast.traverseFrom(b.lhs, order, context)) return false;
+					if (!try context.evalCell(index)) return false;
+					if (!try ast.traverseFrom(b.rhs, order, context)) return false;
 				},
 				.last => {
-					try ast.traverseFrom(b.lhs, order, context);
-					try ast.traverseFrom(b.rhs, order, context);
-					if (!try context.evalCell(index)) return;
+					if (!try ast.traverseFrom(b.lhs, order, context)) return false;
+					if (!try ast.traverseFrom(b.rhs, order, context)) return false;
+					if (!try context.evalCell(index)) return false;
 				},
 			}
 		},
 		.number, .cell, .column => {
-			if (!try context.evalCell(index)) return;
+			if (!try context.evalCell(index)) return false;
 		},
 	}
+
+	return true;
 }
 
 pub fn eval(
@@ -226,7 +230,7 @@ pub fn evalNode(ast: Ast, index: u32, total: f64, context: anytype) f64 {
 	};
 }
 
-const Node = union(enum) {
+pub const Node = union(enum) {
 	number: f64,
 	column: u16,
 	cell: Position,
@@ -294,6 +298,7 @@ const Parser = struct {
 		var index = try ast.parseMulExpr();
 
 		while (ast.eatTokenMulti(.{ .plus, .minus })) |i| {
+			log.info("INDEX: {d}", .{ index });
 			const op = BinaryOperator{
 				.lhs = index,
 				.rhs = try ast.parseMulExpr(),
@@ -308,6 +313,7 @@ const Parser = struct {
 			index = try ast.addNode(node);
 		}
 
+		log.info("RETURNING {d}", .{ index });
 		return index;
 	}
 
@@ -624,5 +630,13 @@ test "Parse" {
 
 		const res = ast.eval(Context{});
 		try t.expectApproxEqRel(@as(f64, 15.833333), res, 0.00001);
+	}
+
+	{
+		var ast = try parseExpression(t.allocator, "(3 + 1) - (4 * 2)");
+		defer ast.deinit(t.allocator);
+
+		const res = ast.eval(Context{});
+		try t.expectApproxEqRel(@as(f64, -4), res, 0.00001);
 	}
 }

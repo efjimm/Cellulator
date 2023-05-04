@@ -188,7 +188,7 @@ fn visit(
 		}
 	};
 
-	try cell.ast.traverse(.middle, Context{
+	_ = try cell.ast.traverse(.middle, Context{
 		.sheet = sheet,
 		.node = node,
 		.nodes = nodes,
