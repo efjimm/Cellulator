@@ -17,31 +17,10 @@ const NodeList = std.MultiArrayList(Node);
 
 nodes: NodeList = .{},
 
-fn initParser(allocator: Allocator, source: []const u8) !Parser {
-	var tokens = TokenList{};
-	errdefer tokens.deinit(allocator);
-
-	var tokenizer = Tokenizer.init(source);
-
-	try tokens.ensureTotalCapacity(allocator, 25);
-	while (tokenizer.next()) |token| {
-		try tokens.append(allocator, token);
-	}
-	try tokens.append(allocator, Tokenizer.eofToken());
-
-	return Parser{
-		.source = source,
-		.tokens = tokens,
-		.token_tags = tokens.items(.tag),
-		.token_starts = tokens.items(.start),
-		.token_ends = tokens.items(.end),
-		.allocator = allocator,
-	};
-}
-
 pub fn parse(allocator: Allocator, source: []const u8) !Ast {
-	var parser = try initParser(allocator, source);
-	defer parser.tokens.deinit(allocator);
+	const tokenizer = Tokenizer.init(source);
+	var parser = Parser.init(allocator, tokenizer, .{});
+
 	errdefer parser.nodes.deinit(allocator);
 
 	try parser.parse();
@@ -52,8 +31,9 @@ pub fn parse(allocator: Allocator, source: []const u8) !Ast {
 }
 
 pub fn parseExpression(allocator: Allocator, source: []const u8) !Ast {
-	var parser = try initParser(allocator, source);
-	defer parser.tokens.deinit(allocator);
+	const tokenizer = Tokenizer.init(source);
+	var parser = Parser.init(allocator, tokenizer, .{});
+
 	errdefer parser.nodes.deinit(allocator);
 
 	_ = try parser.parseExpression();
@@ -97,35 +77,24 @@ pub fn rootTag(ast: Ast) std.meta.Tag(Node) {
 /// Nodes in the list are already sorted in reverse topological order which allows us to overwrite
 /// nodes sequentially without loss. This function preserves reverse topological order.
 pub fn splice(ast: *Ast, new_root: u32) void {
-	// Gets the index of the left-most node that is a child of the new_root node
-	const Context = struct {
-		first_node: u32,
-
-		pub fn evalCell(context: *@This(), index: u32) !bool {
-			context.first_node = index;
-			return false;
-		}
-	};
-
 	var slice = ast.nodes.slice();
-	var context = Context{ .first_node = new_root };
-	_ = ast.traverseFrom(new_root, .last, &context) catch unreachable;
 
-	const new_len = new_root + 1 - context.first_node;
+	const first_node = ast.leftMostChild(new_root);
+	const new_len = new_root + 1 - first_node;
 
-	for (0..new_len, context.first_node..new_root + 1) |i, j| {
+	for (0..new_len, first_node..new_root + 1) |i, j| {
 		var n = slice.get(j);
 		switch (n) {
 			.assignment, .add, .sub, .mul, .div, .mod => |*b| {
-				b.lhs -= context.first_node;
-				b.rhs -= context.first_node;
+				b.lhs -= first_node;
+				b.rhs -= first_node;
 			},
 			.builtin => |*b| {
-				b.args -= context.first_node;
+				b.args -= first_node;
 			},
 			.arg_list => |*b| {
-				b.start -= context.first_node;
-				b.end -= context.first_node;
+				b.start -= first_node;
+				b.end -= first_node;
 			},
 			.number, .column, .cell => {},
 		}
@@ -245,23 +214,53 @@ fn traverseFrom(ast: Ast, index: u32, order: TraverseOrder, context: anytype) !b
 		.builtin => |b| {
 			if (!try ast.traverseFrom(b.args, order, context)) return false;
 		},
-		.arg_list => |b| switch (order) {
-			.first, .middle => {
-				if (!try context.evalCell(index)) return false;
-				for (b.start..b.end) |i| {
-					if (!try ast.traverseFrom(@intCast(u32, i), order, context)) return false;
-				}
-			},
-			.last => {
-				for (b.start..b.end) |i| {
-					if (!try ast.traverseFrom(@intCast(u32, i), order, context)) return false;
-				}
-				if (!try context.evalCell(index)) return false;
-			},
+		.arg_list => |args| {
+			var iter = ast.argIterator(args);
+
+			if (order != .last and !try context.evalCell(index)) return false;
+			while (iter.next()) |arg| {
+				if (!try ast.traverseFrom(arg, order, context)) return false;
+			}
+			if (order == .last and !try context.evalCell(index)) return false;
 		},
 	}
 
 	return true;
+}
+
+/// Iterates over the arguments in an ArgList backwards
+pub const ArgIterator = struct {
+	ast: *const Ast,
+	args: ArgList,
+	index: i33,
+
+	pub fn next(iter: *ArgIterator) ?u32 {
+		if (iter.index < iter.args.start) return null;
+		const ret = @intCast(u32, iter.index);
+		iter.index = @as(i33, iter.ast.leftMostChild(ret)) - 1;
+		return ret;
+	}
+};
+
+pub fn argIterator(ast: *const Ast, args: ArgList) ArgIterator {
+	return ArgIterator{
+		.ast = ast,
+		.args = args,
+		.index = args.end - 1,
+	};
+}
+
+pub fn leftMostChild(ast: Ast, index: u32) u32 {
+	assert(index < ast.nodes.len);
+
+	const node = ast.nodes.get(index);
+
+	return switch (node) {
+		.number, .column, .cell => index,
+		.assignment, .add, .sub, .mul, .div, .mod => |b| ast.leftMostChild(b.lhs),
+		.builtin => |b| ast.leftMostChild(b.args),
+		.arg_list => |args| ast.leftMostChild(args.start),
+	};
 }
 
 pub fn eval(
@@ -286,32 +285,33 @@ pub fn evalNode(ast: Ast, index: u32, total: f64, context: anytype) f64 {
 		.div => |op| total + (ast.evalNode(op.lhs, total, context) / ast.evalNode(op.rhs, total, context)),
 		.mod => |op| total + @rem(ast.evalNode(op.lhs, total, context), ast.evalNode(op.rhs, total, context)),
 		.builtin => |b| {
-			const args = ast.nodes.items(.data)[b.args].arg_list;
+			var iter = ast.argIterator(ast.nodes.items(.data)[b.args].arg_list);
+
 			switch (b.tag) {
 				.sum => {
 					var sum_total: f64 = 0;
-					for (args.start..args.end) |i| {
-						sum_total += ast.evalNode(@intCast(u32, i), sum_total, context);
+					while (iter.next()) |i| {
+						sum_total += ast.evalNode(@intCast(u32, i), 0, context);
 					}
 					return total + sum_total;
 				},
 				.prod => {
 					var prod_total: f64 = 1;
-					for (args.start..args.end) |i| {
-						prod_total *= ast.evalNode(@intCast(u32, i), prod_total, context);
+					while (iter.next()) |i| {
+						prod_total *= ast.evalNode(@intCast(u32, i), 0, context);
 					}
 					return total + prod_total;
 				},
 				.avg => {
 					var sum_total: f64 = 0;
-					for (args.start..args.end) |i| {
-						sum_total = ast.evalNode(@intCast(u32, i), sum_total, context);
+					while (iter.next()) |i| {
+						sum_total += ast.evalNode(@intCast(u32, i), 0, context);
 					}
-					return total + sum_total / @intToFloat(f64, (args.end - args.start));
+					return total + sum_total / @intToFloat(f64, (iter.args.end - iter.args.start));
 				},
 				.max => {
-					var max = ast.evalNode(args.start, 0, context);
-					for (args.start + 1..args.end) |i| {
+					var max = ast.evalNode(iter.next().?, 0, context);
+					while (iter.next()) |i| {
 						const val = ast.evalNode(@intCast(u32, i), 0, context);
 						if (val > max)
 							max = val;
@@ -319,8 +319,8 @@ pub fn evalNode(ast: Ast, index: u32, total: f64, context: anytype) f64 {
 					return total + max;
 				},
 				.min => {
-					var min = ast.evalNode(args.start, 0, context);
-					for (args.start + 1..args.end) |i| {
+					var min = ast.evalNode(iter.next().?, 0, context);
+					while (iter.next()) |i| {
 						const val = ast.evalNode(@intCast(u32, i), 0, context);
 						if (val < min)
 							min = val;
@@ -329,7 +329,9 @@ pub fn evalNode(ast: Ast, index: u32, total: f64, context: anytype) f64 {
 				},
 			}
 		},
-		.column, .assignment, .arg_list => unreachable,
+		.column, .assignment, .arg_list => {
+			unreachable; // Attempted to eval non-expression
+		},
 	};
 }
 
@@ -348,7 +350,7 @@ pub const Node = union(enum) {
 };
 
 comptime {
-	assert(@sizeOf(Node) == 16);
+	assert(@sizeOf(Node) <= 16);
 }
 
 const Builtin = struct {
@@ -387,19 +389,38 @@ const builtins = std.ComptimeStringMap(Builtin.Tag, .{
 });
 
 const Parser = struct {
-	source: []const u8,
-	tok_i: u32 = 0,
+	current_token: Token,
 
-	tokens: TokenList,
-	token_tags: []const Token.Tag,
-	token_starts: []const u32,
-	token_ends: []const u32,
-
-	nodes: NodeList = .{},
+	tokenizer: Tokenizer,
+	nodes: NodeList,
 
 	allocator: Allocator,
 
 	const log = std.log.scoped(.parser);
+
+	const InitOptions = struct {
+		nodes: NodeList = .{},
+	};
+
+	fn init(
+		allocator: Allocator,
+		tokenizer: Tokenizer,
+		options: InitOptions,
+	) Parser {
+		var ret = Parser{
+			.tokenizer = tokenizer,
+			.nodes = options.nodes,
+			.allocator = allocator,
+			.current_token = undefined,
+		};
+
+		ret.current_token = ret.tokenizer.next() orelse Tokenizer.eofToken();
+		return ret;
+	}
+
+	fn source(parser: Parser) []const u8 {
+		return parser.tokenizer.bytes;
+	}
 
 	fn parse(parser: *Parser) !void {
 		_ = try parser.parseStatement();
@@ -436,13 +457,13 @@ const Parser = struct {
 	fn parseAddExpr(parser: *Parser) !u32 {
 		var index = try parser.parseMulExpr();
 
-		while (parser.eatTokenMulti(.{ .plus, .minus })) |i| {
+		while (parser.eatTokenMulti(.{ .plus, .minus })) |token| {
 			const op = BinaryOperator{
 				.lhs = index,
 				.rhs = try parser.parseMulExpr(),
 			};
 
-			const node: Node = switch (parser.token_tags[i]) {
+			const node: Node = switch (token.tag) {
 				.plus => .{ .add = op },
 				.minus => .{ .sub = op },
 				else => unreachable,
@@ -458,13 +479,13 @@ const Parser = struct {
 	fn parseMulExpr(parser: *Parser) !u32 {
 		var index = try parser.parsePrimaryExpr();
 
-		while (parser.eatTokenMulti(.{ .asterisk, .forward_slash, .percent })) |i| {
+		while (parser.eatTokenMulti(.{ .asterisk, .forward_slash, .percent })) |token| {
 			const op = BinaryOperator{
 				.lhs = index,
 				.rhs = try parser.parsePrimaryExpr(),
 			};
 
-			const node: Node = switch (parser.token_tags[i]) {
+			const node: Node = switch (token.tag) {
 				.asterisk => .{ .mul = op },
 				.forward_slash => .{ .div = op },
 				.percent => .{ .mod = op },
@@ -479,7 +500,7 @@ const Parser = struct {
 
 	/// PrimaryExpr <- Number / CellName / Builtin / '(' Expression ')'
 	fn parsePrimaryExpr(parser: *Parser) !u32 {
-		return switch (parser.token_tags[parser.tok_i]) {
+		return switch (parser.current_token.tag) {
 			.minus, .plus, .number => parser.parseNumber(),
 			.cell_name => parser.parseCellName(),
 			.lparen => {
@@ -495,10 +516,10 @@ const Parser = struct {
 
 	/// Builtin <- builtin '(' ArgList? ')'
 	fn parseFunction(parser: *Parser) !u32 {
-		const token_index = try parser.expectToken(.builtin);
+		const token = try parser.expectToken(.builtin);
 		_ = try parser.expectToken(.lparen);
 
-		const identifier = parser.tokenContent(token_index).text(parser.source);
+		const identifier = token.text(parser.source());
 		const builtin = builtins.get(identifier) orelse return error.UnexpectedToken;
 
 		const args = try parser.parseArgList();
@@ -533,8 +554,8 @@ const Parser = struct {
 		const is_positive = parser.eatToken(.minus) == null;
 		if (is_positive) _ = parser.eatToken(.plus);
 
-		const i = try parser.expectToken(.number);
-		const text = parser.tokenContent(i).text(parser.source);
+		const token = try parser.expectToken(.number);
+		const text = token.text(parser.source());
 
 		// Correctness of the number is guaranteed because the tokenizer wouldn't have generated a
 		// number token on invalid format.
@@ -547,8 +568,8 @@ const Parser = struct {
 
 	/// CellName <- ('a'-'z' / 'A'-'Z')+ ('0'-'9')+
 	fn parseCellName(parser: *Parser) !u32 {
-		const i = try parser.expectToken(.cell_name);
-		const text = parser.tokenContent(i).text(parser.source);
+		const token = try parser.expectToken(.cell_name);
+		const text = token.text(parser.source());
 
 		// TODO: check bounds
 		const pos = Position.fromCellAddress(text);
@@ -558,35 +579,22 @@ const Parser = struct {
 		});
 	}
 
-	fn tokenContent(parser: Parser, index: u32) Token {
-		return .{
-			.tag = parser.token_tags[index],
-			.start = parser.token_starts[index],
-			.end = parser.token_ends[index],
-		};
-	}
-
 	fn addNode(parser: *Parser, data: Node) Allocator.Error!u32 {
 		const ret = @intCast(u32, parser.nodes.len);
 		try parser.nodes.append(parser.allocator, data);
 		return ret;
 	}
 
-	fn expectToken(parser: *Parser, expected_tag: Token.Tag) !u32 {
-		return parser.eatToken(expected_tag) orelse {
-			log.warn("Unexpected token {s}, expected {s}", .{
-				@tagName(parser.token_tags[parser.tok_i]),
-				@tagName(expected_tag),
-			});
-			return error.UnexpectedToken;
-		};
+	fn expectToken(parser: *Parser, expected_tag: Token.Tag) !Token {
+		return parser.eatToken(expected_tag) orelse error.UnexpectedToken;
 	}
 
-	fn eatToken(parser: *Parser, expected_tag: Token.Tag) ?u32 {
-		return if (parser.token_tags[parser.tok_i] == expected_tag) parser.nextToken() else null;
+	fn eatToken(parser: *Parser, expected_tag: Token.Tag) ?Token {
+		return if (parser.current_token.tag == expected_tag)
+				parser.nextToken() else null;
 	}
 
-	fn eatTokenMulti(parser: *Parser, tags: anytype) ?u32 {
+	fn eatTokenMulti(parser: *Parser, tags: anytype) ?Token {
 		inline for (tags) |tag| {
 			if (parser.eatToken(tag)) |token|
 				return token;
@@ -595,9 +603,9 @@ const Parser = struct {
 		return null;
 	}
 
-	fn nextToken(parser: *Parser) u32 {
-		const ret = parser.tok_i;
-		parser.tok_i += 1;
+	fn nextToken(parser: *Parser) Token {
+		const ret = parser.current_token;
+		parser.current_token = parser.tokenizer.next() orelse Tokenizer.eofToken();
 		return ret;
 	}
 };
@@ -779,64 +787,68 @@ test "Tokenizer" {
 	try t.expectEqual(@as(?Token, null), tokenizer.next());
 }
 
-test "Parse" {
+test "Parse and Eval Expression" {
 	const t = std.testing;
+	const Context = struct {
+		pub fn evalCell(_: @This(), _: Position) f64 {
+			unreachable;
+		}
+	};
+
+	const testExpr = struct {
+		fn func(expected: Parser.ParseError!f64, expr: []const u8) !void {
+			var ast = parseExpression(t.allocator, expr) catch |err| {
+				return if (err != expected) err else {};
+			};
+			defer ast.deinit(t.allocator);
+
+			const val = expected catch unreachable;
+			const res = ast.eval(Context{});
+			std.testing.expectApproxEqRel(val, res, 0.0001) catch |err| {
+				for (0..ast.nodes.len) |i| {
+					const u = ast.nodes.get(i);
+					std.debug.print("{}\n", .{ u });
+				}
+				return err;
+			};
+		}
+	}.func;
+
+
+	try testExpr(-4, "3 - 5 - 2");
+	try testExpr(2, "8 / 2 / 2");
+	try testExpr(15.833333, "8 + 5 / 2 * 3 - 5 / 3 + 2");
+	try testExpr(-4, "(3 + 1) - (4 * 2)");
+	try testExpr(2, "1 + 1");
+	try testExpr(0, "100 - 100");
+	try testExpr(100, "50 - -50");
+	try testExpr(3, "@max(-500, -50000, 3, 1, 2, 0, 100 - 100, 4 / 2)");
+	try testExpr(-50000, "@min(-500, -50000, 3, 1, 2, 0, 100 - 100, 4 / 2)");
+	try testExpr(-50492, "@sum(-500, -50000, 3, 1, 2, 0, 100 - 100, 4 / 2)");
+	try testExpr(0, "@prod(-500, -50000, 3, 1, 2, 0, 100 - 100, 4 / 2)");
+	try testExpr(5.5, "@avg(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)");
+	try testExpr(5, "@max(3, 5, 100 - 100)");
+}
+
+test "Splice" {
+	const t = std.testing;
+	var arena = std.heap.ArenaAllocator.init(t.allocator);
+	defer arena.deinit();
+	const allocator = arena.allocator();
+
 	const Context = struct {
 		pub fn evalCell(_: @This(), _: Position) f64 {
 			return 0;
 		}
 	};
 
-	{
-		var ast = try parse(t.allocator, "a0 = 3");
-		defer ast.deinit(t.allocator);
+	var ast = try parse(allocator, "a0 = 100 * 3 + 5 / 2 + @avg(1, 10)");
 
-		const tags = ast.nodes.items(.tags);
-		try t.expectEqual(@as(usize, 3), tags.len);
-		try t.expectEqual(std.meta.Tag(Node).cell, tags[0]);
-		try t.expectEqual(std.meta.Tag(Node).number, tags[1]);
-		try t.expectEqual(std.meta.Tag(Node).assignment, tags[2]);
+	ast.splice(ast.rootNode().assignment.rhs);
+	try t.expectApproxEqRel(@as(f64, 308), ast.eval(Context{}), 0.0001);
+	try t.expectEqual(@as(usize, 12), ast.nodes.len);
 
-		try t.expectError(error.UnexpectedToken, parse(t.allocator, "a = 3"));
-	}
-
-	{
-		var ast = try parseExpression(t.allocator, "3 - 5 - 2");
-		defer ast.deinit(t.allocator);
-
-		const res = ast.eval(Context{});
-		try t.expectEqual(@as(f64, -4), res);
-	}
-
-	{
-		var ast = try parseExpression(t.allocator, "8 / 2 / 2");
-		defer ast.deinit(t.allocator);
-
-		const res = ast.eval(Context{});
-		try t.expectEqual(@as(f64, 2), res);
-	}
-
-	{
-		var ast = try parseExpression(t.allocator, "8 + 5 / 2 * 3 - 5 / 3 + 2");
-		defer ast.deinit(t.allocator);
-
-		const res = ast.eval(Context{});
-		try t.expectApproxEqRel(@as(f64, 15.833333), res, 0.00001);
-	}
-
-	{
-		var ast = try parseExpression(t.allocator, "8 + 5 / 2 * 3 - 5 / 3 + 2");
-		defer ast.deinit(t.allocator);
-
-		const res = ast.eval(Context{});
-		try t.expectApproxEqRel(@as(f64, 15.833333), res, 0.00001);
-	}
-
-	{
-		var ast = try parseExpression(t.allocator, "(3 + 1) - (4 * 2)");
-		defer ast.deinit(t.allocator);
-
-		const res = ast.eval(Context{});
-		try t.expectApproxEqRel(@as(f64, -4), res, 0.00001);
-	}
+	ast.splice(ast.rootNode().add.rhs);
+	try t.expectApproxEqRel(@as(f64, 5.5), ast.eval(Context{}), 0.0001);
+	try t.expectEqual(@as(usize, 4), ast.nodes.len);
 }
