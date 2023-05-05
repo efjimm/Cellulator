@@ -8,20 +8,23 @@ const Position = Sheet.Position;
 const Term = spoon.Term;
 
 term: Term,
+update: UpdateFlags = .{},
 
-update_status: bool = true,
-update_command: bool = true,
-update_column_headings: bool = true,
-update_row_numbers: bool = true,
-update_cells: bool = true,
-update_cursor: bool = true,
+const UpdateFlags = packed struct {
+	status: bool = true,
+	command: bool = true,
+	column_headings: bool = true,
+	row_numbers: bool = true,
+	cells: bool = true,
+	cursor: bool = true,
+};
 
 const Self = @This();
 const RenderContext = Term.RenderContext(8192);
 
 pub const InitError = Term.InitError || Term.UncookError || error{ OperationNotSupported };
 
-var needs_resize = false;
+pub var needs_resize = true;
 
 fn resizeHandler(_: c_int) callconv(.C) void {
 	needs_resize = true;
@@ -38,7 +41,6 @@ pub fn init() InitError!Self {
 		.term = blk: {
 			var term = try Term.init(.{});
 			try term.uncook(.{});
-			try term.fetchSize();
 
 			break :blk term;
 		},
@@ -53,8 +55,11 @@ pub fn deinit(self: *Self) void {
 pub const RenderError = Term.WriteError;
 
 pub fn render(self: *Self, zc: *ZC) RenderError!void {
-	if (needs_resize)
+	if (needs_resize) {
 		try self.term.fetchSize();
+		self.update = .{};
+		needs_resize = false;
+	}
 
 	var rc = try self.term.getRenderContext(8192);
 	try rc.hideCursor();
@@ -64,36 +69,37 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
 		return;
 	}
 
-	if (self.update_status or self.update_cursor) {
+	if (self.update.status or self.update.cursor) {
 		try self.renderStatus(&rc, zc);
-		self.update_status = false;
+		self.update.status = false;
 	}
-	if (self.update_command or zc.mode == .command) {
+	if (self.update.command or zc.mode == .command) {
 		try self.renderCommandLine(&rc, zc);
-		self.update_command = false;
+		self.update.command = false;
 	}
-	if (self.update_column_headings) {
+	if (self.update.column_headings) {
 		try self.renderColumnHeadings(&rc, zc.*);
-		self.update_column_headings = false;
+		self.update.column_headings = false;
 	}
-	if (self.update_row_numbers) {
+	if (self.update.row_numbers) {
 		try self.renderRowNumbers(&rc, zc);
-		self.update_row_numbers = false;
+		self.update.row_numbers = false;
 	}
-	if (self.update_cells) {
+	if (self.update.cells) {
 		try self.renderRows(&rc, zc);
 		try renderCursor(&rc, zc);
-		self.update_cells = false;
-		self.update_cursor = false;
-	} else if (self.update_cursor) {
+		self.update.cells = false;
+		self.update.cursor = false;
+	} else if (self.update.cursor) {
 		try renderCursor(&rc, zc);
-		self.update_cursor = false;
+		self.update.cursor = false;
 	}
 
 	try rc.setStyle(.{});
 
 	try rc.done();
 }
+
 pub fn renderStatus(
 	self: Self,
 	rc: *RenderContext,

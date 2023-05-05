@@ -88,12 +88,12 @@ pub fn setStatusMessage(self: *Self, comptime fmt: []const u8, args: anytype) vo
 	self.dismissStatusMessage();
 	const writer = self.status_message.writer();
 	writer.print(fmt, args) catch {};
-	self.tui.update_command = true;
+	self.tui.update.command = true;
 }
 
 pub fn dismissStatusMessage(self: *Self) void {
 	self.status_message.len = 0;
-	self.tui.update_command = true;
+	self.tui.update.command = true;
 }
 
 pub fn updateCells(self: *Self) Allocator.Error!void {
@@ -104,7 +104,7 @@ fn setMode(self: *Self, new_mode: Mode) void {
 	if (new_mode == .command) {
 		self.dismissStatusMessage();
 	} else if (self.mode == .command) {
-		self.tui.update_command = true;
+		self.tui.update.command = true;
 	}
 
 	self.mode = new_mode;
@@ -188,8 +188,8 @@ fn doCommandMode(self: *Self, input: []const u8) !void {
 					ast.splice(op.rhs);
 
 					try self.sheet.setCell(pos, .{ .ast = ast });
-					self.tui.update_cursor = true;
-					self.tui.update_cells = true;
+					self.tui.update.cursor = true;
+					self.tui.update.cells = true;
 				},
 				else => {
 					ast.deinit(self.allocator);
@@ -209,14 +209,14 @@ pub fn runCommand(self: *Self, str: []const u8) !void {
 		'q' => self.running = false,
 		'w' => { // save
 			try self.sheet.writeFile(.{ .filepath = iter.next() });
-			self.tui.update_status = true;
+			self.tui.update.status = true;
 		},
 		'e' => { // load
 			const filepath = iter.next() orelse return error.EmptyFileName;
 			self.sheet.clear();
 			try self.sheet.loadFile(filepath);
-			self.tui.update_status = true;
-			self.tui.update_cells = true;
+			self.tui.update.status = true;
+			self.tui.update.cells = true;
 		},
 		else => return error.InvalidCommand,
 	}
@@ -227,7 +227,7 @@ pub fn setCursor(self: *Self, new_pos: Position) void {
 	self.cursor = new_pos;
 	self.clampScreenToCursor();
 
-	self.tui.update_cursor = true;
+	self.tui.update.cursor = true;
 }
 
 pub inline fn contentHeight(self: Self) u16 {
@@ -251,24 +251,24 @@ pub fn clampScreenToCursor(self: *Self) void {
 pub fn clampScreenToCursorY(self: *Self) void {
 	if (self.cursor.y < self.screen_pos.y) {
 		self.screen_pos.y = self.cursor.y;
-		self.tui.update_row_numbers = true;
-		self.tui.update_cells = true;
+		self.tui.update.row_numbers = true;
+		self.tui.update.cells = true;
 		return;
 	}
 
 	const height = self.contentHeight();
 	if (self.cursor.y - self.screen_pos.y >= height) {
 		self.screen_pos.y = self.cursor.y - (height -| 1);
-		self.tui.update_row_numbers = true;
-		self.tui.update_cells = true;
+		self.tui.update.row_numbers = true;
+		self.tui.update.cells = true;
 	}
 }
 
 pub fn clampScreenToCursorX(self: *Self) void {
 	if (self.cursor.x < self.screen_pos.x) {
 		self.screen_pos.x = self.cursor.x;
-		self.tui.update_column_headings = true;
-		self.tui.update_cells = true;
+		self.tui.update.column_headings = true;
+		self.tui.update.cells = true;
 		return;
 	}
 
@@ -299,28 +299,28 @@ pub fn clampScreenToCursorX(self: *Self) void {
 
 	if (x >= self.screen_pos.x) {
 		self.screen_pos.x = @intCast(u16, @max(0, x + 1));
-		self.tui.update_column_headings = true;
-		self.tui.update_cells = true;
+		self.tui.update.column_headings = true;
+		self.tui.update.cells = true;
 	}
 }
 
 pub fn setPrecision(self: *Self, column: u16, new_precision: u8) void {
 	if (self.sheet.columns.getPtr(column)) |col| {
 		col.precision = new_precision;
-		self.tui.update_cells = true;
+		self.tui.update.cells = true;
 	}
 }
 
 pub fn incPrecision(self: *Self, column: u16, n: u8) void {
 	if (self.sheet.columns.getPtr(column)) |col| {
 		col.precision +|= n;
-		self.tui.update_cells = true;
+		self.tui.update.cells = true;
 	}
 }
 
 pub fn decPrecision(self: *Self, column: u16, n: u8) void {
 	if (self.sheet.columns.getPtr(column)) |col| {
 		col.precision -|= n;
-		self.tui.update_cells = true;
+		self.tui.update.cells = true;
 	}
 }
