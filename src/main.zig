@@ -21,7 +21,7 @@ pub fn main() !void {
 		}
 	}
 
-	var filename: ?[]const u8 = null;
+	var filepath: ?[]const u8 = null;
 	var iter = std.process.args();
 	_ = iter.next();
 	while (iter.next()) |arg| {
@@ -30,10 +30,10 @@ pub fn main() !void {
 		switch (arg[0]) {
 			'-' => {},
 			else => {
-				if (filename) |_| {
+				if (filepath) |_| {
 					return error.InvalidArguments;
 				}
-				filename = arg;
+				filepath = arg;
 			},
 		}
 	}
@@ -43,7 +43,7 @@ pub fn main() !void {
 
 	const allocator = gpa.allocator();
 
-	zc = try ZC.init(allocator, filename);
+	zc = try ZC.init(allocator, .{ .filepath = filepath });
 	defer zc.deinit();
 
 	try zc.run();

@@ -22,6 +22,7 @@ pub fn parse(ast: *Ast, allocator: Allocator, source: []const u8) !void {
 	const tokenizer = Tokenizer.init(source);
 
 	var parser = Parser.init(allocator, tokenizer, .{ .nodes = ast.nodes });
+	errdefer parser.deinit();
 	try parser.parse();
 
 	ast.nodes = parser.nodes;
@@ -29,15 +30,16 @@ pub fn parse(ast: *Ast, allocator: Allocator, source: []const u8) !void {
 
 pub fn fromSource(allocator: Allocator, source: []const u8) !Ast {
 	var ast = Ast{};
+	errdefer ast.deinit(allocator);
 	try ast.parse(allocator, source);
 	return ast;
 }
 
 pub fn parseExpression(allocator: Allocator, source: []const u8) !Ast {
 	const tokenizer = Tokenizer.init(source);
-	var parser = Parser.init(allocator, tokenizer, .{});
 
-	errdefer parser.nodes.deinit(allocator);
+	var parser = Parser.init(allocator, tokenizer, .{});
+	errdefer parser.deinit();
 
 	_ = try parser.parseExpression();
 	_ = try parser.expectToken(.eof);
@@ -49,7 +51,7 @@ pub fn parseExpression(allocator: Allocator, source: []const u8) !Ast {
 
 pub fn deinit(ast: *Ast, allocator: Allocator) void {
 	ast.nodes.deinit(allocator);
-	ast.* = undefined;
+	ast.* = .{};
 }
 
 pub fn isExpression(ast: Ast) bool {
@@ -419,6 +421,11 @@ const Parser = struct {
 
 		ret.current_token = ret.tokenizer.next() orelse Tokenizer.eofToken();
 		return ret;
+	}
+
+	fn deinit(parser: *Parser) void {
+		parser.nodes.deinit(parser.allocator);
+		parser.* = undefined;
 	}
 
 	fn source(parser: Parser) []const u8 {

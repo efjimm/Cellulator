@@ -11,13 +11,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const spoon_dep = b.dependency("spoon", .{});
-    const spoon = spoon_dep.module("spoon");
-    const wcwidth = spoon_dep.module("wcwidth");
+    const spoon_pkg = b.dependency("spoon", .{});
+    const spoon = spoon_pkg.module("spoon");
+    const wcwidth = spoon_pkg.module("wcwidth");
     exe.addModule("spoon", spoon);
     exe.addModule("wcwidth", wcwidth);
 
     b.installArtifact(exe);
+
+
 
     const run_cmd = b.addRunArtifact(exe);
 
@@ -29,6 +31,8 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run the program");
     run_step.dependOn(&run_cmd.step);
+
+
 
     const tests = b.addTest(.{
     	.root_source_file = .{ .path = "src/main.zig" },

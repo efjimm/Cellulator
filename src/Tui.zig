@@ -40,7 +40,6 @@ pub fn init() InitError!Self {
 	return Self{
 		.term = blk: {
 			var term = try Term.init(.{});
-			try term.uncook(.{});
 
 			break :blk term;
 		},
@@ -298,6 +297,7 @@ pub fn renderCursor(
 	try rc.setStyle(.{ .fg = .black, .bg = .blue });
 	try rc.moveCursorTo(pos.y, pos.x);
 	_ = try renderCell(rc, zc, zc.cursor);
+	try rc.setStyle(.{ .fg = .black, .bg = .blue });
 
 	const col = zc.sheet.getColumn(pos.x);
 	try rc.moveCursorTo(ZC.col_heading_line, pos.x);
@@ -353,27 +353,25 @@ pub fn renderCell(
 	pos: Position,
 ) RenderError!u16 {
 	const col = zc.sheet.getColumn(pos.x);
-	const num_optional = if (zc.sheet.getCellPtr(pos)) |cell|
-			cell.getValue(&zc.sheet)
-		else
-			null;
 
-	var rpw = rc.restrictedPaddingWriter(col.width);
-	const writer = rpw.writer();
-	
-	var buf: [256]u8 = undefined;
-	if (num_optional) |num| {
-		const slice = buf[0..col.width];
-		const text = std.fmt.bufPrint(slice, "{d: >[1].[2]}", .{
-			num, col.width, col.precision
-		}) catch slice;
+	const writer = rc.buffer.writer();
 
-		try writer.writeAll(text);
+	if (zc.sheet.getCell(pos)) |cell| {
+		if (cell.num) |num| {
+			try writer.print("{d: >[1].[2]}", .{
+				num, col.width, col.precision,
+			});
+		} else {
+			if (pos.hash() != zc.cursor.hash()) {
+				try rc.setStyle(.{ .fg = .red });
+				try writer.print("{s: >[1]}", .{ "ERROR", col.width });
+				try rc.setStyle(.{});
+			} else {
+				try writer.print("{s: >[1]}", .{ "ERROR", col.width });
+			}
+		}
 	} else {
 		try writer.print("{s: >[1]}", .{ "", col.width });
 	}
-
-	try rpw.finish();
-
 	return col.width;
 }

@@ -53,6 +53,14 @@ pub fn deinit(sheet: *Sheet) void {
 	sheet.* = undefined;
 }
 
+pub fn cellCount(sheet: *Sheet) u32 {
+	return @intCast(u32, sheet.cells.entries.len);
+}
+
+pub fn colCount(sheet: *Sheet) u32 {
+	return @intCast(u32, sheet.columns.entries.len);
+}
+
 pub fn setCell(
 	sheet: *Sheet,
 	position: Position,
@@ -142,6 +150,7 @@ fn rebuildSortedNodeList(sheet: *Sheet) Allocator.Error!void {
 
 	// Topologically sorted set of cell positions
 	var nodes = sheet.sorted_nodes.toManaged(sheet.allocator);
+	defer sheet.sorted_nodes = nodes.moveToUnmanaged();
 	nodes.clearRetainingCapacity();
 
 	var visited_nodes = NodeMap.init(sheet.allocator);
@@ -155,7 +164,6 @@ fn rebuildSortedNodeList(sheet: *Sheet) Allocator.Error!void {
 			try visit(sheet, pos, &nodes, &visited_nodes);
 	}
 
-	sheet.sorted_nodes = nodes.moveToUnmanaged();
 }
 
 /// Recursive function that visits every dependency of a cell.
@@ -326,11 +334,13 @@ pub const Cell = struct {
 		const Context = struct {
 			sheet: *const Sheet,
 			stack: std.BoundedArray(Position, 512) = .{},
+			err: bool = false,
 	
 			pub fn evalCell(context: *@This(), pos: Position) f64 {
 				// Check for cyclical references
 				for (context.stack.slice()) |p| {
 					if (std.meta.eql(pos, p)) {
+						context.err = true;
 						return 0;
 					}
 				}
@@ -350,6 +360,12 @@ pub const Cell = struct {
 	
 		var context = Context{ .sheet = sheet };
 		const ret = cell.ast.eval(&context);
+
+		if (context.err) {
+			cell.num = null;
+			return 0;
+		}
+
 		cell.num = ret;
 		return ret;
 	}
@@ -366,4 +382,83 @@ pub const Column = struct {
 
 pub fn getColumn(sheet: Sheet, index: u16) Column {
 	return sheet.columns.get(index) orelse Column{};
+}
+
+test {
+	const t = std.testing;
+
+	{
+		var sheet = Sheet.init(t.allocator);
+		defer sheet.deinit();
+
+		try t.expectEqual(@as(u32, 0), sheet.cellCount());
+		try t.expectEqual(@as(u32, 0), sheet.colCount());
+		try t.expectEqualStrings("", sheet.filepath.slice());
+	}
+	{
+		var sheet = Sheet.init(t.allocator);
+		defer sheet.deinit();
+
+		const cell1 = Cell{ .ast = try Ast.parseExpression(t.allocator, "50 + 5") };
+		const cell2 = Cell{ .ast = try Ast.parseExpression(t.allocator, "500 * 2 / 34 + 1") };
+		const cell3 = Cell{ .ast = try Ast.parseExpression(t.allocator, "a0") };
+		const cell4 = Cell{ .ast = try Ast.parseExpression(t.allocator, "a2 * a1") };
+		try sheet.setCell(.{ .x = 0, .y = 0 }, cell1);
+		try sheet.setCell(.{ .x = 0, .y = 1 }, cell2);
+		try sheet.setCell(.{ .x = 0, .y = 2 }, cell3);
+		try sheet.setCell(.{ .x = 0, .y = 3 }, cell4);
+
+		try t.expectEqual(@as(u32, 4), sheet.cellCount());
+		try t.expectEqual(@as(u32, 1), sheet.colCount());
+		try t.expectEqual(cell1, sheet.getCell(.{ .x = 0, .y = 0}).?);
+		try t.expectEqual(cell2, sheet.getCell(.{ .x = 0, .y = 1}).?);
+		try t.expectEqual(cell3, sheet.getCell(.{ .x = 0, .y = 2}).?);
+		try t.expectEqual(cell4, sheet.getCell(.{ .x = 0, .y = 3}).?);
+
+		for (0..4) |y| {
+			const pos = .{ .x = 0, .y = @intCast(u16, y) };
+			try t.expectEqual(@as(?f64, null), sheet.cells.get(pos).?.num);
+		}
+		try sheet.update();
+		for (0..4) |y| {
+			const pos = .{ .x = 0, .y = @intCast(u16, y) };
+			try t.expect(sheet.cells.get(pos).?.num != null);
+		}
+
+		var ast = sheet.deleteCell(.{ .x = 0, .y = 0 }).?;
+		ast.deinit(t.allocator);
+
+		try t.expectEqual(@as(u32, 3), sheet.cellCount());
+		try t.expectEqual(@as(?Ast, null), sheet.deleteCell(.{ .x = 0, .y = 0 }));
+		try t.expectEqual(@as(u32, 3), sheet.cellCount());
+	}
+}
+
+test {
+	const t = std.testing;
+	const Test = struct {
+		fn testSetCellAllocs(allocator: Allocator) !void {
+			var sheet = Sheet.init(allocator);
+			defer sheet.deinit();
+
+			{
+				var cell1 = Cell{ .ast = try Ast.parseExpression(allocator, "a4 * a1 * a3") };
+				errdefer cell1.deinit(allocator);
+				try sheet.setCell(.{ .x = 0, .y = 0 }, cell1);
+			}
+
+			{
+				var cell2 = Cell{ .ast = try Ast.parseExpression(allocator, "a2 * a1 * a3") };
+				errdefer cell2.deinit(allocator);
+				try sheet.setCell(.{ .x = 1, .y = 0 }, cell2);
+			}
+
+			var ast = sheet.deleteCell(.{ .x = 0, .y = 0}).?;
+			ast.deinit(allocator);
+
+			try sheet.update();
+		}
+	};
+
+	try t.checkAllAllocationFailures(t.allocator, Test.testSetCellAllocs, .{});
 }

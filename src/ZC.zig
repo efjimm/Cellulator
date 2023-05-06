@@ -43,22 +43,21 @@ pub const Mode = enum {
 	command,
 
 	pub fn format(
-		self: Mode,
+		mode: Mode,
 		comptime _: []const u8,
 		_: std.fmt.FormatOptions,
 		writer: anytype,
 	) !void {
-		const name = inline for (std.meta.fields(Mode)) |field| {
-			const val = comptime std.meta.stringToEnum(Mode, field.name);
-			if (self == val)
-				break field.name;
-		} else unreachable;
-
-		try writer.writeAll(name);
+		try writer.writeAll(@tagName(mode));
 	}
 };
 
-pub fn init(allocator: Allocator, filepath_opt: ?[]const u8) !Self {
+pub const InitOptions = struct {
+	filepath: ?[]const u8 = null,
+	ui: bool = true,
+};
+
+pub fn init(allocator: Allocator, options: InitOptions) !Self {
 	var ret = Self{
 		.sheet = Sheet.init(allocator),
 		.tui = try Tui.init(),
@@ -66,7 +65,11 @@ pub fn init(allocator: Allocator, filepath_opt: ?[]const u8) !Self {
 		.asts = try std.ArrayListUnmanaged(Ast).initCapacity(allocator, 8),
 	};
 
-	if (filepath_opt) |filepath| {
+	if (options.ui) {
+		try ret.tui.term.uncook(.{});
+	}
+
+	if (options.filepath) |filepath| {
 		try ret.loadFile(&ret.sheet, filepath);
 	}
 
@@ -121,16 +124,19 @@ fn handleInput(self: *Self) !void {
 	var buf: [16]u8 = undefined;
 	const slice = try self.tui.term.readInput(&buf);
 
-	try switch (self.mode) {
-		.normal => self.doNormalMode(slice),
+	switch (self.mode) {
+		.normal => self.doNormalMode(slice) catch |err| switch (err) {
+			error.OutOfMemory => self.setStatusMessage("Error: out of memory!", .{}),
+		},
 		.command => self.doCommandMode(slice) catch |err| switch (err) {
+			// We should be able to recover from OOM
+			error.OutOfMemory => self.setStatusMessage("Error: out of memory!", .{}),
+
 			error.UnexpectedToken => self.setStatusMessage("Error: unexpected token", .{}),
 			error.InvalidCommand => self.setStatusMessage("Error: invalid command", .{}),
 			error.EmptyFileName => self.setStatusMessage("Error: must specify a file name", .{}),
-			error.FileNotFound => self.setStatusMessage("Error: file not found", .{}),
-			else => return err,
 		},
-	};
+	}
 }
 
 fn doNormalMode(self: *Self, buf: []const u8) !void {
@@ -145,7 +151,9 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 					const writer = self.command_buf.writer();
 					writer.writeByte(':') catch unreachable;
 				},
-				'D', 'x' => try self.deleteCell(),
+				'D', 'x' => self.deleteCell() catch |err| switch (err) {
+					error.OutOfMemory => self.setStatusMessage("Error: out of memory!", .{}),
+				},
 				'f' => self.incPrecision(self.cursor.x, 1),
 				'F' => self.decPrecision(self.cursor.x, 1),
 				'k' => self.setCursor(.{ .y = self.cursor.y -| 1, .x = self.cursor.x }),
@@ -182,13 +190,17 @@ fn doCommandMode(self: *Self, input: []const u8) !void {
 			defer self.setMode(.normal);
 			const str = arr.slice();
 
-			if (str.len > 0 and str[0] == ':') {
+			if (str.len == 0) return;
+
+			if (str[0] == ':') {
 				return self.runCommand(str[1..]);
 			}
 
 			var ast = self.newAst();
-			try ast.parse(self.allocator, str);
-			errdefer self.asts.appendAssumeCapacity(ast);
+			ast.parse(self.allocator, str) catch |err| {
+				self.delAstAssumeCapacity(ast);
+				return err;
+			};
 
 			const root = ast.rootNode();
 			switch (root) {
@@ -196,12 +208,15 @@ fn doCommandMode(self: *Self, input: []const u8) !void {
 					const pos = ast.nodes.items(.data)[op.lhs].cell;
 					ast.splice(op.rhs);
 
-					try self.sheet.setCell(pos, .{ .ast = ast });
+					self.sheet.setCell(pos, .{ .ast = ast }) catch |err| {
+						self.delAstAssumeCapacity(ast);
+						return err;
+					};
 					self.tui.update.cursor = true;
 					self.tui.update.cells = true;
 				},
 				else => {
-					ast.deinit(self.allocator);
+					self.delAstAssumeCapacity(ast);
 				},
 			}
 		},
@@ -217,13 +232,29 @@ pub fn runCommand(self: *Self, str: []const u8) !void {
 	switch (cmd[0]) {
 		'q' => self.running = false,
 		'w' => { // save
-			try writeFile(&self.sheet, .{ .filepath = iter.next() });
+			writeFile(&self.sheet, .{ .filepath = iter.next() }) catch |err| {
+				self.setStatusMessage("Could not write file: {s}", .{ @errorName(err) });
+				return;
+			};
 			self.tui.update.status = true;
 		},
 		'e' => { // load
 			const filepath = iter.next() orelse return error.EmptyFileName;
-			try self.clearSheet(&self.sheet);
-			try self.loadFile(&self.sheet, filepath);
+			var new_sheet = Sheet.init(self.allocator);
+			self.loadFile(&new_sheet, filepath) catch |err| {
+				self.setStatusMessage("Could not open file: {s}", .{ @errorName(err) });
+				return;
+			};
+
+			var old_sheet = self.sheet;
+			self.sheet = new_sheet;
+
+			// Re-use asts
+			self.clearSheet(&old_sheet) catch |err| switch (err) {
+				error.OutOfMemory => self.setStatusMessage("Error: out of memory!", .{}),
+			};
+			old_sheet.deinit();
+
 			self.tui.update.status = true;
 			self.tui.update.cells = true;
 		},
@@ -415,5 +446,80 @@ pub fn newAst(self: *Self) Ast {
 }
 
 pub fn delAst(self: *Self, ast: Ast) Allocator.Error!void {
-	try self.asts.append(self.allocator, ast);
+	var temp = ast;
+	temp.nodes.len = 0;
+	try self.asts.append(self.allocator, temp);
+}
+
+pub fn delAstAssumeCapacity(self: *Self, ast: Ast) void {
+	var temp = ast;
+	temp.nodes.len = 0;
+	self.asts.appendAssumeCapacity(temp);
+}
+
+test "doCommandMode" {
+	const t = std.testing;
+	var zc = try Self.init(t.allocator, .{ .ui = false });
+	defer zc.deinit();
+
+	try zc.doCommandMode("b1 = 5\n");
+	try zc.updateCells();
+
+	try t.expectEqual(@as(u32, 1), zc.sheet.cellCount());
+	try t.expectEqual(@as(u32, 1), zc.sheet.colCount());
+	try t.expect(zc.sheet.getCell(.{ .y = 1, .x = 1 }) != null);
+
+	try t.expectError(error.InvalidCommand, zc.doCommandMode(":\n"));
+	try t.expectError(error.UnexpectedToken, zc.doCommandMode("a0 a0 a0\n"));
+	try zc.doCommandMode("\n"); // Should do nothing
+}
+
+test "doNormalMode" {
+	const t = std.testing;
+	const Test = struct {
+		fn testAllocs(allocator: Allocator) !void {
+			var zc = try Self.init(allocator, .{ .ui = false });
+			defer zc.deinit();
+
+			const pos = struct {
+				fn func(y: u16, x: u16) Position {
+					return .{ .y = y, .x = x };
+				}
+			}.func;
+
+			try t.expectEqual(Mode.normal, zc.mode);
+			try t.expectEqual(pos(0, 0), zc.cursor);
+
+			// Make sure cursor does not overflow in any way
+			try zc.doNormalMode("hhhkkklhhjkk");
+			try t.expectEqual(pos(0, 0), zc.cursor);
+
+			// Test basic cursor movements
+			try zc.doNormalMode("l");
+			try t.expectEqual(pos(0, 1), zc.cursor);
+			try zc.doNormalMode("lll");
+			try t.expectEqual(pos(0, 4), zc.cursor);
+			try zc.doNormalMode("j");
+			try t.expectEqual(pos(1, 4), zc.cursor);
+			try zc.doNormalMode("jjj");
+			try t.expectEqual(pos(4, 4), zc.cursor);
+			try zc.doNormalMode("kkk");
+			try t.expectEqual(pos(1, 4), zc.cursor);
+			try zc.doNormalMode("hhh");
+			try t.expectEqual(pos(1, 1), zc.cursor);
+
+			try zc.doNormalMode("=\n");
+			try t.expectEqual(Mode.command, zc.mode);
+			try t.expectEqualStrings("B1 = ", zc.command_buf.slice());
+			try zc.doCommandMode("50\n");
+
+			try t.expectEqual(@as(u32, 1), zc.sheet.cellCount());
+			try zc.deleteCell(); // Delete cell under cursor
+			try t.expectEqual(@as(u32, 0), zc.sheet.cellCount());
+			try zc.deleteCell(); // Delete with no cell
+			try t.expectEqual(@as(u32, 0), zc.sheet.cellCount());
+		}
+	};
+
+	try t.checkAllAllocationFailures(t.allocator, Test.testAllocs, .{});
 }
