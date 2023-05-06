@@ -26,6 +26,8 @@ cursor: Position = .{},
 
 running: bool = true,
 
+asts: std.ArrayListUnmanaged(Ast) = .{},
+
 allocator: Allocator,
 
 command_buf: TextInput(512) = .{},
@@ -57,20 +59,25 @@ pub const Mode = enum {
 };
 
 pub fn init(allocator: Allocator, filepath_opt: ?[]const u8) !Self {
-	return .{
-		.sheet = blk: {
-			var sheet = Sheet.init(allocator);
-			if (filepath_opt) |filepath| {
-				try sheet.loadFile(filepath);
-			}
-			break :blk sheet;
-		},
+	var ret = Self{
+		.sheet = Sheet.init(allocator),
 		.tui = try Tui.init(),
 		.allocator = allocator,
+		.asts = try std.ArrayListUnmanaged(Ast).initCapacity(allocator, 8),
 	};
+
+	if (filepath_opt) |filepath| {
+		try ret.loadFile(&ret.sheet, filepath);
+	}
+
+	return ret;
 }
 
 pub fn deinit(self: *Self) void {
+	for (self.asts.items) |*ast| {
+		ast.deinit(self.allocator);
+	}
+	self.asts.deinit(self.allocator);
 	self.sheet.deinit();
 	self.tui.deinit();
 	self.* = undefined;
@@ -138,6 +145,7 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 					const writer = self.command_buf.writer();
 					writer.writeByte(':') catch unreachable;
 				},
+				'D', 'x' => try self.deleteCell(),
 				'f' => self.incPrecision(self.cursor.x, 1),
 				'F' => self.decPrecision(self.cursor.x, 1),
 				'k' => self.setCursor(.{ .y = self.cursor.y -| 1, .x = self.cursor.x }),
@@ -178,8 +186,9 @@ fn doCommandMode(self: *Self, input: []const u8) !void {
 				return self.runCommand(str[1..]);
 			}
 
-			var ast = try Ast.parse(self.allocator, str);
-			errdefer ast.deinit(self.allocator);
+			var ast = self.newAst();
+			try ast.parse(self.allocator, str);
+			errdefer self.asts.appendAssumeCapacity(ast);
 
 			const root = ast.rootNode();
 			switch (root) {
@@ -208,18 +217,94 @@ pub fn runCommand(self: *Self, str: []const u8) !void {
 	switch (cmd[0]) {
 		'q' => self.running = false,
 		'w' => { // save
-			try self.sheet.writeFile(.{ .filepath = iter.next() });
+			try writeFile(&self.sheet, .{ .filepath = iter.next() });
 			self.tui.update.status = true;
 		},
 		'e' => { // load
 			const filepath = iter.next() orelse return error.EmptyFileName;
-			self.sheet.clear();
-			try self.sheet.loadFile(filepath);
+			try self.clearSheet(&self.sheet);
+			try self.loadFile(&self.sheet, filepath);
 			self.tui.update.status = true;
 			self.tui.update.cells = true;
 		},
 		else => return error.InvalidCommand,
 	}
+}
+
+pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
+	for (sheet.cells.values()) |cell| {
+		try self.delAst(cell.ast);
+	}
+	sheet.cells.clearRetainingCapacity();
+}
+
+pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
+	const file = try std.fs.cwd().openFile(filepath, .{});
+	defer file.close();
+
+	const slice = try file.reader().readAllAlloc(sheet.allocator, comptime std.math.maxInt(u30));
+	defer sheet.allocator.free(slice);
+
+	var line_iter = std.mem.tokenize(u8, slice, "\n");
+	while (line_iter.next()) |line| {
+		var ast = self.newAst();
+		ast.parse(self.allocator, line) catch |err| switch (err) {
+			error.UnexpectedToken => continue,
+			else => return err,
+		};
+		errdefer self.asts.appendAssumeCapacity(ast);
+
+		const root = ast.rootNode();
+		switch (root) {
+			.assignment => {
+				const pos = ast.nodes.items(.data)[root.assignment.lhs].cell;
+				ast.splice(root.assignment.rhs);
+				try sheet.setCell(pos, .{ .ast = ast });
+			},
+			else => continue,
+		}
+	}
+
+	sheet.setFilePath(filepath);
+}
+
+pub const WriteFileOptions = struct {
+	filepath: ?[]const u8 = null,
+};
+
+pub fn writeFile(sheet: *Sheet, opts: WriteFileOptions) !void {
+	const filepath = opts.filepath orelse sheet.filepath.slice();
+	if (filepath.len == 0) {
+		return error.EmptyFileName;
+	}
+
+	var atomic_file = try std.fs.cwd().atomicFile(filepath, .{});
+	defer atomic_file.deinit();
+
+	var buf = std.io.bufferedWriter(atomic_file.file.writer());
+	const writer = buf.writer();
+
+	for (sheet.cells.keys(), sheet.cells.values()) |pos, *cell| {
+		try pos.writeCellAddress(writer);
+		try writer.writeAll(" = ");
+		try cell.ast.print(writer);
+		try writer.writeByte('\n');
+	}
+
+	try buf.flush();
+	try atomic_file.finish();
+
+	if (opts.filepath) |path| {
+		sheet.setFilePath(path);
+	}
+}
+
+pub fn deleteCell(self: *Self) Allocator.Error!void {
+	const ast = self.sheet.deleteCell(self.cursor) orelse return;
+	try self.delAst(ast);
+
+	self.tui.update.cells = true;
+	self.tui.update.cursor = true;
 }
 
 pub fn setCursor(self: *Self, new_pos: Position) void {
@@ -323,4 +408,12 @@ pub fn decPrecision(self: *Self, column: u16, n: u8) void {
 		col.precision -|= n;
 		self.tui.update.cells = true;
 	}
+}
+
+pub fn newAst(self: *Self) Ast {
+	return self.asts.popOrNull() orelse Ast{};
+}
+
+pub fn delAst(self: *Self, ast: Ast) Allocator.Error!void {
+	try self.asts.append(self.allocator, ast);
 }

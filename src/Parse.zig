@@ -17,17 +17,20 @@ const NodeList = std.MultiArrayList(Node);
 
 nodes: NodeList = .{},
 
-pub fn parse(allocator: Allocator, source: []const u8) !Ast {
+pub fn parse(ast: *Ast, allocator: Allocator, source: []const u8) !void {
+	ast.nodes.len = 0;
 	const tokenizer = Tokenizer.init(source);
-	var parser = Parser.init(allocator, tokenizer, .{});
 
-	errdefer parser.nodes.deinit(allocator);
-
+	var parser = Parser.init(allocator, tokenizer, .{ .nodes = ast.nodes });
 	try parser.parse();
 
-	return Ast{
-		.nodes = parser.nodes,
-	};
+	ast.nodes = parser.nodes;
+}
+
+pub fn fromSource(allocator: Allocator, source: []const u8) !Ast {
+	var ast = Ast{};
+	try ast.parse(allocator, source);
+	return ast;
 }
 
 pub fn parseExpression(allocator: Allocator, source: []const u8) !Ast {
@@ -779,12 +782,26 @@ pub const Tokenizer = struct {
 
 test "Tokenizer" {
 	const t = std.testing;
-	var tokenizer = Tokenizer.init("a = 3");
+	const testTokens = struct {
+		fn func(bytes: []const u8, tokens: []const Token.Tag) !void {
+			var tokenizer = Tokenizer.init(bytes);
+			for (tokens) |tag| {
+				if (tag == .eof) {
+					try t.expectEqual(@as(?Token, null), tokenizer.next());
+				} else {
+					try t.expectEqual(tag, tokenizer.next().?.tag);
+				}
+			}
+			try t.expectEqual(@as(?Token, null), tokenizer.next());
+		}
+	}.func;
 
-	try t.expectEqual(Token.Tag.column_name, tokenizer.next().?.tag);
-	try t.expectEqual(Token.Tag.equals_sign, tokenizer.next().?.tag);
-	try t.expectEqual(Token.Tag.number, tokenizer.next().?.tag);
-	try t.expectEqual(@as(?Token, null), tokenizer.next());
+	try testTokens("a = 3", &.{ .column_name, .equals_sign, .number, .eof });
+	try testTokens("@max(34, 100 + 45, @min(3, 1))", &.{
+		.builtin, .lparen, .number, .comma, .number, .plus, .number, .comma, .builtin, .lparen,
+		.number, .comma, .number, .rparen, .rparen, .eof
+	});
+	try testTokens("", &.{ .eof });
 }
 
 test "Parse and Eval Expression" {
@@ -842,7 +859,7 @@ test "Splice" {
 		}
 	};
 
-	var ast = try parse(allocator, "a0 = 100 * 3 + 5 / 2 + @avg(1, 10)");
+	var ast = try fromSource(allocator, "a0 = 100 * 3 + 5 / 2 + @avg(1, 10)");
 
 	ast.splice(ast.rootNode().assignment.rhs);
 	try t.expectApproxEqRel(@as(f64, 308), ast.eval(Context{}), 0.0001);
