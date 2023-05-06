@@ -243,7 +243,6 @@ pub fn renderCursor(
 ) RenderError!void {
 	var buf: [16]u8 = undefined;
 
-	try rc.setStyle(.{});
 	const left = zc.leftReservedColumns();
 	const writer = rc.buffer.writer();
 
@@ -260,6 +259,23 @@ pub fn renderCursor(
 			break :blk x;
 		},
 	};
+
+	const pos = Position{
+		.y = zc.cursor.y - zc.screen_pos.y + ZC.content_line,
+		.x = blk: {
+			var x: u16 = left;
+			for (zc.screen_pos.x..zc.cursor.x) |i| {
+				const col = zc.sheet.getColumn(@intCast(u16, i));
+				x += col.width;
+			}
+			break :blk x;
+		},
+	};
+
+	if (pos.hash() == prev_pos.hash())
+		return;
+
+	try rc.setStyle(.{});
 
 	try rc.moveCursorTo(prev_pos.y, prev_pos.x);
 	_ = try renderCell(rc, zc, zc.prev_cursor);
@@ -280,18 +296,6 @@ pub fn renderCursor(
 
 	// Render the cells and headings at the current cursor position with a specific colour.
 	try rc.setStyle(.{ .fg = .black, .bg = .blue });
-
-	const pos = Position{
-		.y = zc.cursor.y - zc.screen_pos.y + ZC.content_line,
-		.x = blk: {
-			var x: u16 = left;
-			for (zc.screen_pos.x..zc.cursor.x) |i| {
-				const col = zc.sheet.getColumn(@intCast(u16, i));
-				x += col.width;
-			}
-			break :blk x;
-		},
-	};
 	try rc.moveCursorTo(pos.y, pos.x);
 	_ = try renderCell(rc, zc, zc.cursor);
 
@@ -304,6 +308,16 @@ pub fn renderCursor(
 
 	try rc.moveCursorTo(pos.y, 0);
 	try writer.print("{d: ^[1]}", .{ zc.cursor.y, left });
+}
+
+pub fn renderCursorCell(
+	rc: *RenderContext,
+	zc: *ZC,
+) RenderError!u16 {
+	try rc.setStyle(.{ .fg = .black, .bg = .blue });
+	const ret = renderCell(rc, zc, zc.cursor);
+	try rc.setStyle(.{});
+	return ret;
 }
 
 pub fn renderRows(
@@ -321,7 +335,12 @@ pub fn renderRows(
 
 		var w: u16 = 0;
 		for (zc.screen_pos.x..std.math.maxInt(u16)) |x| {
-			w += try renderCell(rc, zc, Position{ .y = @intCast(u16, y), .x = @intCast(u16, x) });
+			const pos = Position{ .y = @intCast(u16, y), .x = @intCast(u16, x) };
+			if (pos.hash() == zc.cursor.hash()) {
+				w += try renderCursorCell(rc, zc);
+			} else {
+				w += try renderCell(rc, zc, pos);
+			}
 			if (w >= width)
 				break;
 		}
