@@ -34,7 +34,7 @@ pub fn init() InitError!Self {
 	try std.os.sigaction(std.os.SIG.WINCH, &.{
 		.handler = .{ .handler = resizeHandler, },
 		.mask = std.os.empty_sigset,
-		.flags = std.os.SA.RESTART,
+		.flags = 0,
 	}, null);
 
 	return Self{

@@ -3,8 +3,8 @@
 	.version = "0.0.1",
 	.dependencies = .{
 		.spoon = .{
-			.url = "https://github.com/efjimm/zig-spoon/archive/eb4b3a93d418e8df8d18e6c4dcf0e4a3236c774d.tar.gz",
-			.hash = "1220e7504fd8b15318740816994a174ae5abaa47951ea4e69b768adc48d05ec0726c",
+			.url = "https://github.com/efjimm/zig-spoon/archive/abfd49f4c193ad76329b9efde33a56710539a354.tar.gz",
+			.hash = "12208f10b531a18ff2f1919fedf8fa88db11bc0387a637aff59be68b072f37ec3dc0",
 		},
 	},
 }
