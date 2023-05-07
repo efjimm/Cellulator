@@ -144,8 +144,16 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 
 	while (iter.next()) |in| {
 		if (!in.mod_ctrl)  switch (in.content) {
-			.escape => self.dismissStatusMessage(),
-			.codepoint => |cp| switch (cp) {
+			.escape      => self.dismissStatusMessage(),
+			.arrow_up    => self.setCursor(.{ .y = self.cursor.y -| 1, .x = self.cursor.x }),
+			.arrow_down  => self.setCursor(.{ .y = self.cursor.y +| 1, .x = self.cursor.x }),
+			.arrow_left  => self.setCursor(.{ .x = self.cursor.x -| 1, .y = self.cursor.y }),
+			.arrow_right => self.setCursor(.{ .x = self.cursor.x +| 1, .y = self.cursor.y }),
+			.home        => self.cursorToFirstCell(),
+			.end         => self.cursorToLastCell(),
+			.codepoint   => |cp| switch (cp) {
+				'0' => self.cursorToFirstCell(),
+				'$' => self.cursorToLastCell(),
 				':' => {
 					self.setMode(.command);
 					const writer = self.command_buf.writer();
@@ -153,6 +161,25 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 				},
 				'D', 'x' => self.deleteCell() catch |err| switch (err) {
 					error.OutOfMemory => self.setStatusMessage("Error: out of memory!", .{}),
+				},
+				'w' => {
+					const positions = self.sheet.cells.keys();
+					for (positions) |pos| {
+						if (pos.hash() > self.cursor.hash()) {
+							self.setCursor(pos);
+							break;
+						}
+					}
+				},
+				'b' => {
+					const positions = self.sheet.cells.keys();
+					var pos_iter = std.mem.reverseIterator(positions);
+					while (pos_iter.next()) |pos| {
+						if (pos.hash() < self.cursor.hash()) {
+							self.setCursor(pos);
+							break;
+						}
+					}
 				},
 				'f' => self.incPrecision(self.cursor.x, 1),
 				'F' => self.decPrecision(self.cursor.x, 1),
@@ -455,6 +482,30 @@ pub fn delAstAssumeCapacity(self: *Self, ast: Ast) void {
 	var temp = ast;
 	temp.nodes.len = 0;
 	self.asts.appendAssumeCapacity(temp);
+}
+
+pub fn cursorToFirstCell(self: *Self) void {
+	const positions = self.sheet.cells.keys();
+	for (positions) |pos| {
+		if (pos.y < self.cursor.y) continue;
+
+		if (pos.y == self.cursor.y)
+			self.setCursor(pos);
+		break;
+	}
+}
+
+pub fn cursorToLastCell(self: *Self) void {
+	const positions = self.sheet.cells.keys();
+
+	if (positions.len == 0) return;
+
+	var new_pos = self.cursor;
+	for (positions) |pos| {
+		if (pos.y > self.cursor.y) break;
+		new_pos = pos;
+	}
+	self.setCursor(new_pos);
 }
 
 test "doCommandMode" {

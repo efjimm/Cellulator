@@ -82,9 +82,15 @@ pub fn TextInput(comptime size: u16) type {
 						self.pending_operation = .move;
 					}
 				},
+				.arrow_left  => self.doMotion(.char_prev),
+				.arrow_right => self.doMotion(.char_next),
+				.home => self.doMotion(.bol),
+				.end => self.doMotion(.eol),
 				.codepoint => |cp| switch (cp) {
 					'x' => self.delChar(),
 					'S' => self.reset(),
+					'l' => self.doMotion(.char_next),
+					'h' => self.doMotion(.char_prev),
 					'$' => self.doMotion(.eol),
 					'0' => self.doMotion(.bol),
 					'w' => self.doMotion(.normal_word_start_next),
@@ -129,8 +135,6 @@ pub fn TextInput(comptime size: u16) type {
 						self.setMode(.insert);
 						self.doMotion(.eol);
 					},
-					'l' => self.doMotion(.char_next),
-					'h' => self.doMotion(.char_prev),
 					else => {},
 				},
 				else => {},
@@ -146,11 +150,21 @@ pub fn TextInput(comptime size: u16) type {
 					'h', 127 => self.backspace(),
 					'f' => self.doMotion(.char_next),
 					'b' => self.doMotion(.char_prev),
+					'a' => self.doMotion(.bol),
+					'e' => self.doMotion(.eol),
+					'w' => {
+						self.pending_operation = .change;
+						self.doMotion(.normal_word_start_prev);
+					},
 					else => {},
 				},
 				else => {},
 			} else switch (in.content) {
 				.escape => self.setMode(.normal),
+				.arrow_left => self.doMotion(.char_prev),
+				.arrow_right => self.doMotion(.char_next),
+				.home => self.doMotion(.bol),
+				.end => self.doMotion(.eol),
 				.codepoint => |cp| switch (cp) {
 					'\n', '\r' => return .{ .string = self.finish() },
 					127 => self.backspace(),
