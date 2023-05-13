@@ -232,6 +232,27 @@ pub const Position = struct {
 		return @as(u32, position.y) * std.math.maxInt(u16) + position.x;
 	}
 
+	pub fn topLeft(pos1: Position, pos2: Position) Position {
+		return .{
+			.x = @min(pos1.x, pos2.x),
+			.y = @min(pos1.y, pos2.y),
+		};
+	}
+
+	pub fn bottomRight(pos1: Position, pos2: Position) Position {
+		return .{
+			.x = @max(pos1.x, pos2.x),
+			.y = @max(pos1.y, pos2.y),
+		};
+	}
+
+	pub fn area(pos1: Position, pos2: Position) u32 {
+		const start = topLeft(pos1, pos2);
+		const end = bottomRight(pos1, pos2);
+
+		return (@as(u32, end.x) + 1 - start.x) * (@as(u32, end.y) + 1 - start.y);
+	}
+
 	/// Writes the cell address of this position to the given writer.
 	pub fn writeCellAddress(pos: Position, writer: anytype) @TypeOf(writer).Error!void {
 		try writeColumnAddress(pos.x, writer);
@@ -336,38 +357,43 @@ pub const Cell = struct {
 			stack: std.BoundedArray(Position, 512) = .{},
 			err: bool = false,
 	
-			pub fn evalCell(context: *@This(), pos: Position) f64 {
+			pub fn evalCell(context: *@This(), pos: Position) ?f64 {
 				// Check for cyclical references
 				for (context.stack.slice()) |p| {
-					if (std.meta.eql(pos, p)) {
+					if (p.hash() == pos.hash()) {
 						context.err = true;
-						return 0;
+						return null;
 					}
 				}
 	
-				const _cell = context.sheet.getCell(pos) orelse return 0;
+				const _cell = context.sheet.getCell(pos) orelse return null;
 	
 				if (context.stack.len == context.stack.capacity()) {
 					_ = context.stack.orderedRemove(0);
 				}
 	
 				context.stack.append(pos) catch unreachable;
-				const ret = _cell.ast.eval(context);
+				const ret = _cell.ast.eval(context) catch |err| switch (err) {
+					error.NotEvaluable => {
+						context.err = true;
+						return null;
+					},
+				};
 				_ = context.stack.pop();
 				return ret;
 			}
 		};
 	
 		var context = Context{ .sheet = sheet };
-		const ret = cell.ast.eval(&context);
+		const res = cell.ast.eval(&context);
 
 		if (context.err) {
 			cell.num = null;
 			return 0;
 		}
 
-		cell.num = ret;
-		return ret;
+		cell.num = res catch null;
+		return res catch 0;
 	}
 };
 
