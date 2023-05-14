@@ -68,6 +68,7 @@ pub fn TextInput(comptime size: u16) type {
 				else => {},
 			} else if (in.mod_alt) switch (in.content) {
 				.codepoint => |cp| switch (cp) {
+					'j', 'm', '\r', '\n' => return .{ .string = self.finish() },
 					'e' => self.doMotion(.normal_word_end_prev),
 					'E' => self.doMotion(.long_word_end_prev),
 					else => {},
@@ -87,6 +88,7 @@ pub fn TextInput(comptime size: u16) type {
 				.home => self.doMotion(.bol),
 				.end => self.doMotion(.eol),
 				.codepoint => |cp| switch (cp) {
+					'\r', '\n' => return .{ .string = self.finish() },
 					'x' => self.delChar(),
 					'S' => self.reset(),
 					'l' => self.doMotion(.char_next),
@@ -156,6 +158,7 @@ pub fn TextInput(comptime size: u16) type {
 						self.pending_operation = .change;
 						self.doMotion(.normal_word_start_prev);
 					},
+					'u' => self.reset(),
 					else => {},
 				},
 				else => {},

@@ -80,6 +80,7 @@ implemented commands. Values surrounded in {} are optional.
 
 ###  Normal Mode
 
+- `Return`, `C-m`, `C-j` Submit the current text as a command
 - `h`, `Left` Move cursor left
 - `j`, `Down` Move cursor down
 - `k`, `Up` Move cursor up
@@ -108,6 +109,7 @@ implemented commands. Values surrounded in {} are optional.
 - `C-f`, `Right` Move cursor forward one character
 - `C-b`, `Left` Move cursor backward one character
 - `C-w` Delete the word before the cursor
+- `C-u` Delete all text in the command buffer
 
 ### Command Normal Mode
 
