@@ -33,6 +33,7 @@ filepath: std.BoundedArray(u8, std.fs.MAX_PATH_BYTES) = .{},
 /// Cell positions sorted topologically, used for order of evaluation when evaluating all cells.
 sorted_nodes: NodeListUnmanaged = .{},
 needs_update: bool = false,
+has_changes: bool = false,
 
 allocator: Allocator,
 
@@ -66,9 +67,9 @@ pub fn setCell(
 	position: Position,
 	data: Cell,
 ) Allocator.Error!void {
+	const col_entry = try sheet.columns.getOrPut(sheet.allocator, position.x);
 	sheet.needs_update = true;
 
-	const col_entry = try sheet.columns.getOrPut(sheet.allocator, position.x);
 	if (!col_entry.found_existing) {
 		col_entry.value_ptr.* = Column{};
 	}
@@ -81,25 +82,38 @@ pub fn setCell(
 					.key = position,
 					.value = data,
 				});
-				try sheet.cells.reIndex(sheet.allocator);
+
+				// If this fails with OOM we could potentially end up with the map in an invalid
+				// state. All instances of OOM must be recoverable. If we error here we remove the
+				// newly inserted entry so that the old index remains correct.
+				sheet.cells.reIndex(sheet.allocator) catch |err| switch (err) {
+					error.OutOfMemory => {
+						sheet.cells.entries.orderedRemove(i);
+						return err;
+					},
+				};
+				sheet.has_changes = true;
 				return;
 			}
 		}
 
 		// Found no entries
 		try sheet.cells.put(sheet.allocator, position, data);
+		sheet.has_changes = true;
 		return;
 	}
 
 	const ptr = sheet.cells.getPtr(position).?;
 	ptr.ast.deinit(sheet.allocator);
 	ptr.* = data;
+	sheet.has_changes = true;
 }
 
 pub fn deleteCell(sheet: *Sheet, pos: Position) ?Ast {
 	const cell = sheet.cells.get(pos) orelse return null;
 	_ = sheet.cells.orderedRemove(pos);
 	sheet.needs_update = true;
+	sheet.has_changes = true;
 
 	return cell.ast;
 }

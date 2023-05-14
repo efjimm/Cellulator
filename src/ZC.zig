@@ -131,7 +131,6 @@ fn handleInput(self: *Self) !void {
 		.command => self.doCommandMode(slice) catch |err| switch (err) {
 			// We should be able to recover from OOM
 			error.OutOfMemory => self.setStatusMessage("Error: out of memory!", .{}),
-
 			error.UnexpectedToken => self.setStatusMessage("Error: unexpected token", .{}),
 			error.InvalidCommand => self.setStatusMessage("Error: invalid command", .{}),
 			error.EmptyFileName => self.setStatusMessage("Error: must specify a file name", .{}),
@@ -250,43 +249,79 @@ fn doCommandMode(self: *Self, input: []const u8) !void {
 	}
 }
 
+const Cmd = enum {
+	save,
+	save_force,
+	load,
+	load_force,
+	quit,
+	quit_force,
+};
+
+const cmds = std.ComptimeStringMap(Cmd, .{
+	.{ "w", .save },
+	.{ "w!", .save_force },
+	.{ "e", .load },
+	.{ "e!", .load_force },
+	.{ "q", .quit },
+	.{ "q!", .quit_force },
+});
+
 pub fn runCommand(self: *Self, str: []const u8) !void {
 	var iter = utils.wordIterator(str);
-	const cmd = iter.next() orelse return error.InvalidCommand;
-	if (cmd.len == 0) return error.InvalidCommand;
+	const cmd_str = iter.next() orelse return error.InvalidCommand;
+	assert(cmd_str.len > 0);
+
+	const cmd = cmds.get(cmd_str) orelse return error.InvalidCommand;
 
 	// TODO: add confirmation for certain commands
-	switch (cmd[0]) {
-		'q' => self.running = false,
-		'w' => { // save
+	switch (cmd) {
+		.quit => {
+			if (self.sheet.has_changes) {
+				self.setStatusMessage("No write since last change (add ! to override)", .{});
+			} else {
+				self.running = false;
+			}
+		},
+		.quit_force => self.running = false,
+		.save, .save_force => { // save
 			writeFile(&self.sheet, .{ .filepath = iter.next() }) catch |err| {
 				self.setStatusMessage("Could not write file: {s}", .{ @errorName(err) });
 				return;
 			};
+			self.sheet.has_changes = false;
 			self.tui.update.status = true;
 		},
-		'e' => { // load
-			const filepath = iter.next() orelse return error.EmptyFileName;
-			var new_sheet = Sheet.init(self.allocator);
-			self.loadFile(&new_sheet, filepath) catch |err| {
-				self.setStatusMessage("Could not open file: {s}", .{ @errorName(err) });
-				return;
-			};
-
-			var old_sheet = self.sheet;
-			self.sheet = new_sheet;
-
-			// Re-use asts
-			self.clearSheet(&old_sheet) catch |err| switch (err) {
-				error.OutOfMemory => self.setStatusMessage("Error: out of memory!", .{}),
-			};
-			old_sheet.deinit();
-
-			self.tui.update.status = true;
-			self.tui.update.cells = true;
+		.load => { // load
+			if (self.sheet.has_changes) {
+				self.setStatusMessage("No write since last change (add ! to override)", .{});
+			} else {
+				try self.loadCmd(&iter);
+			}
 		},
-		else => return error.InvalidCommand,
+		.load_force => try self.loadCmd(&iter),
 	}
+}
+
+pub fn loadCmd(self: *Self, iter: *utils.WordIterator) !void {
+	const filepath = iter.next() orelse return error.EmptyFileName;
+	var new_sheet = Sheet.init(self.allocator);
+	self.loadFile(&new_sheet, filepath) catch |err| {
+		self.setStatusMessage("Could not open file: {s}", .{ @errorName(err) });
+		return;
+	};
+
+	var old_sheet = self.sheet;
+	self.sheet = new_sheet;
+
+	// Re-use asts
+	self.clearSheet(&old_sheet) catch |err| switch (err) {
+		error.OutOfMemory => self.setStatusMessage("Error: out of memory!", .{}),
+	};
+	old_sheet.deinit();
+
+	self.tui.update.status = true;
+	self.tui.update.cells = true;
 }
 
 pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
@@ -297,7 +332,10 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
 }
 
 pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
-	const file = try std.fs.cwd().openFile(filepath, .{});
+	const file = try std.fs.cwd().createFile(filepath, .{
+		.read = true,
+		.truncate = false,
+	});
 	defer file.close();
 
 	const slice = try file.reader().readAllAlloc(sheet.allocator, comptime std.math.maxInt(u30));
@@ -324,6 +362,7 @@ pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
 	}
 
 	sheet.setFilePath(filepath);
+	sheet.has_changes = false;
 }
 
 pub const WriteFileOptions = struct {

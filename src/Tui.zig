@@ -121,6 +121,10 @@ pub fn renderStatus(
 		writer.writeAll("[no file] ") catch unreachable;
 	}
 
+	if (zc.sheet.has_changes) {
+		try writer.writeAll("[+] ");
+	}
+
 	try zc.cursor.writeCellAddress(writer);
 	try writer.print(" {}", .{ zc.mode });
 
