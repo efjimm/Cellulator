@@ -2,15 +2,18 @@
 
 Cellulator is a TUI spreadsheet calculator written in [Zig](https://ziglang.org).
 
+## Portability
+
 Cellulator works on Linux and MacOS. Zig's standard library is currently missing some constants and
 types for other POSIX compliant OS's that are required by Cellulator, and may or may not build for
 them.
 
-Cellulator has its origins from an attempted incremental rewrite of
-[sc](https://github.com/andmarti1424/sc-im) in Zig. This proved to be more difficult than
-anticipated, due to the codebase being extremely tightly coupled with liberal usage of global
-state, random isolated heap allocations, deeply nested call stacks and so on. Thus it was decided
-to start from scratch.
+## Terminal Compatibility
+
+Cellulator should be compatible with most modern software terminals. Cellulator does not use
+curses, instead using a [fork](https://github.com/efjimm/zig-spoon) of
+[zig-spoon](https://git.sr.ht/~leon_plickat/zig-spoon). spoon uses vt-100 escape sequences to draw
+to the screen, which should be supported by any modern terminal.
 
 # Installation
 
@@ -28,15 +31,22 @@ Run `zig build test -fsummary` to run the tests.
 Cellulator is currently in early development. Expect missing features. If you actually intend on
 using Cellulator, build it in ReleaseSafe mode to catch any latent bugs.
 
+## Modes
+
+Cellulator used mode-based input, like in vim. There are 3 modes in Cellulator: normal, command
+normal, and command insert. Normal mode allows you to move around the sheet using vim-like motions
+and perform various operations. Command normal and command insert mode allow for editing the
+command buffer and submitting commands.
+
 ## Expressions
 
-Setting a cell's value via the syntax `cellname = expression`. cellname is the identifier of the
-cell, e.g. `a0`, `C52`, `ZZZ100`. expression is any evaluable expression. Number literals, cell
-references, cell ranges and builtin functions are supported, and can be formed into more complex
-expressions using operators. Addition, subtraction, multiplication, division and modulus, unary +/-
-are all supported operators. Cell ranges are defined as two cell identifiers separated by a colon
-character, e.g. `a0:b3`. Cell ranges can only be used as arguments to builtin functions, using them
-in other contexts will parse but produce an error on evaluation.
+A cells value can be set in command mode via the syntax `cellname = expression`, where cellname is
+the address of the cell cell, e.g. `a0`, `C52`, `ZZZ100`, and expression is any evaluable
+expression. Number literals, cell references, cell ranges and builtin functions are supported, and
+can be formed into more complex expressions using operators. Addition, subtraction, multiplication,
+division and modulus, unary +/- are all supported operators. Cell ranges are defined as two cell
+identifiers separated by a colon character, e.g. `a0:b3`. Cell ranges can only be used as arguments
+to builtin functions, using them in other contexts will parse but produce an error on evaluation.
 
 There are a number of builtin functions in Cellulator. All builtin functions take a variadic number
 of arguments, which can include range expressions. All builtin functions must have at least one
