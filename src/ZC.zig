@@ -9,6 +9,7 @@ const TextInput = @import("text_input.zig").TextInput;
 const Position = Sheet.Position;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
+const log = std.log.scoped(.zc);
 
 const Self = @This();
 
@@ -132,6 +133,7 @@ fn handleInput(self: *Self) !void {
 			// We should be able to recover from OOM
 			error.OutOfMemory => self.setStatusMessage("Error: out of memory!", .{}),
 			error.UnexpectedToken => self.setStatusMessage("Error: unexpected token", .{}),
+			error.InvalidCellAddress => self.setStatusMessage("Error: invalid cell address", .{}),
 			error.InvalidCommand => self.setStatusMessage("Error: invalid command", .{}),
 			error.EmptyFileName => self.setStatusMessage("Error: must specify a file name", .{}),
 		},
@@ -153,6 +155,8 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 			.codepoint   => |cp| switch (cp) {
 				'0' => self.cursorToFirstCell(),
 				'$' => self.cursorToLastCell(),
+				'g' => self.cursorToFirstCellInColumn(),
+				'G' => self.cursorToLastCellInColumn(),
 				':' => {
 					self.setMode(.command);
 					const writer = self.command_buf.writer();
@@ -431,16 +435,32 @@ pub fn clampScreenToCursor(self: *Self) void {
 }
 
 pub fn clampScreenToCursorY(self: *Self) void {
+	const height = self.contentHeight();
+	if (height == 0) return;
+
 	if (self.cursor.y < self.screen_pos.y) {
+		const old_max = self.screen_pos.y + (height - 1);
 		self.screen_pos.y = self.cursor.y;
+		const new_max = self.screen_pos.y + (height - 1);
+
+		if (std.math.log10(old_max) != std.math.log10(new_max)) {
+			self.tui.update.column_headings = true;
+		}
+
 		self.tui.update.row_numbers = true;
 		self.tui.update.cells = true;
 		return;
 	}
 
-	const height = self.contentHeight();
 	if (self.cursor.y - self.screen_pos.y >= height) {
-		self.screen_pos.y = self.cursor.y - (height -| 1);
+		const old_max = self.screen_pos.y + (height - 1);
+		self.screen_pos.y = self.cursor.y - (height - 1);
+		const new_max = self.screen_pos.y + (height - 1);
+
+		if (std.math.log10(old_max) != std.math.log10(new_max)) {
+			self.tui.update.column_headings = true;
+		}
+
 		self.tui.update.row_numbers = true;
 		self.tui.update.cells = true;
 	}
@@ -454,33 +474,21 @@ pub fn clampScreenToCursorX(self: *Self) void {
 		return;
 	}
 
-	const reserved_cols = self.leftReservedColumns();
-
-	var w = reserved_cols;
-	var x: i17 = self.cursor.x;
+	var w = self.leftReservedColumns();
+	var x: u16 = self.cursor.x;
 
 	while (true) : (x -= 1) {
-		if (x < self.screen_pos.x)
-			return;
+		if (x < self.screen_pos.x) return;
 
-		const width = blk: {
-			if (x >= 0) {
-				if (self.sheet.columns.get(@intCast(u16, x))) |col| {
-					break :blk col.width;
-				}
-			}
+		const col = self.sheet.getColumn(x);
+		w += col.width;
 
-			break :blk Sheet.Column.default_width;
-		};
-
-		w += width;
-
-		if (w > self.tui.term.width)
-			break;
+		if (w >= self.tui.term.width) break;
+		if (x == 0) return;
 	}
 
 	if (x >= self.screen_pos.x) {
-		self.screen_pos.x = @intCast(u16, @max(0, x + 1));
+		self.screen_pos.x = x + 1;
 		self.tui.update.column_headings = true;
 		self.tui.update.cells = true;
 	}
@@ -545,6 +553,31 @@ pub fn cursorToLastCell(self: *Self) void {
 		new_pos = pos;
 	}
 	self.setCursor(new_pos);
+}
+
+pub fn cursorToFirstCellInColumn(self: *Self) void {
+	const positions = self.sheet.cells.keys();
+	if (positions.len == 0) return;
+
+	for (positions) |pos| {
+		if (pos.x == self.cursor.x) {
+			self.setCursor(pos);
+			break;
+		}
+	}
+}
+
+pub fn cursorToLastCellInColumn(self: *Self) void {
+	const positions = self.sheet.cells.keys();
+	if (positions.len == 0) return;
+
+	var iter = std.mem.reverseIterator(positions);
+	while (iter.next()) |pos| {
+		if (pos.x == self.cursor.x) {
+			self.setCursor(pos);
+			break;
+		}
+	}
 }
 
 test "doCommandMode" {

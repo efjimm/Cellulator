@@ -589,7 +589,10 @@ const Parser = struct {
 		});
 	}
 
-	const ParseError = error{ UnexpectedToken } || Allocator.Error;
+	const ParseError = error{
+		UnexpectedToken,
+		InvalidCellAddress,
+	} || Allocator.Error;
 
 	/// Expression <- AddExpr
 	fn parseExpression(parser: *Parser) ParseError!u32 {
@@ -731,7 +734,7 @@ const Parser = struct {
 		const text = token.text(parser.source());
 
 		// TODO: check bounds
-		const pos = Position.fromCellAddress(text);
+		const pos = Position.fromCellAddress(text) catch return error.InvalidCellAddress;
 
 		return parser.addNode(.{
 			.cell = pos,

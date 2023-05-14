@@ -127,10 +127,12 @@ test "Position.fromCellAddress" {
 		.{ "MM50000", Position{ .y = 50000, .x = 350   } },
 		.{ "ZZ0",     Position{ .y = 0,     .x = 701   } },
 		.{ "AAAA0",   Position{ .y = 0,     .x = 18278 } },
+		.{ "CRXO0",   Position{ .y = 0,     .x = 65534 } },
+		.{ "CRXP0",   Position{ .y = 0,     .x = 65535 } },
 	};
 
 	inline for (tuples) |tuple| {
-		try t.expectEqual(tuple[1], Position.fromCellAddress(tuple[0]));
+		try t.expectEqual(tuple[1], try Position.fromCellAddress(tuple[0]));
 	}
 }
 

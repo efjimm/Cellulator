@@ -3,6 +3,8 @@ const spoon = @import("spoon");
 const ZC = @import("ZC.zig");
 const Sheet = @import("Sheet.zig");
 const wcWidth = @import("wcwidth").wcWidth;
+const assert = std.debug.assert;
+const log = std.log.scoped(.tui);
 
 const Position = Sheet.Position;
 const Term = spoon.Term;
@@ -85,7 +87,7 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
 		self.update.row_numbers = false;
 	}
 	if (self.update.cells) {
-		try self.renderRows(&rc, zc);
+		try self.renderCells(&rc, zc);
 		try renderCursor(&rc, zc);
 		self.update.cells = false;
 		self.update.cursor = false;
@@ -188,15 +190,11 @@ pub fn renderColumnHeadings(
 
 	var x = zc.screen_pos.x;
 	var w = reserved_cols;
-	const columns = &zc.sheet.columns;
 
 	try rc.setStyle(.{ .fg = .blue });
 
-	while (w < self.term.width) : (x +|= 1) {
-		const width = if (columns.get(x)) |col|
-				col.width
-			else
-				Sheet.Column.default_width;
+	while (w < self.term.width) : (x += 1) {
+		const width = zc.sheet.getColumn(x).width;
 
 		var buf: [4]u8 = undefined;
 		const name = Position.columnAddressBuf(x, &buf);
@@ -209,6 +207,10 @@ pub fn renderColumnHeadings(
 			try writer.print("{s: ^[1]}", .{ name, width });
 		}
 
+		if (x == std.math.maxInt(u16)) {
+			try rc.clearToEol();
+			break;
+		}
 		w += width;
 	}
 
@@ -249,19 +251,39 @@ pub fn renderCursor(
 	const left = zc.leftReservedColumns();
 	const writer = rc.buffer.writer();
 
-	// Overrwrite old cursor with a normal looking cell. Also overwrites the old column heading and
-	// line number.
-	const prev_pos = Position{
-		.y = zc.prev_cursor.y - zc.screen_pos.y + ZC.content_line,
-		.x = blk: {
-			var x: u16 = left;
-			for (zc.screen_pos.x..zc.prev_cursor.x) |i| {
-				const col = zc.sheet.getColumn(@intCast(u16, i));
-				x += col.width;
-			}
-			break :blk x;
-		},
-	};
+	if (isOnScreen(&zc.tui, zc, zc.prev_cursor)) {
+		// Overrwrite old cursor with a normal looking cell. Also overwrites the old column heading
+		// and line number.
+		const prev_pos = Position{
+			.y = zc.prev_cursor.y - zc.screen_pos.y + ZC.content_line,
+			.x = blk: {
+				var x: u16 = left;
+				for (zc.screen_pos.x..zc.prev_cursor.x) |i| {
+					const col = zc.sheet.getColumn(@intCast(u16, i));
+					x += col.width;
+				}
+				break :blk x;
+			},
+		};
+
+		try rc.setStyle(.{});
+
+		try rc.moveCursorTo(prev_pos.y, prev_pos.x);
+		_ = try renderCell(rc, zc, zc.prev_cursor);
+
+		try rc.setStyle(.{ .fg = .blue, .bg = .black });
+
+		const prev_col = zc.sheet.getColumn(zc.prev_cursor.x);
+
+		try rc.moveCursorTo(ZC.col_heading_line, prev_pos.x);
+		try writer.print("{s: ^[1]}", .{
+			Position.columnAddressBuf(zc.prev_cursor.x, &buf),
+			prev_col.width,
+		});
+
+		try rc.moveCursorTo(prev_pos.y, 0);
+		try writer.print("{d: ^[1]}", .{ zc.prev_cursor.y, left });
+	}
 
 	const pos = Position{
 		.y = zc.cursor.y - zc.screen_pos.y + ZC.content_line,
@@ -274,28 +296,6 @@ pub fn renderCursor(
 			break :blk x;
 		},
 	};
-
-	if (pos.hash() == prev_pos.hash())
-		return;
-
-	try rc.setStyle(.{});
-
-	try rc.moveCursorTo(prev_pos.y, prev_pos.x);
-	_ = try renderCell(rc, zc, zc.prev_cursor);
-
-	try rc.setStyle(.{ .fg = .blue, .bg = .black });
-
-	const prev_col = zc.sheet.getColumn(zc.prev_cursor.x);
-
-	try rc.moveCursorTo(ZC.col_heading_line, prev_pos.x);
-	try writer.print("{s: ^[1]}", .{
-		Position.columnAddressBuf(zc.prev_cursor.x, &buf),
-		prev_col.width,
-	});
-
-	try rc.moveCursorTo(prev_pos.y, 0);
-	try writer.print("{d: ^[1]}", .{ zc.prev_cursor.y, left });
-
 
 	// Render the cells and headings at the current cursor position with a specific colour.
 	try rc.setStyle(.{ .fg = .black, .bg = .blue });
@@ -324,29 +324,31 @@ pub fn renderCursorCell(
 	return ret;
 }
 
-pub fn renderRows(
+pub fn renderCells(
 	self: Self,
 	rc: *RenderContext,
 	zc: *ZC,
 ) RenderError!void {
 	const reserved_cols = zc.leftReservedColumns();
-	const width = self.term.width - reserved_cols;
 
 	try rc.setStyle(.{});
 
 	for (ZC.content_line..self.term.height, zc.screen_pos.y..) |line, y| {
 		try rc.moveCursorTo(@intCast(u16, line), reserved_cols);
 
-		var w: u16 = 0;
-		for (zc.screen_pos.x..std.math.maxInt(u16)) |x| {
+		var w: u16 = reserved_cols;
+		for (zc.screen_pos.x..@as(usize, std.math.maxInt(u16)) + 1) |x| {
 			const pos = Position{ .y = @intCast(u16, y), .x = @intCast(u16, x) };
 			if (pos.hash() == zc.cursor.hash()) {
 				w += try renderCursorCell(rc, zc);
 			} else {
 				w += try renderCell(rc, zc, pos);
 			}
-			if (w >= width)
-				break;
+			if (w >= self.term.width) break;
+		} else {
+			// Hit maxInt(u16) and didn't go past the end of the screen, so we clear the rest of
+			// the line to remove any artifacts
+			try rc.clearToEol();
 		}
 	}
 }
@@ -378,4 +380,25 @@ pub fn renderCell(
 		try writer.print("{s: >[1]}", .{ "", col.width });
 	}
 	return col.width;
+}
+
+pub fn isOnScreen(tui: *Self, zc: *ZC, pos: Position) bool {
+	if (pos.x < zc.screen_pos.x or pos.y < zc.screen_pos.y) return false;
+
+	var w: u16 = zc.leftReservedColumns();
+	const end_col = blk: {
+		var i: u16 = zc.screen_pos.x;
+		while (true) : (i += 1) {
+			const col = zc.sheet.getColumn(i);
+			w += col.width;
+			if (w >= tui.term.width or i == std.math.maxInt(u16)) break :blk i;
+		}
+		unreachable;
+	};
+	if (w >= tui.term.width and pos.x >= end_col) return false;
+
+	const end_row = zc.screen_pos.y +| (tui.term.height - ZC.content_line);
+	if (pos.y > end_row) return false;
+
+	return true;
 }

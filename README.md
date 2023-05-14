@@ -81,6 +81,8 @@ implemented commands. Values surrounded in {} are optional.
 - `Esc` Dismiss status message
 - `0` Move cursor to the first populated cell on the current row
 - `$` Move cursor to the last populated cell on the current row
+- `g` Move cursor to the first cell in the current column
+- `G` Move cursor to the last cell in the current column
 - `w` Move cursor to the next populated cell
 - `b` Move cursor to the previous populated cell
 - `f` Increase decimal precision of the current column

@@ -281,12 +281,12 @@ pub const Position = struct {
 			return;
 		}
 
-		// Max value is 'CRXO'
+		// Max value is 'CRXP'
 		var buf: [4]u8 = undefined;
 		var stream = std.io.fixedBufferStream(&buf);
 		const bufwriter = stream.writer();
 
-		var i = index +| 1;
+		var i = @as(u32, index) + 1;
 		while (i > 0) : (i /= 26) {
 			i -= 1;
 			const r = @intCast(u8, i % 26);
@@ -308,7 +308,7 @@ pub const Position = struct {
 		var stream = std.io.fixedBufferStream(buf);
 		const writer = stream.writer();
 
-		var i = index +| 1;
+		var i = @as(u32, index) + 1;
 		while (i > 0) : (i /= 26) {
 			i -= 1;
 			const r = @intCast(u8, i % 26);
@@ -320,18 +320,23 @@ pub const Position = struct {
 		return slice;
 	}
 
-	pub fn columnFromAddress(address: []const u8) u16 {
-		var ret: u16 = 0;
+	pub const FromAddressError = error{ Overflow };
+
+	pub fn columnFromAddress(address: []const u8) FromAddressError!u16 {
+		assert(address.len > 0);
+
+		var ret: u32 = 0;
 		for (address) |c| {
 			if (!std.ascii.isAlphabetic(c))
 				break;
-			ret = ret * 26 + (std.ascii.toUpper(c) - 'A' + 1);
+			ret = ret *| 26 +| (std.ascii.toUpper(c) - 'A' + 1);
 		}
 
-		return ret - 1;
+		return if (ret > @as(u32, std.math.maxInt(u16)) + 1) error.Overflow
+				else @intCast(u16, ret - 1);
 	}
 
-	pub fn fromCellAddress(address: []const u8) Position {
+	pub fn fromCellAddress(address: []const u8) FromAddressError!Position {
 		assert(address.len > 1);
 		assert(std.ascii.isAlphabetic(address[0]));
 		assert(std.ascii.isDigit(address[address.len-1]));
@@ -342,8 +347,11 @@ pub const Position = struct {
 		} else unreachable;
 
 		return .{
-			.x = columnFromAddress(address[0..letters_end]),
-			.y = std.fmt.parseInt(u16, address[letters_end..], 0) catch unreachable,
+			.x = try columnFromAddress(address[0..letters_end]),
+			.y = std.fmt.parseInt(u16, address[letters_end..], 0) catch |err| switch (err) {
+				error.Overflow => return error.Overflow,
+				error.InvalidCharacter => unreachable // Invalid numbers do not get passed to this function
+			},
 		};
 	}
 };
