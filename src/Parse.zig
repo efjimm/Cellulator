@@ -54,18 +54,6 @@ pub fn deinit(ast: *Ast, allocator: Allocator) void {
 	ast.nodes = .{};
 }
 
-pub fn isExpression(ast: Ast) bool {
-	for (ast.nodes.items(.tags)) |tag| {
-		switch (tag) {
-			.number, .cell,
-			.add, .sub, .mul, .div,
-				=> {},
-			else => return false,
-		}
-	}
-	return true;
-}
-
 pub fn rootNode(ast: Ast) Node {
 	return ast.nodes.get(ast.rootNodeIndex());
 }

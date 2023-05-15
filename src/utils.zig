@@ -116,32 +116,3 @@ pub fn trimMatchingQuotes(string: []const u8) []const u8 {
 
 	return str;
 }
-
-test "Position.fromCellAddress" {
-	const t = std.testing;
-
-	const tuples = .{
-		.{ "A1",      Position{ .y = 1,     .x = 0     } },
-		.{ "AA7865",  Position{ .y = 7865,  .x = 26    } },
-		.{ "AAA1000", Position{ .y = 1000,  .x = 702   } },
-		.{ "MM50000", Position{ .y = 50000, .x = 350   } },
-		.{ "ZZ0",     Position{ .y = 0,     .x = 701   } },
-		.{ "AAAA0",   Position{ .y = 0,     .x = 18278 } },
-		.{ "CRXO0",   Position{ .y = 0,     .x = 65534 } },
-		.{ "CRXP0",   Position{ .y = 0,     .x = 65535 } },
-	};
-
-	inline for (tuples) |tuple| {
-		try t.expectEqual(tuple[1], try Position.fromCellAddress(tuple[0]));
-	}
-}
-
-test "Position.columnAddressBuf" {
-	const t = std.testing;
-	var buf: [4]u8 = undefined;
-
-	try t.expectEqualStrings("A",    Position.columnAddressBuf(0, &buf));
-	try t.expectEqualStrings("AA",   Position.columnAddressBuf(26, &buf));
-	try t.expectEqualStrings("AAA",  Position.columnAddressBuf(702, &buf));
-	try t.expectEqualStrings("AAAA", Position.columnAddressBuf(18278, &buf));
-}

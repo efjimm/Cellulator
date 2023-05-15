@@ -177,10 +177,10 @@ pub fn TextInput(comptime size: u16) type {
 
 					else => {
 						var buf: [8]u8 = undefined;
-						const len = std.unicode.utf8Encode(cp, &buf) catch return .waiting;
+						const length = std.unicode.utf8Encode(cp, &buf) catch return .waiting;
 
-						self.buf.insertSlice(self.cursor, buf[0..len]) catch return .waiting;
-						self.cursor += len;
+						self.buf.insertSlice(self.cursor, buf[0..length]) catch return .waiting;
+						self.cursor += length;
 					},
 				},
 				else => {},
@@ -192,7 +192,7 @@ pub fn TextInput(comptime size: u16) type {
 		fn doMotion(self: *Self, motion: Motion) void {
 			switch (self.pending_operation) {
 				.move => {
-					const range = motion.do(self.buf.slice(), self.cursor);
+					const range = motion.do(self.slice(), self.cursor);
 					self.cursor = if (range.start == self.cursor)
 							range.end
 						else
@@ -200,22 +200,20 @@ pub fn TextInput(comptime size: u16) type {
 						
 				},
 				.change => {
-					var extra: u16 = 0;
 					const m = switch (motion) {
-						.normal_word_start_next => blk: {
-							extra += 1;
-							break :blk .normal_word_end_next;
-						},
-						.long_word_start_next => blk: {
-							extra += 1;
-							break :blk .long_word_end_next;
-						},
+						.normal_word_start_next => .normal_word_end_next,
+						.long_word_start_next => .long_word_end_next,
 						else => motion,
 					};
 
-					const range = m.do(self.buf.slice(), self.cursor);
+					const range = m.do(self.slice(), self.cursor);
 					const start = range.start;
-					const end = range.end + extra;
+					const end = range.end + switch (m) {
+						.normal_word_end_next,
+						.long_word_end_next,
+							=> nextCharacter(self.slice(), range.end),
+						else => 0,
+					};
 
 					self.buf.replaceRange(start, end - start, &.{}) catch unreachable;
 
@@ -236,58 +234,52 @@ pub fn TextInput(comptime size: u16) type {
 		fn delChar(self: *Self) void {
 			if (self.buf.len == 0) return;
 
-			self.buf.replaceRange(self.cursor, 1, &.{}) catch unreachable;
+			const length = nextCharacter(self.slice(), self.cursor);
+			self.buf.replaceRange(self.cursor, length, &.{}) catch unreachable;
 			self.clampCursor();
 		}
 
+		fn endPos(self: Self) u16 {
+			return if (self.mode == .normal)
+					self.len() - prevCharacter(self.slice(), self.len())
+				else
+					self.len();
+		}
+
 		fn clampCursor(self: *Self) void {
-			if (self.buf.len == 0) {
-				self.cursor = 0;
-				return;
-			}
-
-			const end = @intCast(u16, switch (self.mode) {
-				.normal => self.buf.len - 1,
-				else => self.buf.len,
-			});
-
+			const end = self.endPos();
 			if (self.cursor > end)
 				self.cursor = end;
 		}
 
 		fn backspace(self: *Self) void {
-			const old_cursor = self.cursor;
-			self.cursorBackward(1);
-			self.buf.replaceRange(self.cursor, old_cursor - self.cursor, &.{}) catch unreachable;
+			self.pending_operation = .change;
+			self.doMotion(.char_prev);
 		}
 
 		fn setMode(self: *Self, mode: Mode) void {
 			if (mode == .normal and self.cursor == self.buf.len) {
-				self.cursor = @intCast(u16, self.buf.len) -| 1;
+				self.cursor = Motion.char_prev.do(self.slice(), self.len()).start;
 			}
 			self.mode = mode;
 		}
 
-		/// Moves the cursor forward by `n` codepoints.
+		/// Moves the cursor forward by `n` characters.
 		fn cursorForward(self: *Self, n: u16) void {
-			const end = self.buf.len -| @boolToInt(self.mode == .normal);
+			const end = self.endPos();
+			const bytes = self.slice();
 			for (0..n) |_| {
 				if (self.cursor >= end) break;
-
-				const len = std.unicode.utf8ByteSequenceLength(self.buf.buffer[self.cursor]) catch unreachable;
-				self.cursor += len;
+				self.cursor += nextCharacter(bytes, self.cursor);
 			}
 		}
 
-		/// Moves the cursor backward by `n` codepoints;
+		/// Moves the cursor backward by `n` characters;
 		fn cursorBackward(self: *Self, n: u16) void {
+			const bytes = self.slice();
 			for (0..n) |_| {
 				if (self.cursor == 0) break;
-
-				self.cursor -= 1;
-				while (std.unicode.utf8ByteSequenceLength(self.buf.buffer[self.cursor]) == error.Utf8InvalidStartByte) {
-					self.cursor -= 1;
-				}
+				self.cursor -= prevCharacter(bytes, self.cursor);
 			}
 		}
 
@@ -316,14 +308,18 @@ pub fn TextInput(comptime size: u16) type {
 			self.setMode(.insert);
 		}
 
-		pub fn slice(self: *Self) []const u8 {
+		pub fn slice(self: *const Self) []const u8 {
 			return self.buf.slice();
+		}
+
+		pub fn len(self: Self) u16 {
+			return @intCast(u16, self.buf.len);
 		}
 	};
 }
 
 fn isContinuation(c: u8) bool {
-	return std.unicode.utf8ByteSequenceLength(c) == error.Utf8InvalidStartByte;
+	return c & 0xC0 == 0x80;
 }
 
 fn nextCodepoint(bytes: []const u8, offset: u16) u16 {
@@ -476,7 +472,7 @@ pub const Motion = enum {
 		if (bytes.len == 0) return 0;
 
 		const boundary = wordBoundaryFn(word_type);
-		var pos = start_pos -| 1;
+		var pos = start_pos - prevCharacter(bytes, start_pos);
 
 		while (pos > 0) : (pos -= prevCharacter(bytes, pos)) {
 			if (!isWhitespace(bytes[pos])) break;
@@ -505,7 +501,7 @@ pub const Motion = enum {
 
 		const boundary = wordBoundaryFn(word_type);
 
-		var pos = start_pos + 1;
+		var pos = start_pos + nextCodepoint(bytes, start_pos);
 		while (pos < bytes.len and isWhitespace(bytes[pos])) : (pos += nextCodepoint(bytes, pos)) {}
 		if (pos == bytes.len) return pos;
 
@@ -530,20 +526,18 @@ pub const Motion = enum {
 
 		const boundary = wordBoundaryFn(word_type);
 		var pos = start_pos;
-		var iter = std.mem.reverseIterator(bytes[0..pos + 1]);
-		var c = iter.next() orelse return 0;
 
-		if (boundary(c)) {
-			while (boundary(c) and !isWhitespace(c)) : (pos -= 1) {
-				c = iter.next() orelse break;
+		if (boundary(bytes[pos])) {
+			while (pos > 0 and boundary(bytes[pos]) and !isWhitespace(bytes[pos])) {
+				pos -= prevCodepoint(bytes, pos);
 			}
 		} else {
-			while (!boundary(c)) : (pos -= 1) {
-				 c = iter.next() orelse break;
+			while (pos > 0 and !boundary(bytes[pos])) {
+				pos -= prevCodepoint(bytes, pos);
 			}
 		}
-		while (isWhitespace(c)) : (pos -= 1) {
-			c = iter.next() orelse break;
+		while (pos > 0 and isWhitespace(bytes[pos])) {
+			pos -= prevCodepoint(bytes, pos);
 		}
 
 		return pos;
@@ -560,3 +554,134 @@ pub const Motion = enum {
 		};
 	}
 };
+
+test "Text Input" {
+	const t = std.testing;
+
+	const testInput = struct {
+		fn func(
+			comptime size: usize,
+			input: []const u8,
+			status: std.meta.Tag(TextInput(size).Status),
+		) !TextInput(size).Status {
+			var buf = TextInput(size){};
+			const ret = buf.handleInput(input);
+			try t.expectEqual(status, ret);
+			return ret;
+		}
+	}.func;
+
+	var r = try testInput(1, "this is epic\n", .string);
+	try t.expectEqualStrings("t", r.string.slice());
+
+	_ = try testInput(1024, "hmmm", .waiting);
+	_ = try testInput(1, "hmmmmmm", .waiting);
+	_ = try testInput(1, "hmmmmmm\x1b\x1b", .cancelled);
+}
+
+test "Cursor Movements" {
+	const t = std.testing;
+
+	const T = TextInput(1024);
+	var buf = T{};
+
+	try t.expectEqual(@as(u16, 0), buf.cursor);
+	try t.expectEqual(T.Status.waiting, buf.handleInput("filler text\x1b"));
+	try t.expectEqual(@intCast(u16, buf.buf.len - 1), buf.cursor);
+	try t.expectEqual(T.Status.waiting, buf.handleInput("llllll"));
+	try t.expectEqual(@intCast(u16, buf.buf.len - 1), buf.cursor);
+	try t.expectEqual(T.Status.waiting, buf.handleInput("0"));
+	try t.expectEqual(@as(u16, 0), buf.cursor);
+	try t.expectEqual(T.Status.waiting, buf.handleInput("$"));
+	try t.expectEqual(@intCast(u16, buf.buf.len - 1), buf.cursor);
+	try t.expectEqual(T.Status.waiting, buf.handleInput("0"));
+	try t.expectEqual(@as(u16, 0), buf.cursor);
+	try t.expectEqual(T.Status.waiting, buf.handleInput("h"));
+	try t.expectEqual(@as(u16, 0), buf.cursor);
+	try t.expectEqual(T.Status.waiting, buf.handleInput("hhhhh"));
+	try t.expectEqual(@as(u16, 0), buf.cursor);
+	try t.expectEqual(T.Status.waiting, buf.handleInput("ll"));
+	try t.expectEqual(@as(u16, 2), buf.cursor);
+	try t.expectEqual(T.Status.waiting, buf.handleInput("lll"));
+	try t.expectEqual(@as(u16, 5), buf.cursor);
+	try t.expectEqual(T.Status.waiting, buf.handleInput("h"));
+	try t.expectEqual(@as(u16, 4), buf.cursor);
+	try t.expectEqual(T.Status.waiting, buf.handleInput("h"));
+	try t.expectEqual(@as(u16, 3), buf.cursor);
+	try t.expectEqual(T.Status.waiting, buf.handleInput("hh"));
+	try t.expectEqual(@as(u16, 1), buf.cursor);
+
+	try t.expectEqual(T.Status.waiting, buf.handleInput("0w"));
+	try t.expectEqual("filler ".len, buf.cursor);
+	try t.expectEqual(T.Status.waiting, buf.handleInput("w"));
+	try t.expectEqual("filler text".len - 1, buf.cursor);
+}
+
+test "Motions" {
+	const t = std.testing;
+	var buf = TextInput(1024){};
+
+	_ = buf.handleInput("漢字漢字");
+	try t.expectEqual("漢字漢字".len, buf.cursor);
+	_ = buf.handleInput("\x1b");
+	try t.expectEqual("漢字漢".len, buf.cursor);
+	_ = buf.handleInput("hh");
+	try t.expectEqual("漢".len, buf.cursor);
+	_ = buf.handleInput("h");
+	try t.expectEqual(@as(u16, 0), buf.cursor);
+	_ = buf.handleInput("e");
+	try t.expectEqual("漢字漢".len, buf.cursor);
+	_ = buf.handleInput("b");
+	try t.expectEqual(@as(u16, 0), buf.cursor);
+	_ = buf.handleInput("w");
+	try t.expectEqual("漢字漢".len, buf.cursor);
+	_ = buf.handleInput("0");
+	try t.expectEqual(@as(u16, 0), buf.cursor);
+	_ = buf.handleInput("$");
+	try t.expectEqual("漢字漢".len, buf.cursor);
+	_ = buf.handleInput("i\x06");
+	try t.expectEqual("漢字漢字".len, buf.cursor);
+
+	_ = buf.handleInput("\x1b");
+	_ = buf.handleInput("ccthis 漢字is epic");
+	try t.expectEqual("this 漢字is epic".len, buf.cursor);
+	_ = buf.handleInput("\x1b");
+	try t.expectEqual("this 漢字is epi".len, buf.cursor);
+	_ = buf.handleInput("b");
+	try t.expectEqual("this 漢字is ".len, buf.cursor);
+	_ = buf.handleInput("b");
+	try t.expectEqual("this ".len, buf.cursor);
+	_ = buf.handleInput("b");
+	try t.expectEqual(@as(u16, 0), buf.cursor);
+	_ = buf.handleInput("e");
+	try t.expectEqual("thi".len, buf.cursor);
+	_ = buf.handleInput("e");
+	try t.expectEqual("this 漢字i".len, buf.cursor);
+	_ = buf.handleInput("e");
+	try t.expectEqual("this 漢字is epi".len, buf.cursor);
+
+	// Alt-e
+	_ = buf.handleInput("\x1be");
+	try t.expectEqual("this 漢字i".len, buf.cursor);
+	_ = buf.handleInput("\x1be");
+	try t.expectEqual("thi".len, buf.cursor);
+	_ = buf.handleInput("\x1be");
+	try t.expectEqual(@as(u16, 0), buf.cursor);
+
+	// Inserting and deleting text
+	_ = buf.handleInput("wl");
+	try t.expectEqual("this 漢".len, buf.cursor);
+	_ = buf.handleInput("itest");
+	try t.expectEqual("this 漢test".len, buf.cursor);
+	_ = buf.handleInput("\x06"); // Ctrl-f
+	try t.expectEqual("this 漢test字".len, buf.cursor);
+	try t.expectEqualStrings("this 漢test字", buf.slice()[0..buf.cursor]);
+	_ = buf.handleInput("\x02\x7f\x7f\x7f\x7f"); // Ctrl-b, delete 4 times
+	try t.expectEqual("this 漢".len, buf.cursor);
+	_ = buf.handleInput("漢字");
+	try t.expectEqual("this 漢漢字".len, buf.cursor);
+	_ = buf.handleInput("\x7f"); // Delete
+	try t.expectEqual("this 漢漢".len, buf.cursor);
+	_ = buf.handleInput("\x06"); // Ctrl-f
+	try t.expectEqualStrings("this 漢漢字", buf.slice()[0..buf.cursor]);
+}
