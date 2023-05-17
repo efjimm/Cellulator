@@ -65,6 +65,17 @@ pub fn TextInput(comptime size: u16) type {
 
 		fn doNormalMode(self: *Self, in: spoon.Input) Status {
 			if (in.mod_ctrl) switch (in.content) {
+				.codepoint => |cp| switch (cp) {
+					'[' => {
+						if (self.pending_operation == .move) {
+							self.reset();
+							return .cancelled;
+						} else {
+							self.pending_operation = .move;
+						}
+					},
+					else => {},
+				},
 				else => {},
 			} else if (in.mod_alt) switch (in.content) {
 				.codepoint => |cp| switch (cp) {
@@ -148,6 +159,7 @@ pub fn TextInput(comptime size: u16) type {
 		fn doInsertMode(self: *Self, in: spoon.Input) Status {
 			if (in.mod_ctrl) switch (in.content) {
 				.codepoint => |cp| switch (cp) {
+					'[' => self.setMode(.normal),
 					'j', 'm', '\r', '\n' => return .{ .string = self.finish() },
 					'h', 127 => self.backspace(),
 					'f' => self.doMotion(.char_next),

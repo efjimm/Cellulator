@@ -144,7 +144,15 @@ fn doNormalMode(self: *Self, buf: []const u8) !void {
 	var iter = spoon.inputParser(buf);
 
 	while (iter.next()) |in| {
-		if (!in.mod_ctrl)  switch (in.content) {
+		if (in.mod_ctrl) switch (in.content) {
+			.codepoint => |cp| switch (cp) {
+				// Ctrl-[, registered as escape on most terminals. We make it do the same as escape
+				// for consistency across terminals.
+				'[' => self.dismissStatusMessage(),
+				else => {},
+			},
+			else => {},
+		} else if (!in.mod_ctrl)  switch (in.content) {
 			.escape      => self.dismissStatusMessage(),
 			.arrow_up    => self.setCursor(.{ .y = self.cursor.y -| 1, .x = self.cursor.x }),
 			.arrow_down  => self.setCursor(.{ .y = self.cursor.y +| 1, .x = self.cursor.x }),
