@@ -66,7 +66,10 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
 	try rc.hideCursor();
 
 	if (self.term.width < 15 or self.term.height < 5) {
+		try rc.clear();
+		try rc.moveCursorTo(0, 0);
 		try rc.writeAllWrapping("Terminal too small");
+		try rc.done();
 		return;
 	}
 
