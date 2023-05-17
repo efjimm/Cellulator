@@ -58,6 +58,7 @@ pub const RenderError = Term.WriteError;
 pub fn render(self: *Self, zc: *ZC) RenderError!void {
 	if (needs_resize) {
 		try self.term.fetchSize();
+		zc.clampScreenToCursor();
 		self.update = .{};
 		needs_resize = false;
 	}
