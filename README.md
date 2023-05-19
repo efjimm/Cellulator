@@ -33,10 +33,17 @@ using Cellulator, build it in ReleaseSafe mode to catch any latent bugs.
 
 ## Modes
 
-Cellulator used mode-based input, like in vim. There are 3 modes in Cellulator: normal, command
-normal, and command insert. Normal mode allows you to move around the sheet using vim-like motions
-and perform various operations. Command normal and command insert mode allow for editing the
-command buffer and submitting commands.
+Cellulator used mode-based input, like in vim. There are multiple modes in Cellulator:
+
+ - normal
+ - command normal
+ - command insert
+ - command operator pending
+
+Normal mode allows you to move around the sheet using vim-like motions and perform various
+operations. Command normal and command insert mode allow for editing the command buffer and
+submitting commands. Command operator pending modes perform a specific action on a range of text
+delimited by an inputted motion.
 
 ## Expressions
 
@@ -88,11 +95,11 @@ implemented commands. Values surrounded in {} are optional.
 - `:` Enter command insert mode
 - `=` Enter command insert mode, with text set to `cellname = `, where cellname is the cell under the
   cursor
-- `D`, `x` Delete the cell under the cursor
+- `dd`, `x` Delete the cell under the cursor
 - `Esc` Dismiss status message
 - `0` Move cursor to the first populated cell on the current row
 - `$` Move cursor to the last populated cell on the current row
-- `g` Move cursor to the first cell in the current column
+- `gg` Move cursor to the first cell in the current column
 - `G` Move cursor to the last cell in the current column
 - `w` Move cursor to the next populated cell
 - `b` Move cursor to the previous populated cell
@@ -123,8 +130,8 @@ implemented commands. Values surrounded in {} are optional.
 - `s` Delete the character under the cursor and enters command insert mode
 - `S` Deletes all text and enters command insert mode
 - `x` Delete the character under the cursor
-- `d` Deletes the text delimited by the next inputted motion, or nothing if Escape is pressed
-- `c` Deletes the text delimited by the next inputted motion and enters command insert mode
+- `d` Enter operator pending mode, with deletion as the operator action
+- `c` Enter operator pending mode, with change (delete and enter insert mode) as the operator action
 - `D` Deletes all text at and after the cursor
 - `C` Deletes all text at and after the cursor, and enters command insert mode
 - `w` Moves cursor to the start of the next word
@@ -138,8 +145,32 @@ implemented commands. Values surrounded in {} are optional.
 - `0`, `Home` Move cursor to the beginning of the line
 - `$`, `End` Move cursor to the end of the line
 
+### Command Operator Pending Mode
+
+Performs the given operation on the text delimited by the next motion
+
+- All motions in command normal mode
+- `iw` Inside word
+- `aw` Around word
+- `iW` Inside WORD
+- `aW` Around WORD
+- `i(`, `i)` Inside parentheses
+- `a(`, `a)` Around parentheses
+- `i[`, `i]` Inside brackets
+- `a[`, `a]` Around brackets
+- `i{`, `i}` Inside braces
+- `a{`, `a}` Around braces
+- `i<`, `i>` Inside angle brackets
+- `a<`, `a>` Around angle brackets
+- `i"` Inside double quotes
+- `a"` Around double quotes
+- `i'` Inside single quotes
+- `a'` Around single quotes
+- `` i` `` Inside backticks
+- `` a` `` Around backticks
+
 ## Miscellaneous Notes
 
 Cellulator does not require any heap allocation for running the TUI, handling input, handling
 commands or saving to a file. This means that Cellulator *should* continue to function on OOM and
-allow for saving the current file, though this is all relatively untested.
+allow for saving the current file, though this is relatively untested.
