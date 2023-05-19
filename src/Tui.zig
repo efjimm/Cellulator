@@ -170,6 +170,7 @@ pub fn renderCommandLine(
 		switch (zc.command_buf.mode) {
 			.normal => try rc.setCursorShape(.block),
 			.insert => try rc.setCursorShape(.bar),
+			.operator_pending => try rc.setCursorShape(.underline),
 		}
 		try rc.showCursor();
 	} else {

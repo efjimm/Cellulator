@@ -7,8 +7,34 @@ const wcWidth = @import("wcwidth").wcWidth;
 const inputParser = spoon.inputParser;
 const assert = std.debug.assert;
 const isWhitespace = std.ascii.isWhitespace;
+const log = std.log.scoped(.text_input);
 
-/// A wrapper around a buffer that provides cli editing functions. Backed by a fixed size buf.
+pub const Action = union(enum) {
+	submit_command,
+	enter_normal_mode,
+
+	enter_insert_mode,
+	enter_insert_mode_after,
+	enter_insert_mode_at_eol,
+	enter_insert_mode_at_bol,
+
+	backspace,
+	delete_char,
+	change_to_eol,
+	delete_to_eol,
+	change_char,
+	change_line,
+	backwards_delete_word,
+
+	operator_delete,
+	operator_change,
+
+	insert: []const u8,
+
+	motion: Motion,
+};
+
+/// A wrapper around a buffer that provides cli editing functions. Backed by a fixed size buffer.
 pub fn TextInput(comptime size: u16) type {
 	return struct {
 		const Self = @This();
@@ -26,14 +52,14 @@ pub fn TextInput(comptime size: u16) type {
 			string: Array,
 		};
 
-		pub const Mode = enum {
+		pub const Mode = union(enum) {
 			normal,
 			insert,
+			operator_pending: Operator,
 		};
 
 		/// Determines what happens when a motion is done.
-		pub const Operation = enum {
-			move,
+		pub const Operator = enum {
 			change,
 			delete,
 		};
@@ -44,166 +70,104 @@ pub fn TextInput(comptime size: u16) type {
 		buf: Array = .{},
 		mode: Mode = .insert,
 		cursor: u16 = 0,
-		pending_operation: Operation = .move,
 
-		/// Parses the input contained in `buf` and acts accordingly. Returns a tagged union
-		/// representing whether we are finished gathering input or not.
-		pub fn handleInput(self: *Self, buf: []const u8) Status {
-			var iter = inputParser(buf);
-
-			while (iter.next()) |in| {
-				const status = switch (self.mode) {
-					.normal => self.doNormalMode(in),
-					.insert => self.doInsertMode(in),
-				};
-				if (status != .waiting)
-					return status;
-			}
-
-			return .waiting;
-		}
-
-		fn doNormalMode(self: *Self, in: spoon.Input) Status {
-			if (in.mod_ctrl) switch (in.content) {
-				.codepoint => |cp| switch (cp) {
-					'[' => {
-						if (self.pending_operation == .move) {
-							self.reset();
-							return .cancelled;
-						} else {
-							self.pending_operation = .move;
-						}
-					},
-					else => {},
-				},
-				else => {},
-			} else if (in.mod_alt) switch (in.content) {
-				.codepoint => |cp| switch (cp) {
-					'j', 'm', '\r', '\n' => return .{ .string = self.finish() },
-					'e' => self.doMotion(.normal_word_end_prev),
-					'E' => self.doMotion(.long_word_end_prev),
-					else => {},
-				},
-				else => {},
-			} else switch (in.content) {
-				.escape => {
-					if (self.pending_operation == .move) {
+		pub fn do(self: *Self, action: Action) Status {
+			switch (self.mode) {
+				.normal => switch (action) {
+					.submit_command => return .{ .string = self.finish() },
+					.enter_normal_mode => {
 						self.reset();
 						return .cancelled;
-					} else {
-						self.pending_operation = .move;
-					}
-				},
-				.arrow_left  => self.doMotion(.char_prev),
-				.arrow_right => self.doMotion(.char_next),
-				.home => self.doMotion(.bol),
-				.end => self.doMotion(.eol),
-				.codepoint => |cp| switch (cp) {
-					'\r', '\n' => return .{ .string = self.finish() },
-					'x' => self.delChar(),
-					'S' => self.reset(),
-					'l' => self.doMotion(.char_next),
-					'h' => self.doMotion(.char_prev),
-					'$' => self.doMotion(.eol),
-					'0' => self.doMotion(.bol),
-					'w' => self.doMotion(.normal_word_start_next),
-					'W' => self.doMotion(.long_word_start_next),
-					'e' => self.doMotion(.normal_word_end_next),
-					'E' => self.doMotion(.long_word_end_next),
-					'b' => self.doMotion(.normal_word_start_prev),
-					'B' => self.doMotion(.long_word_start_prev),
-					'c' => {
-						if (self.pending_operation == .change) {
-							self.doMotion(.line);
-						} else {
-							self.pending_operation = .change;
-						}
 					},
-					'C' => {
-						self.buf.len = self.cursor;
-						self.mode = .insert;
-					},
-					'd' => {
-						if (self.pending_operation == .delete) {
-							self.doMotion(.line);
-						} else {
-							self.pending_operation = .delete;
-						}
-					},
-					'D' => self.buf.len = self.cursor,
-					's' => {
-						self.delChar();
-						self.mode = .insert;
-					},
-					'i' => self.setMode(.insert),
-					'I' => {
-						self.setMode(.insert);
-						self.doMotion(.bol);
-					},
-					'a' => {
+					.enter_insert_mode => self.setMode(.insert),
+					.enter_insert_mode_after => {
 						self.setMode(.insert);
 						self.doMotion(.char_next);
 					},
-					'A' => {
+					.enter_insert_mode_at_eol => {
 						self.setMode(.insert);
 						self.doMotion(.eol);
 					},
+					.enter_insert_mode_at_bol => {
+						self.setMode(.insert);
+						self.doMotion(.bol);
+					},
+					.operator_delete => self.setOperator(.delete),
+					.operator_change => self.setOperator(.change),
+
+					.delete_char => self.delChar(),
+					.change_to_eol => {
+						self.buf.len = self.cursor;
+						self.setMode(.insert);
+					},
+					.delete_to_eol => {
+						self.buf.len = self.cursor;
+					},
+					.change_char => {
+						self.delChar();
+						self.mode = .insert;
+					},
+					.change_line => self.reset(),
+
+					.motion => |motion| {
+						const range = motion.do(self.slice(), self.cursor);
+						self.cursor = if (range.start == self.cursor) range.end else range.start;
+						self.clampCursor();
+					},
 					else => {},
 				},
-				else => {},
+				.insert => switch (action) {
+					.insert => |buf| {
+						assert(buf.len > 0);
+						switch (buf[0]) {
+							0...31 => {},
+							else => {
+								self.buf.insertSlice(self.cursor, buf) catch return .waiting;
+								self.cursor += @intCast(u16, buf.len);
+							},
+						}
+					},
+					.backspace => self.backspace(),
+					.submit_command => return .{ .string = self.finish() },
+					.enter_normal_mode => self.setMode(.normal),
+					.backwards_delete_word => {
+						self.mode = .{ .operator_pending = .change };
+						_ = self.do(.{ .motion = .normal_word_start_prev });
+					},
+					.change_line => self.reset(),
+					.motion => |motion| {
+						const range = motion.do(self.slice(), self.cursor);
+						self.cursor = if (range.start == self.cursor) range.end else range.start;
+					},
+					else => {},
+				},
+				.operator_pending => |op| switch (op) {
+					.delete => switch (action) {
+						.enter_normal_mode => self.setMode(.normal),
+						.operator_delete => self.doMotion(.line),
+						.motion => |motion| self.doMotion(motion),
+						else => {},
+					},
+					.change => switch (action) {
+						.enter_normal_mode => self.setMode(.normal),
+						.operator_change => self.doMotion(.line),
+						.motion => |motion| self.doMotion(motion),
+						else => {},
+					},
+				},
 			}
-
 			return .waiting;
 		}
 
-		fn doInsertMode(self: *Self, in: spoon.Input) Status {
-			if (in.mod_ctrl) switch (in.content) {
-				.codepoint => |cp| switch (cp) {
-					'[' => self.setMode(.normal),
-					'j', 'm', '\r', '\n' => return .{ .string = self.finish() },
-					'h', 127 => self.backspace(),
-					'f' => self.doMotion(.char_next),
-					'b' => self.doMotion(.char_prev),
-					'a' => self.doMotion(.bol),
-					'e' => self.doMotion(.eol),
-					'w' => {
-						self.pending_operation = .change;
-						self.doMotion(.normal_word_start_prev);
-					},
-					'u' => self.reset(),
-					else => {},
-				},
-				else => {},
-			} else switch (in.content) {
-				.escape => self.setMode(.normal),
-				.arrow_left => self.doMotion(.char_prev),
-				.arrow_right => self.doMotion(.char_next),
-				.home => self.doMotion(.bol),
-				.end => self.doMotion(.eol),
-				.codepoint => |cp| switch (cp) {
-					'\n', '\r' => return .{ .string = self.finish() },
-					127 => self.backspace(),
-
-					// ignore control codes
-					0...'\n'-1, '\n'+1...'\r'-1, '\r'+1...31 => {},
-
-					else => {
-						var buf: [8]u8 = undefined;
-						const length = std.unicode.utf8Encode(cp, &buf) catch return .waiting;
-
-						self.buf.insertSlice(self.cursor, buf[0..length]) catch return .waiting;
-						self.cursor += length;
-					},
-				},
-				else => {},
-			}
-
-			return .waiting;
+		pub fn setOperator(self: *Self, operator: Operator) void {
+			self.mode = .{
+				.operator_pending = operator,
+			};
 		}
 
 		fn doMotion(self: *Self, motion: Motion) void {
-			switch (self.pending_operation) {
-				.move => {
+			switch (self.mode) {
+				.normal, .insert => {
 					const range = motion.do(self.slice(), self.cursor);
 					self.cursor = if (range.start == self.cursor)
 							range.end
@@ -211,33 +175,35 @@ pub fn TextInput(comptime size: u16) type {
 							range.start;
 						
 				},
-				.change => {
-					const m = switch (motion) {
-						.normal_word_start_next => .normal_word_end_next,
-						.long_word_start_next => .long_word_end_next,
-						else => motion,
-					};
+				.operator_pending => |op| switch (op) {
+					.change => {
+						const m = switch (motion) {
+							.normal_word_start_next => .normal_word_end_next,
+							.long_word_start_next => .long_word_end_next,
+							else => motion,
+						};
 
-					const range = m.do(self.slice(), self.cursor);
-					const start = range.start;
-					const end = range.end + switch (m) {
-						.normal_word_end_next,
-						.long_word_end_next,
-							=> nextCharacter(self.slice(), range.end),
-						else => 0,
-					};
+						const range = m.do(self.slice(), self.cursor);
+						const start = range.start;
+						const end = range.end + switch (m) {
+							.normal_word_end_next,
+							.long_word_end_next,
+								=> nextCharacter(self.slice(), range.end),
+							else => 0,
+						};
 
-					self.buf.replaceRange(start, end - start, &.{}) catch unreachable;
+						assert(end >= start);
+						self.buf.replaceRange(start, end - start, &.{}) catch unreachable;
 
-					self.cursor = start;
-					self.mode = .insert;
-					self.pending_operation = .move;
-				},
-				.delete => {
-					const range = motion.do(self.buf.slice(), self.cursor);
-					self.buf.replaceRange(range.start, range.end - range.start, &.{}) catch unreachable;
-					self.cursor = range.start;
-					self.pending_operation = .move;
+						self.cursor = start;
+						self.setMode(.insert);
+					},
+					.delete => {
+						const range = motion.do(self.slice(), self.cursor);
+						self.buf.replaceRange(range.start, range.len(), &.{}) catch unreachable;
+						self.cursor = range.start;
+						self.setMode(.normal);
+					},
 				},
 			}
 			self.clampCursor();
@@ -265,13 +231,14 @@ pub fn TextInput(comptime size: u16) type {
 		}
 
 		fn backspace(self: *Self) void {
-			self.pending_operation = .change;
-			self.doMotion(.char_prev);
+			self.mode = .{ .operator_pending = .change };
+			_ = self.do(.{ .motion = .char_prev });
 		}
 
 		fn setMode(self: *Self, mode: Mode) void {
 			if (mode == .normal and self.cursor == self.buf.len) {
-				self.cursor = Motion.char_prev.do(self.slice(), self.len()).start;
+				const m: Motion = .char_prev;
+				self.cursor = m.do(self.slice(), self.len()).start;
 			}
 			self.mode = mode;
 		}
@@ -374,7 +341,15 @@ fn prevCharacter(bytes: []const u8, offset: u16) u16 {
 	return offset - i;
 }
 
-pub const Motion = enum {
+pub const Motion = union(enum) {
+	normal_word_inside,
+	long_word_inside,
+	normal_word_around,
+	long_word_around,
+
+	inside_delimiters: Delimiters,
+	around_delimiters: Delimiters,
+
 	normal_word_start_next,
 	normal_word_start_prev,
 	normal_word_end_next,
@@ -394,9 +369,18 @@ pub const Motion = enum {
 		long,
 	};
 
+	pub const Delimiters = struct {
+		left: []const u8,
+		right: []const u8,
+	};
+
 	pub const Range = struct {
 		start: u16,
 		end: u16,
+
+		pub inline fn len(range: Range) u16 {
+			return range.end - range.start;
+		}
 	};
 
 	pub fn do(motion: Motion, bytes: []const u8, pos: u16) Range {
@@ -453,6 +437,13 @@ pub const Motion = enum {
 				.start = 0,
 				.end = pos,
 			},
+			.normal_word_inside => insideWord(bytes, .normal, pos),
+			.long_word_inside => insideWord(bytes, .long, pos),
+			.normal_word_around => aroundWord(bytes, .normal, pos),
+			.long_word_around => aroundWord(bytes, .long, pos),
+
+			.inside_delimiters => |d| insideDelimiters(bytes, d.left, d.right, pos),
+			.around_delimiters => |d| aroundDelimiters(bytes, d.left, d.right, pos),
 		};
 	}
 
@@ -555,6 +546,152 @@ pub const Motion = enum {
 		return pos;
 	}
 
+	fn insideWord(bytes: []const u8, comptime word_type: WordType, pos: u16) Range {
+		if (bytes.len == 0) return .{ .start = 0, .end = 0 };
+
+		var iter = std.mem.reverseIterator(bytes[0..pos]);
+		var start: u16 = pos;
+		var end: u16 = pos;
+
+		const boundary = wordBoundaryFn(word_type);
+
+		if (!boundary(bytes[pos])) {
+			while (iter.next()) |c| : (start -= 1) {
+				if (boundary(c)) break;
+			}
+
+			for (bytes[pos..]) |c| {
+				if (boundary(c)) break;
+				end += 1;
+			}
+		} else {
+			while (iter.next()) |c| : (start -= 1) {
+				if (!boundary(c)) break;
+			}
+
+			for (bytes[pos..]) |c| {
+				if (!boundary(c)) break;
+				end += 1;
+			}
+		}
+
+		return .{
+			.start = start,
+			.end = end,
+		};
+	}
+
+	fn aroundWord(bytes: []const u8, comptime word_type: WordType, pos: u16) Range {
+		if (bytes.len == 0) return .{ .start = 0, .end = 0 };
+
+		var iter = std.mem.reverseIterator(bytes[0..pos]);
+		var start: u16 = pos;
+		var end: u16 = pos;
+
+		const boundary = wordBoundaryFn(word_type);
+
+		if (!boundary(bytes[pos])) {
+			while (iter.next()) |c| : (start -= 1) {
+				if (boundary(c)) break;
+			}
+
+			for (bytes[pos..]) |c| {
+				if (boundary(c)) break;
+				end += 1;
+			}
+
+			if (end < bytes.len) {
+				for (bytes[end..]) |c| {
+					if (!boundary(c)) break;
+					end += 1;
+				}
+			}
+		} else {
+			while (iter.next()) |c| : (start -= 1) {
+				if (!boundary(c)) break;
+			}
+
+			for (bytes[pos..]) |c| {
+				if (!boundary(c)) break;
+				end += 1;
+			}
+
+			if (end < bytes.len) {
+				for (bytes[end..]) |c| {
+					if (boundary(c)) break;
+					end += 1;
+				}
+			}
+		}
+
+		return .{
+			.start = start,
+			.end = end,
+		};
+	}
+
+	fn insideDelimiters(bytes: []const u8, left: []const u8, right: []const u8, pos: u16) Range {
+		if (bytes.len == 0) return .{ .start = 0, .end = 0 };
+
+		var ret = aroundDelimiters(bytes, left, right, pos);
+		if (ret.start == ret.end) return ret;
+		ret.start += 1;
+		ret.end -= 1;
+		return ret;
+	}
+
+	// TODO: this is pretty inefficient
+	fn aroundDelimiters(bytes: []const u8, left: []const u8, right: []const u8, pos: u16) Range {
+		assert(left.len > 0);
+		assert(right.len > 0);
+
+		if (bytes.len == 0) return .{ .start = 0, .end = 0 };
+
+		assert(pos < bytes.len);
+
+
+		var i = pos;
+		var depth: i32 = if (std.mem.startsWith(u8, bytes[pos..], right)) -1 else 0;
+		while (true) : (i -= 1) {
+			if (std.mem.startsWith(u8, bytes[i..], left)) {
+				if (depth == 0) break;
+				depth -= 1;
+			} else if (std.mem.startsWith(u8, bytes[i..], right)) {
+				depth += 1;
+			}
+
+			if (i == 0) return .{
+				.start = pos,
+				.end = pos,
+			};
+		}
+
+		var j = pos;
+		depth = if (std.mem.startsWith(u8, bytes[pos..], left)) -1 else 0;
+
+		while (j < bytes.len) : (j += 1) {
+			if (std.mem.startsWith(u8, bytes[j..], right)) {
+				if (depth == 0) {
+					j += @intCast(u16, right.len);
+					break;
+				}
+				depth -= 1;
+			} else if (std.mem.startsWith(u8, bytes[j..], left)) {
+				depth += 1;
+			}
+		} else return .{
+			.start = pos,
+			.end = pos,
+		};
+
+		assert(i <= j);
+
+		return .{
+			.start = i,
+			.end = j,
+		};
+	}
+
 	fn wordBoundaryFn(comptime word_type: WordType) (fn (u8) bool) {
 		return switch (word_type) {
 			.normal => struct {
@@ -566,134 +703,3 @@ pub const Motion = enum {
 		};
 	}
 };
-
-test "Text Input" {
-	const t = std.testing;
-
-	const testInput = struct {
-		fn func(
-			comptime size: usize,
-			input: []const u8,
-			status: std.meta.Tag(TextInput(size).Status),
-		) !TextInput(size).Status {
-			var buf = TextInput(size){};
-			const ret = buf.handleInput(input);
-			try t.expectEqual(status, ret);
-			return ret;
-		}
-	}.func;
-
-	var r = try testInput(1, "this is epic\n", .string);
-	try t.expectEqualStrings("t", r.string.slice());
-
-	_ = try testInput(1024, "hmmm", .waiting);
-	_ = try testInput(1, "hmmmmmm", .waiting);
-	_ = try testInput(1, "hmmmmmm\x1b\x1b", .cancelled);
-}
-
-test "Cursor Movements" {
-	const t = std.testing;
-
-	const T = TextInput(1024);
-	var buf = T{};
-
-	try t.expectEqual(@as(u16, 0), buf.cursor);
-	try t.expectEqual(T.Status.waiting, buf.handleInput("filler text\x1b"));
-	try t.expectEqual(@intCast(u16, buf.buf.len - 1), buf.cursor);
-	try t.expectEqual(T.Status.waiting, buf.handleInput("llllll"));
-	try t.expectEqual(@intCast(u16, buf.buf.len - 1), buf.cursor);
-	try t.expectEqual(T.Status.waiting, buf.handleInput("0"));
-	try t.expectEqual(@as(u16, 0), buf.cursor);
-	try t.expectEqual(T.Status.waiting, buf.handleInput("$"));
-	try t.expectEqual(@intCast(u16, buf.buf.len - 1), buf.cursor);
-	try t.expectEqual(T.Status.waiting, buf.handleInput("0"));
-	try t.expectEqual(@as(u16, 0), buf.cursor);
-	try t.expectEqual(T.Status.waiting, buf.handleInput("h"));
-	try t.expectEqual(@as(u16, 0), buf.cursor);
-	try t.expectEqual(T.Status.waiting, buf.handleInput("hhhhh"));
-	try t.expectEqual(@as(u16, 0), buf.cursor);
-	try t.expectEqual(T.Status.waiting, buf.handleInput("ll"));
-	try t.expectEqual(@as(u16, 2), buf.cursor);
-	try t.expectEqual(T.Status.waiting, buf.handleInput("lll"));
-	try t.expectEqual(@as(u16, 5), buf.cursor);
-	try t.expectEqual(T.Status.waiting, buf.handleInput("h"));
-	try t.expectEqual(@as(u16, 4), buf.cursor);
-	try t.expectEqual(T.Status.waiting, buf.handleInput("h"));
-	try t.expectEqual(@as(u16, 3), buf.cursor);
-	try t.expectEqual(T.Status.waiting, buf.handleInput("hh"));
-	try t.expectEqual(@as(u16, 1), buf.cursor);
-
-	try t.expectEqual(T.Status.waiting, buf.handleInput("0w"));
-	try t.expectEqual("filler ".len, buf.cursor);
-	try t.expectEqual(T.Status.waiting, buf.handleInput("w"));
-	try t.expectEqual("filler text".len - 1, buf.cursor);
-}
-
-test "Motions" {
-	const t = std.testing;
-	var buf = TextInput(1024){};
-
-	_ = buf.handleInput("漢字漢字");
-	try t.expectEqual("漢字漢字".len, buf.cursor);
-	_ = buf.handleInput("\x1b");
-	try t.expectEqual("漢字漢".len, buf.cursor);
-	_ = buf.handleInput("hh");
-	try t.expectEqual("漢".len, buf.cursor);
-	_ = buf.handleInput("h");
-	try t.expectEqual(@as(u16, 0), buf.cursor);
-	_ = buf.handleInput("e");
-	try t.expectEqual("漢字漢".len, buf.cursor);
-	_ = buf.handleInput("b");
-	try t.expectEqual(@as(u16, 0), buf.cursor);
-	_ = buf.handleInput("w");
-	try t.expectEqual("漢字漢".len, buf.cursor);
-	_ = buf.handleInput("0");
-	try t.expectEqual(@as(u16, 0), buf.cursor);
-	_ = buf.handleInput("$");
-	try t.expectEqual("漢字漢".len, buf.cursor);
-	_ = buf.handleInput("i\x06");
-	try t.expectEqual("漢字漢字".len, buf.cursor);
-
-	_ = buf.handleInput("\x1b");
-	_ = buf.handleInput("ccthis 漢字is epic");
-	try t.expectEqual("this 漢字is epic".len, buf.cursor);
-	_ = buf.handleInput("\x1b");
-	try t.expectEqual("this 漢字is epi".len, buf.cursor);
-	_ = buf.handleInput("b");
-	try t.expectEqual("this 漢字is ".len, buf.cursor);
-	_ = buf.handleInput("b");
-	try t.expectEqual("this ".len, buf.cursor);
-	_ = buf.handleInput("b");
-	try t.expectEqual(@as(u16, 0), buf.cursor);
-	_ = buf.handleInput("e");
-	try t.expectEqual("thi".len, buf.cursor);
-	_ = buf.handleInput("e");
-	try t.expectEqual("this 漢字i".len, buf.cursor);
-	_ = buf.handleInput("e");
-	try t.expectEqual("this 漢字is epi".len, buf.cursor);
-
-	// Alt-e
-	_ = buf.handleInput("\x1be");
-	try t.expectEqual("this 漢字i".len, buf.cursor);
-	_ = buf.handleInput("\x1be");
-	try t.expectEqual("thi".len, buf.cursor);
-	_ = buf.handleInput("\x1be");
-	try t.expectEqual(@as(u16, 0), buf.cursor);
-
-	// Inserting and deleting text
-	_ = buf.handleInput("wl");
-	try t.expectEqual("this 漢".len, buf.cursor);
-	_ = buf.handleInput("itest");
-	try t.expectEqual("this 漢test".len, buf.cursor);
-	_ = buf.handleInput("\x06"); // Ctrl-f
-	try t.expectEqual("this 漢test字".len, buf.cursor);
-	try t.expectEqualStrings("this 漢test字", buf.slice()[0..buf.cursor]);
-	_ = buf.handleInput("\x02\x7f\x7f\x7f\x7f"); // Ctrl-b, delete 4 times
-	try t.expectEqual("this 漢".len, buf.cursor);
-	_ = buf.handleInput("漢字");
-	try t.expectEqual("this 漢漢字".len, buf.cursor);
-	_ = buf.handleInput("\x7f"); // Delete
-	try t.expectEqual("this 漢漢".len, buf.cursor);
-	_ = buf.handleInput("\x06"); // Ctrl-f
-	try t.expectEqualStrings("this 漢漢字", buf.slice()[0..buf.cursor]);
-}

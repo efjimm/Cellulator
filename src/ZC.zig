@@ -4,7 +4,9 @@ const Ast = @import("Parse.zig");
 const spoon = @import("spoon");
 const Sheet = @import("Sheet.zig");
 const Tui = @import("Tui.zig");
+const CommandAction = @import("text_input.zig").Action;
 const TextInput = @import("text_input.zig").TextInput;
+const critbit = @import("critbit.zig");
 
 const Position = Sheet.Position;
 const Allocator = std.mem.Allocator;
@@ -29,8 +31,14 @@ running: bool = true,
 
 asts: std.ArrayListUnmanaged(Ast) = .{},
 
+normal_keys: KeyMap,
+command_normal_keys: CommandKeyMap,
+command_insert_keys: CommandKeyMap,
+command_operator_keys: CommandKeyMap,
+
 allocator: Allocator,
 
+input_buf: std.BoundedArray(u8, 64) = .{},
 command_buf: TextInput(512) = .{},
 status_message: std.BoundedArray(u8, 256) = .{},
 
@@ -38,6 +46,9 @@ pub const status_line = 0;
 pub const input_line = 1;
 pub const col_heading_line = 2;
 pub const content_line = 3;
+
+const KeyMap = critbit.CritBitMap([]const u8, Action, critbit.StringContext);
+const CommandKeyMap = critbit.CritBitMap([]const u8, CommandAction, critbit.StringContext);
 
 pub const Mode = enum {
 	normal,
@@ -59,16 +70,54 @@ pub const InitOptions = struct {
 };
 
 pub fn init(allocator: Allocator, options: InitOptions) !Self {
-	var ret = Self{
-		.sheet = Sheet.init(allocator),
-		.tui = try Tui.init(),
-		.allocator = allocator,
-		.asts = try std.ArrayListUnmanaged(Ast).initCapacity(allocator, 8),
-	};
+	var ast_list = try std.ArrayListUnmanaged(Ast).initCapacity(allocator, 8);
+	errdefer ast_list.deinit(allocator);
+
+	var normal_keys = KeyMap.init();
+	errdefer normal_keys.deinit(allocator);
+
+	for (default_normal_keys) |mapping| {
+		try normal_keys.put(allocator, mapping[0], mapping[1]);
+	}
+
+	var command_normal_keys = CommandKeyMap.init();
+	errdefer command_normal_keys.deinit(allocator);
+
+	for (default_command_normal_keys) |mapping| {
+		try command_normal_keys.put(allocator, mapping[0], mapping[1]);
+	}
+
+	var command_insert_keys = CommandKeyMap.init();
+	errdefer command_insert_keys.deinit(allocator);
+
+	for (default_command_insert_keys) |mapping| {
+		try command_insert_keys.put(allocator, mapping[0], mapping[1]);
+	}
+
+	var command_operator_keys = CommandKeyMap.init();
+	errdefer command_operator_keys.deinit(allocator);
+
+	for (default_command_operator_keys) |mapping| {
+		try command_operator_keys.put(allocator, mapping[0], mapping[1]);
+	}
+
+	var tui = try Tui.init();
+	errdefer tui.deinit();
 
 	if (options.ui) {
-		try ret.tui.term.uncook(.{});
+		try tui.term.uncook(.{});
 	}
+
+	var ret = Self{
+		.sheet = Sheet.init(allocator),
+		.tui = tui,
+		.allocator = allocator,
+		.asts = ast_list,
+		.normal_keys = normal_keys,
+		.command_normal_keys = command_normal_keys,
+		.command_insert_keys = command_insert_keys,
+		.command_operator_keys = command_operator_keys,
+	};
 
 	if (options.filepath) |filepath| {
 		try ret.loadFile(&ret.sheet, filepath);
@@ -81,6 +130,12 @@ pub fn deinit(self: *Self) void {
 	for (self.asts.items) |*ast| {
 		ast.deinit(self.allocator);
 	}
+
+	self.normal_keys.deinit(self.allocator);
+	self.command_normal_keys.deinit(self.allocator);
+	self.command_insert_keys.deinit(self.allocator);
+	self.command_operator_keys.deinit(self.allocator);
+
 	self.asts.deinit(self.allocator);
 	self.sheet.deinit();
 	self.tui.deinit();
@@ -125,141 +180,134 @@ fn handleInput(self: *Self) !void {
 	var buf: [16]u8 = undefined;
 	const slice = try self.tui.term.readInput(&buf);
 
+	const writer = self.input_buf.writer();
+	parseInput(slice, writer) catch unreachable;
+
 	switch (self.mode) {
-		.normal => self.doNormalMode(slice) catch |err| switch (err) {
-			error.OutOfMemory => self.setStatusMessage("Error: out of memory!", .{}),
-		},
-		.command => self.doCommandMode(slice) catch |err| switch (err) {
-			// We should be able to recover from OOM
-			error.OutOfMemory => self.setStatusMessage("Error: out of memory!", .{}),
-			error.UnexpectedToken => self.setStatusMessage("Error: unexpected token", .{}),
-			error.InvalidCellAddress => self.setStatusMessage("Error: invalid cell address", .{}),
-			error.InvalidCommand => self.setStatusMessage("Error: invalid command", .{}),
-			error.EmptyFileName => self.setStatusMessage("Error: must specify a file name", .{}),
+		.normal => self.normalMode(),
+		.command => self.commandMode() catch |err| {
+			self.setStatusMessage("Error: {s}", .{ @errorName(err) });
 		},
 	}
 }
 
-fn doNormalMode(self: *Self, buf: []const u8) !void {
-	var iter = spoon.inputParser(buf);
+fn commandMode(self: *Self) !void {
+	const input = self.input_buf.slice();
+	const keys = switch (self.command_buf.mode) {
+		.normal => &self.command_normal_keys,
+		.insert => &self.command_insert_keys,
+		.operator_pending => &self.command_operator_keys,
+	};
 
-	while (iter.next()) |in| {
-		if (in.mod_ctrl) switch (in.content) {
-			.codepoint => |cp| switch (cp) {
-				// Ctrl-[, registered as escape on most terminals. We make it do the same as escape
-				// for consistency across terminals.
-				'[' => self.dismissStatusMessage(),
-				else => {},
-			},
-			else => {},
-		} else if (!in.mod_ctrl)  switch (in.content) {
-			.escape      => self.dismissStatusMessage(),
-			.arrow_up    => self.setCursor(.{ .y = self.cursor.y -| 1, .x = self.cursor.x }),
-			.arrow_down  => self.setCursor(.{ .y = self.cursor.y +| 1, .x = self.cursor.x }),
-			.arrow_left  => self.setCursor(.{ .x = self.cursor.x -| 1, .y = self.cursor.y }),
-			.arrow_right => self.setCursor(.{ .x = self.cursor.x +| 1, .y = self.cursor.y }),
-			.home        => self.cursorToFirstCell(),
-			.end         => self.cursorToLastCell(),
-			.codepoint   => |cp| switch (cp) {
-				'0' => self.cursorToFirstCell(),
-				'$' => self.cursorToLastCell(),
-				'g' => self.cursorToFirstCellInColumn(),
-				'G' => self.cursorToLastCellInColumn(),
-				':' => {
-					self.setMode(.command);
-					const writer = self.command_buf.writer();
-					writer.writeByte(':') catch unreachable;
-				},
-				'D', 'x' => self.deleteCell() catch |err| switch (err) {
-					error.OutOfMemory => self.setStatusMessage("Error: out of memory!", .{}),
-				},
-				'w' => {
-					const positions = self.sheet.cells.keys();
-					for (positions) |pos| {
-						if (pos.hash() > self.cursor.hash()) {
-							self.setCursor(pos);
-							break;
-						}
-					}
-				},
-				'b' => {
-					const positions = self.sheet.cells.keys();
-					var pos_iter = std.mem.reverseIterator(positions);
-					while (pos_iter.next()) |pos| {
-						if (pos.hash() < self.cursor.hash()) {
-							self.setCursor(pos);
-							break;
-						}
-					}
-				},
-				'f' => self.incPrecision(self.cursor.x, 1),
-				'F' => self.decPrecision(self.cursor.x, 1),
-				'k' => self.setCursor(.{ .y = self.cursor.y -| 1, .x = self.cursor.x }),
-				'j' => self.setCursor(.{ .y = self.cursor.y +| 1, .x = self.cursor.x }),
-				'h' => self.setCursor(.{ .x = self.cursor.x -| 1, .y = self.cursor.y }),
-				'l' => self.setCursor(.{ .x = self.cursor.x +| 1, .y = self.cursor.y }),
-				'=' => {
-					self.setMode(.command);
-					const writer = self.command_buf.writer();
-					self.cursor.writeCellAddress(writer) catch unreachable;
-					writer.writeAll(" = ") catch unreachable;
-				},
-				else => {},
-			},
-			else => {},
-		} else switch (in.content) {
-			.codepoint => |cp| switch (cp) {
-				// C-[ is indistinguishable from Escape on most terminals. On terminals where they
-				// can be distinguished, we make them do the same thing for a consistent experience
-				'[' => self.dismissStatusMessage(),
-				else => {},
-			},
-			else => {},
-		}
-	}
-}
+	if (keys.get(input)) |action| {
+		self.input_buf.len = 0;
+		const status = self.command_buf.do(action);
+		switch (status) {
+			.waiting => {},
+			.cancelled => self.setMode(.normal),
+			.string => |arr| {
+				defer self.setMode(.normal);
+				const str = arr.slice();
 
-fn doCommandMode(self: *Self, input: []const u8) !void {
-	const status = self.command_buf.handleInput(input);
-	switch (status) {
-		.waiting => {},
-		.cancelled => self.setMode(.normal),
-		.string => |arr| {
-			defer self.setMode(.normal);
-			const str = arr.slice();
+				if (str.len == 0) return;
 
-			if (str.len == 0) return;
+				if (str[0] == ':') {
+					return self.runCommand(str[1..]);
+				}
 
-			if (str[0] == ':') {
-				return self.runCommand(str[1..]);
-			}
-
-			var ast = self.newAst();
-			ast.parse(self.allocator, str) catch |err| {
-				self.delAstAssumeCapacity(ast);
-				return err;
-			};
-
-			const root = ast.rootNode();
-			switch (root) {
-				.assignment => |op| {
-					const pos = ast.nodes.items(.data)[op.lhs].cell;
-					ast.splice(op.rhs);
-
-					self.sheet.setCell(pos, .{ .ast = ast }) catch |err| {
-						self.delAstAssumeCapacity(ast);
-						return err;
-					};
-					self.tui.update.cursor = true;
-					self.tui.update.cells = true;
-				},
-				else => {
+				var ast = self.newAst();
+				ast.parse(self.allocator, str) catch |err| {
 					self.delAstAssumeCapacity(ast);
-				},
-			}
-		},
+					return err;
+				};
+
+				const root = ast.rootNode();
+				switch (root) {
+					.assignment => |op| {
+						const pos = ast.nodes.items(.data)[op.lhs].cell;
+						ast.splice(op.rhs);
+
+						self.sheet.setCell(pos, .{ .ast = ast }) catch |err| {
+							self.delAstAssumeCapacity(ast);
+							return err;
+						};
+						self.tui.update.cursor = true;
+						self.tui.update.cells = true;
+					},
+					else => {
+						self.delAstAssumeCapacity(ast);
+					},
+				}
+			},
+		}
+	} else if (!keys.contains(input)) {
+		if (self.command_buf.mode == .insert) {
+			var buf: [64]u8 = undefined;
+			const len = std.mem.replacementSize(u8, input, "<<", "<");
+			_ = std.mem.replace(u8, input, "<<", "<", &buf);
+			_ = self.command_buf.do(.{ .insert = buf[0..len] });
+		}
+		self.input_buf.len = 0;
 	}
 }
+
+fn normalMode(self: *Self) void {
+	const input = self.input_buf.slice();
+	if (self.normal_keys.get(input)) |action| {
+		switch (action) {
+			.enter_command_mode => {
+				self.setMode(.command);
+				const writer = self.command_buf.writer();
+				writer.writeByte(':') catch unreachable;
+			},
+			.dismiss_status_message => self.dismissStatusMessage(),
+
+			.cell_cursor_up => self.setCursor(.{ .y = self.cursor.y -| 1, .x = self.cursor.x }),
+			.cell_cursor_down => self.setCursor(.{ .y = self.cursor.y +| 1, .x = self.cursor.x }),
+			.cell_cursor_left => self.setCursor(.{ .y = self.cursor.y, .x = self.cursor.x -| 1 }),
+			.cell_cursor_right => self.setCursor(.{ .y = self.cursor.y, .x = self.cursor.x +| 1 }),
+			.cell_cursor_row_first => self.cursorToFirstCellInColumn(),
+			.cell_cursor_row_last => self.cursorToLastCellInColumn(),
+			.cell_cursor_col_first => self.cursorToFirstCell(),
+			.cell_cursor_col_last => self.cursorToLastCell(),
+
+			.delete_cell => self.deleteCell() catch |err| switch (err) {
+				error.OutOfMemory => self.setStatusMessage("Error: out of memory!", .{}),
+			},
+			.next_populated_cell => {
+				const positions = self.sheet.cells.keys();
+				for (positions) |pos| {
+					if (pos.hash() > self.cursor.hash()) {
+						self.setCursor(pos);
+						break;
+					}
+				}
+			},
+			.prev_populated_cell => {
+				const positions = self.sheet.cells.keys();
+				var pos_iter = std.mem.reverseIterator(positions);
+				while (pos_iter.next()) |pos| {
+					if (pos.hash() < self.cursor.hash()) {
+						self.setCursor(pos);
+						break;
+					}
+				}
+			},
+			.increase_precision => self.incPrecision(self.cursor.x, 1),
+			.decrease_precision => self.decPrecision(self.cursor.x, 1),
+			.assign_cell => {
+				self.setMode(.command);
+				const writer = self.command_buf.writer();
+				self.cursor.writeCellAddress(writer) catch unreachable;
+				writer.writeAll(" = ") catch unreachable;
+			},
+		}
+		self.input_buf.len = 0;
+	} else if (!self.normal_keys.contains(input)) {
+		self.input_buf.len = 0;
+	}
+}
+
 
 const Cmd = enum {
 	save,
@@ -588,69 +636,227 @@ pub fn cursorToLastCellInColumn(self: *Self) void {
 	}
 }
 
-test "doCommandMode" {
-	const t = std.testing;
-	var zc = try Self.init(t.allocator, .{ .ui = false });
-	defer zc.deinit();
+pub fn parseInput(bytes: []const u8, writer: anytype) @TypeOf(writer).Error!void {
+	var iter = spoon.inputParser(bytes);
 
-	try zc.doCommandMode("b1 = 5\n");
-	try zc.updateCells();
-
-	try t.expectEqual(@as(u32, 1), zc.sheet.cellCount());
-	try t.expectEqual(@as(u32, 1), zc.sheet.colCount());
-	try t.expect(zc.sheet.getCell(.{ .y = 1, .x = 1 }) != null);
-
-	try t.expectError(error.InvalidCommand, zc.doCommandMode(":\n"));
-	try t.expectError(error.UnexpectedToken, zc.doCommandMode("a0 a0 a0\n"));
-	try zc.doCommandMode("\n"); // Should do nothing
-}
-
-test "doNormalMode" {
-	const t = std.testing;
-	const Test = struct {
-		fn testAllocs(allocator: Allocator) !void {
-			var zc = try Self.init(allocator, .{ .ui = false });
-			defer zc.deinit();
-
-			const pos = struct {
-				fn func(y: u16, x: u16) Position {
-					return .{ .y = y, .x = x };
-				}
-			}.func;
-
-			try t.expectEqual(Mode.normal, zc.mode);
-			try t.expectEqual(pos(0, 0), zc.cursor);
-
-			// Make sure cursor does not overflow in any way
-			try zc.doNormalMode("hhhkkklhhjkk");
-			try t.expectEqual(pos(0, 0), zc.cursor);
-
-			// Test basic cursor movements
-			try zc.doNormalMode("l");
-			try t.expectEqual(pos(0, 1), zc.cursor);
-			try zc.doNormalMode("lll");
-			try t.expectEqual(pos(0, 4), zc.cursor);
-			try zc.doNormalMode("j");
-			try t.expectEqual(pos(1, 4), zc.cursor);
-			try zc.doNormalMode("jjj");
-			try t.expectEqual(pos(4, 4), zc.cursor);
-			try zc.doNormalMode("kkk");
-			try t.expectEqual(pos(1, 4), zc.cursor);
-			try zc.doNormalMode("hhh");
-			try t.expectEqual(pos(1, 1), zc.cursor);
-
-			try zc.doNormalMode("=\n");
-			try t.expectEqual(Mode.command, zc.mode);
-			try t.expectEqualStrings("B1 = ", zc.command_buf.slice());
-			try zc.doCommandMode("50\n");
-
-			try t.expectEqual(@as(u32, 1), zc.sheet.cellCount());
-			try zc.deleteCell(); // Delete cell under cursor
-			try t.expectEqual(@as(u32, 0), zc.sheet.cellCount());
-			try zc.deleteCell(); // Delete with no cell
-			try t.expectEqual(@as(u32, 0), zc.sheet.cellCount());
+	while (iter.next()) |in| {
+		var special = false;
+		if (in.mod_ctrl and in.mod_alt) {
+			special = true;
+			try writer.writeAll("<C-M-");
+		} else if (in.mod_ctrl) {
+			special = true;
+			try writer.writeAll("<C-");
+		} else if (in.mod_alt) {
+			special = true;
+			try writer.writeAll("<M-");
 		}
-	};
 
-	try t.checkAllAllocationFailures(t.allocator, Test.testAllocs, .{});
+		switch (in.content) {
+			.escape => try writer.writeAll("<Escape>"),
+			.arrow_up => try writer.writeAll("<Up"),
+			.arrow_down => try writer.writeAll("<Down>"),
+			.arrow_left => try writer.writeAll("<Left>"),
+			.arrow_right => try writer.writeAll("<Right>"),
+			.home => try writer.writeAll("<Home>"),
+			.end => try writer.writeAll("<End>"),
+			.begin => try writer.writeAll("<Begin>"),
+			.page_up => try writer.writeAll("<PageUp>"),
+			.page_down => try writer.writeAll("<PageDown>"),
+			.delete => try writer.writeAll("<Delete>"),
+			.insert => try writer.writeAll("<Insert>"),
+			.print => try writer.writeAll("<Print>"),
+			.scroll_lock => try writer.writeAll("<Scroll>"),
+			.pause => try writer.writeAll("<Pause>"),
+			.function => |function| try writer.print("<F{d}>", .{ function }),
+			.codepoint => |cp| switch (cp) {
+				'<' => try writer.writeAll("<<"),
+				'\n', '\r' => try writer.writeAll("<Return>"),
+				127 => try writer.writeAll("<Delete>"),
+				0...'\n'-1, '\n'+1...'\r'-1, '\r'+1...31 => {},
+				else => {
+					var buf: [4]u8 = undefined;
+					const len = std.unicode.utf8Encode(cp, &buf) catch unreachable;
+					try writer.writeAll(buf[0..len]);
+				},
+			},
+			.mouse, .unknown => try writer.writeAll("\x00"),
+		}
+
+		if (special) {
+			try writer.writeByte('>');
+		}
+	}
 }
+
+pub const Action = enum {
+	enter_command_mode,
+	dismiss_status_message,
+
+	cell_cursor_up,
+	cell_cursor_down,
+	cell_cursor_left,
+	cell_cursor_right,
+	cell_cursor_row_first,
+	cell_cursor_row_last,
+	cell_cursor_col_first,
+	cell_cursor_col_last,
+
+	delete_cell,
+	next_populated_cell,
+	prev_populated_cell,
+	increase_precision,
+	decrease_precision,
+	assign_cell,
+};
+
+const Mapping = struct {
+	[]const u8,
+	Action,
+};
+
+const default_normal_keys = [_]Mapping{
+	.{ "j", .cell_cursor_down },
+	.{ "k", .cell_cursor_up },
+	.{ "h", .cell_cursor_left },
+	.{ "l", .cell_cursor_right },
+	.{ "w", .next_populated_cell },
+	.{ "b", .prev_populated_cell },
+	.{ "gg", .cell_cursor_row_first },
+	.{ "G", .cell_cursor_row_last },
+	.{ "0", .cell_cursor_col_first },
+	.{ "$", .cell_cursor_col_last },
+	.{ "=", .assign_cell },
+	.{ "dd", .delete_cell },
+	.{ "x", .delete_cell },
+	.{ "<Escape>", .dismiss_status_message },
+	.{ ":", .enter_command_mode },
+};
+
+const CommandMapping = struct {
+	[]const u8,
+	CommandAction,
+};
+
+const default_command_normal_keys = [_]CommandMapping{
+	.{ "<C-[>", .enter_normal_mode },
+	.{ "<Escape>", .enter_normal_mode },
+
+	.{ "<C-m>", .submit_command },
+	.{ "<C-j>", .submit_command },
+	.{ "<Return>", .submit_command },
+
+	.{ "x", .delete_char },
+	.{ "d", .operator_delete },
+	.{ "D", .delete_to_eol },
+	.{ "c", .operator_change },
+	.{ "C", .change_to_eol },
+	.{ "s", .change_char },
+	.{ "S", .change_line },
+
+	.{ "i", .enter_insert_mode },
+	.{ "I", .enter_insert_mode_at_bol },
+	.{ "a", .enter_insert_mode_after },
+	.{ "A", .enter_insert_mode_at_eol },
+
+	.{ "<Left>", .{ .motion = .char_prev } },
+	.{ "<Right>", .{ .motion = .char_next } },
+	.{ "<Home>", .{ .motion = .bol } },
+	.{ "<End>", .{ .motion = .eol } },
+
+	.{ "h", .{ .motion = .char_prev } },
+	.{ "l", .{ .motion = .char_next } },
+	.{ "0", .{ .motion = .bol } },
+	.{ "$", .{ .motion = .eol } },
+	.{ "w", .{ .motion = .normal_word_start_next } },
+	.{ "W", .{ .motion = .long_word_start_next   } },
+	.{ "e", .{ .motion = .normal_word_end_next   } },
+	.{ "E", .{ .motion = .long_word_end_next     } },
+	.{ "b", .{ .motion = .normal_word_start_prev } },
+	.{ "B", .{ .motion = .long_word_start_prev   } },
+	.{ "<M-e>", .{ .motion = .normal_word_end_prev } },
+	.{ "<M-E>", .{ .motion = .long_word_end_prev } },
+};
+
+const default_command_insert_keys = [_]CommandMapping{
+	.{ "<C-[>", .enter_normal_mode },
+	.{ "<Escape>", .enter_normal_mode },
+
+	.{ "<C-m>", .submit_command },
+	.{ "<C-j>", .submit_command },
+	.{ "<Return>", .submit_command },
+
+	.{ "<C-h>", .backspace },
+	.{ "<Delete>", .backspace },
+	.{ "<C-u>", .change_line },
+
+	.{ "<Home>", .{ .motion = .bol } },
+	.{ "<End>", .{ .motion = .eol } },
+	.{ "<Left>", .{ .motion = .char_prev } },
+	.{ "<Right>", .{ .motion = .char_next } },
+
+	.{ "<C-a>", .{ .motion = .bol } },
+	.{ "<C-e>", .{ .motion = .eol } },
+	.{ "<C-b>", .{ .motion = .char_prev } },
+	.{ "<C-f>", .{ .motion = .char_next } },
+	.{ "<C-w>", .backwards_delete_word },
+};
+
+const default_command_operator_keys = [_]CommandMapping{
+	.{ "<C-[>", .enter_normal_mode },
+	.{ "<Escape>", .enter_normal_mode },
+	.{ "d", .operator_delete },
+	.{ "c", .operator_change },
+
+	.{ "<Left>", .{ .motion = .char_prev } },
+	.{ "<Right>", .{ .motion = .char_next } },
+	.{ "<Home>", .{ .motion = .bol } },
+	.{ "<End>", .{ .motion = .eol } },
+
+	.{ "h", .{ .motion = .char_prev } },
+	.{ "l", .{ .motion = .char_next } },
+	.{ "0", .{ .motion = .bol } },
+	.{ "$", .{ .motion = .eol } },
+	.{ "w", .{ .motion = .normal_word_start_next } },
+	.{ "W", .{ .motion = .long_word_start_next   } },
+	.{ "e", .{ .motion = .normal_word_end_next   } },
+	.{ "E", .{ .motion = .long_word_end_next     } },
+	.{ "b", .{ .motion = .normal_word_start_prev } },
+	.{ "B", .{ .motion = .long_word_start_prev   } },
+	.{ "<M-e>", .{ .motion = .normal_word_end_prev } },
+	.{ "<M-E>", .{ .motion = .long_word_end_prev } },
+
+	.{ "aw", .{ .motion = .normal_word_around } },
+	.{ "aW", .{ .motion = .long_word_around } },
+	.{ "iw", .{ .motion = .normal_word_inside } },
+	.{ "iW", .{ .motion = .long_word_inside } },
+
+	.{ "a(", .{ .motion = .{ .around_delimiters = .{ .left = "(", .right = ")" } } } },
+	.{ "i(", .{ .motion = .{ .inside_delimiters = .{ .left = "(", .right = ")" } } } },
+	.{ "a)", .{ .motion = .{ .around_delimiters = .{ .left = "(", .right = ")" } } } },
+	.{ "i)", .{ .motion = .{ .inside_delimiters = .{ .left = "(", .right = ")" } } } },
+
+	.{ "a[", .{ .motion = .{ .around_delimiters = .{ .left = "[", .right = "]" } } } },
+	.{ "i[", .{ .motion = .{ .inside_delimiters = .{ .left = "[", .right = "]" } } } },
+	.{ "a]", .{ .motion = .{ .around_delimiters = .{ .left = "[", .right = "]" } } } },
+	.{ "i]", .{ .motion = .{ .inside_delimiters = .{ .left = "[", .right = "]" } } } },
+
+	.{ "i{", .{ .motion = .{ .inside_delimiters = .{ .left = "{", .right = "}" } } } },
+	.{ "a{", .{ .motion = .{ .around_delimiters = .{ .left = "{", .right = "}" } } } },
+	.{ "i}", .{ .motion = .{ .inside_delimiters = .{ .left = "{", .right = "}" } } } },
+	.{ "a}", .{ .motion = .{ .around_delimiters = .{ .left = "{", .right = "}" } } } },
+
+	.{ "i<<", .{ .motion = .{ .inside_delimiters = .{ .left = "<", .right = ">" } } } },
+	.{ "a<<", .{ .motion = .{ .around_delimiters = .{ .left = "<", .right = ">" } } } },
+	.{ "i>", .{ .motion = .{ .inside_delimiters = .{ .left = "<", .right = ">" } } } },
+	.{ "a>", .{ .motion = .{ .around_delimiters = .{ .left = "<", .right = ">" } } } },
+
+	.{ "i\"", .{ .motion = .{ .inside_delimiters = .{ .left = "\"", .right = "\"" } } } },
+	.{ "a\"", .{ .motion = .{ .around_delimiters = .{ .left = "\"", .right = "\"" } } } },
+
+	.{ "i'", .{ .motion = .{ .inside_delimiters = .{ .left = "'", .right = "'" } } } },
+	.{ "a'", .{ .motion = .{ .around_delimiters = .{ .left = "'", .right = "'" } } } },
+
+	.{ "i`", .{ .motion = .{ .inside_delimiters = .{ .left = "`", .right = "`" } } } },
+	.{ "a`", .{ .motion = .{ .around_delimiters = .{ .left = "`", .right = "`" } } } },
+};
