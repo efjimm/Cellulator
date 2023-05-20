@@ -199,7 +199,7 @@ pub fn renderColumnHeadings(
 	try rc.setStyle(.{ .fg = .blue });
 
 	while (w < self.term.width) : (x += 1) {
-		const width = zc.sheet.getColumn(x).width;
+		const width = @min(self.term.width - reserved_cols, zc.sheet.getColumn(x).width);
 
 		var buf: [4]u8 = undefined;
 		const name = Position.columnAddressBuf(x, &buf);
@@ -278,12 +278,13 @@ pub fn renderCursor(
 
 		try rc.setStyle(.{ .fg = .blue, .bg = .black });
 
-		const prev_col = zc.sheet.getColumn(zc.prev_cursor.x);
+		const col = zc.sheet.getColumn(zc.prev_cursor.x);
+		const width = @min(col.width, rc.term.width - left);
 
 		try rc.moveCursorTo(ZC.col_heading_line, prev_pos.x);
 		try writer.print("{s: ^[1]}", .{
 			Position.columnAddressBuf(zc.prev_cursor.x, &buf),
-			prev_col.width,
+			width,
 		});
 
 		try rc.moveCursorTo(prev_pos.y, 0);
@@ -293,6 +294,8 @@ pub fn renderCursor(
 	const pos = Position{
 		.y = zc.cursor.y - zc.screen_pos.y + ZC.content_line,
 		.x = blk: {
+			assert(zc.screen_pos.x <= zc.cursor.x);
+
 			var x: u16 = left;
 			for (zc.screen_pos.x..zc.cursor.x) |i| {
 				const col = zc.sheet.getColumn(@intCast(u16, i));
@@ -308,11 +311,12 @@ pub fn renderCursor(
 	_ = try renderCell(rc, zc, zc.cursor);
 	try rc.setStyle(.{ .fg = .black, .bg = .blue });
 
-	const col = zc.sheet.getColumn(pos.x);
+	const col = zc.sheet.getColumn(zc.cursor.x);
+	const width = @min(col.width, rc.term.width - left);
 	try rc.moveCursorTo(ZC.col_heading_line, pos.x);
 	try writer.print("{s: ^[1]}", .{
 		Position.columnAddressBuf(zc.cursor.x, &buf),
-		col.width,
+		width,
 	});
 
 	try rc.moveCursorTo(pos.y, 0);
@@ -364,27 +368,30 @@ pub fn renderCell(
 	pos: Position,
 ) RenderError!u16 {
 	const col = zc.sheet.getColumn(pos.x);
+	const width = @min(col.width, rc.term.width - zc.leftReservedColumns());
 
-	const writer = rc.buffer.writer();
+	var rpw = rc.restrictedPaddingWriter(width);
+	const writer = rpw.writer();
 
 	if (zc.sheet.getCell(pos)) |cell| {
 		if (cell.num) |num| {
 			try writer.print("{d: >[1].[2]}", .{
-				num, col.width, col.precision,
+				num, width, col.precision,
 			});
 		} else {
 			if (pos.hash() != zc.cursor.hash()) {
 				try rc.setStyle(.{ .fg = .red });
-				try writer.print("{s: >[1]}", .{ "ERROR", col.width });
+				try writer.print("{s: >[1]}", .{ "ERROR", width });
 				try rc.setStyle(.{});
 			} else {
-				try writer.print("{s: >[1]}", .{ "ERROR", col.width });
+				try writer.print("{s: >[1]}", .{ "ERROR", width });
 			}
 		}
 	} else {
-		try writer.print("{s: >[1]}", .{ "", col.width });
+		try writer.print("{s: >[1]}", .{ "", width });
 	}
-	return col.width;
+	try rpw.finish();
+	return width;
 }
 
 pub fn isOnScreen(tui: *Self, zc: *ZC, pos: Position) bool {
@@ -400,7 +407,7 @@ pub fn isOnScreen(tui: *Self, zc: *ZC, pos: Position) bool {
 		}
 		unreachable;
 	};
-	if (w >= tui.term.width and pos.x >= end_col) return false;
+	if (w >= tui.term.width and pos.x > end_col) return false;
 
 	const end_row = zc.screen_pos.y +| (tui.term.height - ZC.content_line);
 	if (pos.y > end_row) return false;

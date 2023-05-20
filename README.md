@@ -105,6 +105,8 @@ implemented commands. Values surrounded in {} are optional.
 - `b` Move cursor to the previous populated cell
 - `f` Increase decimal precision of the current column
 - `F` Decrease decimal precision of the current column
+- `+` Increase width of current column if non-empty
+- `-` Decrease width of current column if non-empty
 
 ### Command Insert Mode
 

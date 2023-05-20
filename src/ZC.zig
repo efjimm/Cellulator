@@ -295,6 +295,8 @@ fn normalMode(self: *Self) void {
 			},
 			.increase_precision => self.incPrecision(self.cursor.x, 1),
 			.decrease_precision => self.decPrecision(self.cursor.x, 1),
+			.increase_width => self.incWidth(self.cursor.x, 1),
+			.decrease_width => self.decWidth(self.cursor.x, 1),
 			.assign_cell => {
 				self.setMode(.command);
 				const writer = self.command_buf.writer();
@@ -539,11 +541,11 @@ pub fn clampScreenToCursorX(self: *Self) void {
 		const col = self.sheet.getColumn(x);
 		w += col.width;
 
-		if (w >= self.tui.term.width) break;
+		if (w > self.tui.term.width) break;
 		if (x == 0) return;
 	}
 
-	if (x >= self.screen_pos.x) {
+	if (x > self.screen_pos.x or (x == self.screen_pos.x and x < self.cursor.x)) {
 		self.screen_pos.x = x + 1;
 		self.tui.update.column_headings = true;
 		self.tui.update.cells = true;
@@ -568,6 +570,23 @@ pub fn decPrecision(self: *Self, column: u16, n: u8) void {
 	if (self.sheet.columns.getPtr(column)) |col| {
 		col.precision -|= n;
 		self.tui.update.cells = true;
+	}
+}
+
+pub fn incWidth(self: *Self, column: u16, n: u8) void {
+	if (self.sheet.columns.getPtr(column)) |col| {
+		col.width +|= n;
+		self.tui.update.cells = true;
+		self.tui.update.column_headings = true;
+	}
+}
+
+pub fn decWidth(self: *Self, column: u16, n: u8) void {
+	if (self.sheet.columns.getPtr(column)) |col| {
+		const new_width = col.width -| n;
+		col.width = @max(1, new_width);
+		self.tui.update.cells = true;
+		self.tui.update.column_headings = true;
 	}
 }
 
@@ -707,6 +726,8 @@ pub const Action = enum {
 	prev_populated_cell,
 	increase_precision,
 	decrease_precision,
+	increase_width,
+	decrease_width,
 	assign_cell,
 };
 
@@ -716,6 +737,10 @@ const Mapping = struct {
 };
 
 const default_normal_keys = [_]Mapping{
+	.{ "+", .increase_width },
+	.{ "-", .decrease_width },
+	.{ "f", .increase_precision },
+	.{ "F", .decrease_precision },
 	.{ "j", .cell_cursor_down },
 	.{ "k", .cell_cursor_up },
 	.{ "h", .cell_cursor_left },
