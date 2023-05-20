@@ -352,7 +352,6 @@ pub fn runCommand(self: *Self, str: []const u8) !void {
 				return;
 			};
 			self.sheet.has_changes = false;
-			self.tui.update.status = true;
 		},
 		.load => { // load
 			if (self.sheet.has_changes) {
@@ -382,7 +381,6 @@ pub fn loadCmd(self: *Self, iter: *utils.WordIterator) !void {
 	};
 	old_sheet.deinit();
 
-	self.tui.update.status = true;
 	self.tui.update.cells = true;
 }
 
@@ -764,6 +762,16 @@ const CommandMapping = struct {
 };
 
 const default_command_normal_keys = [_]CommandMapping{
+	.{ "1", .{ .count = 1 } },
+	.{ "2", .{ .count = 2 } },
+	.{ "3", .{ .count = 3 } },
+	.{ "4", .{ .count = 4 } },
+	.{ "5", .{ .count = 5 } },
+	.{ "6", .{ .count = 6 } },
+	.{ "7", .{ .count = 7 } },
+	.{ "8", .{ .count = 8 } },
+	.{ "9", .{ .count = 9 } },
+
 	.{ "<C-[>", .enter_normal_mode },
 	.{ "<Escape>", .enter_normal_mode },
 
@@ -791,7 +799,7 @@ const default_command_normal_keys = [_]CommandMapping{
 
 	.{ "h", .{ .motion = .char_prev } },
 	.{ "l", .{ .motion = .char_next } },
-	.{ "0", .{ .motion = .bol } },
+	.{ "0", .zero },
 	.{ "$", .{ .motion = .eol } },
 	.{ "w", .{ .motion = .normal_word_start_next } },
 	.{ "W", .{ .motion = .long_word_start_next   } },
@@ -828,6 +836,16 @@ const default_command_insert_keys = [_]CommandMapping{
 };
 
 const default_command_operator_keys = [_]CommandMapping{
+	.{ "1", .{ .count = 1 } },
+	.{ "2", .{ .count = 2 } },
+	.{ "3", .{ .count = 3 } },
+	.{ "4", .{ .count = 4 } },
+	.{ "5", .{ .count = 5 } },
+	.{ "6", .{ .count = 6 } },
+	.{ "7", .{ .count = 7 } },
+	.{ "8", .{ .count = 8 } },
+	.{ "9", .{ .count = 9 } },
+
 	.{ "<C-[>", .enter_normal_mode },
 	.{ "<Escape>", .enter_normal_mode },
 	.{ "d", .operator_delete },
@@ -840,7 +858,7 @@ const default_command_operator_keys = [_]CommandMapping{
 
 	.{ "h", .{ .motion = .char_prev } },
 	.{ "l", .{ .motion = .char_next } },
-	.{ "0", .{ .motion = .bol } },
+	.{ "0", .zero },
 	.{ "$", .{ .motion = .eol } },
 	.{ "w", .{ .motion = .normal_word_start_next } },
 	.{ "W", .{ .motion = .long_word_start_next   } },
@@ -876,12 +894,12 @@ const default_command_operator_keys = [_]CommandMapping{
 	.{ "i>", .{ .motion = .{ .inside_delimiters = .{ .left = "<", .right = ">" } } } },
 	.{ "a>", .{ .motion = .{ .around_delimiters = .{ .left = "<", .right = ">" } } } },
 
-	.{ "i\"", .{ .motion = .{ .inside_delimiters = .{ .left = "\"", .right = "\"" } } } },
-	.{ "a\"", .{ .motion = .{ .around_delimiters = .{ .left = "\"", .right = "\"" } } } },
+	.{ "i\"", .{ .motion = .{ .inside_single_delimiter = "\"" } } },
+	.{ "a\"", .{ .motion = .{ .around_single_delimiter = "\"" } } },
 
-	.{ "i'", .{ .motion = .{ .inside_delimiters = .{ .left = "'", .right = "'" } } } },
-	.{ "a'", .{ .motion = .{ .around_delimiters = .{ .left = "'", .right = "'" } } } },
+	.{ "i'", .{ .motion = .{ .inside_single_delimiter = "'" } } },
+	.{ "a'", .{ .motion = .{ .around_single_delimiter = "'" } } },
 
-	.{ "i`", .{ .motion = .{ .inside_delimiters = .{ .left = "`", .right = "`" } } } },
-	.{ "a`", .{ .motion = .{ .around_delimiters = .{ .left = "`", .right = "`" } } } },
+	.{ "i`", .{ .motion = .{ .inside_single_delimiter = "`" } } },
+	.{ "a`", .{ .motion = .{ .around_single_delimiter = "`" } } },
 };

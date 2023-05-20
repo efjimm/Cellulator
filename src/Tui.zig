@@ -13,7 +13,6 @@ term: Term,
 update: UpdateFlags = .{},
 
 const UpdateFlags = packed struct {
-	status: bool = true,
 	command: bool = true,
 	column_headings: bool = true,
 	row_numbers: bool = true,
@@ -74,10 +73,7 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
 		return;
 	}
 
-	if (self.update.status or self.update.cursor) {
-		try self.renderStatus(&rc, zc);
-		self.update.status = false;
-	}
+	try self.renderStatus(&rc, zc);
 	if (self.update.command or zc.mode == .command) {
 		try self.renderCommandLine(&rc, zc);
 		self.update.command = false;
@@ -132,7 +128,13 @@ pub fn renderStatus(
 	}
 
 	try zc.cursor.writeCellAddress(writer);
-	try writer.print(" {}", .{ zc.mode });
+	try writer.print(" {} ", .{ zc.mode });
+
+	if (zc.command_buf.count != 0) {
+		try writer.print("{d} ", .{ zc.command_buf.getCount() });
+	}
+
+	try writer.writeAll(zc.input_buf.slice());
 
 	try rpw.pad();
 }

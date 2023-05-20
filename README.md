@@ -85,6 +85,10 @@ implemented commands. Values surrounded in {} are optional.
 
 ## Keybinds
 
+Motions in command normal and command operator pending modes can be prefixed by a number, which
+will repeat the following motion that many times. This does not currently work for any of the
+*inside* or *around* motions.
+
 ###  Normal Mode
 
 - `Return`, `C-m`, `C-j` Submit the current text as a command

@@ -29,8 +29,9 @@ pub const Action = union(enum) {
 	operator_delete,
 	operator_change,
 
+	zero,
+	count: u4,
 	insert: []const u8,
-
 	motion: Motion,
 };
 
@@ -69,6 +70,7 @@ pub fn TextInput(comptime size: u16) type {
 
 		buf: Array = .{},
 		mode: Mode = .insert,
+		count: u32 = 0,
 		cursor: u16 = 0,
 
 		pub fn do(self: *Self, action: Action) Status {
@@ -109,11 +111,15 @@ pub fn TextInput(comptime size: u16) type {
 					},
 					.change_line => self.reset(),
 
-					.motion => |motion| {
-						const range = motion.do(self.slice(), self.cursor);
-						self.cursor = if (range.start == self.cursor) range.end else range.start;
-						self.clampCursor();
+					.zero => {
+						if (self.count == 0) {
+							_ = self.do(.{ .motion = .bol });
+						} else {
+							self.setCount(0);
+						}
 					},
+					.motion => |motion| self.doMotion(motion),
+					.count => |count| self.setCount(count),
 					else => {},
 				},
 				.insert => switch (action) {
@@ -135,22 +141,23 @@ pub fn TextInput(comptime size: u16) type {
 						_ = self.do(.{ .motion = .normal_word_start_prev });
 					},
 					.change_line => self.reset(),
-					.motion => |motion| {
-						const range = motion.do(self.slice(), self.cursor);
-						self.cursor = if (range.start == self.cursor) range.end else range.start;
-					},
+					.motion => |motion| self.doMotion(motion),
 					else => {},
 				},
 				.operator_pending => |op| switch (op) {
 					.delete => switch (action) {
 						.enter_normal_mode => self.setMode(.normal),
 						.operator_delete => self.doMotion(.line),
+						.zero => if (self.count == 0) self.doMotion(.bol) else self.setCount(0),
+						.count => |count| self.setCount(count),
 						.motion => |motion| self.doMotion(motion),
 						else => {},
 					},
 					.change => switch (action) {
 						.enter_normal_mode => self.setMode(.normal),
 						.operator_change => self.doMotion(.line),
+						.zero => if (self.count == 0) self.doMotion(.bol) else self.setCount(0),
+						.count => |count| self.setCount(count),
 						.motion => |motion| self.doMotion(motion),
 						else => {},
 					},
@@ -165,10 +172,24 @@ pub fn TextInput(comptime size: u16) type {
 			};
 		}
 
+		pub fn setCount(self: *Self, count: u4) void {
+			assert(count <= 9);
+			self.count = self.count *| 10 +| count;
+		}
+
+		pub fn getCount(self: Self) u32 {
+			return if (self.count == 0) 1 else self.count;
+		}
+
+		pub fn resetCount(self: *Self) void {
+			self.count = 0;
+		}
+
 		fn doMotion(self: *Self, motion: Motion) void {
+			const count = self.getCount();
 			switch (self.mode) {
 				.normal, .insert => {
-					const range = motion.do(self.slice(), self.cursor);
+					const range = motion.do(self.slice(), self.cursor, count);
 					self.cursor = if (range.start == self.cursor)
 							range.end
 						else
@@ -183,7 +204,7 @@ pub fn TextInput(comptime size: u16) type {
 							else => motion,
 						};
 
-						const range = m.do(self.slice(), self.cursor);
+						const range = m.do(self.slice(), self.cursor, count);
 						const start = range.start;
 						const end = range.end + switch (m) {
 							.normal_word_end_next,
@@ -199,7 +220,7 @@ pub fn TextInput(comptime size: u16) type {
 						self.setMode(.insert);
 					},
 					.delete => {
-						const range = motion.do(self.slice(), self.cursor);
+						const range = motion.do(self.slice(), self.cursor, count);
 						self.buf.replaceRange(range.start, range.len(), &.{}) catch unreachable;
 						self.cursor = range.start;
 						self.setMode(.normal);
@@ -207,6 +228,7 @@ pub fn TextInput(comptime size: u16) type {
 				},
 			}
 			self.clampCursor();
+			self.resetCount();
 		}
 
 		fn delChar(self: *Self) void {
@@ -238,8 +260,9 @@ pub fn TextInput(comptime size: u16) type {
 		fn setMode(self: *Self, mode: Mode) void {
 			if (mode == .normal and self.cursor == self.buf.len) {
 				const m: Motion = .char_prev;
-				self.cursor = m.do(self.slice(), self.len()).start;
+				self.cursor = m.do(self.slice(), self.len(), 1).start;
 			}
+			self.resetCount();
 			self.mode = mode;
 		}
 
@@ -349,6 +372,8 @@ pub const Motion = union(enum) {
 
 	inside_delimiters: Delimiters,
 	around_delimiters: Delimiters,
+	inside_single_delimiter: []const u8,
+	around_single_delimiter: []const u8,
 
 	normal_word_start_next,
 	normal_word_start_prev,
@@ -383,46 +408,116 @@ pub const Motion = union(enum) {
 		}
 	};
 
-	pub fn do(motion: Motion, bytes: []const u8, pos: u16) Range {
+	pub fn do(motion: Motion, bytes: []const u8, pos: u16, count: u32) Range {
 		return switch (motion) {
 			.normal_word_start_next => .{
 				.start = pos,
-				.end = nextWordStart(bytes, .normal, pos),
+				.end = blk: {
+					var p = pos;
+					for (0..count) |_| {
+						if (p >= bytes.len) break;
+						p = nextWordStart(bytes, .normal, p);
+					}
+					break :blk p;
+				},
 			},
 			.normal_word_start_prev => .{
-				.start = prevWordStart(bytes, .normal, pos),
+				.start = blk: {
+					var p = pos;
+					for (0..count) |_| {
+						if (p == 0) break;
+						p = prevWordStart(bytes, .normal, p);
+					}
+					break :blk p;
+				},
 				.end = pos,
 			},
 			.normal_word_end_next => .{
 				.start = pos,
-				.end = nextWordEnd(bytes, .normal, pos),
+				.end = blk: {
+					var p = pos;
+					for (0..count) |_| {
+						if (p >= bytes.len) break;
+						p = nextWordEnd(bytes, .normal, p);
+					}
+					break :blk p;
+				},
 			},
 			.normal_word_end_prev => .{
-				.start = prevWordEnd(bytes, .normal, pos),
+				.start = blk: {
+					var p = pos;
+					for (0..count) |_| {
+						if (p == 0) break;
+						p = prevWordEnd(bytes, .normal, p);
+					}
+					break :blk p;
+				},
 				.end = pos,
 			},
 			.long_word_start_next => .{
 				.start = pos,
-				.end = nextWordStart(bytes, .long, pos),
+				.end = blk: {
+					var p = pos;
+					for (0..count) |_| {
+						if (p >= bytes.len) break;
+						p = nextWordStart(bytes, .long, p);
+					}
+					break :blk p;
+				},
 			},
 			.long_word_start_prev => .{
-				.start = prevWordStart(bytes, .long, pos),
+				.start = blk: {
+					var p = pos;
+					for (0..count) |_| {
+						if (p == 0) break;
+						p = prevWordStart(bytes, .long, p);
+					}
+					break :blk p;
+				},
 				.end = pos,
 			},
 			.long_word_end_next => .{
 				.start = pos,
-				.end = nextWordEnd(bytes, .long, pos),
+				.end = blk: {
+					var p = pos;
+					for (0..count) |_| {
+						if (p >= bytes.len) break;
+						p = nextWordEnd(bytes, .long, p);
+					}
+					break :blk p;
+				},
 			},
 			.long_word_end_prev => .{
-				.start = prevWordEnd(bytes, .long, pos),
+				.start = blk: {
+					var p = pos;
+					for (0..count) |_| {
+						if (p == 0) break;
+						p = prevWordEnd(bytes, .long, p);
+					}
+					break :blk p;
+				},
 				.end = pos,
 			},
 			.char_next => .{
 				.start = pos,
-				.end = pos + nextCharacter(bytes, pos),
+				.end = blk: {
+					var p = pos;
+					for (0..count) |_| {
+						if (p >= bytes.len) break;
+						p += nextCharacter(bytes, p);
+					}
+					break :blk p;
+				},
 			},
 			.char_prev => .{
-				.start = pos - prevCharacter(bytes, pos),
+				.start = blk: {
+					var p = pos;
+					for (0..count) |_| {
+						if (p == 0) break;
+						p -= prevCharacter(bytes, p);
+					}
+					break :blk p;
+				},
 				.end = pos,
 			},
 			.line => .{
@@ -444,6 +539,8 @@ pub const Motion = union(enum) {
 
 			.inside_delimiters => |d| insideDelimiters(bytes, d.left, d.right, pos),
 			.around_delimiters => |d| aroundDelimiters(bytes, d.left, d.right, pos),
+			.inside_single_delimiter => |d| insideSingleDelimiter(bytes, d, pos),
+			.around_single_delimiter => |d| aroundSingleDelimiter(bytes, d, pos),
 		};
 	}
 
@@ -526,6 +623,7 @@ pub const Motion = union(enum) {
 
 	fn prevWordEnd(bytes: []const u8, comptime word_type: WordType, start_pos: u16) u16 {
 		if (bytes.len == 0) return 0;
+		if (start_pos >= bytes.len) return @intCast(u16, bytes.len) - 1;
 
 		const boundary = wordBoundaryFn(word_type);
 		var pos = start_pos;
@@ -585,8 +683,8 @@ pub const Motion = union(enum) {
 		if (bytes.len == 0) return .{ .start = 0, .end = 0 };
 
 		var iter = std.mem.reverseIterator(bytes[0..pos]);
-		var start: u16 = pos;
-		var end: u16 = pos;
+		var start = pos;
+		var end = pos;
 
 		const boundary = wordBoundaryFn(word_type);
 
@@ -600,11 +698,9 @@ pub const Motion = union(enum) {
 				end += 1;
 			}
 
-			if (end < bytes.len) {
-				for (bytes[end..]) |c| {
-					if (!boundary(c)) break;
-					end += 1;
-				}
+			for (bytes[end..]) |c| {
+				if (!isWhitespace(c)) break;
+				end += 1;
 			}
 		} else {
 			while (iter.next()) |c| : (start -= 1) {
@@ -616,11 +712,9 @@ pub const Motion = union(enum) {
 				end += 1;
 			}
 
-			if (end < bytes.len) {
-				for (bytes[end..]) |c| {
-					if (boundary(c)) break;
-					end += 1;
-				}
+			for (bytes[end..]) |c| {
+				if (isWhitespace(c)) break;
+				end += 1;
 			}
 		}
 
@@ -635,8 +729,8 @@ pub const Motion = union(enum) {
 
 		var ret = aroundDelimiters(bytes, left, right, pos);
 		if (ret.start == ret.end) return ret;
-		ret.start += 1;
-		ret.end -= 1;
+		ret.start += @intCast(u16, left.len);
+		ret.end -= @intCast(u16, right.len);
 		return ret;
 	}
 
@@ -692,6 +786,41 @@ pub const Motion = union(enum) {
 		};
 	}
 
+	fn insideSingleDelimiter(bytes: []const u8, delim: []const u8, pos: u16) Range {
+		if (bytes.len == 0) return .{ .start = 0, .end = 0 };
+
+		var ret = aroundSingleDelimiter(bytes, delim, pos);
+		if (ret.start == ret.end) return ret;
+		ret.start += @intCast(u16, delim.len);
+		ret.end -= @intCast(u16, delim.len);
+		return ret;
+	}
+
+	fn aroundSingleDelimiter(
+		bytes: []const u8,
+		delim: []const u8,
+		pos: u16,
+	) Range {
+		const len = @intCast(u16, delim.len);
+
+		if (std.mem.startsWith(u8, bytes[pos..], delim)) {
+			const start = std.mem.lastIndexOf(u8, bytes[0..pos], delim) orelse pos;
+			const end = std.mem.indexOf(u8, bytes[pos + len..], delim) orelse pos;
+
+			return .{
+				.start = @intCast(u16, start),
+				.end = len + @intCast(u16, end),
+			};
+		} else {
+			const start = std.mem.lastIndexOf(u8, bytes[0..pos], delim) orelse pos;
+			const end = if (std.mem.indexOf(u8, bytes[pos..], delim)) |x| pos + x else pos;
+			return .{
+				.start = @intCast(u16, start),
+				.end = len + @intCast(u16, end),
+			};
+		}
+	}
+
 	fn wordBoundaryFn(comptime word_type: WordType) (fn (u8) bool) {
 		return switch (word_type) {
 			.normal => struct {
@@ -703,3 +832,125 @@ pub const Motion = union(enum) {
 		};
 	}
 };
+
+fn testMotion(
+	text: []const u8,
+	start: u16,
+	start_pos: u16,
+	end_pos: u16,
+	motion: Motion,
+	count: u32,
+) !void {
+	const range = motion.do(text, start, count);
+	try std.testing.expectEqual(start_pos, range.start);
+	try std.testing.expectEqual(end_pos, range.end);
+}
+
+test "Motions" {
+	const text = "this漢字is .my. epic漢字. .漢字text";
+	try testMotion(text, 0, 0, "t".len, .char_next, 1);
+	try testMotion(text, 0, 0, "th".len, .char_next, 2);
+	try testMotion(text, 0, 0, "thi".len, .char_next, 3);
+	try testMotion(text, 0, 0, "this".len, .char_next, 4);
+	try testMotion(text, 0, 0, "this漢".len, .char_next, 5);
+	try testMotion(text, 0, 0, "this漢字".len, .char_next, 6);
+	try testMotion(text, 0, 0, "this漢字i".len, .char_next, 7);
+
+	try testMotion(text, "this漢字i".len, "this漢字".len, "this漢字i".len, .char_prev, 1);
+	try testMotion(text, "this漢字i".len, "this漢".len, "this漢字i".len, .char_prev, 2);
+	try testMotion(text, "this漢字i".len, "this".len, "this漢字i".len, .char_prev, 3);
+	try testMotion(text, "this漢字i".len, "thi".len, "this漢字i".len, .char_prev, 4);
+	try testMotion(text, "this漢字i".len, "th".len, "this漢字i".len, .char_prev, 5);
+	try testMotion(text, "this漢字i".len, "t".len, "this漢字i".len, .char_prev, 6);
+	try testMotion(text, "this漢字i".len, 0, "this漢字i".len, .char_prev, 7);
+	try testMotion(text, "this漢字i".len, 0, "this漢字i".len, .char_prev, 8);
+
+	try testMotion(text, 0, 0, "this漢字is ".len, .normal_word_start_next, 1);
+	try testMotion(text, 0, 0, "this漢字is .".len, .normal_word_start_next, 2);
+	try testMotion(text, 0, 0, "this漢字is .my".len, .normal_word_start_next, 3);
+	try testMotion(text, 0, 0, "this漢字is .my. ".len, .normal_word_start_next, 4);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字".len, .normal_word_start_next, 5);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. ".len, .normal_word_start_next, 6);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .".len, .normal_word_start_next, 7);
+	try testMotion(text, 0, 0, text.len, .normal_word_start_next, 8);
+
+	try testMotion(text, 0, 0, "this漢字i".len, .normal_word_end_next, 1);
+	try testMotion(text, 0, 0, "this漢字is ".len, .normal_word_end_next, 2);
+	try testMotion(text, 0, 0, "this漢字is .m".len, .normal_word_end_next, 3);
+	try testMotion(text, 0, 0, "this漢字is .my".len, .normal_word_end_next, 4);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢".len, .normal_word_end_next, 5);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字".len, .normal_word_end_next, 6);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. ".len, .normal_word_end_next, 7);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .漢字tex".len, .normal_word_end_next, 8);
+	try testMotion(text, 0, 0, text.len, .normal_word_end_next, 9);
+
+	try testMotion(text, text.len, "this漢字is .my. epic漢字. .".len, text.len, .normal_word_start_prev, 1);
+	try testMotion(text, text.len, "this漢字is .my. epic漢字. ".len, text.len, .normal_word_start_prev, 2);
+	try testMotion(text, text.len, "this漢字is .my. epic漢字".len, text.len, .normal_word_start_prev, 3);
+	try testMotion(text, text.len, "this漢字is .my. ".len, text.len, .normal_word_start_prev, 4);
+	try testMotion(text, text.len, "this漢字is .my".len, text.len, .normal_word_start_prev, 5);
+	try testMotion(text, text.len, "this漢字is .".len, text.len, .normal_word_start_prev, 6);
+	try testMotion(text, text.len, "this漢字is ".len, text.len, .normal_word_start_prev, 7);
+	try testMotion(text, text.len, 0, text.len, .normal_word_start_prev, 8);
+
+	try testMotion(text, text.len, "this漢字is .my. epic漢字. .漢字tex".len, text.len, .normal_word_end_prev, 1);
+	try testMotion(text, text.len, "this漢字is .my. epic漢字. ".len, text.len, .normal_word_end_prev, 2);
+	try testMotion(text, text.len, "this漢字is .my. epic漢字".len, text.len, .normal_word_end_prev, 3);
+	try testMotion(text, text.len, "this漢字is .my. epic漢".len, text.len, .normal_word_end_prev, 4);
+	try testMotion(text, text.len, "this漢字is .my".len, text.len, .normal_word_end_prev, 5);
+	try testMotion(text, text.len, "this漢字is .m".len, text.len, .normal_word_end_prev, 6);
+	try testMotion(text, text.len, "this漢字is ".len, text.len, .normal_word_end_prev, 7);
+	try testMotion(text, text.len, "this漢字i".len, text.len, .normal_word_end_prev, 8);
+	try testMotion(text, text.len, 0, text.len, .normal_word_start_prev, 9);
+
+	try testMotion(text, 0, 0, "this漢字is ".len, .long_word_start_next, 1);
+	try testMotion(text, 0, 0, "this漢字is .my. ".len, .long_word_start_next, 2);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. ".len, .long_word_start_next, 3);
+	try testMotion(text, 0, 0, text.len, .long_word_start_next, 4);
+
+	try testMotion(text, 0, 0, "this漢字i".len, .long_word_end_next, 1);
+	try testMotion(text, 0, 0, "this漢字is .my".len, .long_word_end_next, 2);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字".len, .long_word_end_next, 3);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .漢字tex".len, .long_word_end_next, 4);
+	try testMotion(text, 0, 0, text.len, .long_word_end_next, 5);
+
+	try testMotion(text, text.len, "this漢字is .my. epic漢字. ".len, text.len, .long_word_start_prev, 1);
+	try testMotion(text, text.len, "this漢字is .my. ".len, text.len, .long_word_start_prev, 2);
+	try testMotion(text, text.len, "this漢字is ".len, text.len, .long_word_start_prev, 3);
+	try testMotion(text, text.len, 0, text.len, .long_word_start_prev, 4);
+
+	try testMotion(text, text.len, "this漢字is .my. epic漢字. .漢字tex".len, text.len, .long_word_end_prev, 1);
+	try testMotion(text, text.len, "this漢字is .my. epic漢字".len, text.len, .long_word_end_prev, 2);
+	try testMotion(text, text.len, "this漢字is .my".len, text.len, .long_word_end_prev, 3);
+	try testMotion(text, text.len, "this漢字i".len, text.len, .long_word_end_prev, 4);
+	try testMotion(text, text.len, 0, text.len, .long_word_end_prev, 5);
+
+	try testMotion(text, 0, 0, text.len, .line, 1);
+	try testMotion(text, 5, 0, text.len, .line, 1);
+	try testMotion(text, text.len, 0, text.len, .line, 1);
+
+	try testMotion(text, 0, 0, text.len, .eol, 1);
+	try testMotion(text, 5, 5, text.len, .eol, 1);
+	try testMotion(text, text.len, text.len, text.len, .eol, 1);
+
+	try testMotion(text, 0, 0, 0, .bol, 1);
+	try testMotion(text, 5, 0, 5, .bol, 1);
+	try testMotion(text, text.len, 0, text.len, .bol, 1);
+
+	try testMotion(text, 3, 0, "this漢字is".len, .normal_word_inside, 1);
+	try testMotion("  ..word..  ", 6, "  ..".len, "  ..word".len, .normal_word_inside, 1);
+
+	try testMotion(text, 3, 0, "this漢字is".len, .long_word_inside, 1);
+	try testMotion("  ..word..  word", 6, 2, "  ..word..".len, .long_word_inside, 1);
+	try testMotion(" word   word ", 6, " word".len, " word   ".len, .normal_word_inside, 1);
+	try testMotion(" word   word ", 6, " word".len, " word   word".len, .normal_word_around, 1);
+	try testMotion("  .. word ..  ", "  .. w".len, "  .. ".len, "  .. word ".len, .normal_word_around, 1);
+	try testMotion("  ..word..  word", 6, 2, "  ..word..  ".len, .long_word_around, 1);
+
+	try testMotion(" ''word'' ", 5, " ''".len, " ''word".len, .{ .inside_single_delimiter = "'" }, 1);
+	try testMotion(" ''word'' ", 5, " '".len, " ''word'".len, .{ .around_single_delimiter = "'" }, 1);
+
+	const delims = .{ .left = "(", .right = ")" };
+	try testMotion("((word))", 5, "((".len, "((word".len, .{ .inside_delimiters = delims }, 1);
+	try testMotion("((word))", 5, "(".len, "((word)".len, .{ .around_delimiters = delims }, 1);
+}
