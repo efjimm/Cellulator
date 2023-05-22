@@ -35,12 +35,15 @@ normal_keys: KeyMap,
 command_normal_keys: CommandKeyMap,
 command_insert_keys: CommandKeyMap,
 command_operator_keys: CommandKeyMap,
+command_to_keys: CommandKeyMap,
 
 allocator: Allocator,
 
-input_buf: std.BoundedArray(u8, 64) = .{},
+input_buf: std.BoundedArray(u8, input_buf_len) = .{},
 command_buf: TextInput(512) = .{},
 status_message: std.BoundedArray(u8, 256) = .{},
+
+const input_buf_len = 64;
 
 pub const status_line = 0;
 pub const input_line = 1;
@@ -101,6 +104,13 @@ pub fn init(allocator: Allocator, options: InitOptions) !Self {
 		try command_operator_keys.put(allocator, mapping[0], mapping[1]);
 	}
 
+	var command_to_keys = CommandKeyMap.init();
+	errdefer command_to_keys.deinit(allocator);
+
+	for (default_command_to_keys) |mapping| {
+		try command_to_keys.put(allocator, mapping[0], mapping[1]);
+	}
+
 	var tui = try Tui.init();
 	errdefer tui.deinit();
 
@@ -117,6 +127,7 @@ pub fn init(allocator: Allocator, options: InitOptions) !Self {
 		.command_normal_keys = command_normal_keys,
 		.command_insert_keys = command_insert_keys,
 		.command_operator_keys = command_operator_keys,
+		.command_to_keys = command_to_keys,
 	};
 
 	if (options.filepath) |filepath| {
@@ -135,6 +146,7 @@ pub fn deinit(self: *Self) void {
 	self.command_normal_keys.deinit(self.allocator);
 	self.command_insert_keys.deinit(self.allocator);
 	self.command_operator_keys.deinit(self.allocator);
+	self.command_to_keys.deinit(self.allocator);
 
 	self.asts.deinit(self.allocator);
 	self.sheet.deinit();
@@ -177,7 +189,7 @@ fn setMode(self: *Self, new_mode: Mode) void {
 }
 
 fn handleInput(self: *Self) !void {
-	var buf: [16]u8 = undefined;
+	var buf: [input_buf_len]u8 = undefined;
 	const slice = try self.tui.term.readInput(&buf);
 
 	const writer = self.input_buf.writer();
@@ -197,6 +209,7 @@ fn commandMode(self: *Self) !void {
 		.normal => &self.command_normal_keys,
 		.insert => &self.command_insert_keys,
 		.operator_pending => &self.command_operator_keys,
+		.to => &self.command_to_keys,
 	};
 
 	if (keys.get(input)) |action| {
@@ -205,49 +218,48 @@ fn commandMode(self: *Self) !void {
 		switch (status) {
 			.waiting => {},
 			.cancelled => self.setMode(.normal),
-			.string => |arr| {
-				defer self.setMode(.normal);
-				const str = arr.slice();
-
-				if (str.len == 0) return;
-
-				if (str[0] == ':') {
-					return self.runCommand(str[1..]);
-				}
-
-				var ast = self.newAst();
-				ast.parse(self.allocator, str) catch |err| {
-					self.delAstAssumeCapacity(ast);
-					return err;
-				};
-
-				const root = ast.rootNode();
-				switch (root) {
-					.assignment => |op| {
-						const pos = ast.nodes.items(.data)[op.lhs].cell;
-						ast.splice(op.rhs);
-
-						self.sheet.setCell(pos, .{ .ast = ast }) catch |err| {
-							self.delAstAssumeCapacity(ast);
-							return err;
-						};
-						self.tui.update.cursor = true;
-						self.tui.update.cells = true;
-					},
-					else => {
-						self.delAstAssumeCapacity(ast);
-					},
-				}
-			},
+			.string => |arr| try self.parseCommand(arr.slice()),
 		}
 	} else if (!keys.contains(input)) {
-		if (self.command_buf.mode == .insert) {
-			var buf: [64]u8 = undefined;
-			const len = std.mem.replacementSize(u8, input, "<<", "<");
-			_ = std.mem.replace(u8, input, "<<", "<", &buf);
-			_ = self.command_buf.do(.{ .insert = buf[0..len] });
-		}
+		var buf: [64]u8 = undefined;
+		const len = std.mem.replacementSize(u8, input, "<<", "<");
+		_ = std.mem.replace(u8, input, "<<", "<", &buf);
+		_ = self.command_buf.do(.{ .other = buf[0..len] });
 		self.input_buf.len = 0;
+	}
+}
+
+fn parseCommand(self: *Self, str: []const u8) !void {
+	defer self.setMode(.normal);
+
+	if (str.len == 0) return;
+
+	if (str[0] == ':') {
+		return self.runCommand(str[1..]);
+	}
+
+	var ast = self.newAst();
+	ast.parse(self.allocator, str) catch |err| {
+		self.delAstAssumeCapacity(ast);
+		return err;
+	};
+
+	const root = ast.rootNode();
+	switch (root) {
+		.assignment => |op| {
+			const pos = ast.nodes.items(.data)[op.lhs].cell;
+			ast.splice(op.rhs);
+
+			self.sheet.setCell(pos, .{ .ast = ast }) catch |err| {
+				self.delAstAssumeCapacity(ast);
+				return err;
+			};
+			self.tui.update.cursor = true;
+			self.tui.update.cells = true;
+		},
+		else => {
+			self.delAstAssumeCapacity(ast);
+		},
 	}
 }
 
@@ -797,6 +809,11 @@ const default_command_normal_keys = [_]CommandMapping{
 	.{ "<Home>", .{ .motion = .bol } },
 	.{ "<End>", .{ .motion = .eol } },
 
+	.{ "f", .operator_to_forwards },
+	.{ "F", .operator_to_backwards },
+	.{ "t", .operator_until_forwards },
+	.{ "T", .operator_until_backwards },
+
 	.{ "h", .{ .motion = .char_prev } },
 	.{ "l", .{ .motion = .char_next } },
 	.{ "0", .zero },
@@ -856,6 +873,11 @@ const default_command_operator_keys = [_]CommandMapping{
 	.{ "<Home>", .{ .motion = .bol } },
 	.{ "<End>", .{ .motion = .eol } },
 
+	.{ "f", .operator_to_forwards },
+	.{ "F", .operator_to_backwards },
+	.{ "t", .operator_until_forwards },
+	.{ "T", .operator_until_backwards },
+
 	.{ "h", .{ .motion = .char_prev } },
 	.{ "l", .{ .motion = .char_next } },
 	.{ "0", .zero },
@@ -902,4 +924,9 @@ const default_command_operator_keys = [_]CommandMapping{
 
 	.{ "i`", .{ .motion = .{ .inside_single_delimiter = "`" } } },
 	.{ "a`", .{ .motion = .{ .around_single_delimiter = "`" } } },
+};
+
+pub const default_command_to_keys = [_]CommandMapping{
+	.{ "<C-[>", .enter_normal_mode },
+	.{ "<Escape>", .enter_normal_mode },
 };

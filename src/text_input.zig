@@ -29,10 +29,18 @@ pub const Action = union(enum) {
 	operator_delete,
 	operator_change,
 
+	operator_to_forwards,
+	operator_until_forwards,
+	operator_to_backwards,
+	operator_until_backwards,
+
 	zero,
 	count: u4,
-	insert: []const u8,
 	motion: Motion,
+
+	// Any inputs that aren't a mapping get passed as this
+	// Its usage depends on the mode (e.g. insert mode inserts any characters passed here)
+	other: []const u8,
 };
 
 /// A wrapper around a buffer that provides cli editing functions. Backed by a fixed size buffer.
@@ -53,10 +61,30 @@ pub fn TextInput(comptime size: u16) type {
 			string: Array,
 		};
 
+		/// Mode to go back to after finishing 'to' mode
+		pub const PrevMode = union(enum) {
+			normal,
+			insert,
+			operator: Operator,
+		};
+
 		pub const Mode = union(enum) {
 			normal,
 			insert,
 			operator_pending: Operator,
+
+			// TODO: This sucks, handle this better
+			to: struct {
+				prev_mode: PrevMode,
+				to_mode: ToMode,
+			},
+		};
+
+		pub const ToMode = enum {
+			to_forwards,
+			until_forwards,
+			to_backwards,
+			until_backwards,
 		};
 
 		/// Determines what happens when a motion is done.
@@ -111,6 +139,10 @@ pub fn TextInput(comptime size: u16) type {
 					},
 					.change_line => self.reset(),
 
+					.operator_to_forwards => self.setToMode(.to_forwards),
+					.operator_to_backwards => self.setToMode(.to_backwards),
+					.operator_until_forwards => self.setToMode(.until_forwards),
+					.operator_until_backwards => self.setToMode(.until_backwards),
 					.zero => {
 						if (self.count == 0) {
 							_ = self.do(.{ .motion = .bol });
@@ -123,13 +155,13 @@ pub fn TextInput(comptime size: u16) type {
 					else => {},
 				},
 				.insert => switch (action) {
-					.insert => |buf| {
-						assert(buf.len > 0);
-						switch (buf[0]) {
+					.other => |bytes| {
+						assert(bytes.len > 0);
+						switch (bytes[0]) {
 							0...31 => {},
 							else => {
-								self.buf.insertSlice(self.cursor, buf) catch return .waiting;
-								self.cursor += @intCast(u16, buf.len);
+								self.buf.insertSlice(self.cursor, bytes) catch return .waiting;
+								self.cursor += @intCast(u16, bytes.len);
 							},
 						}
 					},
@@ -144,23 +176,38 @@ pub fn TextInput(comptime size: u16) type {
 					.motion => |motion| self.doMotion(motion),
 					else => {},
 				},
-				.operator_pending => |op| switch (op) {
-					.delete => switch (action) {
-						.enter_normal_mode => self.setMode(.normal),
-						.operator_delete => self.doMotion(.line),
-						.zero => if (self.count == 0) self.doMotion(.bol) else self.setCount(0),
-						.count => |count| self.setCount(count),
-						.motion => |motion| self.doMotion(motion),
-						else => {},
+				.operator_pending => |op| switch (action) {
+					.enter_normal_mode => self.setMode(.normal),
+
+					.operator_to_forwards => self.setToMode(.to_forwards),
+					.operator_to_backwards => self.setToMode(.to_backwards),
+					.operator_until_forwards => self.setToMode(.until_forwards),
+					.operator_until_backwards => self.setToMode(.until_backwards),
+
+					.zero => if (self.count == 0) self.doMotion(.bol) else self.setCount(0),
+					.count => |count| self.setCount(count),
+					.motion => |motion| self.doMotion(motion),
+
+					.operator_delete => if (op == .delete) self.doMotion(.line),
+					.operator_change => if (op == .change) self.doMotion(.line),
+					else => {},
+				},
+				.to => |t| switch (action) {
+					.enter_normal_mode => self.setMode(.normal),
+					.other => |bytes| {
+						switch (t.prev_mode) {
+							.normal => self.setMode(.normal),
+							.insert => self.setMode(.insert),
+							.operator => |op| self.setMode(.{ .operator_pending = op }),
+						}
+						switch (t.to_mode) {
+							.to_forwards => self.doMotion(.{ .to_forwards = bytes }),
+							.to_backwards => self.doMotion(.{ .to_backwards = bytes }),
+							.until_forwards => self.doMotion(.{ .until_forwards = bytes }),
+							.until_backwards => self.doMotion(.{ .until_backwards = bytes }),
+						}
 					},
-					.change => switch (action) {
-						.enter_normal_mode => self.setMode(.normal),
-						.operator_change => self.doMotion(.line),
-						.zero => if (self.count == 0) self.doMotion(.bol) else self.setCount(0),
-						.count => |count| self.setCount(count),
-						.motion => |motion| self.doMotion(motion),
-						else => {},
-					},
+					else => {},
 				},
 			}
 			return .waiting;
@@ -185,6 +232,20 @@ pub fn TextInput(comptime size: u16) type {
 			self.count = 0;
 		}
 
+		pub fn setToMode(self: *Self, mode: ToMode) void {
+			self.setMode(.{
+				.to = .{
+					.prev_mode = switch (self.mode) {
+						.normal => .normal,
+						.insert => .insert,
+						.operator_pending => |op| .{ .operator = op },
+						else => unreachable,
+					},
+					.to_mode = mode,
+				}
+			});
+		}
+
 		fn doMotion(self: *Self, motion: Motion) void {
 			const count = self.getCount();
 			switch (self.mode) {
@@ -206,10 +267,17 @@ pub fn TextInput(comptime size: u16) type {
 
 						const range = m.do(self.slice(), self.cursor, count);
 						const start = range.start;
+
+						// We want the 'end' part of the range to be inclusive for some motions and
+						// exclusive for others.
 						const end = range.end + switch (m) {
 							.normal_word_end_next,
 							.long_word_end_next,
-								=> nextCharacter(self.slice(), range.end),
+							.to_forwards,
+							.to_backwards,
+							.until_forwards,
+							.until_backwards,
+								=> nextCharacter(self.slice(), range.end, 1),
 							else => 0,
 						};
 
@@ -220,12 +288,21 @@ pub fn TextInput(comptime size: u16) type {
 						self.setMode(.insert);
 					},
 					.delete => {
-						const range = motion.do(self.slice(), self.cursor, count);
+						var range = motion.do(self.slice(), self.cursor, count);
+						range.end += switch (motion) {
+							.normal_word_end_next,
+							.long_word_end_next,
+							.to_forwards,
+							.to_backwards,
+								=> nextCharacter(self.slice(), range.end, 1),
+							else => 0,
+						};
 						self.buf.replaceRange(range.start, range.len(), &.{}) catch unreachable;
 						self.cursor = range.start;
 						self.setMode(.normal);
 					},
 				},
+				.to => unreachable, // Attempted motion in 'to' mode
 			}
 			self.clampCursor();
 			self.resetCount();
@@ -234,16 +311,13 @@ pub fn TextInput(comptime size: u16) type {
 		fn delChar(self: *Self) void {
 			if (self.buf.len == 0) return;
 
-			const length = nextCharacter(self.slice(), self.cursor);
+			const length = nextCharacter(self.slice(), self.cursor, 1);
 			self.buf.replaceRange(self.cursor, length, &.{}) catch unreachable;
 			self.clampCursor();
 		}
 
 		fn endPos(self: Self) u16 {
-			return if (self.mode == .normal)
-					self.len() - prevCharacter(self.slice(), self.len())
-				else
-					self.len();
+			return self.len() - prevCharacter(self.slice(), self.len(), @boolToInt(self.mode == .normal));
 		}
 
 		fn clampCursor(self: *Self) void {
@@ -258,31 +332,9 @@ pub fn TextInput(comptime size: u16) type {
 		}
 
 		fn setMode(self: *Self, mode: Mode) void {
-			if (mode == .normal and self.cursor == self.buf.len) {
-				const m: Motion = .char_prev;
-				self.cursor = m.do(self.slice(), self.len(), 1).start;
-			}
-			self.resetCount();
+			if (self.mode != .to and mode != .to) self.resetCount();
 			self.mode = mode;
-		}
-
-		/// Moves the cursor forward by `n` characters.
-		fn cursorForward(self: *Self, n: u16) void {
-			const end = self.endPos();
-			const bytes = self.slice();
-			for (0..n) |_| {
-				if (self.cursor >= end) break;
-				self.cursor += nextCharacter(bytes, self.cursor);
-			}
-		}
-
-		/// Moves the cursor backward by `n` characters;
-		fn cursorBackward(self: *Self, n: u16) void {
-			const bytes = self.slice();
-			for (0..n) |_| {
-				if (self.cursor == 0) break;
-				self.cursor -= prevCharacter(bytes, self.cursor);
-			}
+			self.clampCursor();
 		}
 
 		/// Returns a copy of the internal buffer and resets internal buffer
@@ -338,27 +390,33 @@ fn prevCodepoint(bytes: []const u8, offset: u16) u16 {
 	return offset - @intCast(u16, iter.index);
 }
 
-fn nextCharacter(bytes: []const u8, offset: u16) u16 {
+// TODO: package & use libgrapheme for these
+//       waiting for https://github.com/ziglang/zig/issues/14719 to be fixed before this happens
+fn nextCharacter(bytes: []const u8, offset: u16, count: u32) u16 {
 	var iter = std.unicode.Utf8Iterator{
 		.bytes = bytes[offset..],
 		.i = 0,
 	};
 
-	while (iter.nextCodepoint()) |cp| {
-		if (wcWidth(cp) != 0) break;
+	for (0..count) |_| {
+		while (iter.nextCodepoint()) |cp| {
+			if (wcWidth(cp) != 0) break;
+		} else break;
 	}
 
 	return @intCast(u16, iter.i);
 }
 
-fn prevCharacter(bytes: []const u8, offset: u16) u16 {
+fn prevCharacter(bytes: []const u8, offset: u16, count: u32) u16 {
 	var i: u16 = offset;
-	while (i > 0) {
-		const len = prevCodepoint(bytes, i);
-		i -= len;
+	for (0..count) |_| {
+		while (i > 0) {
+			const len = prevCodepoint(bytes, i);
+			i -= len;
 
-		const cp = std.unicode.utf8Decode(bytes[i..i + len]) catch continue;
-		if (wcWidth(cp) != 0) break;
+			const cp = std.unicode.utf8Decode(bytes[i..i + len]) catch continue;
+			if (wcWidth(cp) != 0) break;
+		} else break;
 	}
 
 	return offset - i;
@@ -374,6 +432,10 @@ pub const Motion = union(enum) {
 	around_delimiters: Delimiters,
 	inside_single_delimiter: []const u8,
 	around_single_delimiter: []const u8,
+	to_forwards: []const u8,
+	to_backwards: []const u8,
+	until_forwards: []const u8,
+	until_backwards: []const u8,
 
 	normal_word_start_next,
 	normal_word_start_prev,
@@ -412,112 +474,42 @@ pub const Motion = union(enum) {
 		return switch (motion) {
 			.normal_word_start_next => .{
 				.start = pos,
-				.end = blk: {
-					var p = pos;
-					for (0..count) |_| {
-						if (p >= bytes.len) break;
-						p = nextWordStart(bytes, .normal, p);
-					}
-					break :blk p;
-				},
+				.end = nextWordStart(bytes, .normal, pos, count),
 			},
 			.normal_word_start_prev => .{
-				.start = blk: {
-					var p = pos;
-					for (0..count) |_| {
-						if (p == 0) break;
-						p = prevWordStart(bytes, .normal, p);
-					}
-					break :blk p;
-				},
+				.start = prevWordStart(bytes, .normal, pos, count),
 				.end = pos,
 			},
 			.normal_word_end_next => .{
 				.start = pos,
-				.end = blk: {
-					var p = pos;
-					for (0..count) |_| {
-						if (p >= bytes.len) break;
-						p = nextWordEnd(bytes, .normal, p);
-					}
-					break :blk p;
-				},
+				.end = nextWordEnd(bytes, .normal, pos, count),
 			},
 			.normal_word_end_prev => .{
-				.start = blk: {
-					var p = pos;
-					for (0..count) |_| {
-						if (p == 0) break;
-						p = prevWordEnd(bytes, .normal, p);
-					}
-					break :blk p;
-				},
+				.start = prevWordEnd(bytes, .normal, pos, count),
 				.end = pos,
 			},
 			.long_word_start_next => .{
 				.start = pos,
-				.end = blk: {
-					var p = pos;
-					for (0..count) |_| {
-						if (p >= bytes.len) break;
-						p = nextWordStart(bytes, .long, p);
-					}
-					break :blk p;
-				},
+				.end = nextWordStart(bytes, .long, pos, count),
 			},
 			.long_word_start_prev => .{
-				.start = blk: {
-					var p = pos;
-					for (0..count) |_| {
-						if (p == 0) break;
-						p = prevWordStart(bytes, .long, p);
-					}
-					break :blk p;
-				},
+				.start = prevWordStart(bytes, .long, pos, count),
 				.end = pos,
 			},
 			.long_word_end_next => .{
 				.start = pos,
-				.end = blk: {
-					var p = pos;
-					for (0..count) |_| {
-						if (p >= bytes.len) break;
-						p = nextWordEnd(bytes, .long, p);
-					}
-					break :blk p;
-				},
+				.end = nextWordEnd(bytes, .long, pos, count),
 			},
 			.long_word_end_prev => .{
-				.start = blk: {
-					var p = pos;
-					for (0..count) |_| {
-						if (p == 0) break;
-						p = prevWordEnd(bytes, .long, p);
-					}
-					break :blk p;
-				},
+				.start = prevWordEnd(bytes, .long, pos, count),
 				.end = pos,
 			},
 			.char_next => .{
 				.start = pos,
-				.end = blk: {
-					var p = pos;
-					for (0..count) |_| {
-						if (p >= bytes.len) break;
-						p += nextCharacter(bytes, p);
-					}
-					break :blk p;
-				},
+				.end = pos + nextCharacter(bytes, pos, count),
 			},
 			.char_prev => .{
-				.start = blk: {
-					var p = pos;
-					for (0..count) |_| {
-						if (p == 0) break;
-						p -= prevCharacter(bytes, p);
-					}
-					break :blk p;
-				},
+				.start = pos - prevCharacter(bytes, pos, count),
 				.end = pos,
 			},
 			.line => .{
@@ -541,104 +533,156 @@ pub const Motion = union(enum) {
 			.around_delimiters => |d| aroundDelimiters(bytes, d.left, d.right, pos),
 			.inside_single_delimiter => |d| insideSingleDelimiter(bytes, d, pos),
 			.around_single_delimiter => |d| aroundSingleDelimiter(bytes, d, pos),
+
+			.to_forwards => |str| .{
+				.start = pos,
+				.end = toForwards(bytes, str, pos, count) orelse pos,
+			},
+			.to_backwards => |str| .{
+				.start = toBackwards(bytes, str, pos, count) orelse pos,
+				.end = pos,
+			},
+			.until_forwards => |str| .{
+				.start = pos,
+				.end = untilForwards(bytes, str, pos +| 1, count) orelse pos,
+			},
+			.until_backwards => |str| .{
+				.start = untilBackwards(bytes, str, pos -| 1, count) orelse pos,
+				.end = pos,
+			},
 		};
 	}
 
 	/// Returns the byte position of the next word
-	fn nextWordStart(bytes: []const u8, comptime word_type: WordType, start_pos: u16) u16 {
-		if (bytes.len == 0) return 0;
-
+	fn nextWordStart(
+		bytes: []const u8,
+		comptime word_type: WordType,
+		start_pos: u16,
+		count: u32,
+	) u16 {
 		const boundary = wordBoundaryFn(word_type);
 		var pos = start_pos;
 
-		if (boundary(bytes[pos])) {
-			while (pos < bytes.len) : (pos += nextCharacter(bytes, pos)) {
-				if (!boundary(bytes[pos]) or isWhitespace(bytes[pos])) break;
+		for (0..count) |_| {
+			if (pos >= bytes.len) break;
+
+			if (boundary(bytes[pos])) {
+				while (pos < bytes.len) : (pos += nextCharacter(bytes, pos, 1)) {
+					if (!boundary(bytes[pos]) or isWhitespace(bytes[pos])) break;
+				}
+			} else {
+				while (pos < bytes.len) : (pos += nextCharacter(bytes, pos, 1)) {
+					if (boundary(bytes[pos])) break;
+				}
 			}
-		} else {
-			while (pos < bytes.len) : (pos += nextCharacter(bytes, pos)) {
-				if (boundary(bytes[pos])) break;
-			}
-		}
 
-		while (pos < bytes.len) : (pos += nextCharacter(bytes, pos)) {
-			if (!isWhitespace(bytes[pos])) break;
-		}
-
-		return pos;
-	}
-
-	fn prevWordStart(bytes: []const u8, comptime word_type: WordType, start_pos: u16) u16 {
-		if (bytes.len == 0) return 0;
-
-		const boundary = wordBoundaryFn(word_type);
-		var pos = start_pos - prevCharacter(bytes, start_pos);
-
-		while (pos > 0) : (pos -= prevCharacter(bytes, pos)) {
-			if (!isWhitespace(bytes[pos])) break;
-		} else return 0;
-
-		var p = pos;
-		if (boundary(bytes[pos])) {
-			while (p > 0) : (p -= prevCharacter(bytes, p)) {
-				if (!boundary(bytes[p]) or isWhitespace(bytes[p])) return pos;
-				pos = p;
-			}
-			if (!boundary(bytes[p]) or isWhitespace(bytes[p])) return pos;
-		} else {
-			while (p > 0) : (p -= prevCharacter(bytes, p)) {
-				if (boundary(bytes[p])) return pos;
-				pos = p;
-			}
-			if (boundary(bytes[p])) return pos;
-		}
-
-		return 0;
-	}
-
-	fn nextWordEnd(bytes: []const u8, comptime word_type: WordType, start_pos: u16) u16 {
-		if (bytes.len == 0) return 0;
-
-		const boundary = wordBoundaryFn(word_type);
-
-		var pos = start_pos + nextCodepoint(bytes, start_pos);
-		while (pos < bytes.len and isWhitespace(bytes[pos])) : (pos += nextCodepoint(bytes, pos)) {}
-		if (pos == bytes.len) return pos;
-
-		var p = pos;
-		if (boundary(bytes[pos])) {
-			while (p < bytes.len) : (p += nextCharacter(bytes, p)) {
-				if (!boundary(bytes[p]) or isWhitespace(bytes[p])) break;
-				pos = p;
-			}
-		} else {
-			while (p < bytes.len) : (p += nextCharacter(bytes, p)) {
-				if (boundary(bytes[p])) break;
-				pos = p;
+			while (pos < bytes.len) : (pos += nextCharacter(bytes, pos, 1)) {
+				if (!isWhitespace(bytes[pos])) break;
 			}
 		}
 
 		return pos;
 	}
 
-	fn prevWordEnd(bytes: []const u8, comptime word_type: WordType, start_pos: u16) u16 {
+	fn prevWordStart(
+		bytes: []const u8,
+		comptime word_type: WordType,
+		start_pos: u16,
+		count: u32,
+	) u16 {
 		if (bytes.len == 0) return 0;
-		if (start_pos >= bytes.len) return @intCast(u16, bytes.len) - 1;
 
 		const boundary = wordBoundaryFn(word_type);
 		var pos = start_pos;
 
-		if (boundary(bytes[pos])) {
-			while (pos > 0 and boundary(bytes[pos]) and !isWhitespace(bytes[pos])) {
-				pos -= prevCodepoint(bytes, pos);
-			}
-		} else {
-			while (pos > 0 and !boundary(bytes[pos])) {
-				pos -= prevCodepoint(bytes, pos);
+		for (0..count) |_| {
+			while (pos > 0) {
+				pos -= prevCharacter(bytes, pos, 1);
+				if (!isWhitespace(bytes[pos])) break;
+			} else break;
+
+			var p = pos;
+			if (boundary(bytes[p])) {
+				while (p > 0) {
+					p -= prevCharacter(bytes, p, 1);
+					if (!boundary(bytes[p]) or isWhitespace(bytes[p])) break;
+					pos = p;
+				}
+			} else {
+				while (p > 0) {
+					p -= prevCharacter(bytes, p, 1);
+					if (boundary(bytes[p])) break;
+					pos = p;
+				}
 			}
 		}
-		while (pos > 0 and isWhitespace(bytes[pos])) {
-			pos -= prevCodepoint(bytes, pos);
+
+		return pos;
+	}
+
+	fn nextWordEnd(
+		bytes: []const u8,
+		comptime word_type: WordType,
+		start_pos: u16,
+		count: u32,
+	) u16 {
+		if (bytes.len == 0) return 0;
+
+		const boundary = wordBoundaryFn(word_type);
+		var pos = start_pos;
+		
+		for (0..count) |_| {
+			pos += nextCodepoint(bytes, pos);
+			while (pos < bytes.len and isWhitespace(bytes[pos])) {
+				pos += nextCodepoint(bytes, pos);
+			}
+			if (pos == bytes.len) return pos;
+
+			var p = pos;
+			if (boundary(bytes[pos])) {
+				while (p < bytes.len) : (p += nextCharacter(bytes, p, 1)) {
+					if (!boundary(bytes[p]) or isWhitespace(bytes[p])) break;
+					pos = p;
+				}
+			} else {
+				while (p < bytes.len) : (p += nextCharacter(bytes, p, 1)) {
+					if (boundary(bytes[p])) break;
+					pos = p;
+				}
+			}
+		}
+
+		return pos;
+	}
+
+	fn prevWordEnd(
+		bytes: []const u8,
+		comptime word_type: WordType,
+		start_pos: u16,
+		count: u32,
+	) u16 {
+		if (bytes.len == 0) return 0;
+
+		const len = @intCast(u16, bytes.len);
+		if (start_pos >= bytes.len)
+			return prevWordEnd(bytes, word_type, len - prevCharacter(bytes, len, 1), count - 1);
+
+		const boundary = wordBoundaryFn(word_type);
+		var pos = start_pos;
+
+		for (0..count) |_| {
+			if (boundary(bytes[pos])) {
+				while (pos > 0 and boundary(bytes[pos]) and !isWhitespace(bytes[pos])) {
+					pos -= prevCodepoint(bytes, pos);
+				}
+			} else {
+				while (pos > 0 and !boundary(bytes[pos])) {
+					pos -= prevCodepoint(bytes, pos);
+				}
+			}
+			while (pos > 0 and isWhitespace(bytes[pos])) {
+				pos -= prevCodepoint(bytes, pos);
+			}
 		}
 
 		return pos;
@@ -821,6 +865,43 @@ pub const Motion = union(enum) {
 		}
 	}
 
+	fn toForwards(bytes: []const u8, needle: []const u8, pos: u16, count: u32) ?u16 {
+		if (pos >= bytes.len or count == 0) return pos;
+
+		const first = 1 + (std.mem.indexOf(u8, bytes[pos + 1..], needle) orelse return null);
+		var p = pos + first;
+
+		for (1..count) |_| {
+			if (p >= bytes.len) break;
+			p += 1 + (std.mem.indexOf(u8, bytes[p + 1..], needle) orelse break);
+		}
+
+		return @intCast(u16, p);
+	}
+
+	fn toBackwards(bytes: []const u8, needle: []const u8, pos: u16, count: u32) ?u16 {
+		assert(pos <= bytes.len);
+		if (count == 0) return pos;
+
+		var p = std.mem.lastIndexOf(u8, bytes[0..pos], needle) orelse return null;
+
+		for (1..count) |_| {
+			p = std.mem.lastIndexOf(u8, bytes[0..p], needle) orelse break;
+		}
+
+		return @intCast(u16, p);
+	}
+
+	fn untilForwards(bytes: []const u8, needle: []const u8, pos: u16, count: u32) ?u16 {
+		const ret = toForwards(bytes, needle, pos, count) orelse return null;
+		return ret - prevCharacter(bytes, ret, 1);
+	}
+
+	fn untilBackwards(bytes: []const u8, needle: []const u8, pos: u16, count: u32) ?u16 {
+		const ret = toBackwards(bytes, needle, pos, count) orelse return null;
+		return ret + nextCharacter(bytes, ret, 1);
+	}
+
 	fn wordBoundaryFn(comptime word_type: WordType) (fn (u8) bool) {
 		return switch (word_type) {
 			.normal => struct {
@@ -848,6 +929,55 @@ fn testMotion(
 
 test "Motions" {
 	const text = "this漢字is .my. epic漢字. .漢字text";
+
+	try testMotion(text, 0, 0, "th".len, .{ .to_forwards = "i" }, 1);
+	try testMotion(text, 0, 0, "this漢字".len, .{ .to_forwards = "i" }, 2);
+	try testMotion(text, 0, 0, "this漢字is .my. ep".len, .{ .to_forwards = "i" }, 3);
+	try testMotion(text, 0, 0, "this漢字is .my. ep".len, .{ .to_forwards = "i" }, 4);
+	try testMotion(text, 0, 0, "this漢字is .my. ep".len, .{ .to_forwards = "i" }, 5);
+
+	try testMotion(text, 0, 0, "this漢".len, .{ .to_forwards = "字" }, 1);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢".len, .{ .to_forwards = "字" }, 2);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .漢".len, .{ .to_forwards = "字" }, 3);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .漢".len, .{ .to_forwards = "字" }, 4);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .漢".len, .{ .to_forwards = "字" }, 5);
+
+	try testMotion(text, text.len, "this漢字is .my. ep".len, text.len, .{ .to_backwards = "i" }, 1);
+	try testMotion(text, text.len, "this漢字".len, text.len, .{ .to_backwards = "i" }, 2);
+	try testMotion(text, text.len, "th".len, text.len, .{ .to_backwards = "i" }, 3);
+	try testMotion(text, text.len, "th".len, text.len, .{ .to_backwards = "i" }, 4);
+	try testMotion(text, text.len, "th".len, text.len, .{ .to_backwards = "i" }, 5);
+
+	try testMotion(text, text.len, "this漢字is .my. epic漢字. .漢".len, text.len, .{ .to_backwards = "字" }, 1);
+	try testMotion(text, text.len, "this漢字is .my. epic漢".len, text.len, .{ .to_backwards = "字" }, 2);
+	try testMotion(text, text.len, "this漢".len, text.len, .{ .to_backwards = "字" }, 3);
+	try testMotion(text, text.len, "this漢".len, text.len, .{ .to_backwards = "字" }, 4);
+	try testMotion(text, text.len, "this漢".len, text.len, .{ .to_backwards = "字" }, 5);
+
+	try testMotion(text, 0, 0, "t".len, .{ .until_forwards = "i" }, 1);
+	try testMotion(text, 0, 0, "this漢".len, .{ .until_forwards = "i" }, 2);
+	try testMotion(text, 0, 0, "this漢字is .my. e".len, .{ .until_forwards = "i" }, 3);
+	try testMotion(text, 0, 0, "this漢字is .my. e".len, .{ .until_forwards = "i" }, 4);
+	try testMotion(text, 0, 0, "this漢字is .my. e".len, .{ .until_forwards = "i" }, 5);
+
+	try testMotion(text, 0, 0, "this".len, .{ .until_forwards = "字" }, 1);
+	try testMotion(text, 0, 0, "this漢字is .my. epic".len, .{ .until_forwards = "字" }, 2);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .".len, .{ .until_forwards = "字" }, 3);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .".len, .{ .until_forwards = "字" }, 4);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .".len, .{ .until_forwards = "字" }, 5);
+
+	try testMotion(text, text.len, "this漢字is .my. epi".len, text.len, .{ .until_backwards = "i" }, 1);
+	try testMotion(text, text.len, "this漢字i".len, text.len, .{ .until_backwards = "i" }, 2);
+	try testMotion(text, text.len, "thi".len, text.len, .{ .until_backwards = "i" }, 3);
+	try testMotion(text, text.len, "thi".len, text.len, .{ .until_backwards = "i" }, 4);
+	try testMotion(text, text.len, "thi".len, text.len, .{ .until_backwards = "i" }, 5);
+
+	try testMotion(text, text.len, "this漢字is .my. epic漢字. .漢字".len, text.len, .{ .until_backwards = "字" }, 1);
+	try testMotion(text, text.len, "this漢字is .my. epic漢字".len, text.len, .{ .until_backwards = "字" }, 2);
+	try testMotion(text, text.len, "this漢字".len, text.len, .{ .until_backwards = "字" }, 3);
+	try testMotion(text, text.len, "this漢字".len, text.len, .{ .until_backwards = "字" }, 4);
+	try testMotion(text, text.len, "this漢字".len, text.len, .{ .until_backwards = "字" }, 5);
+
 	try testMotion(text, 0, 0, "t".len, .char_next, 1);
 	try testMotion(text, 0, 0, "th".len, .char_next, 2);
 	try testMotion(text, 0, 0, "thi".len, .char_next, 3);
