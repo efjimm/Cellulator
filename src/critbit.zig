@@ -8,6 +8,7 @@
 // copyright notice and this permission notice appear in all copies.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 
 pub const StringContext = struct {
 	pub fn eql(_: @This(), a: []const u8, b: []const u8) bool {
@@ -25,15 +26,22 @@ pub fn CritBitMap(
 	comptime Context: type,
 ) type {
 	return struct {
-		pub const ENode = union(enum) {
+		pub const ENode = union {
 			kv: KV,
 			inode: *INode,
+			none: void,
+		};
+
+		pub const Tag = enum(u2) {
+			kv,
+			inode,
 			none,
 		};
 
 		pub const INode = struct {
 			child: [2]ENode,
-			byte: usize,
+			tags: [2]Tag,
+			byte: u32,
 			bit: u3,
 		};
 
@@ -44,7 +52,12 @@ pub fn CritBitMap(
 
 		const Self = @This();
 
-		head: ENode = .none,
+		comptime {
+			assert(@sizeOf(INode) == @sizeOf(ENode) * 2 + 8);
+		}
+
+		head: ENode = .{ .none = {} },
+		head_tag: Tag = .none,
 		context: Context,
 
 		pub fn init() Self {
@@ -62,21 +75,21 @@ pub fn CritBitMap(
 			};
 		}
 
-		fn clear(allocator: Allocator, node: *ENode) void {
-			if (node.* == .inode) {
-				clear(allocator, &node.inode.child[0]);
-				clear(allocator, &node.inode.child[1]);
+		fn clear(allocator: Allocator, node: *ENode, tag: Tag) void {
+			if (tag == .inode) {
+				clear(allocator, &node.inode.child[0], node.inode.tags[0]);
+				clear(allocator, &node.inode.child[1], node.inode.tags[1]);
 				allocator.destroy(node.inode);
 			}
 		}
 
 		pub fn deinit(self: *Self, allocator: Allocator) void {
-			clear(allocator, &self.head);
+			clear(allocator, &self.head, self.head_tag);
 			self.* = undefined;
 		}
 
 		pub fn get(self: *Self, key: K) ?V {
-			if (self.head == .none) return null;
+			if (self.head_tag == .none) return null;
 
 			const kv = self.closest(key);
 			if (self.context.eql(kv.key, key)) return kv.value;
@@ -87,9 +100,10 @@ pub fn CritBitMap(
 		pub fn prefix(self: Self, key: K) ?*const ENode {
 			const bytes = self.context.asBytes(&key);
 			var node = &self.head;
+			var tag = self.head_tag;
 			var top = node;
 
-			while (node.* == .inode) {
+			while (tag == .inode) {
 				const inode = node.inode;
 				const direction: u1 = if (inode.byte < bytes.len) blk: {
 					top = node;
@@ -97,6 +111,7 @@ pub fn CritBitMap(
 				} else 0;
 
 				node = &inode.child[direction];
+				tag = inode.tags[direction];
 			}
 
 			const top_bytes = self.context.asBytes(&node.kv.key);
@@ -105,7 +120,7 @@ pub fn CritBitMap(
 		}
 
 		pub fn contains(self: Self, key: K) bool {
-			if (self.head == .none) return false;
+			if (self.head_tag == .none) return false;
 			return self.prefix(key) != null;
 		}
 
@@ -117,13 +132,14 @@ pub fn CritBitMap(
 			key: K,
 			value: V,
 		) PutError!void {
-			if (self.head == .none) {
+			if (self.head_tag == .none) {
 				self.head = .{
 					.kv = .{
 						.key = key,
 						.value = value,
 					},
 				};
+				self.head_tag = .kv;
 				return;
 			}
 
@@ -154,9 +170,10 @@ pub fn CritBitMap(
 
 			const new_node = try allocator.create(INode);
 			new_node.* = .{
-				.byte = diff_byte,
+				.byte = @intCast(u32, diff_byte),
 				.bit = diff_bit,
 				.child = undefined,
+				.tags = undefined,
 			};
 			new_node.child[new_dir] = .{
 				.kv = .{
@@ -164,9 +181,11 @@ pub fn CritBitMap(
 					.value = value,
 				},
 			};
+			new_node.tags[new_dir] = .kv;
 
 			var node = &self.head;
-			while (node.* == .inode) {
+			var tag = &self.head_tag;
+			while (tag.* == .inode) {
 				const inode = node.inode;
 				if (inode.byte > diff_byte) break;
 				if (inode.byte == diff_byte and inode.bit < diff_bit) break;
@@ -175,12 +194,15 @@ pub fn CritBitMap(
 						@intCast(u1, (bytes[inode.byte] >> inode.bit) & 1)
 					else 0;
 				node = &inode.child[direction];
+				tag = &inode.tags[direction];
 			}
 
 			new_node.child[new_dir ^ 1] = node.*;
+			new_node.tags[new_dir ^ 1] = tag.*;
 			node.* = .{
 				.inode = new_node,
 			};
+			tag.* = .inode;
 		}
 
 		pub fn remove(self: *Self, allocator: Allocator, key: K) ?V {
@@ -224,10 +246,13 @@ pub fn CritBitMap(
 			const bytes = self.context.asBytes(&key);
 
 			var node = &self.head;
-			while (node.* == .inode) {
+			var tag = self.head_tag;
+			while (tag == .inode) {
 				const inode = node.inode;
 				const direction = getDirection(bytes, inode.*);
+
 				node = &inode.child[direction];
+				tag = inode.tags[direction];
 			}
 
 			return &node.kv;
@@ -289,7 +314,7 @@ test {
 	try map.put(t.allocator, "This is epic", 5);
 	try t.expectError(error.IsPrefix, map.put(t.allocator, "This is", 10));
 	try map.put(t.allocator, "This is epic and nice", 10);
-	try t.expectEqual(std.meta.Tag(Map.ENode).kv, map.head);
+	try t.expectEqual(Map.Tag.kv, map.head_tag);
 	try t.expectEqualStrings("This is epic and nice", map.head.kv.key);
 	try t.expectEqual(@as(usize, 10), map.head.kv.value);
 }
