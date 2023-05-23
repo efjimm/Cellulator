@@ -246,10 +246,10 @@ fn visualMode(self: *Self) void {
 			self.mode.visual = temp;
 		},
 
-		.cell_cursor_up => self.setCursor(.{ .y = self.cursor.y -| 1, .x = self.cursor.x }),
-		.cell_cursor_down => self.setCursor(.{ .y = self.cursor.y +| 1, .x = self.cursor.x }),
-		.cell_cursor_left => self.setCursor(.{ .y = self.cursor.y, .x = self.cursor.x -| 1 }),
-		.cell_cursor_right => self.setCursor(.{ .y = self.cursor.y, .x = self.cursor.x +| 1 }),
+		.cell_cursor_up => self.cursorUp(),
+		.cell_cursor_down => self.cursorDown(),
+		.cell_cursor_left => self.cursorLeft(),
+		.cell_cursor_right => self.cursorRight(),
 		.cell_cursor_row_first => self.cursorToFirstCellInColumn(),
 		.cell_cursor_row_last => self.cursorToLastCellInColumn(),
 		.cell_cursor_col_first => self.cursorToFirstCell(),
@@ -344,10 +344,10 @@ fn normalMode(self: *Self) void {
 				}
 			},
 
-			.cell_cursor_up => self.setCursor(.{ .y = self.cursor.y -| 1, .x = self.cursor.x }),
-			.cell_cursor_down => self.setCursor(.{ .y = self.cursor.y +| 1, .x = self.cursor.x }),
-			.cell_cursor_left => self.setCursor(.{ .y = self.cursor.y, .x = self.cursor.x -| 1 }),
-			.cell_cursor_right => self.setCursor(.{ .y = self.cursor.y, .x = self.cursor.x +| 1 }),
+			.cell_cursor_up => self.cursorUp(),
+			.cell_cursor_down => self.cursorDown(),
+			.cell_cursor_left => self.cursorLeft(),
+			.cell_cursor_right => self.cursorRight(),
 			.cell_cursor_row_first => self.cursorToFirstCellInColumn(),
 			.cell_cursor_row_last => self.cursorToLastCellInColumn(),
 			.cell_cursor_col_first => self.cursorToFirstCell(),
@@ -459,8 +459,12 @@ pub fn setCount(self: *Self, count: u4) void {
 	self.count = self.count *| 10 +| count;
 }
 
-pub fn getCount(self: *Self) u32 {
+pub fn getCount(self: Self) u32 {
 	return if (self.count == 0) 1 else self.count;
+}
+
+pub fn getCountU16(self: Self) u16 {
+	return @intCast(u16, @min(std.math.maxInt(u16), self.getCount()));
 }
 
 pub fn resetCount(self: *Self) void {
@@ -632,6 +636,26 @@ pub fn setCursor(self: *Self, new_pos: Position) void {
 	} else {
 		self.tui.update.cursor = true;
 	}
+}
+
+pub fn cursorUp(self: *Self) void {
+	self.setCursor(.{ .y = self.cursor.y -| self.getCountU16(), .x = self.cursor.x });
+	self.resetCount();
+}
+
+pub fn cursorDown(self: *Self) void {
+	self.setCursor(.{ .y = self.cursor.y +| self.getCountU16(), .x = self.cursor.x });
+	self.resetCount();
+}
+
+pub fn cursorLeft(self: *Self) void {
+	self.setCursor(.{ .y = self.cursor.y, .x = self.cursor.x -| self.getCountU16() });
+	self.resetCount();
+}
+
+pub fn cursorRight(self: *Self) void {
+	self.setCursor(.{ .y = self.cursor.y, .x = self.cursor.x +| self.getCountU16() });
+	self.resetCount();
 }
 
 pub inline fn contentHeight(self: Self) u16 {
