@@ -31,7 +31,10 @@ running: bool = true,
 
 asts: std.ArrayListUnmanaged(Ast) = .{},
 
+count: u32 = 0,
+
 normal_keys: KeyMap,
+visual_keys: KeyMap,
 command_normal_keys: CommandKeyMap,
 command_insert_keys: CommandKeyMap,
 command_operator_keys: CommandKeyMap,
@@ -53,8 +56,9 @@ pub const content_line = 3;
 const KeyMap = critbit.CritBitMap([]const u8, Action, critbit.StringContext);
 const CommandKeyMap = critbit.CritBitMap([]const u8, CommandAction, critbit.StringContext);
 
-pub const Mode = enum {
+pub const Mode = union(enum) {
 	normal,
+	visual: Position, // Holds the 'anchor' position
 	command,
 
 	pub fn format(
@@ -81,6 +85,13 @@ pub fn init(allocator: Allocator, options: InitOptions) !Self {
 
 	for (default_normal_keys) |mapping| {
 		try normal_keys.put(allocator, mapping[0], mapping[1]);
+	}
+
+	var visual_keys = KeyMap.init();
+	errdefer visual_keys.deinit(allocator);
+
+	for (default_visual_keys) |mapping| {
+		try visual_keys.put(allocator, mapping[0], mapping[1]);
 	}
 
 	var command_normal_keys = CommandKeyMap.init();
@@ -118,12 +129,15 @@ pub fn init(allocator: Allocator, options: InitOptions) !Self {
 		try tui.term.uncook(.{});
 	}
 
+	log.debug("Finished init", .{});
+
 	var ret = Self{
 		.sheet = Sheet.init(allocator),
 		.tui = tui,
 		.allocator = allocator,
 		.asts = ast_list,
 		.normal_keys = normal_keys,
+		.visual_keys = visual_keys,
 		.command_normal_keys = command_normal_keys,
 		.command_insert_keys = command_insert_keys,
 		.command_operator_keys = command_operator_keys,
@@ -143,6 +157,7 @@ pub fn deinit(self: *Self) void {
 	}
 
 	self.normal_keys.deinit(self.allocator);
+	self.visual_keys.deinit(self.allocator);
 	self.command_normal_keys.deinit(self.allocator);
 	self.command_insert_keys.deinit(self.allocator);
 	self.command_operator_keys.deinit(self.allocator);
@@ -178,14 +193,25 @@ pub fn updateCells(self: *Self) Allocator.Error!void {
 	return self.sheet.update();
 }
 
-fn setMode(self: *Self, new_mode: Mode) void {
-	if (new_mode == .command) {
-		self.dismissStatusMessage();
-	} else if (self.mode == .command) {
-		self.tui.update.command = true;
+fn setMode(self: *Self, new_mode: std.meta.Tag(Mode)) void {
+	switch (self.mode) {
+		.normal => {},
+		.visual => {
+			self.tui.update.cells = true;
+			self.tui.update.column_headings = true;
+			self.tui.update.row_numbers = true;
+		},
+		.command => self.tui.update.command = true,
 	}
 
-	self.mode = new_mode;
+	switch (new_mode) {
+		.normal => self.mode = .normal,
+		.visual => self.mode = .{ .visual = self.cursor },
+		.command => {
+			self.dismissStatusMessage();
+			self.mode = .command;
+		},
+	}
 }
 
 fn handleInput(self: *Self) !void {
@@ -197,10 +223,46 @@ fn handleInput(self: *Self) !void {
 
 	switch (self.mode) {
 		.normal => self.normalMode(),
+		.visual => self.visualMode(),
 		.command => self.commandMode() catch |err| {
 			self.setStatusMessage("Error: {s}", .{ @errorName(err) });
 		},
 	}
+}
+
+fn visualMode(self: *Self) void {
+	const input = self.input_buf.slice();
+
+	const action = self.visual_keys.get(input) orelse {
+		if (!self.visual_keys.contains(input)) self.input_buf.len = 0;
+		return;
+	};
+
+	switch (action) {
+		.enter_normal_mode => self.setMode(.normal),
+		.swap_anchor => {
+			const temp = self.cursor;
+			self.setCursor(self.mode.visual);
+			self.mode.visual = temp;
+		},
+
+		.cell_cursor_up => self.setCursor(.{ .y = self.cursor.y -| 1, .x = self.cursor.x }),
+		.cell_cursor_down => self.setCursor(.{ .y = self.cursor.y +| 1, .x = self.cursor.x }),
+		.cell_cursor_left => self.setCursor(.{ .y = self.cursor.y, .x = self.cursor.x -| 1 }),
+		.cell_cursor_right => self.setCursor(.{ .y = self.cursor.y, .x = self.cursor.x +| 1 }),
+		.cell_cursor_row_first => self.cursorToFirstCellInColumn(),
+		.cell_cursor_row_last => self.cursorToLastCellInColumn(),
+		.cell_cursor_col_first => self.cursorToFirstCell(),
+		.cell_cursor_col_last => self.cursorToLastCell(),
+
+		.delete_cell => {
+			self.sheet.deleteCellsInRange(self.cursor, self.mode.visual);
+			self.setMode(.normal);
+			self.tui.update.cells = true;
+		},
+		else => {},
+	}
+	self.input_buf.len = 0;
 }
 
 fn commandMode(self: *Self) !void {
@@ -272,7 +334,15 @@ fn normalMode(self: *Self) void {
 				const writer = self.command_buf.writer();
 				writer.writeByte(':') catch unreachable;
 			},
-			.dismiss_status_message => self.dismissStatusMessage(),
+			.enter_visual_mode => self.setMode(.visual),
+			.enter_normal_mode => {},
+			.dismiss_count_or_status_message => {
+				if (self.count != 0) {
+					self.resetCount();
+				} else {
+					self.dismissStatusMessage();
+				}
+			},
 
 			.cell_cursor_up => self.setCursor(.{ .y = self.cursor.y -| 1, .x = self.cursor.x }),
 			.cell_cursor_down => self.setCursor(.{ .y = self.cursor.y +| 1, .x = self.cursor.x }),
@@ -286,35 +356,28 @@ fn normalMode(self: *Self) void {
 			.delete_cell => self.deleteCell() catch |err| switch (err) {
 				error.OutOfMemory => self.setStatusMessage("Error: out of memory!", .{}),
 			},
-			.next_populated_cell => {
-				const positions = self.sheet.cells.keys();
-				for (positions) |pos| {
-					if (pos.hash() > self.cursor.hash()) {
-						self.setCursor(pos);
-						break;
-					}
-				}
-			},
-			.prev_populated_cell => {
-				const positions = self.sheet.cells.keys();
-				var pos_iter = std.mem.reverseIterator(positions);
-				while (pos_iter.next()) |pos| {
-					if (pos.hash() < self.cursor.hash()) {
-						self.setCursor(pos);
-						break;
-					}
-				}
-			},
-			.increase_precision => self.incPrecision(self.cursor.x, 1),
-			.decrease_precision => self.decPrecision(self.cursor.x, 1),
-			.increase_width => self.incWidth(self.cursor.x, 1),
-			.decrease_width => self.decWidth(self.cursor.x, 1),
+			.next_populated_cell => self.cursorNextPopulatedCell(),
+			.prev_populated_cell => self.cursorPrevPopulatedCell(),
+			.increase_precision => self.cursorIncPrecision(),
+			.decrease_precision => self.cursorDecPrecision(),
+			.increase_width => self.cursorIncWidth(),
+			.decrease_width => self.cursorDecWidth(),
 			.assign_cell => {
 				self.setMode(.command);
 				const writer = self.command_buf.writer();
 				self.cursor.writeCellAddress(writer) catch unreachable;
 				writer.writeAll(" = ") catch unreachable;
 			},
+
+			.zero => {
+				if (self.count == 0) {
+					self.cursorToFirstCell();
+				} else {
+					self.setCount(0);
+				}
+			},
+			.count => |count| self.setCount(count),
+			else => {},
 		}
 		self.input_buf.len = 0;
 	} else if (!self.normal_keys.contains(input)) {
@@ -322,6 +385,87 @@ fn normalMode(self: *Self) void {
 	}
 }
 
+pub fn isSelectedCell(self: Self, pos: Position) bool {
+	return switch (self.mode) {
+		.visual => |anchor| pos.intersects(anchor, self.cursor),
+		else => self.cursor.hash() == pos.hash(),
+	};
+}
+
+pub fn isSelectedCol(self: Self, x: u16) bool {
+	return switch (self.mode) {
+		.visual => |anchor| {
+			const min = @min(self.cursor.x, anchor.x);
+			const max = @max(self.cursor.x, anchor.x);
+			return x >= min and x <= max;
+		},
+		else => self.cursor.x == x,
+	};
+}
+
+pub fn isSelectedRow(self: Self, y: u16) bool {
+	return switch (self.mode) {
+		.visual => |anchor| {
+			const min = @min(self.cursor.y, anchor.y);
+			const max = @max(self.cursor.y, anchor.y);
+			return y >= min and y <= max;
+		},
+		else => self.cursor.y == y,
+	};
+}
+
+pub fn nextPopulatedCell(self: *Self, start_pos: Position, count: u32) Position {
+	if (count == 0) return start_pos;
+	const positions = self.sheet.cells.keys();
+	if (positions.len == 0) return start_pos;
+
+	var ret = start_pos;
+
+	// Index of the first position that is greater than start_pos
+	const first = for (positions, count - 1..) |pos, i| {
+		if (pos.hash() > start_pos.hash()) break i;
+	} else return ret;
+
+	// count-1 positions after the first one that is greater than start_pos
+	return positions[@min(positions.len - 1, first)];
+}
+
+pub fn prevPopulatedCell(self: *Self, start_pos: Position, count: u32) Position {
+	if (count == 0) return start_pos;
+
+	const positions = self.sheet.cells.keys();
+	var iter = std.mem.reverseIterator(positions);
+	while (iter.next()) |pos| {
+		if (pos.hash() < start_pos.hash()) break;
+	} else return start_pos;
+
+	return positions[iter.index -| (count - 1)];
+}
+
+pub fn cursorNextPopulatedCell(self: *Self) void {
+	const new_pos = self.nextPopulatedCell(self.cursor, self.getCount());
+	self.setCursor(new_pos);
+	self.resetCount();
+}
+
+pub fn cursorPrevPopulatedCell(self: *Self) void {
+	const new_pos = self.prevPopulatedCell(self.cursor, self.getCount());
+	self.setCursor(new_pos);
+	self.resetCount();
+}
+
+pub fn setCount(self: *Self, count: u4) void {
+	assert(count <= 9);
+	self.count = self.count *| 10 +| count;
+}
+
+pub fn getCount(self: *Self) u32 {
+	return if (self.count == 0) 1 else self.count;
+}
+
+pub fn resetCount(self: *Self) void {
+	self.count = 0;
+}
 
 const Cmd = enum {
 	save,
@@ -481,7 +625,13 @@ pub fn setCursor(self: *Self, new_pos: Position) void {
 	self.cursor = new_pos;
 	self.clampScreenToCursor();
 
-	self.tui.update.cursor = true;
+	if (self.mode == .visual) {
+		self.tui.update.cells = true;
+		self.tui.update.column_headings = true;
+		self.tui.update.row_numbers = true;
+	} else {
+		self.tui.update.cursor = true;
+	}
 }
 
 pub inline fn contentHeight(self: Self) u16 {
@@ -569,18 +719,30 @@ pub fn setPrecision(self: *Self, column: u16, new_precision: u8) void {
 	}
 }
 
-pub fn incPrecision(self: *Self, column: u16, n: u8) void {
+pub fn incPrecision(self: *Self, column: u16, count: u8) void {
 	if (self.sheet.columns.getPtr(column)) |col| {
-		col.precision +|= n;
+		col.precision +|= count;
 		self.tui.update.cells = true;
 	}
 }
 
-pub fn decPrecision(self: *Self, column: u16, n: u8) void {
+pub fn decPrecision(self: *Self, column: u16, count: u8) void {
 	if (self.sheet.columns.getPtr(column)) |col| {
-		col.precision -|= n;
+		col.precision -|= count;
 		self.tui.update.cells = true;
 	}
+}
+
+pub inline fn cursorIncPrecision(self: *Self) void {
+	const count = @intCast(u8, @min(std.math.maxInt(u8), self.getCount()));
+	self.incPrecision(self.cursor.x, count);
+	self.resetCount();
+}
+
+pub inline fn cursorDecPrecision(self: *Self) void {
+	const count = @intCast(u8, @min(std.math.maxInt(u8), self.getCount()));
+	self.decPrecision(self.cursor.x, count);
+	self.resetCount();
 }
 
 pub fn incWidth(self: *Self, column: u16, n: u8) void {
@@ -598,6 +760,18 @@ pub fn decWidth(self: *Self, column: u16, n: u8) void {
 		self.tui.update.cells = true;
 		self.tui.update.column_headings = true;
 	}
+}
+
+pub inline fn cursorIncWidth(self: *Self) void {
+	const count = @intCast(u8, @min(std.math.maxInt(u8), self.getCount()));
+	self.incWidth(self.cursor.x, count);
+	self.resetCount();
+}
+
+pub inline fn cursorDecWidth(self: *Self) void {
+	const count = @intCast(u8, @min(std.math.maxInt(u8), self.getCount()));
+	self.decWidth(self.cursor.x, count);
+	self.resetCount();
 }
 
 pub fn newAst(self: *Self) Ast {
@@ -718,9 +892,11 @@ pub fn parseInput(bytes: []const u8, writer: anytype) @TypeOf(writer).Error!void
 	}
 }
 
-pub const Action = enum {
+pub const Action = union(enum) {
+	enter_normal_mode,
+	enter_visual_mode,
 	enter_command_mode,
-	dismiss_status_message,
+	dismiss_count_or_status_message,
 
 	cell_cursor_up,
 	cell_cursor_down,
@@ -739,6 +915,12 @@ pub const Action = enum {
 	increase_width,
 	decrease_width,
 	assign_cell,
+
+	zero,
+	count: u4,
+
+	// Visual mode only
+	swap_anchor,
 };
 
 const Mapping = struct {
@@ -747,6 +929,9 @@ const Mapping = struct {
 };
 
 const default_normal_keys = [_]Mapping{
+	.{ "<C-[>", .dismiss_count_or_status_message },
+	.{ "<Escape>", .dismiss_count_or_status_message },
+
 	.{ "+", .increase_width },
 	.{ "-", .decrease_width },
 	.{ "f", .increase_precision },
@@ -759,13 +944,44 @@ const default_normal_keys = [_]Mapping{
 	.{ "b", .prev_populated_cell },
 	.{ "gg", .cell_cursor_row_first },
 	.{ "G", .cell_cursor_row_last },
-	.{ "0", .cell_cursor_col_first },
 	.{ "$", .cell_cursor_col_last },
 	.{ "=", .assign_cell },
 	.{ "dd", .delete_cell },
 	.{ "x", .delete_cell },
-	.{ "<Escape>", .dismiss_status_message },
 	.{ ":", .enter_command_mode },
+	.{ "v", .enter_visual_mode },
+
+	.{ "0", .zero }, // Could be motion or count
+	.{ "1", .{ .count = 1 } },
+	.{ "2", .{ .count = 2 } },
+	.{ "3", .{ .count = 3 } },
+	.{ "4", .{ .count = 4 } },
+	.{ "5", .{ .count = 5 } },
+	.{ "6", .{ .count = 6 } },
+	.{ "7", .{ .count = 7 } },
+	.{ "8", .{ .count = 8 } },
+	.{ "9", .{ .count = 9 } },
+};
+
+const default_visual_keys = [_]Mapping{
+	.{ "<C-[>", .enter_normal_mode },
+	.{ "<Escape>", .enter_normal_mode },
+
+	.{ "o", .swap_anchor },
+	.{ "d", .delete_cell },
+	.{ "x", .delete_cell },
+
+	.{ "j", .cell_cursor_down },
+	.{ "k", .cell_cursor_up },
+	.{ "h", .cell_cursor_left },
+	.{ "l", .cell_cursor_right },
+
+	.{ "w", .next_populated_cell },
+	.{ "b", .prev_populated_cell },
+	.{ "gg", .cell_cursor_row_first },
+	.{ "G", .cell_cursor_row_last },
+	.{ "0", .cell_cursor_col_first },
+	.{ "$", .cell_cursor_col_last },
 };
 
 const CommandMapping = struct {

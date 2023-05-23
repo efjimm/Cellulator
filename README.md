@@ -36,14 +36,16 @@ using Cellulator, build it in ReleaseSafe mode to catch any latent bugs.
 Cellulator used mode-based input, like in vim. There are multiple modes in Cellulator:
 
  - normal
+ - visual
  - command normal
  - command insert
  - command operator pending
 
 Normal mode allows you to move around the sheet using vim-like motions and perform various
-operations. Command normal and command insert mode allow for editing the command buffer and
-submitting commands. Command operator pending modes perform a specific action on a range of text
-delimited by an inputted motion.
+operations. Visual mode is used for performing operations on a range of cells interactively.
+Command normal and command insert mode allow for editing the command buffer and submitting
+commands. Command operator pending modes perform a specific action on a range of text delimited by
+an inputted motion.
 
 ## Expressions
 
@@ -111,6 +113,12 @@ will repeat the following motion that many times. This does not currently work f
 - `F` Decrease decimal precision of the current column
 - `+` Increase width of current column if non-empty
 - `-` Decrease width of current column if non-empty
+
+### Visual Mode
+
+- `Esc`, `C-[` Enter normal mode
+- `d`, `x` Delete the cells in the given range
+- `o` Swap cursor and anchor
 
 ### Command Insert Mode
 

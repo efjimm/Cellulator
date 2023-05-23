@@ -130,8 +130,13 @@ pub fn renderStatus(
 	try zc.cursor.writeCellAddress(writer);
 	try writer.print(" {} ", .{ zc.mode });
 
-	if (zc.command_buf.count != 0) {
-		try writer.print("{d} ", .{ zc.command_buf.getCount() });
+	switch (zc.mode) {
+		.command => if (zc.command_buf.count != 0) {
+			try writer.print("{d} ", .{ zc.command_buf.getCount() });
+		},
+		else => if (zc.count != 0) {
+			try writer.print("{d} ", .{ zc.getCount() });
+		},
 	}
 
 	try writer.writeAll(zc.input_buf.slice());
@@ -206,7 +211,7 @@ pub fn renderColumnHeadings(
 		var buf: [4]u8 = undefined;
 		const name = Position.columnAddressBuf(x, &buf);
 
-		if (x == zc.cursor.x) {
+		if (zc.isSelectedCol(x)) {
 			try rc.setStyle(.{ .fg = .black, .bg = .blue });
 			try writer.print("{s: ^[1]}", .{ name, width });
 			try rc.setStyle(.{ .fg = .blue, .bg = .black });
@@ -234,18 +239,20 @@ pub fn renderRowNumbers(self: Self, rc: *RenderContext, zc: *ZC) RenderError!voi
 	for (ZC.content_line..self.term.height, zc.screen_pos.y..) |screen_line, sheet_line| {
 		try rc.moveCursorTo(@intCast(u16, screen_line), 0);
 
-		if (zc.cursor.y == sheet_line)
-			try rc.setStyle(.{ .fg = .black, .bg = .blue });
-
 		var rpw = rc.restrictedPaddingWriter(width);
 		const writer = rpw.writer();
 
-		try writer.print("{d: ^[1]}", .{ sheet_line, width });
+		if (zc.isSelectedRow(@intCast(u16, sheet_line))) {
+			try rc.setStyle(.{ .fg = .black, .bg = .blue });
 
-		try rpw.pad();
+			try writer.print("{d: ^[1]}", .{ sheet_line, width });
+			try rpw.pad();
 
-		if (zc.cursor.y == sheet_line)
 			try rc.setStyle(.{ .fg = .blue, .bg = .black });
+		} else {
+			try writer.print("{d: ^[1]}", .{ sheet_line, width });
+			try rpw.pad();
+		}
 	}
 }
 
@@ -253,6 +260,7 @@ pub fn renderCursor(
 	rc: *RenderContext,
 	zc: *ZC,
 ) RenderError!void {
+	if (zc.mode == .visual) return;
 	var buf: [16]u8 = undefined;
 
 	const left = zc.leftReservedColumns();
@@ -328,9 +336,10 @@ pub fn renderCursor(
 pub fn renderCursorCell(
 	rc: *RenderContext,
 	zc: *ZC,
+	pos: Position,
 ) RenderError!u16 {
 	try rc.setStyle(.{ .fg = .black, .bg = .blue });
-	const ret = renderCell(rc, zc, zc.cursor);
+	const ret = renderCell(rc, zc, pos);
 	try rc.setStyle(.{});
 	return ret;
 }
@@ -350,10 +359,25 @@ pub fn renderCells(
 		var w: u16 = reserved_cols;
 		for (zc.screen_pos.x..@as(usize, std.math.maxInt(u16)) + 1) |x| {
 			const pos = Position{ .y = @intCast(u16, y), .x = @intCast(u16, x) };
-			if (pos.hash() == zc.cursor.hash()) {
-				w += try renderCursorCell(rc, zc);
-			} else {
-				w += try renderCell(rc, zc, pos);
+			switch (zc.mode) {
+				.visual => |anchor| {
+					if (pos.hash() == zc.cursor.hash()) {
+						try rc.setStyle(.{ .fg = .black, .bg = .yellow });
+						w += try renderCell(rc, zc, pos);
+						try rc.setStyle(.{});
+					} else if (pos.intersects(anchor, zc.cursor)) {
+						w += try renderCursorCell(rc, zc, pos);
+					} else {
+						w += try renderCell(rc, zc, pos);
+					}
+				},
+				else => {
+					if (pos.hash() == zc.cursor.hash()) {
+						w += try renderCursorCell(rc, zc, pos);
+					} else {
+						w += try renderCell(rc, zc, pos);
+					}
+				},
 			}
 			if (w >= self.term.width) break;
 		} else {

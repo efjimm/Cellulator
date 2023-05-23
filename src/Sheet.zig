@@ -118,6 +118,24 @@ pub fn deleteCell(sheet: *Sheet, pos: Position) ?Ast {
 	return cell.ast;
 }
 
+pub fn deleteCellsInRange(sheet: *Sheet, p1: Position, p2: Position) void {
+	var i: usize = 0;
+	const positions = sheet.cells.keys();
+	const tl = Position.topLeft(p1, p2);
+	const br = Position.bottomRight(p1, p2);
+
+	while (i < positions.len) {
+		const pos = positions[i];
+		if (pos.y > br.y) break;
+		if (pos.y >= tl.y and pos.x >= tl.x and pos.x <= br.x) {
+			var ast = sheet.deleteCell(pos).?;
+			ast.deinit(sheet.allocator);
+		} else {
+			i += 1;
+		}
+	}
+}
+
 pub fn getCell(sheet: Sheet, pos: Position) ?Cell {
 	return sheet.cells.get(pos);
 }
@@ -265,6 +283,13 @@ pub const Position = struct {
 		const end = bottomRight(pos1, pos2);
 
 		return (@as(u32, end.x) + 1 - start.x) * (@as(u32, end.y) + 1 - start.y);
+	}
+
+	pub fn intersects(pos: Position, corner1: Position, corner2: Position) bool {
+		const tl = topLeft(corner1, corner2);
+		const br = bottomRight(corner1, corner2);
+
+		return pos.y >= tl.y and pos.y <= br.y and pos.x >= tl.x and pos.x <= br.x;
 	}
 
 	/// Writes the cell address of this position to the given writer.

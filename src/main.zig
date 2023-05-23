@@ -41,9 +41,9 @@ pub fn main() !void {
 	var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 	defer _ = gpa.deinit();
 
-	const allocator = gpa.allocator();
+	var sfa = std.heap.stackFallback(32768, gpa.allocator());
 
-	zc = try ZC.init(allocator, .{ .filepath = filepath });
+	zc = try ZC.init(sfa.get(), .{ .filepath = filepath });
 	defer zc.deinit();
 
 	try zc.run();
@@ -70,10 +70,10 @@ pub fn log(
 ) void {
 	if (logfile) |file| {
 		const writer = file.writer();
-		writer.print("[{}] {}:", .{ scope, level }) catch unreachable;
-		writer.print(format, args) catch unreachable;
-		writer.writeByte('\n') catch unreachable;
-		file.sync() catch unreachable;
+		writer.print("[{s}] {s}: ", .{ @tagName(scope), @tagName(level) }) catch {};
+		writer.print(format, args) catch {};
+		writer.writeByte('\n') catch {};
+		file.sync() catch {};
 	} else {
 		std.log.defaultLog(level, scope, format, args);
 	}
