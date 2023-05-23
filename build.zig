@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
 
     const spoon_pkg = b.dependency("spoon", .{});
     const spoon = spoon_pkg.module("spoon");
-    const wcwidth = spoon_pkg.module("wcwidth");
+    const wcwidth = b.dependency("wcwidth", .{}).module("wcwidth");
     exe.addModule("spoon", spoon);
     exe.addModule("wcwidth", wcwidth);
 
