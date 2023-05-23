@@ -33,12 +33,8 @@ asts: std.ArrayListUnmanaged(Ast) = .{},
 
 count: u32 = 0,
 
-normal_keys: KeyMap,
-visual_keys: KeyMap,
-command_normal_keys: CommandKeyMap,
-command_insert_keys: CommandKeyMap,
-command_operator_keys: CommandKeyMap,
-command_to_keys: CommandKeyMap,
+keymaps: KeyMap(Action, MapType),
+command_keymaps: KeyMap(CommandAction, CommandMapType),
 
 allocator: Allocator,
 
@@ -52,9 +48,6 @@ pub const status_line = 0;
 pub const input_line = 1;
 pub const col_heading_line = 2;
 pub const content_line = 3;
-
-const KeyMap = critbit.CritBitMap([]const u8, Action, critbit.StringContext);
-const CommandKeyMap = critbit.CritBitMap([]const u8, CommandAction, critbit.StringContext);
 
 pub const Mode = union(enum) {
 	normal,
@@ -80,47 +73,11 @@ pub fn init(allocator: Allocator, options: InitOptions) !Self {
 	var ast_list = try std.ArrayListUnmanaged(Ast).initCapacity(allocator, 8);
 	errdefer ast_list.deinit(allocator);
 
-	var normal_keys = KeyMap.init();
-	errdefer normal_keys.deinit(allocator);
+	var keymaps = try KeyMap(Action, MapType).init(outer_keys, allocator);
+	errdefer keymaps.deinit(allocator);
 
-	for (default_normal_keys) |mapping| {
-		try normal_keys.put(allocator, mapping[0], mapping[1]);
-	}
-
-	var visual_keys = KeyMap.init();
-	errdefer visual_keys.deinit(allocator);
-
-	for (default_visual_keys) |mapping| {
-		try visual_keys.put(allocator, mapping[0], mapping[1]);
-	}
-
-	var command_normal_keys = CommandKeyMap.init();
-	errdefer command_normal_keys.deinit(allocator);
-
-	for (default_command_normal_keys) |mapping| {
-		try command_normal_keys.put(allocator, mapping[0], mapping[1]);
-	}
-
-	var command_insert_keys = CommandKeyMap.init();
-	errdefer command_insert_keys.deinit(allocator);
-
-	for (default_command_insert_keys) |mapping| {
-		try command_insert_keys.put(allocator, mapping[0], mapping[1]);
-	}
-
-	var command_operator_keys = CommandKeyMap.init();
-	errdefer command_operator_keys.deinit(allocator);
-
-	for (default_command_operator_keys) |mapping| {
-		try command_operator_keys.put(allocator, mapping[0], mapping[1]);
-	}
-
-	var command_to_keys = CommandKeyMap.init();
-	errdefer command_to_keys.deinit(allocator);
-
-	for (default_command_to_keys) |mapping| {
-		try command_to_keys.put(allocator, mapping[0], mapping[1]);
-	}
+	var command_keymaps = try KeyMap(CommandAction, CommandMapType).init(command_keys, allocator);
+	errdefer command_keymaps.deinit(allocator);
 
 	var tui = try Tui.init();
 	errdefer tui.deinit();
@@ -129,24 +86,20 @@ pub fn init(allocator: Allocator, options: InitOptions) !Self {
 		try tui.term.uncook(.{});
 	}
 
-	log.debug("Finished init", .{});
-
 	var ret = Self{
 		.sheet = Sheet.init(allocator),
 		.tui = tui,
 		.allocator = allocator,
 		.asts = ast_list,
-		.normal_keys = normal_keys,
-		.visual_keys = visual_keys,
-		.command_normal_keys = command_normal_keys,
-		.command_insert_keys = command_insert_keys,
-		.command_operator_keys = command_operator_keys,
-		.command_to_keys = command_to_keys,
+		.keymaps = keymaps,
+		.command_keymaps = command_keymaps,
 	};
 
 	if (options.filepath) |filepath| {
 		try ret.loadFile(&ret.sheet, filepath);
 	}
+
+	log.debug("Finished init", .{});
 
 	return ret;
 }
@@ -156,12 +109,8 @@ pub fn deinit(self: *Self) void {
 		ast.deinit(self.allocator);
 	}
 
-	self.normal_keys.deinit(self.allocator);
-	self.visual_keys.deinit(self.allocator);
-	self.command_normal_keys.deinit(self.allocator);
-	self.command_insert_keys.deinit(self.allocator);
-	self.command_operator_keys.deinit(self.allocator);
-	self.command_to_keys.deinit(self.allocator);
+	self.keymaps.deinit(self.allocator);
+	self.command_keymaps.deinit(self.allocator);
 
 	self.asts.deinit(self.allocator);
 	self.sheet.deinit();
@@ -233,8 +182,8 @@ fn handleInput(self: *Self) !void {
 fn visualMode(self: *Self) void {
 	const input = self.input_buf.slice();
 
-	const action = self.visual_keys.get(input) orelse {
-		if (!self.visual_keys.contains(input)) self.input_buf.len = 0;
+	const action = self.keymaps.get(.visual, input) orelse {
+		if (!self.keymaps.contains(.visual, input)) self.input_buf.len = 0;
 		return;
 	};
 
@@ -267,14 +216,14 @@ fn visualMode(self: *Self) void {
 
 fn commandMode(self: *Self) !void {
 	const input = self.input_buf.slice();
-	const keys = switch (self.command_buf.mode) {
-		.normal => &self.command_normal_keys,
-		.insert => &self.command_insert_keys,
-		.operator_pending => &self.command_operator_keys,
-		.to => &self.command_to_keys,
+	const map_type: CommandMapType = switch (self.command_buf.mode) {
+		.normal => .normal,
+		.insert => .insert,
+		.operator_pending => .operator_pending,
+		.to => .to,
 	};
 
-	if (keys.get(input)) |action| {
+	if (self.command_keymaps.get(map_type, input)) |action| {
 		self.input_buf.len = 0;
 		const status = self.command_buf.do(action);
 		switch (status) {
@@ -282,7 +231,7 @@ fn commandMode(self: *Self) !void {
 			.cancelled => self.setMode(.normal),
 			.string => |arr| try self.parseCommand(arr.slice()),
 		}
-	} else if (!keys.contains(input)) {
+	} else if (!self.command_keymaps.contains(map_type, input)) {
 		var buf: [64]u8 = undefined;
 		const len = std.mem.replacementSize(u8, input, "<<", "<");
 		_ = std.mem.replace(u8, input, "<<", "<", &buf);
@@ -327,7 +276,7 @@ fn parseCommand(self: *Self, str: []const u8) !void {
 
 fn normalMode(self: *Self) void {
 	const input = self.input_buf.slice();
-	if (self.normal_keys.get(input)) |action| {
+	if (self.keymaps.get(.normal, input)) |action| {
 		switch (action) {
 			.enter_command_mode => {
 				self.setMode(.command);
@@ -380,7 +329,7 @@ fn normalMode(self: *Self) void {
 			else => {},
 		}
 		self.input_buf.len = 0;
-	} else if (!self.normal_keys.contains(input)) {
+	} else if (!self.keymaps.contains(.normal, input)) {
 		self.input_buf.len = 0;
 	}
 }
@@ -947,226 +896,296 @@ pub const Action = union(enum) {
 	swap_anchor,
 };
 
-const Mapping = struct {
-	[]const u8,
-	Action,
+pub const MapType = enum {
+	normal,
+	visual,
+	common_motions,
+	common_keys,
 };
 
-const default_normal_keys = [_]Mapping{
-	.{ "<C-[>", .dismiss_count_or_status_message },
-	.{ "<Escape>", .dismiss_count_or_status_message },
-
-	.{ "+", .increase_width },
-	.{ "-", .decrease_width },
-	.{ "f", .increase_precision },
-	.{ "F", .decrease_precision },
-	.{ "j", .cell_cursor_down },
-	.{ "k", .cell_cursor_up },
-	.{ "h", .cell_cursor_left },
-	.{ "l", .cell_cursor_right },
-	.{ "w", .next_populated_cell },
-	.{ "b", .prev_populated_cell },
-	.{ "gg", .cell_cursor_row_first },
-	.{ "G", .cell_cursor_row_last },
-	.{ "$", .cell_cursor_col_last },
-	.{ "=", .assign_cell },
-	.{ "dd", .delete_cell },
-	.{ "x", .delete_cell },
-	.{ ":", .enter_command_mode },
-	.{ "v", .enter_visual_mode },
-
-	.{ "0", .zero }, // Could be motion or count
-	.{ "1", .{ .count = 1 } },
-	.{ "2", .{ .count = 2 } },
-	.{ "3", .{ .count = 3 } },
-	.{ "4", .{ .count = 4 } },
-	.{ "5", .{ .count = 5 } },
-	.{ "6", .{ .count = 6 } },
-	.{ "7", .{ .count = 7 } },
-	.{ "8", .{ .count = 8 } },
-	.{ "9", .{ .count = 9 } },
+pub const CommandMapType = enum {
+	normal,
+	insert,
+	operator_pending,
+	to,
+	non_insert_keys,
+	common_keys,
 };
 
-const default_visual_keys = [_]Mapping{
-	.{ "<C-[>", .enter_normal_mode },
-	.{ "<Escape>", .enter_normal_mode },
+pub fn KeyMap(comptime A: type, comptime M: type) type {
+	return struct {
+		const CritMap = critbit.CritBitMap([]const u8, A, critbit.StringContext);
+		pub const Map = struct {
+			keys: CritMap,
+			parents: []const M,
+		};
 
-	.{ "o", .swap_anchor },
-	.{ "d", .delete_cell },
-	.{ "x", .delete_cell },
+		maps: std.EnumArray(M, Map),
 
-	.{ "j", .cell_cursor_down },
-	.{ "k", .cell_cursor_up },
-	.{ "h", .cell_cursor_left },
-	.{ "l", .cell_cursor_right },
+		pub fn init(default: anytype, allocator: Allocator) !@This() {
+			var maps = std.EnumArray(M, Map).initFill(.{
+				.keys = CritMap.init(),
+				.parents = &.{},
+			});
+			errdefer for (&maps.values) |*v| v.keys.deinit(allocator);
 
-	.{ "w", .next_populated_cell },
-	.{ "b", .prev_populated_cell },
-	.{ "gg", .cell_cursor_row_first },
-	.{ "G", .cell_cursor_row_last },
-	.{ "0", .cell_cursor_col_first },
-	.{ "$", .cell_cursor_col_last },
+			for (default) |map| {
+				var m = CritMap.init();
+				errdefer m.deinit(allocator);
+
+				for (map.keys) |mapping| {
+					try m.put(allocator, mapping[0], mapping[1]);
+				}
+
+				maps.set(map.type, .{
+					.keys = m,
+					.parents = map.parents,
+				});
+			}
+			return .{
+				.maps = maps,
+			};
+		}
+
+		pub fn get(self: @This(), mode: M, input: []const u8) ?A {
+			const map = self.maps.getPtrConst(mode);
+			return map.keys.get(input) orelse for (map.parents) |parent_mode| {
+				const parent = self.maps.getPtrConst(parent_mode);
+				if (parent.keys.get(input)) |a| return a;
+			} else null;
+		}
+
+		pub fn contains(self: @This(), mode: M, input: []const u8) bool {
+			const map = self.maps.getPtrConst(mode);
+			if (map.keys.contains(input)) return true;
+			for (map.parents) |parent_mode| {
+				const parent = self.maps.getPtrConst(parent_mode);
+				if (parent.keys.contains(input)) return true;
+			}
+			return false;
+		}
+
+		pub fn deinit(self: *@This(), allocator: Allocator) void {
+			for (&self.maps.values) |*v| {
+				v.keys.deinit(allocator);
+			}
+			self.* = undefined;
+		}
+	};
+}
+
+const KeyMaps = struct {
+	type: MapType,
+	parents: []const MapType,
+	keys: []const struct {
+		[]const u8,
+		Action,
+	},
 };
 
-const CommandMapping = struct {
-	[]const u8,
-	CommandAction,
+const outer_keys = [_]KeyMaps{
+	.{
+		.type = .common_keys,
+		.parents = &.{},
+		.keys = &.{
+			.{ "x", .delete_cell },
+		},
+	},
+	.{
+		.type = .common_motions,
+		.parents = &.{},
+		.keys = &.{
+			.{ "j", .cell_cursor_down },
+			.{ "k", .cell_cursor_up },
+			.{ "h", .cell_cursor_left },
+			.{ "l", .cell_cursor_right },
+			.{ "w", .next_populated_cell },
+			.{ "b", .prev_populated_cell },
+			.{ "gg", .cell_cursor_row_first },
+			.{ "G", .cell_cursor_row_last },
+			.{ "$", .cell_cursor_col_last },
+
+			.{ "0", .zero }, // Could be motion or count
+			.{ "1", .{ .count = 1 } },
+			.{ "2", .{ .count = 2 } },
+			.{ "3", .{ .count = 3 } },
+			.{ "4", .{ .count = 4 } },
+			.{ "5", .{ .count = 5 } },
+			.{ "6", .{ .count = 6 } },
+			.{ "7", .{ .count = 7 } },
+			.{ "8", .{ .count = 8 } },
+			.{ "9", .{ .count = 9 } },
+		},
+	},
+	.{
+		.type = .normal,
+		.parents = &.{ .common_motions },
+		.keys = &.{
+			.{ "<C-[>", .dismiss_count_or_status_message },
+			.{ "<Escape>", .dismiss_count_or_status_message },
+
+			.{ "+", .increase_width },
+			.{ "-", .decrease_width },
+			.{ "f", .increase_precision },
+			.{ "F", .decrease_precision },
+			.{ "=", .assign_cell },
+			.{ "dd", .delete_cell },
+			.{ ":", .enter_command_mode },
+			.{ "v", .enter_visual_mode },
+		},
+	},
+	.{
+		.type = .visual,
+		.parents = &.{ .common_motions },
+		.keys = &.{
+			.{ "<C-[>", .enter_normal_mode },
+			.{ "<Escape>", .enter_normal_mode },
+
+			.{ "o", .swap_anchor },
+			.{ "d", .delete_cell },
+		},
+	},
 };
 
-const default_command_normal_keys = [_]CommandMapping{
-	.{ "1", .{ .count = 1 } },
-	.{ "2", .{ .count = 2 } },
-	.{ "3", .{ .count = 3 } },
-	.{ "4", .{ .count = 4 } },
-	.{ "5", .{ .count = 5 } },
-	.{ "6", .{ .count = 6 } },
-	.{ "7", .{ .count = 7 } },
-	.{ "8", .{ .count = 8 } },
-	.{ "9", .{ .count = 9 } },
-
-	.{ "<C-[>", .enter_normal_mode },
-	.{ "<Escape>", .enter_normal_mode },
-
-	.{ "<C-m>", .submit_command },
-	.{ "<C-j>", .submit_command },
-	.{ "<Return>", .submit_command },
-
-	.{ "x", .delete_char },
-	.{ "d", .operator_delete },
-	.{ "D", .delete_to_eol },
-	.{ "c", .operator_change },
-	.{ "C", .change_to_eol },
-	.{ "s", .change_char },
-	.{ "S", .change_line },
-
-	.{ "i", .enter_insert_mode },
-	.{ "I", .enter_insert_mode_at_bol },
-	.{ "a", .enter_insert_mode_after },
-	.{ "A", .enter_insert_mode_at_eol },
-
-	.{ "<Left>", .{ .motion = .char_prev } },
-	.{ "<Right>", .{ .motion = .char_next } },
-	.{ "<Home>", .{ .motion = .bol } },
-	.{ "<End>", .{ .motion = .eol } },
-
-	.{ "f", .operator_to_forwards },
-	.{ "F", .operator_to_backwards },
-	.{ "t", .operator_until_forwards },
-	.{ "T", .operator_until_backwards },
-
-	.{ "h", .{ .motion = .char_prev } },
-	.{ "l", .{ .motion = .char_next } },
-	.{ "0", .zero },
-	.{ "$", .{ .motion = .eol } },
-	.{ "w", .{ .motion = .normal_word_start_next } },
-	.{ "W", .{ .motion = .long_word_start_next   } },
-	.{ "e", .{ .motion = .normal_word_end_next   } },
-	.{ "E", .{ .motion = .long_word_end_next     } },
-	.{ "b", .{ .motion = .normal_word_start_prev } },
-	.{ "B", .{ .motion = .long_word_start_prev   } },
-	.{ "<M-e>", .{ .motion = .normal_word_end_prev } },
-	.{ "<M-E>", .{ .motion = .long_word_end_prev } },
+const CommandKeyMaps = struct {
+	type: CommandMapType,
+	parents: []const CommandMapType,
+	keys: []const struct {
+		[]const u8,
+		CommandAction,
+	},
 };
 
-const default_command_insert_keys = [_]CommandMapping{
-	.{ "<C-[>", .enter_normal_mode },
-	.{ "<Escape>", .enter_normal_mode },
+const command_keys = [_]CommandKeyMaps{
+	.{
+		.type = .common_keys,
+		.parents = &.{},
+		.keys = &.{
+			.{ "<C-m>", .submit_command },
+			.{ "<C-j>", .submit_command },
+			.{ "<Return>", .submit_command },
 
-	.{ "<C-m>", .submit_command },
-	.{ "<C-j>", .submit_command },
-	.{ "<Return>", .submit_command },
+			.{ "<Home>", .{ .motion = .bol } },
+			.{ "<End>", .{ .motion = .eol } },
+			.{ "<Left>", .{ .motion = .char_prev } },
+			.{ "<Right>", .{ .motion = .char_next } },
 
-	.{ "<C-h>", .backspace },
-	.{ "<Delete>", .backspace },
-	.{ "<C-u>", .change_line },
+			.{ "<C-[>", .enter_normal_mode },
+			.{ "<Escape>", .enter_normal_mode },
+		},
+	},
+	.{
+		.type = .non_insert_keys,
+		.parents = &.{},
+		.keys = &.{
+			.{ "1", .{ .count = 1 } },
+			.{ "2", .{ .count = 2 } },
+			.{ "3", .{ .count = 3 } },
+			.{ "4", .{ .count = 4 } },
+			.{ "5", .{ .count = 5 } },
+			.{ "6", .{ .count = 6 } },
+			.{ "7", .{ .count = 7 } },
+			.{ "8", .{ .count = 8 } },
+			.{ "9", .{ .count = 9 } },
 
-	.{ "<Home>", .{ .motion = .bol } },
-	.{ "<End>", .{ .motion = .eol } },
-	.{ "<Left>", .{ .motion = .char_prev } },
-	.{ "<Right>", .{ .motion = .char_next } },
+			.{ "f", .operator_to_forwards },
+			.{ "F", .operator_to_backwards },
+			.{ "t", .operator_until_forwards },
+			.{ "T", .operator_until_backwards },
 
-	.{ "<C-a>", .{ .motion = .bol } },
-	.{ "<C-e>", .{ .motion = .eol } },
-	.{ "<C-b>", .{ .motion = .char_prev } },
-	.{ "<C-f>", .{ .motion = .char_next } },
-	.{ "<C-w>", .backwards_delete_word },
-};
+			.{ "h", .{ .motion = .char_prev } },
+			.{ "l", .{ .motion = .char_next } },
+			.{ "0", .zero },
+			.{ "$", .{ .motion = .eol } },
+			.{ "w", .{ .motion = .normal_word_start_next } },
+			.{ "W", .{ .motion = .long_word_start_next   } },
+			.{ "e", .{ .motion = .normal_word_end_next   } },
+			.{ "E", .{ .motion = .long_word_end_next     } },
+			.{ "b", .{ .motion = .normal_word_start_prev } },
+			.{ "B", .{ .motion = .long_word_start_prev   } },
+			.{ "<M-e>", .{ .motion = .normal_word_end_prev } },
+			.{ "<M-E>", .{ .motion = .long_word_end_prev } },
+		},
+	},
+	.{
+		.type = .normal,
+		.parents = &.{ .common_keys, .non_insert_keys },
+		.keys = &.{
+			.{ "x", .delete_char },
+			.{ "d", .operator_delete },
+			.{ "D", .delete_to_eol },
+			.{ "c", .operator_change },
+			.{ "C", .change_to_eol },
+			.{ "s", .change_char },
+			.{ "S", .change_line },
 
-const default_command_operator_keys = [_]CommandMapping{
-	.{ "1", .{ .count = 1 } },
-	.{ "2", .{ .count = 2 } },
-	.{ "3", .{ .count = 3 } },
-	.{ "4", .{ .count = 4 } },
-	.{ "5", .{ .count = 5 } },
-	.{ "6", .{ .count = 6 } },
-	.{ "7", .{ .count = 7 } },
-	.{ "8", .{ .count = 8 } },
-	.{ "9", .{ .count = 9 } },
+			.{ "i", .enter_insert_mode },
+			.{ "I", .enter_insert_mode_at_bol },
+			.{ "a", .enter_insert_mode_after },
+			.{ "A", .enter_insert_mode_at_eol },
+		},
+	},
+	.{
+		.type = .insert,
+		.parents = &.{ .common_keys },
+		.keys = &.{
+			.{ "<C-h>", .backspace },
+			.{ "<Delete>", .backspace },
+			.{ "<C-u>", .change_line },
 
-	.{ "<C-[>", .enter_normal_mode },
-	.{ "<Escape>", .enter_normal_mode },
-	.{ "d", .operator_delete },
-	.{ "c", .operator_change },
+			.{ "<C-a>", .{ .motion = .bol } },
+			.{ "<C-e>", .{ .motion = .eol } },
+			.{ "<C-b>", .{ .motion = .char_prev } },
+			.{ "<C-f>", .{ .motion = .char_next } },
+			.{ "<C-w>", .backwards_delete_word },
+		},
+	},
+	.{
+		.type = .operator_pending,
+		.parents = &.{ .common_keys, .non_insert_keys },
+		.keys = &.{
+			.{ "d", .operator_delete },
+			.{ "c", .operator_change },
 
-	.{ "<Left>", .{ .motion = .char_prev } },
-	.{ "<Right>", .{ .motion = .char_next } },
-	.{ "<Home>", .{ .motion = .bol } },
-	.{ "<End>", .{ .motion = .eol } },
+			.{ "aw", .{ .motion = .normal_word_around } },
+			.{ "aW", .{ .motion = .long_word_around } },
+			.{ "iw", .{ .motion = .normal_word_inside } },
+			.{ "iW", .{ .motion = .long_word_inside } },
 
-	.{ "f", .operator_to_forwards },
-	.{ "F", .operator_to_backwards },
-	.{ "t", .operator_until_forwards },
-	.{ "T", .operator_until_backwards },
+			.{ "a(", .{ .motion = .{ .around_delimiters = .{ .left = "(", .right = ")" } } } },
+			.{ "i(", .{ .motion = .{ .inside_delimiters = .{ .left = "(", .right = ")" } } } },
+			.{ "a)", .{ .motion = .{ .around_delimiters = .{ .left = "(", .right = ")" } } } },
+			.{ "i)", .{ .motion = .{ .inside_delimiters = .{ .left = "(", .right = ")" } } } },
 
-	.{ "h", .{ .motion = .char_prev } },
-	.{ "l", .{ .motion = .char_next } },
-	.{ "0", .zero },
-	.{ "$", .{ .motion = .eol } },
-	.{ "w", .{ .motion = .normal_word_start_next } },
-	.{ "W", .{ .motion = .long_word_start_next   } },
-	.{ "e", .{ .motion = .normal_word_end_next   } },
-	.{ "E", .{ .motion = .long_word_end_next     } },
-	.{ "b", .{ .motion = .normal_word_start_prev } },
-	.{ "B", .{ .motion = .long_word_start_prev   } },
-	.{ "<M-e>", .{ .motion = .normal_word_end_prev } },
-	.{ "<M-E>", .{ .motion = .long_word_end_prev } },
+			.{ "a[", .{ .motion = .{ .around_delimiters = .{ .left = "[", .right = "]" } } } },
+			.{ "i[", .{ .motion = .{ .inside_delimiters = .{ .left = "[", .right = "]" } } } },
+			.{ "a]", .{ .motion = .{ .around_delimiters = .{ .left = "[", .right = "]" } } } },
+			.{ "i]", .{ .motion = .{ .inside_delimiters = .{ .left = "[", .right = "]" } } } },
 
-	.{ "aw", .{ .motion = .normal_word_around } },
-	.{ "aW", .{ .motion = .long_word_around } },
-	.{ "iw", .{ .motion = .normal_word_inside } },
-	.{ "iW", .{ .motion = .long_word_inside } },
+			.{ "i{", .{ .motion = .{ .inside_delimiters = .{ .left = "{", .right = "}" } } } },
+			.{ "a{", .{ .motion = .{ .around_delimiters = .{ .left = "{", .right = "}" } } } },
+			.{ "i}", .{ .motion = .{ .inside_delimiters = .{ .left = "{", .right = "}" } } } },
+			.{ "a}", .{ .motion = .{ .around_delimiters = .{ .left = "{", .right = "}" } } } },
 
-	.{ "a(", .{ .motion = .{ .around_delimiters = .{ .left = "(", .right = ")" } } } },
-	.{ "i(", .{ .motion = .{ .inside_delimiters = .{ .left = "(", .right = ")" } } } },
-	.{ "a)", .{ .motion = .{ .around_delimiters = .{ .left = "(", .right = ")" } } } },
-	.{ "i)", .{ .motion = .{ .inside_delimiters = .{ .left = "(", .right = ")" } } } },
+			.{ "i<<", .{ .motion = .{ .inside_delimiters = .{ .left = "<", .right = ">" } } } },
+			.{ "a<<", .{ .motion = .{ .around_delimiters = .{ .left = "<", .right = ">" } } } },
+			.{ "i>", .{ .motion = .{ .inside_delimiters = .{ .left = "<", .right = ">" } } } },
+			.{ "a>", .{ .motion = .{ .around_delimiters = .{ .left = "<", .right = ">" } } } },
 
-	.{ "a[", .{ .motion = .{ .around_delimiters = .{ .left = "[", .right = "]" } } } },
-	.{ "i[", .{ .motion = .{ .inside_delimiters = .{ .left = "[", .right = "]" } } } },
-	.{ "a]", .{ .motion = .{ .around_delimiters = .{ .left = "[", .right = "]" } } } },
-	.{ "i]", .{ .motion = .{ .inside_delimiters = .{ .left = "[", .right = "]" } } } },
+			.{ "i\"", .{ .motion = .{ .inside_single_delimiter = "\"" } } },
+			.{ "a\"", .{ .motion = .{ .around_single_delimiter = "\"" } } },
 
-	.{ "i{", .{ .motion = .{ .inside_delimiters = .{ .left = "{", .right = "}" } } } },
-	.{ "a{", .{ .motion = .{ .around_delimiters = .{ .left = "{", .right = "}" } } } },
-	.{ "i}", .{ .motion = .{ .inside_delimiters = .{ .left = "{", .right = "}" } } } },
-	.{ "a}", .{ .motion = .{ .around_delimiters = .{ .left = "{", .right = "}" } } } },
+			.{ "i'", .{ .motion = .{ .inside_single_delimiter = "'" } } },
+			.{ "a'", .{ .motion = .{ .around_single_delimiter = "'" } } },
 
-	.{ "i<<", .{ .motion = .{ .inside_delimiters = .{ .left = "<", .right = ">" } } } },
-	.{ "a<<", .{ .motion = .{ .around_delimiters = .{ .left = "<", .right = ">" } } } },
-	.{ "i>", .{ .motion = .{ .inside_delimiters = .{ .left = "<", .right = ">" } } } },
-	.{ "a>", .{ .motion = .{ .around_delimiters = .{ .left = "<", .right = ">" } } } },
-
-	.{ "i\"", .{ .motion = .{ .inside_single_delimiter = "\"" } } },
-	.{ "a\"", .{ .motion = .{ .around_single_delimiter = "\"" } } },
-
-	.{ "i'", .{ .motion = .{ .inside_single_delimiter = "'" } } },
-	.{ "a'", .{ .motion = .{ .around_single_delimiter = "'" } } },
-
-	.{ "i`", .{ .motion = .{ .inside_single_delimiter = "`" } } },
-	.{ "a`", .{ .motion = .{ .around_single_delimiter = "`" } } },
-};
-
-pub const default_command_to_keys = [_]CommandMapping{
-	.{ "<C-[>", .enter_normal_mode },
-	.{ "<Escape>", .enter_normal_mode },
+			.{ "i`", .{ .motion = .{ .inside_single_delimiter = "`" } } },
+			.{ "a`", .{ .motion = .{ .around_single_delimiter = "`" } } },
+		},
+	},
+	.{
+		.type = .to,
+		.parents = &.{ .common_keys },
+		.keys = &.{
+		},
+	},
 };

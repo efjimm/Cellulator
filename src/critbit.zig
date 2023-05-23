@@ -88,10 +88,10 @@ pub fn CritBitMap(
 			self.* = undefined;
 		}
 
-		pub fn get(self: *Self, key: K) ?V {
+		pub fn get(self: Self, key: K) ?V {
 			if (self.head_tag == .none) return null;
 
-			const kv = self.closest(key);
+			const kv = self.closestConst(key);
 			if (self.context.eql(kv.key, key)) return kv.value;
 
 			return null;
@@ -256,6 +256,22 @@ pub fn CritBitMap(
 			}
 
 			return &node.kv;
+		}
+
+		fn closestConst(self: Self, key: K) KV {
+			const bytes = self.context.asBytes(&key);
+
+			var node = &self.head;
+			var tag = self.head_tag;
+			while (tag == .inode) {
+				const inode = node.inode;
+				const direction = getDirection(bytes, inode.*);
+
+				node = &inode.child[direction];
+				tag = inode.tags[direction];
+			}
+
+			return node.kv;
 		}
 	};
 }
