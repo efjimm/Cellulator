@@ -20,6 +20,19 @@ pub const StringContext = struct {
 	}
 };
 
+pub const StringContextZ = struct {
+	pub fn eql(_: @This(), a: [*:0]const u8, b: [*:0]const u8) bool {
+		return for (a, b, 0..std.math.maxInt(usize)) |c1, c2, _| {
+			if (c1 != c2) break false;
+			if (c1 == 0) break true;
+		} else unreachable;
+	}
+
+	pub fn asBytes(_: @This(), a: *const [*:0]const u8) []const u8 {
+		return std.mem.span(a.*);
+	}
+};
+
 pub fn CritBitMap(
 	comptime K: type,
 	comptime V: type,
@@ -51,10 +64,6 @@ pub fn CritBitMap(
 		};
 
 		const Self = @This();
-
-		comptime {
-			assert(@sizeOf(INode) == @sizeOf(ENode) * 2 + 8);
-		}
 
 		head: ENode = .{ .none = {} },
 		head_tag: Tag = .none,
@@ -115,8 +124,8 @@ pub fn CritBitMap(
 			}
 
 			const top_bytes = self.context.asBytes(&node.kv.key);
-			const min_len = @min(top_bytes.len, key.len);
-			return if (self.context.eql(top_bytes[0..min_len], bytes[0..min_len])) top else null;
+			const min_len = @min(top_bytes.len, bytes.len);
+			return if (std.mem.eql(u8, top_bytes[0..min_len], bytes[0..min_len])) top else null;
 		}
 
 		pub fn contains(self: Self, key: K) bool {

@@ -1,5 +1,3 @@
-// TODO
-//  Handle more complicated key sequences using a hashmap
 const std = @import("std");
 const utils = @import("utils.zig");
 const spoon = @import("spoon");
@@ -9,8 +7,8 @@ const assert = std.debug.assert;
 const isWhitespace = std.ascii.isWhitespace;
 const log = std.log.scoped(.text_input);
 
-pub const Action = union(enum) {
-	submit_command,
+pub const Action = union(enum(u6)) {
+	submit_command = 26,
 	enter_normal_mode,
 
 	enter_insert_mode,
@@ -36,11 +34,90 @@ pub const Action = union(enum) {
 
 	zero,
 	count: u4,
-	motion: Motion,
 
-	// Any inputs that aren't a mapping get passed as this
-	// Its usage depends on the mode (e.g. insert mode inserts any characters passed here)
-	other: []const u8,
+	// Motion tagged union duplicated to reduce memory usage
+	motion_normal_word_inside = 0,
+	motion_long_word_inside = 1,
+	motion_normal_word_around = 2,
+	motion_long_word_around = 3,
+
+	/// Absolutely cursed - these fields store two UCS codepoints. This is done to save one byte.
+	/// Storing them as two UTF-8 codepoints would require 8 bytes. Storing them as two u21 values
+	/// would cause each one to get padded to 4 bytes, using 8 bytes total.
+	motion_inside_delimiters: [7]u8 align(4) = 4,
+	motion_around_delimiters: [7]u8 align(4) = 5,
+
+	motion_inside_single_delimiter: u21 = 6,
+	motion_around_single_delimiter: u21 = 7,
+	motion_to_forwards: u21 = 8,
+	motion_to_backwards: u21 = 9,
+	motion_until_forwards: u21 = 10,
+	motion_until_backwards: u21 = 11,
+
+	motion_normal_word_start_next = 12,
+	motion_normal_word_start_prev = 13,
+	motion_normal_word_end_next = 14,
+	motion_normal_word_end_prev = 15,
+	motion_long_word_start_next = 16,
+	motion_long_word_start_prev = 17,
+	motion_long_word_end_next = 18,
+	motion_long_word_end_prev = 19,
+	motion_char_next = 20,
+	motion_char_prev = 21,
+	motion_line = 22,
+	motion_eol = 23,
+	motion_bol = 24,
+
+	/// Any inputs that aren't a mapping get passed as this. Its usage depends on the mode. For
+	/// example, in insert mode the inputted text is passed along with this action if it does
+	/// not correspond to another action.
+	none,
+
+	pub fn isMotion(action: Action) bool {
+		return @enumToInt(action) <= 24;
+	}
+
+	// Cursed function that converts an Action to a Motion.
+	pub fn toMotion(action: Action) Motion {
+		switch (action) {
+			.motion_inside_delimiters => |buf| {
+				const b align(4) = buf; // `buf` is not aligned for some reason, so copy it
+				const cps align(4) = utils.unpackDoubleCp(&b);
+				return .{
+					.inside_delimiters = .{
+						.left = cps[0],
+						.right = cps[1],
+					},
+				};
+			},
+			.motion_around_delimiters => |buf| {
+				const b align(4) = buf;
+				const cps align(4) = utils.unpackDoubleCp(&b);
+				return .{
+					.around_delimiters = .{
+						.left = cps[0],
+						.right = cps[1],
+					},
+				};
+			},
+			else => {},
+		}
+
+		@setEvalBranchQuota(1200);
+		const tag = @intToEnum(std.meta.Tag(Motion), @enumToInt(action));
+		switch (action) {
+			inline else => |payload, action_tag| switch (tag) {
+				inline else => |t| {
+					if (comptime (@enumToInt(t) == @enumToInt(action_tag) and
+							action_tag != .motion_inside_delimiters and
+							action_tag != .motion_around_delimiters)) {
+						return @unionInit(Motion, @tagName(t), payload);
+					}
+				},
+			},
+		}
+		unreachable;
+	}
 };
 
 /// A wrapper around a buffer that provides cli editing functions. Backed by a fixed size buffer.
@@ -101,7 +178,7 @@ pub fn TextInput(comptime size: u16) type {
 		count: u32 = 0,
 		cursor: u16 = 0,
 
-		pub fn do(self: *Self, action: Action) Status {
+		pub fn do(self: *Self, action: Action, keys: []const u8) Status {
 			switch (self.mode) {
 				.normal => switch (action) {
 					.submit_command => return .{ .string = self.finish() },
@@ -145,36 +222,37 @@ pub fn TextInput(comptime size: u16) type {
 					.operator_until_backwards => self.setToMode(.until_backwards),
 					.zero => {
 						if (self.count == 0) {
-							_ = self.do(.{ .motion = .bol });
+							_ = self.do(.motion_bol, keys);
 						} else {
 							self.setCount(0);
 						}
 					},
-					.motion => |motion| self.doMotion(motion),
 					.count => |count| self.setCount(count),
-					else => {},
+					else => {
+						if (action.isMotion()) {
+							self.doMotion(action.toMotion());
+						}
+					},
 				},
 				.insert => switch (action) {
-					.other => |bytes| {
-						assert(bytes.len > 0);
-						switch (bytes[0]) {
-							0...31 => {},
-							else => {
-								self.buf.insertSlice(self.cursor, bytes) catch return .waiting;
-								self.cursor += @intCast(u16, bytes.len);
-							},
-						}
+					.none => {
+						if (keys.len == 0) return .waiting;
+						self.buf.insertSlice(self.cursor, keys) catch return .waiting;
+						self.cursor += @intCast(u16, keys.len);
 					},
 					.backspace => self.backspace(),
 					.submit_command => return .{ .string = self.finish() },
 					.enter_normal_mode => self.setMode(.normal),
 					.backwards_delete_word => {
 						self.mode = .{ .operator_pending = .change };
-						_ = self.do(.{ .motion = .normal_word_start_prev });
+						_ = self.do(.motion_normal_word_start_prev, keys);
 					},
 					.change_line => self.reset(),
-					.motion => |motion| self.doMotion(motion),
-					else => {},
+					else => {
+						if (action.isMotion()) {
+							self.doMotion(action.toMotion());
+						}
+					},
 				},
 				.operator_pending => |op| switch (action) {
 					.enter_normal_mode => self.setMode(.normal),
@@ -186,25 +264,31 @@ pub fn TextInput(comptime size: u16) type {
 
 					.zero => if (self.count == 0) self.doMotion(.bol) else self.setCount(0),
 					.count => |count| self.setCount(count),
-					.motion => |motion| self.doMotion(motion),
 
 					.operator_delete => if (op == .delete) self.doMotion(.line),
 					.operator_change => if (op == .change) self.doMotion(.line),
-					else => {},
+					else => {
+						if (action.isMotion()) {
+							self.doMotion(action.toMotion());
+						}
+					},
 				},
 				.to => |t| switch (action) {
 					.enter_normal_mode => self.setMode(.normal),
-					.other => |bytes| {
+					.none => {
+						if (keys.len == 0) return .waiting;
 						switch (t.prev_mode) {
 							.normal => self.setMode(.normal),
 							.insert => self.setMode(.insert),
 							.operator => |op| self.setMode(.{ .operator_pending = op }),
 						}
+						const cp_len = std.unicode.utf8ByteSequenceLength(keys[0]) catch return .waiting;
+						const cp = std.unicode.utf8Decode(keys[0..cp_len]) catch return .waiting;
 						switch (t.to_mode) {
-							.to_forwards => self.doMotion(.{ .to_forwards = bytes }),
-							.to_backwards => self.doMotion(.{ .to_backwards = bytes }),
-							.until_forwards => self.doMotion(.{ .until_forwards = bytes }),
-							.until_backwards => self.doMotion(.{ .until_backwards = bytes }),
+							.to_forwards => self.doMotion(.{ .to_forwards = cp }),
+							.to_backwards => self.doMotion(.{ .to_backwards = cp }),
+							.until_forwards => self.doMotion(.{ .until_forwards = cp }),
+							.until_backwards => self.doMotion(.{ .until_backwards = cp }),
 						}
 					},
 					else => {},
@@ -328,7 +412,7 @@ pub fn TextInput(comptime size: u16) type {
 
 		fn backspace(self: *Self) void {
 			self.mode = .{ .operator_pending = .change };
-			_ = self.do(.{ .motion = .char_prev });
+			_ = self.do(.motion_char_prev, "");
 		}
 
 		fn setMode(self: *Self, mode: Mode) void {
@@ -422,43 +506,57 @@ fn prevCharacter(bytes: []const u8, offset: u16, count: u32) u16 {
 	return offset - i;
 }
 
-pub const Motion = union(enum) {
-	normal_word_inside,
-	long_word_inside,
-	normal_word_around,
-	long_word_around,
+pub fn sliceToCp(slice: []const u8) [4]u8 {
+	assert(slice.len > 0);
+	var buf: [4] u8 = undefined;
+	const len = std.unicode.utf8ByteSequenceLength(slice[0]) catch 1;
+	@memcpy(buf[0..len], slice[0..len]);
+	return buf;
+}
 
-	inside_delimiters: Delimiters,
-	around_delimiters: Delimiters,
-	inside_single_delimiter: []const u8,
-	around_single_delimiter: []const u8,
-	to_forwards: []const u8,
-	to_backwards: []const u8,
-	until_forwards: []const u8,
-	until_backwards: []const u8,
+/// Converts a UTF-8 codepoint array to a slice
+pub fn cpToSlice(array: *const [4]u8) []const u8 {
+	const len = std.unicode.utf8ByteSequenceLength(array[0]) catch 1;
+	return array[0..len];
+}
 
-	normal_word_start_next,
-	normal_word_start_prev,
-	normal_word_end_next,
-	normal_word_end_prev,
-	long_word_start_next,
-	long_word_start_prev,
-	long_word_end_next,
-	long_word_end_prev,
-	char_next,
-	char_prev,
-	line,
-	eol,
-	bol,
+pub const Delimiters = struct {
+	left: u21,
+	right: u21,
+};
+
+pub const Motion = union(enum(u8)) {
+	normal_word_inside = 0,
+	long_word_inside = 1,
+	normal_word_around = 2,
+	long_word_around = 3,
+
+	inside_delimiters: Delimiters = 4,
+	around_delimiters: Delimiters = 5,
+	inside_single_delimiter: u21 = 6,
+	around_single_delimiter: u21 = 7,
+	to_forwards: u21 = 8,
+	to_backwards: u21 = 9,
+	until_forwards: u21 = 10,
+	until_backwards: u21 = 11,
+
+	normal_word_start_next = 12,
+	normal_word_start_prev = 13,
+	normal_word_end_next = 14,
+	normal_word_end_prev = 15,
+	long_word_start_next = 16,
+	long_word_start_prev = 17,
+	long_word_end_next = 18,
+	long_word_end_prev = 19,
+	char_next = 20,
+	char_prev = 21,
+	line = 22,
+	eol = 23,
+	bol = 24,
 
 	pub const WordType = enum {
 		normal,
 		long,
-	};
-
-	pub const Delimiters = struct {
-		left: []const u8,
-		right: []const u8,
 	};
 
 	pub const Range = struct {
@@ -531,23 +629,23 @@ pub const Motion = union(enum) {
 
 			.inside_delimiters => |d| insideDelimiters(bytes, d.left, d.right, pos),
 			.around_delimiters => |d| aroundDelimiters(bytes, d.left, d.right, pos),
-			.inside_single_delimiter => |d| insideSingleDelimiter(bytes, d, pos),
-			.around_single_delimiter => |d| aroundSingleDelimiter(bytes, d, pos),
+			.inside_single_delimiter => |cp| insideSingleDelimiter(bytes, cp, pos),
+			.around_single_delimiter => |cp| aroundSingleDelimiter(bytes, cp, pos),
 
-			.to_forwards => |str| .{
+			.to_forwards => |cp| .{
 				.start = pos,
-				.end = toForwards(bytes, str, pos, count) orelse pos,
+				.end = toForwards(bytes, cp, pos, count) orelse pos,
 			},
-			.to_backwards => |str| .{
-				.start = toBackwards(bytes, str, pos, count) orelse pos,
+			.to_backwards => |cp| .{
+				.start = toBackwards(bytes, cp, pos, count) orelse pos,
 				.end = pos,
 			},
-			.until_forwards => |str| .{
+			.until_forwards => |cp| .{
 				.start = pos,
-				.end = untilForwards(bytes, str, pos +| 1, count) orelse pos,
+				.end = untilForwards(bytes, cp, pos +| 1, count) orelse pos,
 			},
-			.until_backwards => |str| .{
-				.start = untilBackwards(bytes, str, pos -| 1, count) orelse pos,
+			.until_backwards => |cp| .{
+				.start = untilBackwards(bytes, cp, pos -| 1, count) orelse pos,
 				.end = pos,
 			},
 		};
@@ -768,25 +866,27 @@ pub const Motion = union(enum) {
 		};
 	}
 
-	fn insideDelimiters(bytes: []const u8, left: []const u8, right: []const u8, pos: u16) Range {
+	fn insideDelimiters(bytes: []const u8, left: u21, right: u21, pos: u16) Range {
 		if (bytes.len == 0) return .{ .start = 0, .end = 0 };
 
 		var ret = aroundDelimiters(bytes, left, right, pos);
 		if (ret.start == ret.end) return ret;
-		ret.start += @intCast(u16, left.len);
-		ret.end -= @intCast(u16, right.len);
+		ret.start += nextCodepoint(bytes, ret.start);
+		ret.end -= prevCodepoint(bytes, ret.end);
 		return ret;
 	}
 
 	// TODO: this is pretty inefficient
-	fn aroundDelimiters(bytes: []const u8, left: []const u8, right: []const u8, pos: u16) Range {
-		assert(left.len > 0);
-		assert(right.len > 0);
-
+	fn aroundDelimiters(bytes: []const u8, left_cp: u21, right_cp: u21, pos: u16) Range {
 		if (bytes.len == 0) return .{ .start = 0, .end = 0 };
-
 		assert(pos < bytes.len);
+		var buf: [8]u8 = undefined;
+		const left = buf[0..std.unicode.utf8Encode(left_cp, &buf) catch 1];
+		const right = buf[left.len..left.len + (std.unicode.utf8Encode(right_cp, buf[left.len..]) catch 1)];
 
+		log.debug("left_cp: '{u}', right_cp: '{u}', left: '{s}', right: '{s}'\n", .{
+			left_cp, right_cp, left, right,
+		});
 
 		var i = pos;
 		var depth: i32 = if (std.mem.startsWith(u8, bytes[pos..], right)) -1 else 0;
@@ -830,22 +930,24 @@ pub const Motion = union(enum) {
 		};
 	}
 
-	fn insideSingleDelimiter(bytes: []const u8, delim: []const u8, pos: u16) Range {
+	fn insideSingleDelimiter(bytes: []const u8, delim_cp: u21, pos: u16) Range {
 		if (bytes.len == 0) return .{ .start = 0, .end = 0 };
 
-		var ret = aroundSingleDelimiter(bytes, delim, pos);
+		var ret = aroundSingleDelimiter(bytes, delim_cp, pos);
 		if (ret.start == ret.end) return ret;
-		ret.start += @intCast(u16, delim.len);
-		ret.end -= @intCast(u16, delim.len);
+		ret.start += nextCodepoint(bytes, ret.start);
+		ret.end -= prevCodepoint(bytes, ret.end);
 		return ret;
 	}
 
 	fn aroundSingleDelimiter(
 		bytes: []const u8,
-		delim: []const u8,
+		delim_cp: u21,
 		pos: u16,
 	) Range {
-		const len = @intCast(u16, delim.len);
+		var buf: [4]u8 = undefined;
+		const len = std.unicode.utf8Encode(delim_cp, &buf) catch 1;
+		const delim = buf[0..len];
 
 		if (std.mem.startsWith(u8, bytes[pos..], delim)) {
 			const start = std.mem.lastIndexOf(u8, bytes[0..pos], delim) orelse pos;
@@ -858,6 +960,7 @@ pub const Motion = union(enum) {
 		} else {
 			const start = std.mem.lastIndexOf(u8, bytes[0..pos], delim) orelse pos;
 			const end = if (std.mem.indexOf(u8, bytes[pos..], delim)) |x| pos + x else pos;
+			if (start == end) return .{ .start = pos, .end = pos };
 			return .{
 				.start = @intCast(u16, start),
 				.end = len + @intCast(u16, end),
@@ -865,8 +968,11 @@ pub const Motion = union(enum) {
 		}
 	}
 
-	fn toForwards(bytes: []const u8, needle: []const u8, pos: u16, count: u32) ?u16 {
+	fn toForwards(bytes: []const u8, cp: u21, pos: u16, count: u32) ?u16 {
 		if (pos >= bytes.len or count == 0) return pos;
+		var buf: [4]u8 = undefined;
+		const len = std.unicode.utf8Encode(cp, &buf) catch 1;
+		const needle = buf[0..len];
 
 		const first = 1 + (std.mem.indexOf(u8, bytes[pos + 1..], needle) orelse return null);
 		var p = pos + first;
@@ -879,9 +985,12 @@ pub const Motion = union(enum) {
 		return @intCast(u16, p);
 	}
 
-	fn toBackwards(bytes: []const u8, needle: []const u8, pos: u16, count: u32) ?u16 {
+	fn toBackwards(bytes: []const u8, cp: u21, pos: u16, count: u32) ?u16 {
 		assert(pos <= bytes.len);
 		if (count == 0) return pos;
+		var buf: [4]u8 = undefined;
+		const len = std.unicode.utf8Encode(cp, &buf) catch 1;
+		const needle = buf[0..len];
 
 		var p = std.mem.lastIndexOf(u8, bytes[0..pos], needle) orelse return null;
 
@@ -892,13 +1001,13 @@ pub const Motion = union(enum) {
 		return @intCast(u16, p);
 	}
 
-	fn untilForwards(bytes: []const u8, needle: []const u8, pos: u16, count: u32) ?u16 {
-		const ret = toForwards(bytes, needle, pos, count) orelse return null;
+	fn untilForwards(bytes: []const u8, cp: u21, pos: u16, count: u32) ?u16 {
+		const ret = toForwards(bytes, cp, pos, count) orelse return null;
 		return ret - prevCharacter(bytes, ret, 1);
 	}
 
-	fn untilBackwards(bytes: []const u8, needle: []const u8, pos: u16, count: u32) ?u16 {
-		const ret = toBackwards(bytes, needle, pos, count) orelse return null;
+	fn untilBackwards(bytes: []const u8, cp: u21, pos: u16, count: u32) ?u16 {
+		const ret = toBackwards(bytes, cp, pos, count) orelse return null;
 		return ret + nextCharacter(bytes, ret, 1);
 	}
 
@@ -930,53 +1039,53 @@ fn testMotion(
 test "Motions" {
 	const text = "this漢字is .my. epic漢字. .漢字text";
 
-	try testMotion(text, 0, 0, "th".len, .{ .to_forwards = "i" }, 1);
-	try testMotion(text, 0, 0, "this漢字".len, .{ .to_forwards = "i" }, 2);
-	try testMotion(text, 0, 0, "this漢字is .my. ep".len, .{ .to_forwards = "i" }, 3);
-	try testMotion(text, 0, 0, "this漢字is .my. ep".len, .{ .to_forwards = "i" }, 4);
-	try testMotion(text, 0, 0, "this漢字is .my. ep".len, .{ .to_forwards = "i" }, 5);
+	try testMotion(text, 0, 0, "th".len, .{ .to_forwards = 'i' }, 1);
+	try testMotion(text, 0, 0, "this漢字".len, .{ .to_forwards = 'i' }, 2);
+	try testMotion(text, 0, 0, "this漢字is .my. ep".len, .{ .to_forwards = 'i' }, 3);
+	try testMotion(text, 0, 0, "this漢字is .my. ep".len, .{ .to_forwards = 'i' }, 4);
+	try testMotion(text, 0, 0, "this漢字is .my. ep".len, .{ .to_forwards = 'i' }, 5);
 
-	try testMotion(text, 0, 0, "this漢".len, .{ .to_forwards = "字" }, 1);
-	try testMotion(text, 0, 0, "this漢字is .my. epic漢".len, .{ .to_forwards = "字" }, 2);
-	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .漢".len, .{ .to_forwards = "字" }, 3);
-	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .漢".len, .{ .to_forwards = "字" }, 4);
-	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .漢".len, .{ .to_forwards = "字" }, 5);
+	try testMotion(text, 0, 0, "this漢".len, .{ .to_forwards = '字' }, 1);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢".len, .{ .to_forwards = '字' }, 2);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .漢".len, .{ .to_forwards = '字' }, 3);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .漢".len, .{ .to_forwards = '字' }, 4);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .漢".len, .{ .to_forwards = '字' }, 5);
 
-	try testMotion(text, text.len, "this漢字is .my. ep".len, text.len, .{ .to_backwards = "i" }, 1);
-	try testMotion(text, text.len, "this漢字".len, text.len, .{ .to_backwards = "i" }, 2);
-	try testMotion(text, text.len, "th".len, text.len, .{ .to_backwards = "i" }, 3);
-	try testMotion(text, text.len, "th".len, text.len, .{ .to_backwards = "i" }, 4);
-	try testMotion(text, text.len, "th".len, text.len, .{ .to_backwards = "i" }, 5);
+	try testMotion(text, text.len, "this漢字is .my. ep".len, text.len, .{ .to_backwards = 'i' }, 1);
+	try testMotion(text, text.len, "this漢字".len, text.len, .{ .to_backwards = 'i' }, 2);
+	try testMotion(text, text.len, "th".len, text.len, .{ .to_backwards = 'i' }, 3);
+	try testMotion(text, text.len, "th".len, text.len, .{ .to_backwards = 'i' }, 4);
+	try testMotion(text, text.len, "th".len, text.len, .{ .to_backwards = 'i' }, 5);
 
-	try testMotion(text, text.len, "this漢字is .my. epic漢字. .漢".len, text.len, .{ .to_backwards = "字" }, 1);
-	try testMotion(text, text.len, "this漢字is .my. epic漢".len, text.len, .{ .to_backwards = "字" }, 2);
-	try testMotion(text, text.len, "this漢".len, text.len, .{ .to_backwards = "字" }, 3);
-	try testMotion(text, text.len, "this漢".len, text.len, .{ .to_backwards = "字" }, 4);
-	try testMotion(text, text.len, "this漢".len, text.len, .{ .to_backwards = "字" }, 5);
+	try testMotion(text, text.len, "this漢字is .my. epic漢字. .漢".len, text.len, .{ .to_backwards = '字' }, 1);
+	try testMotion(text, text.len, "this漢字is .my. epic漢".len, text.len, .{ .to_backwards = '字' }, 2);
+	try testMotion(text, text.len, "this漢".len, text.len, .{ .to_backwards = '字' }, 3);
+	try testMotion(text, text.len, "this漢".len, text.len, .{ .to_backwards = '字' }, 4);
+	try testMotion(text, text.len, "this漢".len, text.len, .{ .to_backwards = '字' }, 5);
 
-	try testMotion(text, 0, 0, "t".len, .{ .until_forwards = "i" }, 1);
-	try testMotion(text, 0, 0, "this漢".len, .{ .until_forwards = "i" }, 2);
-	try testMotion(text, 0, 0, "this漢字is .my. e".len, .{ .until_forwards = "i" }, 3);
-	try testMotion(text, 0, 0, "this漢字is .my. e".len, .{ .until_forwards = "i" }, 4);
-	try testMotion(text, 0, 0, "this漢字is .my. e".len, .{ .until_forwards = "i" }, 5);
+	try testMotion(text, 0, 0, "t".len, .{ .until_forwards = 'i' }, 1);
+	try testMotion(text, 0, 0, "this漢".len, .{ .until_forwards = 'i' }, 2);
+	try testMotion(text, 0, 0, "this漢字is .my. e".len, .{ .until_forwards = 'i' }, 3);
+	try testMotion(text, 0, 0, "this漢字is .my. e".len, .{ .until_forwards = 'i' }, 4);
+	try testMotion(text, 0, 0, "this漢字is .my. e".len, .{ .until_forwards = 'i' }, 5);
 
-	try testMotion(text, 0, 0, "this".len, .{ .until_forwards = "字" }, 1);
-	try testMotion(text, 0, 0, "this漢字is .my. epic".len, .{ .until_forwards = "字" }, 2);
-	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .".len, .{ .until_forwards = "字" }, 3);
-	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .".len, .{ .until_forwards = "字" }, 4);
-	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .".len, .{ .until_forwards = "字" }, 5);
+	try testMotion(text, 0, 0, "this".len, .{ .until_forwards = '字' }, 1);
+	try testMotion(text, 0, 0, "this漢字is .my. epic".len, .{ .until_forwards = '字' }, 2);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .".len, .{ .until_forwards = '字' }, 3);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .".len, .{ .until_forwards = '字' }, 4);
+	try testMotion(text, 0, 0, "this漢字is .my. epic漢字. .".len, .{ .until_forwards = '字' }, 5);
 
-	try testMotion(text, text.len, "this漢字is .my. epi".len, text.len, .{ .until_backwards = "i" }, 1);
-	try testMotion(text, text.len, "this漢字i".len, text.len, .{ .until_backwards = "i" }, 2);
-	try testMotion(text, text.len, "thi".len, text.len, .{ .until_backwards = "i" }, 3);
-	try testMotion(text, text.len, "thi".len, text.len, .{ .until_backwards = "i" }, 4);
-	try testMotion(text, text.len, "thi".len, text.len, .{ .until_backwards = "i" }, 5);
+	try testMotion(text, text.len, "this漢字is .my. epi".len, text.len, .{ .until_backwards = 'i' }, 1);
+	try testMotion(text, text.len, "this漢字i".len, text.len, .{ .until_backwards = 'i' }, 2);
+	try testMotion(text, text.len, "thi".len, text.len, .{ .until_backwards = 'i' }, 3);
+	try testMotion(text, text.len, "thi".len, text.len, .{ .until_backwards = 'i' }, 4);
+	try testMotion(text, text.len, "thi".len, text.len, .{ .until_backwards = 'i' }, 5);
 
-	try testMotion(text, text.len, "this漢字is .my. epic漢字. .漢字".len, text.len, .{ .until_backwards = "字" }, 1);
-	try testMotion(text, text.len, "this漢字is .my. epic漢字".len, text.len, .{ .until_backwards = "字" }, 2);
-	try testMotion(text, text.len, "this漢字".len, text.len, .{ .until_backwards = "字" }, 3);
-	try testMotion(text, text.len, "this漢字".len, text.len, .{ .until_backwards = "字" }, 4);
-	try testMotion(text, text.len, "this漢字".len, text.len, .{ .until_backwards = "字" }, 5);
+	try testMotion(text, text.len, "this漢字is .my. epic漢字. .漢字".len, text.len, .{ .until_backwards = '字' }, 1);
+	try testMotion(text, text.len, "this漢字is .my. epic漢字".len, text.len, .{ .until_backwards = '字' }, 2);
+	try testMotion(text, text.len, "this漢字".len, text.len, .{ .until_backwards = '字' }, 3);
+	try testMotion(text, text.len, "this漢字".len, text.len, .{ .until_backwards = '字' }, 4);
+	try testMotion(text, text.len, "this漢字".len, text.len, .{ .until_backwards = '字' }, 5);
 
 	try testMotion(text, 0, 0, "t".len, .char_next, 1);
 	try testMotion(text, 0, 0, "th".len, .char_next, 2);
@@ -1077,10 +1186,10 @@ test "Motions" {
 	try testMotion("  .. word ..  ", "  .. w".len, "  .. ".len, "  .. word ".len, .normal_word_around, 1);
 	try testMotion("  ..word..  word", 6, 2, "  ..word..  ".len, .long_word_around, 1);
 
-	try testMotion(" ''word'' ", 5, " ''".len, " ''word".len, .{ .inside_single_delimiter = "'" }, 1);
-	try testMotion(" ''word'' ", 5, " '".len, " ''word'".len, .{ .around_single_delimiter = "'" }, 1);
+	try testMotion(" ''word'' ", 5, " ''".len, " ''word".len, .{ .inside_single_delimiter = '\'' }, 1);
+	try testMotion(" ''word'' ", 5, " '".len, " ''word'".len, .{ .around_single_delimiter = '\'' }, 1);
 
-	const delims = .{ .left = "(", .right = ")" };
+	const delims = .{ .left = '(', .right = ')' };
 	try testMotion("((word))", 5, "((".len, "((word".len, .{ .inside_delimiters = delims }, 1);
 	try testMotion("((word))", 5, "(".len, "((word)".len, .{ .around_delimiters = delims }, 1);
 }

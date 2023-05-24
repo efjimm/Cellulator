@@ -4,6 +4,20 @@ const Position = @import("Sheet.zig").Position;
 const mem = std.mem;
 const assert = std.debug.assert;
 
+pub fn packDoubleCp(cp1: u21, cp2: u21) [7]u8 {
+	var buf: [7]u8 align(4) = undefined;
+	@memcpy(buf[0..3], std.mem.asBytes(&cp1)[0..3]);
+	@memcpy(buf[4..7], std.mem.asBytes(&cp2)[0..3]);
+	return buf;
+}
+
+pub fn unpackDoubleCp(buf: []align(4) const u8) struct { u21, u21 } {
+	return .{
+		@ptrCast(*const u21, buf[0..3]).*,
+		@ptrCast(*const u21, buf[4..7]).*,
+	};
+}
+
 /// Writes the utf-8 representation of a unicode codepoint to the given writer
 pub fn writeCodepoint(cp: u21, writer: anytype) !void {
 	var buf: [4]u8 = undefined;

@@ -163,6 +163,14 @@ fn setMode(self: *Self, new_mode: std.meta.Tag(Mode)) void {
 	}
 }
 
+fn inputBufSentinelArray(self: *Self) [input_buf_len + 1]u8 {
+	var buf: [input_buf_len + 1]u8 = undefined;
+	const slice = self.input_buf.slice();
+	@memcpy(buf[0..slice.len], slice);
+	buf[slice.len] = 0;
+	return buf;
+}
+
 fn handleInput(self: *Self) !void {
 	var buf: [input_buf_len]u8 = undefined;
 	const slice = try self.tui.term.readInput(&buf);
@@ -180,7 +188,8 @@ fn handleInput(self: *Self) !void {
 }
 
 fn visualMode(self: *Self) void {
-	const input = self.input_buf.slice();
+	var input_buf = self.inputBufSentinelArray();
+	const input = input_buf[0..self.input_buf.len:0];
 
 	const action = self.keymaps.get(.visual, input) orelse {
 		if (!self.keymaps.contains(.visual, input)) self.input_buf.len = 0;
@@ -215,7 +224,8 @@ fn visualMode(self: *Self) void {
 }
 
 fn commandMode(self: *Self) !void {
-	const input = self.input_buf.slice();
+	var input_buf = self.inputBufSentinelArray();
+	const input = input_buf[0..self.input_buf.len:0];
 	const map_type: CommandMapType = switch (self.command_buf.mode) {
 		.normal => .normal,
 		.insert => .insert,
@@ -225,17 +235,17 @@ fn commandMode(self: *Self) !void {
 
 	if (self.command_keymaps.get(map_type, input)) |action| {
 		self.input_buf.len = 0;
-		const status = self.command_buf.do(action);
+		const status = self.command_buf.do(action, input);
 		switch (status) {
 			.waiting => {},
 			.cancelled => self.setMode(.normal),
 			.string => |arr| try self.parseCommand(arr.slice()),
 		}
 	} else if (!self.command_keymaps.contains(map_type, input)) {
-		var buf: [64]u8 = undefined;
+		var buf: [input_buf_len]u8 = undefined;
 		const len = std.mem.replacementSize(u8, input, "<<", "<");
 		_ = std.mem.replace(u8, input, "<<", "<", &buf);
-		_ = self.command_buf.do(.{ .other = buf[0..len] });
+		_ = self.command_buf.do(.none, buf[0..len]);
 		self.input_buf.len = 0;
 	}
 }
@@ -275,7 +285,8 @@ fn parseCommand(self: *Self, str: []const u8) !void {
 }
 
 fn normalMode(self: *Self) void {
-	const input = self.input_buf.slice();
+	var input_buf = self.inputBufSentinelArray();
+	const input = input_buf[0..self.input_buf.len:0];
 	if (self.keymaps.get(.normal, input)) |action| {
 		switch (action) {
 			.enter_command_mode => {
@@ -914,7 +925,7 @@ pub const CommandMapType = enum {
 
 pub fn KeyMap(comptime A: type, comptime M: type) type {
 	return struct {
-		const CritMap = critbit.CritBitMap([]const u8, A, critbit.StringContext);
+		const CritMap = critbit.CritBitMap([*:0]const u8, A, critbit.StringContextZ);
 		pub const Map = struct {
 			keys: CritMap,
 			parents: []const M,
@@ -947,7 +958,7 @@ pub fn KeyMap(comptime A: type, comptime M: type) type {
 			};
 		}
 
-		pub fn get(self: @This(), mode: M, input: []const u8) ?A {
+		pub fn get(self: @This(), mode: M, input: [:0]const u8) ?A {
 			const map = self.maps.getPtrConst(mode);
 			return map.keys.get(input) orelse for (map.parents) |parent_mode| {
 				const parent = self.maps.getPtrConst(parent_mode);
@@ -955,7 +966,7 @@ pub fn KeyMap(comptime A: type, comptime M: type) type {
 			} else null;
 		}
 
-		pub fn contains(self: @This(), mode: M, input: []const u8) bool {
+		pub fn contains(self: @This(), mode: M, input: [:0]const u8) bool {
 			const map = self.maps.getPtrConst(mode);
 			if (map.keys.contains(input)) return true;
 			for (map.parents) |parent_mode| {
@@ -978,7 +989,7 @@ const KeyMaps = struct {
 	type: MapType,
 	parents: []const MapType,
 	keys: []const struct {
-		[]const u8,
+		[*:0]const u8,
 		Action,
 	},
 };
@@ -1051,7 +1062,7 @@ const CommandKeyMaps = struct {
 	type: CommandMapType,
 	parents: []const CommandMapType,
 	keys: []const struct {
-		[]const u8,
+		[*:0]const u8,
 		CommandAction,
 	},
 };
@@ -1065,10 +1076,10 @@ const command_keys = [_]CommandKeyMaps{
 			.{ "<C-j>", .submit_command },
 			.{ "<Return>", .submit_command },
 
-			.{ "<Home>", .{ .motion = .bol } },
-			.{ "<End>", .{ .motion = .eol } },
-			.{ "<Left>", .{ .motion = .char_prev } },
-			.{ "<Right>", .{ .motion = .char_next } },
+			.{ "<Home>", .motion_bol },
+			.{ "<End>", .motion_eol },
+			.{ "<Left>", .motion_char_prev },
+			.{ "<Right>", .motion_char_next },
 
 			.{ "<C-[>", .enter_normal_mode },
 			.{ "<Escape>", .enter_normal_mode },
@@ -1093,18 +1104,18 @@ const command_keys = [_]CommandKeyMaps{
 			.{ "t", .operator_until_forwards },
 			.{ "T", .operator_until_backwards },
 
-			.{ "h", .{ .motion = .char_prev } },
-			.{ "l", .{ .motion = .char_next } },
+			.{ "h", .motion_char_prev },
+			.{ "l", .motion_char_next },
 			.{ "0", .zero },
-			.{ "$", .{ .motion = .eol } },
-			.{ "w", .{ .motion = .normal_word_start_next } },
-			.{ "W", .{ .motion = .long_word_start_next   } },
-			.{ "e", .{ .motion = .normal_word_end_next   } },
-			.{ "E", .{ .motion = .long_word_end_next     } },
-			.{ "b", .{ .motion = .normal_word_start_prev } },
-			.{ "B", .{ .motion = .long_word_start_prev   } },
-			.{ "<M-e>", .{ .motion = .normal_word_end_prev } },
-			.{ "<M-E>", .{ .motion = .long_word_end_prev } },
+			.{ "$", .motion_eol },
+			.{ "w", .motion_normal_word_start_next },
+			.{ "W", .motion_long_word_start_next },
+			.{ "e", .motion_normal_word_end_next },
+			.{ "E", .motion_long_word_end_next },
+			.{ "b", .motion_normal_word_start_prev },
+			.{ "B", .motion_long_word_start_prev },
+			.{ "<M-e>", .motion_normal_word_end_prev },
+			.{ "<M-E>", .motion_long_word_end_prev },
 		},
 	},
 	.{
@@ -1133,10 +1144,10 @@ const command_keys = [_]CommandKeyMaps{
 			.{ "<Delete>", .backspace },
 			.{ "<C-u>", .change_line },
 
-			.{ "<C-a>", .{ .motion = .bol } },
-			.{ "<C-e>", .{ .motion = .eol } },
-			.{ "<C-b>", .{ .motion = .char_prev } },
-			.{ "<C-f>", .{ .motion = .char_next } },
+			.{ "<C-a>", .motion_bol },
+			.{ "<C-e>", .motion_eol },
+			.{ "<C-b>", .motion_char_prev },
+			.{ "<C-f>", .motion_char_next },
 			.{ "<C-w>", .backwards_delete_word },
 		},
 	},
@@ -1147,39 +1158,39 @@ const command_keys = [_]CommandKeyMaps{
 			.{ "d", .operator_delete },
 			.{ "c", .operator_change },
 
-			.{ "aw", .{ .motion = .normal_word_around } },
-			.{ "aW", .{ .motion = .long_word_around } },
-			.{ "iw", .{ .motion = .normal_word_inside } },
-			.{ "iW", .{ .motion = .long_word_inside } },
+			.{ "aw", .motion_normal_word_around },
+			.{ "aW", .motion_long_word_around },
+			.{ "iw", .motion_normal_word_inside },
+			.{ "iW", .motion_long_word_inside },
 
-			.{ "a(", .{ .motion = .{ .around_delimiters = .{ .left = "(", .right = ")" } } } },
-			.{ "i(", .{ .motion = .{ .inside_delimiters = .{ .left = "(", .right = ")" } } } },
-			.{ "a)", .{ .motion = .{ .around_delimiters = .{ .left = "(", .right = ")" } } } },
-			.{ "i)", .{ .motion = .{ .inside_delimiters = .{ .left = "(", .right = ")" } } } },
+			.{ "a(", .{ .motion_around_delimiters = utils.packDoubleCp('(', ')') } },
+			.{ "i(", .{ .motion_inside_delimiters = utils.packDoubleCp('(', ')') } },
+			.{ "a)", .{ .motion_around_delimiters = utils.packDoubleCp('(', ')') } },
+			.{ "i)", .{ .motion_inside_delimiters = utils.packDoubleCp('(', ')') } },
 
-			.{ "a[", .{ .motion = .{ .around_delimiters = .{ .left = "[", .right = "]" } } } },
-			.{ "i[", .{ .motion = .{ .inside_delimiters = .{ .left = "[", .right = "]" } } } },
-			.{ "a]", .{ .motion = .{ .around_delimiters = .{ .left = "[", .right = "]" } } } },
-			.{ "i]", .{ .motion = .{ .inside_delimiters = .{ .left = "[", .right = "]" } } } },
+			.{ "a[", .{ .motion_around_delimiters = utils.packDoubleCp('[', ']') } },
+			.{ "i[", .{ .motion_inside_delimiters = utils.packDoubleCp('[', ']') } },
+			.{ "a]", .{ .motion_around_delimiters = utils.packDoubleCp('[', ']') } },
+			.{ "i]", .{ .motion_inside_delimiters = utils.packDoubleCp('[', ']') } },
 
-			.{ "i{", .{ .motion = .{ .inside_delimiters = .{ .left = "{", .right = "}" } } } },
-			.{ "a{", .{ .motion = .{ .around_delimiters = .{ .left = "{", .right = "}" } } } },
-			.{ "i}", .{ .motion = .{ .inside_delimiters = .{ .left = "{", .right = "}" } } } },
-			.{ "a}", .{ .motion = .{ .around_delimiters = .{ .left = "{", .right = "}" } } } },
+			.{ "i{", .{ .motion_inside_delimiters = utils.packDoubleCp('{', '}') } },
+			.{ "a{", .{ .motion_around_delimiters = utils.packDoubleCp('{', '}') } },
+			.{ "i}", .{ .motion_inside_delimiters = utils.packDoubleCp('{', '}') } },
+			.{ "a}", .{ .motion_around_delimiters = utils.packDoubleCp('{', '}') } },
 
-			.{ "i<<", .{ .motion = .{ .inside_delimiters = .{ .left = "<", .right = ">" } } } },
-			.{ "a<<", .{ .motion = .{ .around_delimiters = .{ .left = "<", .right = ">" } } } },
-			.{ "i>", .{ .motion = .{ .inside_delimiters = .{ .left = "<", .right = ">" } } } },
-			.{ "a>", .{ .motion = .{ .around_delimiters = .{ .left = "<", .right = ">" } } } },
+			.{ "i<<", .{ .motion_inside_delimiters = utils.packDoubleCp('<', '>') } },
+			.{ "a<<", .{ .motion_around_delimiters = utils.packDoubleCp('<', '>') } },
+			.{ "i>", .{ .motion_inside_delimiters = utils.packDoubleCp('<', '>') } },
+			.{ "a>", .{ .motion_around_delimiters = utils.packDoubleCp('<', '>') } },
 
-			.{ "i\"", .{ .motion = .{ .inside_single_delimiter = "\"" } } },
-			.{ "a\"", .{ .motion = .{ .around_single_delimiter = "\"" } } },
+			.{ "i\"", .{ .motion_inside_single_delimiter = '"' } },
+			.{ "a\"", .{ .motion_around_single_delimiter = '"' } },
 
-			.{ "i'", .{ .motion = .{ .inside_single_delimiter = "'" } } },
-			.{ "a'", .{ .motion = .{ .around_single_delimiter = "'" } } },
+			.{ "i'", .{ .motion_inside_single_delimiter = '\'' } },
+			.{ "a'", .{ .motion_around_single_delimiter = '\'' } },
 
-			.{ "i`", .{ .motion = .{ .inside_single_delimiter = "`" } } },
-			.{ "a`", .{ .motion = .{ .around_single_delimiter = "`" } } },
+			.{ "i`", .{ .motion_inside_single_delimiter = '`' } },
+			.{ "a`", .{ .motion_around_single_delimiter = '`' } },
 		},
 	},
 	.{
