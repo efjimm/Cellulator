@@ -37,6 +37,7 @@ Cellulator used mode-based input, like in vim. There are multiple modes in Cellu
 
  - normal
  - visual
+ - visual select
  - command normal
  - command insert
  - command operator pending
@@ -94,9 +95,9 @@ will repeat the following motion that many times. This does not currently work f
 ###  Normal Mode
 
 - `Return`, `C-m`, `C-j` Submit the current text as a command
-- `h`, `Left` Move cursor left
 - `j`, `Down` Move cursor down
 - `k`, `Up` Move cursor up
+- `h`, `Left` Move cursor left
 - `l`, `Right` Move cursor right
 - `:` Enter command insert mode
 - `=` Enter command insert mode, with text set to `cellname = `, where cellname is the cell under the
@@ -116,9 +117,20 @@ will repeat the following motion that many times. This does not currently work f
 
 ### Visual Mode
 
+- All normal mode motions
 - `Esc`, `C-[` Enter normal mode
 - `d`, `x` Delete the cells in the given range
 - `o` Swap cursor and anchor
+- `Alt-j` Move selection down
+- `Alt-k` Move selection up
+- `Alt-h` Move selection left
+- `Alt-l` Move selection right
+
+### Visual Select Mode
+
+- All visual mode motions
+- `Return` Write the selected range to the command buffer
+- `Esc` Cancel select mode
 
 ### Command Insert Mode
 
@@ -131,6 +143,7 @@ will repeat the following motion that many times. This does not currently work f
 - `C-b`, `Left` Move cursor backward one character
 - `C-w` Delete the word before the cursor
 - `C-u` Delete all text in the command buffer
+- `C-v` Enter visual select mode
 
 ### Command Normal Mode
 

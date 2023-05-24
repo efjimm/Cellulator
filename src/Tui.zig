@@ -74,10 +74,6 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
 	}
 
 	try self.renderStatus(&rc, zc);
-	if (self.update.command or zc.mode == .command) {
-		try self.renderCommandLine(&rc, zc);
-		self.update.command = false;
-	}
 	if (self.update.column_headings) {
 		try self.renderColumnHeadings(&rc, zc.*);
 		self.update.column_headings = false;
@@ -94,6 +90,10 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
 	} else if (self.update.cursor) {
 		try renderCursor(&rc, zc);
 		self.update.cursor = false;
+	}
+	if (self.update.command or zc.mode == .command) {
+		try self.renderCommandLine(&rc, zc);
+		self.update.command = false;
 	}
 
 	try rc.setStyle(.{});
@@ -260,7 +260,10 @@ pub fn renderCursor(
 	rc: *RenderContext,
 	zc: *ZC,
 ) RenderError!void {
-	if (zc.mode == .visual) return;
+	switch (zc.mode) {
+		.visual, .select => return,
+		.normal, .command => {},
+	}
 	var buf: [16]u8 = undefined;
 
 	const left = zc.leftReservedColumns();
@@ -316,10 +319,9 @@ pub fn renderCursor(
 	};
 
 	// Render the cells and headings at the current cursor position with a specific colour.
-	try rc.setStyle(.{ .fg = .black, .bg = .blue });
 	try rc.moveCursorTo(pos.y, pos.x);
-	_ = try renderCell(rc, zc, zc.cursor);
 	try rc.setStyle(.{ .fg = .black, .bg = .blue });
+	_ = try renderCell(rc, zc, zc.cursor);
 
 	const col = zc.sheet.getColumn(zc.cursor.x);
 	const width = @min(col.width, rc.term.width - left);
@@ -331,6 +333,7 @@ pub fn renderCursor(
 
 	try rc.moveCursorTo(pos.y, 0);
 	try writer.print("{d: ^[1]}", .{ zc.cursor.y, left });
+	try rc.setStyle(.{});
 }
 
 pub fn renderCursorCell(
@@ -360,7 +363,7 @@ pub fn renderCells(
 		for (zc.screen_pos.x..@as(usize, std.math.maxInt(u16)) + 1) |x| {
 			const pos = Position{ .y = @intCast(u16, y), .x = @intCast(u16, x) };
 			switch (zc.mode) {
-				.visual => |anchor| {
+				.visual, .select => |anchor| {
 					if (pos.hash() == zc.cursor.hash()) {
 						try rc.setStyle(.{ .fg = .black, .bg = .yellow });
 						w += try renderCell(rc, zc, pos);
@@ -371,7 +374,7 @@ pub fn renderCells(
 						w += try renderCell(rc, zc, pos);
 					}
 				},
-				else => {
+				.normal, .command => {
 					if (pos.hash() == zc.cursor.hash()) {
 						w += try renderCursorCell(rc, zc, pos);
 					} else {

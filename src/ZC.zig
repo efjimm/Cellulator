@@ -38,11 +38,11 @@ command_keymaps: KeyMap(CommandAction, CommandMapType),
 
 allocator: Allocator,
 
-input_buf: std.BoundedArray(u8, input_buf_len) = .{},
+input_buf: std.BoundedArray(u8, INPUT_BUF_LEN) = .{},
 command_buf: TextInput(512) = .{},
 status_message: std.BoundedArray(u8, 256) = .{},
 
-const input_buf_len = 64;
+const INPUT_BUF_LEN = 64;
 
 pub const status_line = 0;
 pub const input_line = 1;
@@ -51,7 +51,14 @@ pub const content_line = 3;
 
 pub const Mode = union(enum) {
 	normal,
-	visual: Position, // Holds the 'anchor' position
+
+	/// Holds the 'anchor' position
+	visual: Position,
+
+	/// Same as visual mode, with different operations allowed. Used for inserting
+	/// the text representation of the selected range into the command buffer.
+	select: Position,
+	                  
 	command,
 
 	pub fn format(
@@ -145,7 +152,7 @@ pub fn updateCells(self: *Self) Allocator.Error!void {
 fn setMode(self: *Self, new_mode: std.meta.Tag(Mode)) void {
 	switch (self.mode) {
 		.normal => {},
-		.visual => {
+		.visual, .select => {
 			self.tui.update.cells = true;
 			self.tui.update.column_headings = true;
 			self.tui.update.row_numbers = true;
@@ -155,16 +162,17 @@ fn setMode(self: *Self, new_mode: std.meta.Tag(Mode)) void {
 
 	switch (new_mode) {
 		.normal => self.mode = .normal,
-		.visual => self.mode = .{ .visual = self.cursor },
 		.command => {
 			self.dismissStatusMessage();
 			self.mode = .command;
+			self.tui.update.command = true;
 		},
+		inline .visual, .select => |tag| self.mode = @unionInit(Mode, @tagName(tag), self.cursor),
 	}
 }
 
-fn inputBufSentinelArray(self: *Self) [input_buf_len + 1]u8 {
-	var buf: [input_buf_len + 1]u8 = undefined;
+fn inputBufSentinelArray(self: *Self) [INPUT_BUF_LEN + 1]u8 {
+	var buf: [INPUT_BUF_LEN + 1]u8 = undefined;
 	const slice = self.input_buf.slice();
 	@memcpy(buf[0..slice.len], slice);
 	buf[slice.len] = 0;
@@ -172,36 +180,63 @@ fn inputBufSentinelArray(self: *Self) [input_buf_len + 1]u8 {
 }
 
 fn handleInput(self: *Self) !void {
-	var buf: [input_buf_len]u8 = undefined;
+	var buf: [INPUT_BUF_LEN]u8 = undefined;
 	const slice = try self.tui.term.readInput(&buf);
 
+	// TODO: parseInput may write more bytes than the buffer allows, which will cut off long key
+	// sequences
 	const writer = self.input_buf.writer();
-	parseInput(slice, writer) catch unreachable;
+	parseInput(slice, writer) catch |err| switch (err) {
+		error.Overflow => {},
+	};
 
 	switch (self.mode) {
 		.normal => self.normalMode(),
-		.visual => self.visualMode(),
+		.visual, .select => self.visualMode(),
 		.command => self.commandMode() catch |err| {
 			self.setStatusMessage("Error: {s}", .{ @errorName(err) });
 		},
 	}
 }
 
+fn getAnchor(self: *Self) *Position {
+	return switch (self.mode) {
+		.visual, .select => |*anchor| anchor,
+		.normal, .command => unreachable,
+	};
+}
+
 fn visualMode(self: *Self) void {
 	var input_buf = self.inputBufSentinelArray();
 	const input = input_buf[0..self.input_buf.len:0];
 
-	const action = self.keymaps.get(.visual, input) orelse {
-		if (!self.keymaps.contains(.visual, input)) self.input_buf.len = 0;
+	const map_type: MapType = switch (self.mode) {
+		.visual => .visual,
+		.select => .select,
+		.normal, .command => unreachable,
+	};
+
+	const action = self.keymaps.get(map_type, input) orelse {
+		if (!self.keymaps.contains(map_type, input)) self.input_buf.len = 0;
 		return;
 	};
 
 	switch (action) {
 		.enter_normal_mode => self.setMode(.normal),
 		.swap_anchor => {
-			const temp = self.cursor;
-			self.setCursor(self.mode.visual);
-			self.mode.visual = temp;
+			const anchor = self.getAnchor();
+			const temp = anchor.*;
+			anchor.* = self.cursor;
+			self.setCursor(temp);
+		},
+
+		.select_cancel => self.setMode(.command),
+		.select_submit => {
+			const writer = self.command_buf.writer();
+			const tl = Position.topLeft(self.cursor, self.mode.select);
+			const br = Position.bottomRight(self.cursor, self.mode.select);
+			writer.print("{}:{}", .{ tl, br }) catch {};
+			self.setMode(.command);
 		},
 
 		.cell_cursor_up => self.cursorUp(),
@@ -212,6 +247,57 @@ fn visualMode(self: *Self) void {
 		.cell_cursor_row_last => self.cursorToLastCellInColumn(),
 		.cell_cursor_col_first => self.cursorToFirstCell(),
 		.cell_cursor_col_last => self.cursorToLastCell(),
+		.next_populated_cell => self.cursorNextPopulatedCell(),
+		.prev_populated_cell => self.cursorPrevPopulatedCell(),
+
+		.visual_move_up => {
+			const anchor = self.getAnchor();
+			if (anchor.y < self.cursor.y) {
+				if (anchor.y > 0) {
+					anchor.y -= 1;
+					self.cursorUp();
+				}
+			} else if (self.cursor.y > 0) {
+				anchor.y -= 1;
+				self.cursorUp();
+			}
+		},
+		.visual_move_down => {
+			const anchor = self.getAnchor();
+			if (anchor.y > self.cursor.y) {
+				if (anchor.y < std.math.maxInt(u16)) {
+					anchor.y += 1;
+					self.cursorDown();
+				}
+			} else if (self.cursor.y < std.math.maxInt(u16)) {
+				anchor.y += 1;
+				self.cursorDown();
+			}
+		},
+		.visual_move_left => {
+			const anchor = self.getAnchor();
+			if (anchor.x < self.cursor.x) {
+				if (anchor.x > 0) {
+					anchor.x -= 1;
+					self.cursorLeft();
+				}
+			} else if (self.cursor.x > 0) {
+				anchor.x -= 1;
+				self.cursorLeft();
+			}
+		},
+		.visual_move_right => {
+			const anchor = self.getAnchor();
+			if (anchor.x > self.cursor.x) {
+				if (anchor.x < std.math.maxInt(u16)) {
+					anchor.x += 1;
+					self.cursorRight();
+				}
+			} else if (self.cursor.x < std.math.maxInt(u16)) {
+				anchor.x += 1;
+				self.cursorRight();
+			}
+		},
 
 		.delete_cell => {
 			self.sheet.deleteCellsInRange(self.cursor, self.mode.visual);
@@ -239,10 +325,11 @@ fn commandMode(self: *Self) !void {
 		switch (status) {
 			.waiting => {},
 			.cancelled => self.setMode(.normal),
+			.select => self.setMode(.select),
 			.string => |arr| try self.parseCommand(arr.slice()),
 		}
 	} else if (!self.command_keymaps.contains(map_type, input)) {
-		var buf: [input_buf_len]u8 = undefined;
+		var buf: [INPUT_BUF_LEN]u8 = undefined;
 		const len = std.mem.replacementSize(u8, input, "<<", "<");
 		_ = std.mem.replace(u8, input, "<<", "<", &buf);
 		_ = self.command_buf.do(.none, buf[0..len]);
@@ -347,14 +434,14 @@ fn normalMode(self: *Self) void {
 
 pub fn isSelectedCell(self: Self, pos: Position) bool {
 	return switch (self.mode) {
-		.visual => |anchor| pos.intersects(anchor, self.cursor),
+		.visual, .select => |anchor| pos.intersects(anchor, self.cursor),
 		else => self.cursor.hash() == pos.hash(),
 	};
 }
 
 pub fn isSelectedCol(self: Self, x: u16) bool {
 	return switch (self.mode) {
-		.visual => |anchor| {
+		.visual, .select => |anchor| {
 			const min = @min(self.cursor.x, anchor.x);
 			const max = @max(self.cursor.x, anchor.x);
 			return x >= min and x <= max;
@@ -365,7 +452,7 @@ pub fn isSelectedCol(self: Self, x: u16) bool {
 
 pub fn isSelectedRow(self: Self, y: u16) bool {
 	return switch (self.mode) {
-		.visual => |anchor| {
+		.visual, .select => |anchor| {
 			const min = @min(self.cursor.y, anchor.y);
 			const max = @max(self.cursor.y, anchor.y);
 			return y >= min and y <= max;
@@ -456,7 +543,6 @@ pub fn runCommand(self: *Self, str: []const u8) !void {
 
 	const cmd = cmds.get(cmd_str) orelse return error.InvalidCommand;
 
-	// TODO: add confirmation for certain commands
 	switch (cmd) {
 		.quit => {
 			if (self.sheet.has_changes) {
@@ -589,12 +675,15 @@ pub fn setCursor(self: *Self, new_pos: Position) void {
 	self.cursor = new_pos;
 	self.clampScreenToCursor();
 
-	if (self.mode == .visual) {
-		self.tui.update.cells = true;
-		self.tui.update.column_headings = true;
-		self.tui.update.row_numbers = true;
-	} else {
-		self.tui.update.cursor = true;
+	switch (self.mode) {
+		.visual, .select => {
+			self.tui.update.cells = true;
+			self.tui.update.column_headings = true;
+			self.tui.update.row_numbers = true;
+		},
+		else => {
+			self.tui.update.cursor = true;
+		},
 	}
 }
 
@@ -863,7 +952,7 @@ pub fn parseInput(bytes: []const u8, writer: anytype) @TypeOf(writer).Error!void
 				0...'\n'-1, '\n'+1...'\r'-1, '\r'+1...31 => {},
 				else => {
 					var buf: [4]u8 = undefined;
-					const len = std.unicode.utf8Encode(cp, &buf) catch unreachable;
+					const len = std.unicode.utf8Encode(cp, &buf) catch continue;
 					try writer.writeAll(buf[0..len]);
 				},
 			},
@@ -900,6 +989,13 @@ pub const Action = union(enum) {
 	decrease_width,
 	assign_cell,
 
+	visual_move_left,
+	visual_move_right,
+	visual_move_up,
+	visual_move_down,
+	select_submit,
+	select_cancel,
+
 	zero,
 	count: u4,
 
@@ -910,6 +1006,9 @@ pub const Action = union(enum) {
 pub const MapType = enum {
 	normal,
 	visual,
+	select,
+
+	visual_motions,
 	common_motions,
 	common_keys,
 };
@@ -958,15 +1057,16 @@ pub fn KeyMap(comptime A: type, comptime M: type) type {
 			};
 		}
 
-		pub fn get(self: @This(), mode: M, input: [:0]const u8) ?A {
+		/// Returns the action associated with the given input, or `null` if not found. Looks
+		/// recursively through parent maps if not found.
+		pub fn get(self: @This(), mode: M, input: [*:0]const u8) ?A {
 			const map = self.maps.getPtrConst(mode);
 			return map.keys.get(input) orelse for (map.parents) |parent_mode| {
-				const parent = self.maps.getPtrConst(parent_mode);
-				if (parent.keys.get(input)) |a| return a;
+				if (self.get(parent_mode, input)) |ret| break ret;
 			} else null;
 		}
 
-		pub fn contains(self: @This(), mode: M, input: [:0]const u8) bool {
+		pub fn contains(self: @This(), mode: M, input: [*:0]const u8) bool {
 			const map = self.maps.getPtrConst(mode);
 			if (map.keys.contains(input)) return true;
 			for (map.parents) |parent_mode| {
@@ -1029,6 +1129,16 @@ const outer_keys = [_]KeyMaps{
 		},
 	},
 	.{
+		.type = .visual_motions,
+		.parents = &.{},
+		.keys = &.{
+			.{ "<M-h>", .visual_move_left },
+			.{ "<M-l>", .visual_move_right },
+			.{ "<M-k>", .visual_move_up },
+			.{ "<M-j>", .visual_move_down },
+		},
+	},
+	.{
 		.type = .normal,
 		.parents = &.{ .common_motions },
 		.keys = &.{
@@ -1047,13 +1157,26 @@ const outer_keys = [_]KeyMaps{
 	},
 	.{
 		.type = .visual,
-		.parents = &.{ .common_motions },
+		.parents = &.{ .common_motions, .visual_motions },
 		.keys = &.{
 			.{ "<C-[>", .enter_normal_mode },
 			.{ "<Escape>", .enter_normal_mode },
 
 			.{ "o", .swap_anchor },
 			.{ "d", .delete_cell },
+		},
+	},
+	.{
+		.type = .select,
+		.parents = &.{ .common_motions, .visual_motions },
+		.keys = &.{
+			.{ "<C-[>", .select_cancel },
+			.{ "<Escape>", .select_cancel },
+
+			.{ "o", .swap_anchor },
+			.{ "<Return>", .select_submit },
+			.{ "<C-j>", .select_submit },
+			.{ "<C-m>", .select_submit },
 		},
 	},
 };
@@ -1143,6 +1266,7 @@ const command_keys = [_]CommandKeyMaps{
 			.{ "<C-h>", .backspace },
 			.{ "<Delete>", .backspace },
 			.{ "<C-u>", .change_line },
+			.{ "<C-v>", .enter_select_mode },
 
 			.{ "<C-a>", .motion_bol },
 			.{ "<C-e>", .motion_eol },

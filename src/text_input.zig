@@ -11,6 +11,8 @@ pub const Action = union(enum(u6)) {
 	submit_command = 26,
 	enter_normal_mode,
 
+	enter_select_mode,
+
 	enter_insert_mode,
 	enter_insert_mode_after,
 	enter_insert_mode_at_eol,
@@ -80,30 +82,19 @@ pub const Action = union(enum(u6)) {
 	// Cursed function that converts an Action to a Motion.
 	pub fn toMotion(action: Action) Motion {
 		switch (action) {
-			.motion_inside_delimiters => |buf| {
+			inline .motion_around_delimiters, .motion_inside_delimiters => |buf, action_tag| {
 				const b align(4) = buf; // `buf` is not aligned for some reason, so copy it
 				const cps align(4) = utils.unpackDoubleCp(&b);
-				return .{
-					.inside_delimiters = .{
-						.left = cps[0],
-						.right = cps[1],
-					},
-				};
-			},
-			.motion_around_delimiters => |buf| {
-				const b align(4) = buf;
-				const cps align(4) = utils.unpackDoubleCp(&b);
-				return .{
-					.around_delimiters = .{
-						.left = cps[0],
-						.right = cps[1],
-					},
-				};
+				const tag = @intToEnum(std.meta.Tag(Motion), @enumToInt(action_tag));
+				return @unionInit(Motion, @tagName(tag), .{
+					.left = cps[0],
+					.right = cps[1],
+				});
 			},
 			else => {},
 		}
 
-		@setEvalBranchQuota(1200);
+		@setEvalBranchQuota(1400);
 		const tag = @intToEnum(std.meta.Tag(Motion), @enumToInt(action));
 		switch (action) {
 			inline else => |payload, action_tag| switch (tag) {
@@ -133,6 +124,9 @@ pub fn TextInput(comptime size: u16) type {
 
 			/// Editing was cancelled
 			cancelled,
+
+			/// Signal to enter select mode
+			select,
 
 			/// Editing finished and the resulting string is stored in this field
 			string: Array,
@@ -243,6 +237,7 @@ pub fn TextInput(comptime size: u16) type {
 					.backspace => self.backspace(),
 					.submit_command => return .{ .string = self.finish() },
 					.enter_normal_mode => self.setMode(.normal),
+					.enter_select_mode => return .select,
 					.backwards_delete_word => {
 						self.mode = .{ .operator_pending = .change };
 						_ = self.do(.motion_normal_word_start_prev, keys);

@@ -260,6 +260,15 @@ pub const Position = struct {
 	x: u16 = 0,
 	y: u16 = 0,
 
+	pub fn format(
+		pos: Position,
+		comptime _: []const u8,
+		_: std.fmt.FormatOptions,
+		writer: anytype,
+	) !void {
+		try pos.writeCellAddress(writer);
+	}
+
 	pub fn hash(position: Position) u32 {
 		return @as(u32, position.y) * std.math.maxInt(u16) + position.x;
 	}
@@ -375,7 +384,7 @@ pub const Position = struct {
 			.x = try columnFromAddress(address[0..letters_end]),
 			.y = std.fmt.parseInt(u16, address[letters_end..], 0) catch |err| switch (err) {
 				error.Overflow => return error.Overflow,
-				error.InvalidCharacter => unreachable // Invalid numbers do not get passed to this function
+				error.InvalidCharacter => unreachable // Invalid data should not get to this function
 			},
 		};
 	}

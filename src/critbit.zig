@@ -20,6 +20,7 @@ pub const StringContext = struct {
 	}
 };
 
+/// Context for null terminated u8 pointers
 pub const StringContextZ = struct {
 	pub fn eql(_: @This(), a: [*:0]const u8, b: [*:0]const u8) bool {
 		return for (a, b, 0..std.math.maxInt(usize)) |c1, c2, _| {
