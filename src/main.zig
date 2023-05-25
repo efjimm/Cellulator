@@ -9,6 +9,7 @@ const ZC = @import("ZC.zig");
 const Allocator = std.mem.Allocator;
 
 var zc: ZC = undefined;
+var logfile: if (builtin.mode == .Debug) std.fs.File else void = undefined;
 
 pub fn main() !void {
 	if (builtin.mode == .Debug) {
@@ -16,8 +17,7 @@ pub fn main() !void {
 	}
 	defer {
 		if (builtin.mode == .Debug) {
-			logfile.?.close();
-			logfile = null;
+			logfile.close();
 		}
 	}
 
@@ -55,8 +55,6 @@ pub fn panic(msg: []const u8, trace: ?*std.builtin.StackTrace, ret_addr: ?usize)
     std.builtin.default_panic(msg, trace, ret_addr);
 }
 
-var logfile: ?std.fs.File = null;
-
 pub const std_options = struct {
 	pub const log_level = if (builtin.mode == .Debug) .debug else .info;
 	pub const logFn = if (builtin.mode == .Debug) log else std.log.defaultLog;
@@ -68,15 +66,11 @@ pub fn log(
 	comptime format: []const u8,
 	args: anytype,
 ) void {
-	if (logfile) |file| {
-		const writer = file.writer();
-		writer.print("[{s}] {s}: ", .{ @tagName(scope), @tagName(level) }) catch {};
-		writer.print(format, args) catch {};
-		writer.writeByte('\n') catch {};
-		file.sync() catch {};
-	} else {
-		std.log.defaultLog(level, scope, format, args);
-	}
+	const writer = logfile.writer();
+	writer.print("[{s}] {s}: ", .{ @tagName(scope), @tagName(level) }) catch {};
+	writer.print(format, args) catch {};
+	writer.writeByte('\n') catch {};
+	logfile.sync() catch {};
 }
 
 // Reference all tests in other modules

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const utils = @import("utils.zig");
 const Ast = @import("Parse.zig");
 
@@ -11,7 +12,7 @@ const NodeListUnmanaged = std.ArrayListUnmanaged(Position);
 
 const log = std.log.scoped(.sheet);
 
-const PositionContext = struct {
+const ArrayPositionContext = struct {
 	pub fn eql(_: @This(), p1: Position, p2: Position, _: usize) bool {
 		return p1.y == p2.y and p1.x == p2.x;
 	}
@@ -21,7 +22,27 @@ const PositionContext = struct {
 	}
 };
 
-const CellMap = std.ArrayHashMapUnmanaged(Position, Cell, PositionContext, false);
+/// std.HashMap and std.ArrayHasMap require slightly different contexts.
+const PositionContext = struct {
+	pub fn eql(_: @This(), p1: Position, p2: Position) bool {
+		return p1.y == p2.y and p1.x == p2.x;
+	}
+
+	pub fn hash(_: @This(), pos: Position) u64 {
+		return pos.hash();
+	}
+};
+
+const CellMap = std.ArrayHashMapUnmanaged(Position, Cell, ArrayPositionContext, false);
+
+/// Used for cell evaluation
+const NodeMap = std.HashMapUnmanaged(Position, NodeMark, PositionContext, 99);
+
+/// Used for cell evaluation
+const NodeMark = enum {
+	temporary,
+	permanent,
+};
 
 /// ArrayHashMap mapping spreadsheet positions to cells.
 cells: CellMap = .{},
@@ -30,9 +51,15 @@ cells: CellMap = .{},
 columns: std.AutoArrayHashMapUnmanaged(u16, Column) = .{},
 filepath: std.BoundedArray(u8, std.fs.MAX_PATH_BYTES) = .{},
 
+/// Map containing cells which have already been visited during evaluation.node_list
+visited_nodes: NodeMap = .{},
 /// Cell positions sorted topologically, used for order of evaluation when evaluating all cells.
 sorted_nodes: NodeListUnmanaged = .{},
+
+/// If true, the next call to Sheet.update will re-evaluate all cells in the sheet.
 needs_update: bool = false,
+
+/// True if there have been any changes since the last save
 has_changes: bool = false,
 
 allocator: Allocator,
@@ -49,6 +76,7 @@ pub fn deinit(sheet: *Sheet) void {
 	}
 
 	sheet.cells.deinit(sheet.allocator);
+	sheet.visited_nodes.deinit(sheet.allocator);
 	sheet.sorted_nodes.deinit(sheet.allocator);
 	sheet.columns.deinit(sheet.allocator);
 	sheet.* = undefined;
@@ -144,68 +172,64 @@ pub fn getCellPtr(sheet: *Sheet, pos: Position) ?*Cell {
 	return sheet.cells.getPtr(pos);
 }
 
-const NodeMark = enum {
-	temporary,
-	permanent,
-};
-
-/// Re-evaluates all cells in the sheet. It evaluates cells in reverse topological order to ensure
-/// that we only need to evaluate each cell once. Cell results are cached after they are evaluted
+/// Re-evaluates all cells in the sheet. Evaluates cells in reverse topological order to ensure
+/// that each cell is only evaluated once. Cell results are cached after they are evaluted
 /// (see Cell.eval)
 pub fn update(sheet: *Sheet) Allocator.Error!void {
-	if (!sheet.needs_update)
-		return;
+	if (!sheet.needs_update) return;
+
+	log.debug("Updating...", .{});
+
+	// Is void unless in debug build
+	const begin = (if (builtin.mode == .Debug) std.time.Instant.now() catch unreachable else {});
 
 	try sheet.rebuildSortedNodeList();
 
-	var iter = std.mem.reverseIterator(sheet.sorted_nodes.items);
-	while (iter.next()) |pos| {
+	// Mark all cells as needing to be re-evaluated
+	for (sheet.cells.values()) |*cell| {
+		cell.num = null;
+	}
+
+	for (sheet.sorted_nodes.items) |pos| {
 		const cell = sheet.getCellPtr(pos).?;
-		_ = cell.eval(sheet);
+		_ = try cell.eval(sheet);
 	}
 
 	sheet.needs_update = false;
+	if (builtin.mode == .Debug) {
+		log.debug("Finished update in {d} seconds", .{
+			blk: {
+				const now = std.time.Instant.now() catch unreachable;
+				const elapsed = now.since(begin);
+				break :blk @intToFloat(f64, elapsed) / std.time.ns_per_s;
+			},
+		});
+	}
 }
-
-const NodeMap = std.HashMap(Position, NodeMark, struct {
-	pub fn eql(_: @This(), p1: Position, p2: Position) bool {
-		return p1.y == p2.y and p1.x == p2.x;
-	}
-
-	pub fn hash(_: @This(), pos: Position) u64 {
-		return pos.hash();
-	}
-}, 99);
 
 fn rebuildSortedNodeList(sheet: *Sheet) Allocator.Error!void {
 	const node_count = @intCast(u32, sheet.cells.entries.len);
 
 	// Topologically sorted set of cell positions
-	var nodes = sheet.sorted_nodes.toManaged(sheet.allocator);
-	defer sheet.sorted_nodes = nodes.moveToUnmanaged();
-	nodes.clearRetainingCapacity();
-
-	var visited_nodes = NodeMap.init(sheet.allocator);
-	defer visited_nodes.deinit();
-
-	try nodes.ensureTotalCapacity(node_count + 1);
-	try visited_nodes.ensureTotalCapacity(node_count + 1);
+	sheet.visited_nodes.clearRetainingCapacity();
+	sheet.sorted_nodes.clearRetainingCapacity();
+	try sheet.visited_nodes.ensureTotalCapacity(sheet.allocator, node_count + 1);
+	try sheet.sorted_nodes.ensureTotalCapacity(sheet.allocator, node_count + 1);
 
 	for (sheet.cells.keys()) |pos| {
-		if (!visited_nodes.contains(pos))
-			try visit(sheet, pos, &nodes, &visited_nodes);
+		if (!sheet.visited_nodes.contains(pos))
+			visit(sheet, pos, &sheet.visited_nodes, &sheet.sorted_nodes);
 	}
 
 }
 
-/// Recursive function that visits every dependency of a cell.
 fn visit(
 	sheet: *const Sheet,
 	node: Position,
-	nodes: *NodeList,
-	visited_nodes: *NodeMap,
-) Allocator.Error!void {
-	if (visited_nodes.get(node)) |mark| {
+	nodes: *NodeMap,
+	sorted_nodes: *NodeListUnmanaged,
+) void {
+	if (nodes.get(node)) |mark| {
 		switch (mark) {
 			.permanent => return,
 			.temporary => unreachable,
@@ -214,23 +238,18 @@ fn visit(
 
 	var cell = sheet.getCell(node) orelse return;
 
-	visited_nodes.putAssumeCapacity(node, .temporary);
+	nodes.putAssumeCapacity(node, .temporary);
 
 	const Context = struct {
 		sheet: *const Sheet,
-		node: Position,
-		nodes: *NodeList,
-		visited_nodes: *NodeMap,
+		cell: *Cell,
+		nodes: *NodeMap,
+		sorted_nodes: *NodeListUnmanaged,
 
-		pub fn evalCell(context: @This(), index: u32) Allocator.Error!bool {
-			const _cell = context.sheet.getCell(context.node).?;
-			const ast_node = _cell.ast.nodes.get(index);
+		pub fn evalCell(context: @This(), index: u32) !bool {
+			const ast_node = context.cell.ast.nodes.get(index);
 			if (ast_node == .cell) {
-				// Stop traversal on cyclical reference
-				if (context.visited_nodes.contains(ast_node.cell))
-					return false;
-
-				try visit(context.sheet, ast_node.cell, context.nodes, context.visited_nodes);
+				visit(context.sheet, ast_node.cell, context.nodes, context.sorted_nodes);
 			}
 			return true;
 		}
@@ -238,13 +257,13 @@ fn visit(
 
 	_ = try cell.ast.traverse(.middle, Context{
 		.sheet = sheet,
-		.node = node,
+		.cell = &cell,
 		.nodes = nodes,
-		.visited_nodes = visited_nodes,
+		.sorted_nodes = sorted_nodes,
 	});
 
-	visited_nodes.putAssumeCapacity(node, .permanent);
-	try nodes.insert(0, node);
+	nodes.putAssumeCapacity(node, .permanent);
+	sorted_nodes.appendAssumeCapacity(node);
 }
 
 pub fn getFilePath(sheet: Sheet) []const u8 {
@@ -391,6 +410,9 @@ pub const Position = struct {
 };
 
 pub const Cell = struct {
+	// TODO: reduce memory usage
+	//         store optional bit somewhere where it won't waste 63 bits
+	//         reduce Ast.NodeList to from 24 to 16 bytes
 	num: ?f64 = null,
 	ast: Ast = .{},
 
@@ -399,57 +421,55 @@ pub const Cell = struct {
 		cell.* = undefined;
 	}
 
-	pub fn isEmpty(cell: Cell) bool {
+	pub inline fn isEmpty(cell: Cell) bool {
 		return cell.ast.nodes.len == 0;
 	}
 
-	pub fn getValue(cell: *Cell, sheet: *Sheet) f64 {
+	pub inline fn getValue(cell: *Cell, sheet: *Sheet) f64 {
 		return cell.num orelse cell.eval(sheet);
 	}
 
-	pub fn eval(cell: *Cell, sheet: *Sheet) f64 {
+	pub fn eval(cell: *Cell, sheet: *Sheet) Allocator.Error!f64 {
 		const Context = struct {
 			sheet: *const Sheet,
-			stack: std.BoundedArray(Position, 512) = .{},
-			err: bool = false,
+			visited_cells: Map,
+
+			const Map = std.HashMap(Position, void, PositionContext, 80);
+			const EvalError = error{ CyclicalReference } || Ast.EvalError || Allocator.Error;
 	
-			pub fn evalCell(context: *@This(), pos: Position) ?f64 {
+			pub fn evalCell(context: *@This(), pos: Position) EvalError!?f64 {
 				// Check for cyclical references
-				for (context.stack.slice()) |p| {
-					if (p.hash() == pos.hash()) {
-						context.err = true;
-						return null;
-					}
+				const res = try context.visited_cells.getOrPut(pos);
+				if (res.found_existing) {
+					log.debug("CYCLICAL REFERENCE at {}", .{ pos });
+					return error.CyclicalReference;
 				}
 	
 				const _cell = context.sheet.getCell(pos) orelse return null;
+				if (_cell.num) |num| return num;
 	
-				if (context.stack.len == context.stack.capacity()) {
-					_ = context.stack.orderedRemove(0);
-				}
-	
-				context.stack.append(pos) catch unreachable;
-				const ret = _cell.ast.eval(context) catch |err| switch (err) {
-					error.NotEvaluable => {
-						context.err = true;
-						return null;
-					},
-				};
-				_ = context.stack.pop();
+				const ret = try _cell.ast.eval(context);
+				_ = context.visited_cells.remove(pos);
 				return ret;
 			}
 		};
 	
-		var context = Context{ .sheet = sheet };
-		const res = cell.ast.eval(&context);
+		// Only heavily nested cell references will heap allocate
+		var sfa = std.heap.stackFallback(2048, sheet.allocator);
+		var context = Context{
+			.sheet = sheet,
+			.visited_cells = Context.Map.init(sfa.get()),
+		};
+		const res = cell.ast.eval(&context) catch |err| switch (err) {
+			error.OutOfMemory => return error.OutOfMemory,
+			error.NotEvaluable, error.CyclicalReference => {
+				cell.num = null;
+				return 0;
+			},
+		};
 
-		if (context.err) {
-			cell.num = null;
-			return 0;
-		}
-
-		cell.num = res catch null;
-		return res catch 0;
+		cell.num = res;
+		return res;
 	}
 };
 

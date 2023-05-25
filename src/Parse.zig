@@ -245,12 +245,13 @@ pub const Slice = struct {
 		};
 	}
 
-	pub fn evalNode(ast: Slice, index: u32, context: anytype) EvalError!f64 {
+
+	pub fn evalNode(ast: Slice, index: u32, context: anytype) !f64 {
 		const node = ast.nodes.get(index);
 
 		return switch (node) {
 			.number => |n| n,
-			.cell => |pos| context.evalCell(pos) orelse 0,
+			.cell => |pos| try context.evalCell(pos) orelse 0,
 			.add => |op| (try ast.evalNode(op.lhs, context) + try ast.evalNode(op.rhs, context)),
 			.sub => |op| (try ast.evalNode(op.lhs, context) - try ast.evalNode(op.rhs, context)),
 			.mul => |op| (try ast.evalNode(op.lhs, context) * try ast.evalNode(op.rhs, context)),
@@ -261,7 +262,7 @@ pub const Slice = struct {
 		};
 	}
 
-	fn evalBuiltin(ast: Slice, builtin: Builtin, context: anytype) EvalError!f64 {
+	fn evalBuiltin(ast: Slice, builtin: Builtin, context: anytype) !f64 {
 		const args = ast.nodes.items(.data)[builtin.args].arg_list;
 		return switch (builtin.tag) {
 			.sum  => try ast.evalSum(args, context),
@@ -272,19 +273,19 @@ pub const Slice = struct {
 		};
 	}
 
-	pub fn evalSum(ast: Slice, args: ArgList, context: anytype) EvalError!f64 {
+	pub fn evalSum(ast: Slice, args: ArgList, context: anytype) !f64 {
 		var iter = ast.argIterator(args);
 
 		var total: f64 = 0;
 		while (iter.next()) |i| {
 			const tag = ast.nodes.items(.tags)[i];
-			total += if (tag == .range) ast.sumRange(ast.nodes.items(.data)[i].range, context)
+			total += if (tag == .range) try ast.sumRange(ast.nodes.items(.data)[i].range, context)
 					else try ast.evalNode(i, context);
 		}
 		return total;
 	}
 
-	pub fn sumRange(ast: Slice, range: BinaryOperator, context: anytype) f64 {
+	pub fn sumRange(ast: Slice, range: BinaryOperator, context: anytype) !f64 {
 		const pos1 = ast.nodes.items(.data)[range.lhs].cell;
 		const pos2 = ast.nodes.items(.data)[range.rhs].cell;
 
@@ -294,25 +295,25 @@ pub const Slice = struct {
 		var total: f64 = 0;
 		for (start.y..end.y + @as(u32, 1)) |y| {
 			for (start.x..end.x + @as(u32, 1)) |x| {
-				total += context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse 0;
+				total += try context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse 0;
 			}
 		}
 		return total;
 	}
 
-	pub fn evalProd(ast: Slice, args: ArgList, context: anytype) EvalError!f64 {
+	pub fn evalProd(ast: Slice, args: ArgList, context: anytype) !f64 {
 		var iter = ast.argIterator(args);
 		var total: f64 = 1;
 
 		while (iter.next()) |i| {
 			const tag = ast.nodes.items(.tags)[i];
-			total *= if (tag == .range) ast.prodRange(ast.nodes.items(.data)[i].range, context)
+			total *= if (tag == .range) try ast.prodRange(ast.nodes.items(.data)[i].range, context)
 					else try ast.evalNode(i, context);
 		}
 		return total;
 	}
 
-	pub fn prodRange(ast: Slice, range: BinaryOperator, context: anytype) f64 {
+	pub fn prodRange(ast: Slice, range: BinaryOperator, context: anytype) !f64 {
 		const pos1 = ast.nodes.items(.data)[range.lhs].cell;
 		const pos2 = ast.nodes.items(.data)[range.rhs].cell;
 
@@ -322,13 +323,13 @@ pub const Slice = struct {
 		var total: f64 = 1;
 		for (start.y..end.y + @as(u32, 1)) |y| {
 			for (start.x..end.x + @as(u32, 1)) |x| {
-				total *= context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse continue;
+				total *= try context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse continue;
 			}
 		}
 		return total;
 	}
 
-	pub fn evalAvg(ast: Slice, args: ArgList, context: anytype) EvalError!f64 {
+	pub fn evalAvg(ast: Slice, args: ArgList, context: anytype) !f64 {
 		var iter = ast.argIterator(args);
 		var total: f64 = 0;
 		var total_items: u32 = 0;
@@ -337,7 +338,7 @@ pub const Slice = struct {
 			const tag = ast.nodes.items(.tags)[i];
 			if (tag == .range) {
 				const range = ast.nodes.items(.data)[i].range;
-				total += ast.sumRange(range, context);
+				total += try ast.sumRange(range, context);
 
 				const p1 = ast.nodes.items(.data)[range.lhs].cell;
 				const p2 = ast.nodes.items(.data)[range.rhs].cell;
@@ -351,13 +352,13 @@ pub const Slice = struct {
 		return total / @intToFloat(f64, total_items);
 	}
 
-	pub fn evalMax(ast: Slice, args: ArgList, context: anytype) EvalError!f64 {
+	pub fn evalMax(ast: Slice, args: ArgList, context: anytype) !f64 {
 		var iter = ast.argIterator(args);
 		var max: ?f64 = null;
 
 		while (iter.next()) |i| {
 			const tag = ast.nodes.items(.tags)[i];
-			const res = if (tag == .range) ast.maxRange(ast.nodes.items(.data)[i].range, context) orelse continue
+			const res = if (tag == .range) try ast.maxRange(ast.nodes.items(.data)[i].range, context) orelse continue
 					else try ast.evalNode(i, context);
 			if (max == null or res > max.?)
 				max = res;
@@ -366,7 +367,7 @@ pub const Slice = struct {
 		return max orelse 0;
 	}
 
-	pub fn maxRange(ast: Slice, range: BinaryOperator, context: anytype) ?f64 {
+	pub fn maxRange(ast: Slice, range: BinaryOperator, context: anytype) !?f64 {
 		const pos1 = ast.nodes.items(.data)[range.lhs].cell;
 		const pos2 = ast.nodes.items(.data)[range.rhs].cell;
 
@@ -376,7 +377,7 @@ pub const Slice = struct {
 		var max: ?f64 = null;
 		for (start.y..end.y + @as(u32, 1)) |y| {
 			for (start.x..end.x + @as(u32, 1)) |x| {
-				const res = context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse continue;
+				const res = try context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse continue;
 				if (max == null or res > max.?)
 					max = res;
 			}
@@ -384,13 +385,13 @@ pub const Slice = struct {
 		return max;
 	}
 
-	pub fn evalMin(ast: Slice, args: ArgList, context: anytype) EvalError!f64 {
+	pub fn evalMin(ast: Slice, args: ArgList, context: anytype) !f64 {
 		var iter = ast.argIterator(args);
 		var min: ?f64 = null;
 
 		while (iter.next()) |i| {
 			const tag = ast.nodes.items(.tags)[i];
-			const res = if (tag == .range) ast.minRange(ast.nodes.items(.data)[i].range, context) orelse continue
+			const res = if (tag == .range) try ast.minRange(ast.nodes.items(.data)[i].range, context) orelse continue
 					else try ast.evalNode(i, context);
 			if (min == null or res < min.?)
 				min = res;
@@ -399,7 +400,7 @@ pub const Slice = struct {
 		return min orelse 0;
 	}
 
-	pub fn minRange(ast: Slice, range: BinaryOperator, context: anytype) ?f64 {
+	pub fn minRange(ast: Slice, range: BinaryOperator, context: anytype) !?f64 {
 		const pos1 = ast.nodes.items(.data)[range.lhs].cell;
 		const pos2 = ast.nodes.items(.data)[range.rhs].cell;
 
@@ -409,7 +410,7 @@ pub const Slice = struct {
 		var min: ?f64 = null;
 		for (start.y..end.y + @as(u32, 1)) |y| {
 			for (start.x..end.x + @as(u32, 1)) |x| {
-				const res = context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse continue;
+				const res = try context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse continue;
 				if (min == null or res < min.?)
 					min = res;
 			}
@@ -493,7 +494,7 @@ pub fn eval(
 	/// This function should return the value of the cell at the given position. It may do this
 	/// by calling this function.
 	context: anytype,
-) EvalError!f64 {
+) !f64 {
 	const slice = ast.toSlice();
 	return slice.evalNode(slice.rootNodeIndex(), context);
 }
@@ -1010,7 +1011,7 @@ test "Tokenizer" {
 test "Parse and Eval Expression" {
 	const t = std.testing;
 	const Context = struct {
-		pub fn evalCell(_: @This(), _: Position) ?f64 {
+		pub fn evalCell(_: @This(), _: Position) !?f64 {
 			unreachable;
 		}
 	};
@@ -1063,9 +1064,9 @@ test "Functions on Ranges" {
 	const Test = struct {
 		sheet: *Sheet,
 		
-		fn evalCell(context: @This(), pos: Position) ?f64 {
+		fn evalCell(context: @This(), pos: Position) !?f64 {
 			const cell = context.sheet.getCellPtr(pos) orelse return null;
-			return cell.eval(context.sheet);
+			return try cell.eval(context.sheet);
 		}
 
 		fn testSheetExpr(expected: f64, expr: []const u8) !void {
@@ -1144,7 +1145,7 @@ test "Splice" {
 	const allocator = arena.allocator();
 
 	const Context = struct {
-		pub fn evalCell(_: @This(), _: Position) ?f64 {
+		pub fn evalCell(_: @This(), _: Position) !?f64 {
 			return null;
 		}
 	};
