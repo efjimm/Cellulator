@@ -185,11 +185,6 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
 
 	try sheet.rebuildSortedNodeList();
 
-	// Mark all cells as needing to be re-evaluated
-	for (sheet.cells.values()) |*cell| {
-		cell.num = null;
-	}
-
 	for (sheet.sorted_nodes.items) |pos| {
 		const cell = sheet.getCellPtr(pos).?;
 		_ = try cell.eval(sheet);
@@ -455,12 +450,14 @@ pub const Cell = struct {
 		};
 	
 		// Only heavily nested cell references will heap allocate
-		var sfa = std.heap.stackFallback(2048, sheet.allocator);
+		var sfa = std.heap.stackFallback(4096, sheet.allocator);
 		var context = Context{
 			.sheet = sheet,
 			.visited_cells = Context.Map.init(sfa.get()),
 		};
-		const res = cell.ast.eval(&context) catch |err| switch (err) {
+		defer context.visited_cells.deinit();
+
+		cell.num = cell.ast.eval(&context) catch |err| switch (err) {
 			error.OutOfMemory => return error.OutOfMemory,
 			error.NotEvaluable, error.CyclicalReference => {
 				cell.num = null;
@@ -468,8 +465,7 @@ pub const Cell = struct {
 			},
 		};
 
-		cell.num = res;
-		return res;
+		return cell.num.?;
 	}
 };
 
