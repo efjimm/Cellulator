@@ -248,7 +248,7 @@ fn visit(
 
 		pub fn evalCell(context: @This(), index: u32) !bool {
 			const ast_node = context.cell.ast.nodes.get(index);
-			if (ast_node == .cell) {
+			if (ast_node == .cell and !context.nodes.contains(ast_node.cell)) {
 				visit(context.sheet, ast_node.cell, context.nodes, context.sorted_nodes);
 			}
 			return true;
