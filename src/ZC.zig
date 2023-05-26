@@ -343,56 +343,14 @@ fn doVisualMode(self: *Self, action: Action) void {
         .cell_cursor_col_last => self.cursorToLastCell(),
         .next_populated_cell => self.cursorNextPopulatedCell(),
         .prev_populated_cell => self.cursorPrevPopulatedCell(),
+
+        .zero => self.setCount(0),
         .count => |count| self.setCount(count),
 
-        .visual_move_up => {
-            const anchor = self.getAnchor();
-            if (anchor.y < self.cursor.y) {
-                if (anchor.y > 0) {
-                    anchor.y -= 1;
-                    self.cursorUp();
-                }
-            } else if (self.cursor.y > 0) {
-                anchor.y -= 1;
-                self.cursorUp();
-            }
-        },
-        .visual_move_down => {
-            const anchor = self.getAnchor();
-            if (anchor.y > self.cursor.y) {
-                if (anchor.y < std.math.maxInt(u16)) {
-                    anchor.y += 1;
-                    self.cursorDown();
-                }
-            } else if (self.cursor.y < std.math.maxInt(u16)) {
-                anchor.y += 1;
-                self.cursorDown();
-            }
-        },
-        .visual_move_left => {
-            const anchor = self.getAnchor();
-            if (anchor.x < self.cursor.x) {
-                if (anchor.x > 0) {
-                    anchor.x -= 1;
-                    self.cursorLeft();
-                }
-            } else if (self.cursor.x > 0) {
-                anchor.x -= 1;
-                self.cursorLeft();
-            }
-        },
-        .visual_move_right => {
-            const anchor = self.getAnchor();
-            if (anchor.x > self.cursor.x) {
-                if (anchor.x < std.math.maxInt(u16)) {
-                    anchor.x += 1;
-                    self.cursorRight();
-                }
-            } else if (self.cursor.x < std.math.maxInt(u16)) {
-                anchor.x += 1;
-                self.cursorRight();
-            }
-        },
+        .visual_move_up => self.selectionUp(),
+        .visual_move_down => self.selectionDown(),
+        .visual_move_left => self.selectionLeft(),
+        .visual_move_right => self.selectionRight(),
 
         .delete_cell => {
             self.sheet.deleteCellsInRange(self.cursor, self.mode.visual);
@@ -720,6 +678,72 @@ pub fn cursorLeft(self: *Self) void {
 
 pub fn cursorRight(self: *Self) void {
     self.setCursor(.{ .y = self.cursor.y, .x = self.cursor.x +| self.getCountU16() });
+    self.resetCount();
+}
+
+pub fn selectionUp(self: *Self) void {
+    assert(self.mode == .visual or self.mode == .select);
+    const anchor = self.getAnchor();
+    const count = self.getCountU16();
+    if (anchor.y < self.cursor.y) {
+        const len = self.cursor.y - anchor.y;
+        self.setCursor(.{ .y = @max(self.cursor.y -| count, len), .x = self.cursor.x });
+        anchor.y -|= count;
+    } else {
+        const len = anchor.y - self.cursor.y;
+        anchor.y = @max(anchor.y -| count, len);
+        self.setCursor(.{ .y = self.cursor.y -| count, .x = self.cursor.x });
+    }
+    self.resetCount();
+}
+
+pub fn selectionDown(self: *Self) void {
+    assert(self.mode == .visual or self.mode == .select);
+    const anchor = self.getAnchor();
+    const count = self.getCountU16();
+
+    if (anchor.y < self.cursor.y) {
+        const len = self.cursor.y - anchor.y;
+        self.setCursor(.{ .y = self.cursor.y +| count, .x = self.cursor.x });
+        anchor.y = @min(anchor.y +| count, std.math.maxInt(u16) - len);
+    } else {
+        const len = anchor.y - self.cursor.y;
+        self.setCursor(.{ .y = @min(self.cursor.y +| count, std.math.maxInt(u16) - len), .x = self.cursor.x });
+        anchor.y +|= count;
+    }
+    self.resetCount();
+}
+
+pub fn selectionLeft(self: *Self) void {
+    assert(self.mode == .visual or self.mode == .select);
+    const anchor = self.getAnchor();
+    const count = self.getCountU16();
+    if (anchor.x < self.cursor.x) {
+        const len = self.cursor.x - anchor.x;
+        self.setCursor(.{ .x = @max(self.cursor.x -| count, len), .y = self.cursor.y });
+        anchor.x -|= count;
+    } else {
+        const len = anchor.x - self.cursor.x;
+        anchor.x = @max(anchor.x -| count, len);
+        self.setCursor(.{ .x = self.cursor.x -| count, .y = self.cursor.y });
+    }
+    self.resetCount();
+}
+
+pub fn selectionRight(self: *Self) void {
+    assert(self.mode == .visual or self.mode == .select);
+    const anchor = self.getAnchor();
+    const count = self.getCountU16();
+
+    if (anchor.x < self.cursor.x) {
+        const len = self.cursor.x - anchor.x;
+        self.setCursor(.{ .x = self.cursor.x +| count, .y = self.cursor.y });
+        anchor.x = @min(anchor.x +| count, std.math.maxInt(u16) - len);
+    } else {
+        const len = anchor.x - self.cursor.x;
+        self.setCursor(.{ .x = @min(self.cursor.x +| count, std.math.maxInt(u16) - len), .y = self.cursor.y });
+        anchor.x +|= count;
+    }
     self.resetCount();
 }
 
@@ -2059,4 +2083,185 @@ test "Motions visual mode" {
     zc.doVisualMode(.prev_populated_cell);
     try t.expectEqual(try Position.fromCellAddress("B0"), zc.cursor);
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.getAnchor().*);
+
+    // swap_anchor
+    zc.doVisualMode(.swap_anchor);
+    try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
+    try t.expectEqual(Position.fromCellAddress("B0"), zc.getAnchor().*);
+
+    zc.setCursor(.{ .x = max, .y = max });
+    zc.doVisualMode(.swap_anchor);
+    try t.expectEqual(Position{ .x = max, .y = max }, zc.getAnchor().*);
+    try t.expectEqual(Position.fromCellAddress("B0"), zc.cursor);
+
+    zc.setCursor(.{ .x = max - 10, .y = max - 10 });
+    zc.doVisualMode(.swap_anchor);
+    try t.expectEqual(Position{ .x = max - 10, .y = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = max, .y = max }, zc.cursor);
+
+    // visual_move_left
+    zc.doVisualMode(.visual_move_left);
+    try t.expectEqual(Position{ .x = max - 1, .y = max }, zc.cursor);
+    try t.expectEqual(Position{ .x = max - 11, .y = max - 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.visual_move_left);
+    try t.expectEqual(Position{ .x = max - 2, .y = max }, zc.cursor);
+    try t.expectEqual(Position{ .x = max - 12, .y = max - 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.visual_move_left);
+    try t.expectEqual(Position{ .x = max - 3, .y = max }, zc.cursor);
+    try t.expectEqual(Position{ .x = max - 13, .y = max - 10 }, zc.getAnchor().*);
+
+    // with counts
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.visual_move_left);
+    try t.expectEqual(Position{ .x = max - 12, .y = max }, zc.cursor);
+    try t.expectEqual(Position{ .x = max - 22, .y = max - 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.{ .count = 1 });
+    zc.doVisualMode(.{ .count = 0 });
+    zc.doVisualMode(.visual_move_left);
+    try t.expectEqual(Position{ .x = max - 22, .y = max }, zc.cursor);
+    try t.expectEqual(Position{ .x = max - 32, .y = max - 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.visual_move_left);
+    try t.expectEqual(Position{ .x = max - 10021, .y = max }, zc.cursor);
+    try t.expectEqual(Position{ .x = max - 10031, .y = max - 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.visual_move_left);
+    try t.expectEqual(Position{ .x = 10, .y = max }, zc.cursor);
+    try t.expectEqual(Position{ .x = 0, .y = max - 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.visual_move_left);
+    try t.expectEqual(Position{ .x = 10, .y = max }, zc.cursor);
+    try t.expectEqual(Position{ .x = 0, .y = max - 10 }, zc.getAnchor().*);
+
+    // visual_move_right
+    zc.setCursor(.{ .x = 0, .y = 0 });
+    zc.getAnchor().* = .{ .x = 10, .y = 10 };
+    zc.doVisualMode(.visual_move_right);
+    try t.expectEqual(Position{ .x = 1, .y = 0 }, zc.cursor);
+    try t.expectEqual(Position{ .x = 11, .y = 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.visual_move_right);
+    try t.expectEqual(Position{ .x = 2, .y = 0 }, zc.cursor);
+    try t.expectEqual(Position{ .x = 12, .y = 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.visual_move_right);
+    try t.expectEqual(Position{ .x = 3, .y = 0 }, zc.cursor);
+    try t.expectEqual(Position{ .x = 13, .y = 10 }, zc.getAnchor().*);
+
+    // with counts
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.visual_move_right);
+    try t.expectEqual(Position{ .x = 12, .y = 0 }, zc.cursor);
+    try t.expectEqual(Position{ .x = 22, .y = 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.{ .count = 1 });
+    zc.doVisualMode(.{ .count = 0 });
+    zc.doVisualMode(.visual_move_right);
+    try t.expectEqual(Position{ .x = 22, .y = 0 }, zc.cursor);
+    try t.expectEqual(Position{ .x = 32, .y = 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.visual_move_right);
+    try t.expectEqual(Position{ .x = 10021, .y = 0 }, zc.cursor);
+    try t.expectEqual(Position{ .x = 10031, .y = 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.visual_move_right);
+    try t.expectEqual(Position{ .x = max - 10, .y = 0 }, zc.cursor);
+    try t.expectEqual(Position{ .x = max, .y = 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.visual_move_right);
+    try t.expectEqual(Position{ .x = max - 10, .y = 0 }, zc.cursor);
+    try t.expectEqual(Position{ .x = max, .y = 10 }, zc.getAnchor().*);
+
+    // visual_move_up
+    zc.setCursor(.{ .x = max, .y = max });
+    zc.getAnchor().* = .{ .x = max - 10, .y = max - 10 };
+    zc.doVisualMode(.visual_move_up);
+    try t.expectEqual(Position{ .y = max - 1, .x = max }, zc.cursor);
+    try t.expectEqual(Position{ .y = max - 11, .x = max - 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.visual_move_up);
+    try t.expectEqual(Position{ .y = max - 2, .x = max }, zc.cursor);
+    try t.expectEqual(Position{ .y = max - 12, .x = max - 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.visual_move_up);
+    try t.expectEqual(Position{ .y = max - 3, .x = max }, zc.cursor);
+    try t.expectEqual(Position{ .y = max - 13, .x = max - 10 }, zc.getAnchor().*);
+
+    // with counts
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.visual_move_up);
+    try t.expectEqual(Position{ .y = max - 12, .x = max }, zc.cursor);
+    try t.expectEqual(Position{ .y = max - 22, .x = max - 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.{ .count = 1 });
+    zc.doVisualMode(.{ .count = 0 });
+    zc.doVisualMode(.visual_move_up);
+    try t.expectEqual(Position{ .y = max - 22, .x = max }, zc.cursor);
+    try t.expectEqual(Position{ .y = max - 32, .x = max - 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.visual_move_up);
+    try t.expectEqual(Position{ .y = max - 10021, .x = max }, zc.cursor);
+    try t.expectEqual(Position{ .y = max - 10031, .x = max - 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.visual_move_up);
+    try t.expectEqual(Position{ .y = 10, .x = max }, zc.cursor);
+    try t.expectEqual(Position{ .y = 0, .x = max - 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.visual_move_up);
+    try t.expectEqual(Position{ .y = 10, .x = max }, zc.cursor);
+    try t.expectEqual(Position{ .y = 0, .x = max - 10 }, zc.getAnchor().*);
+
+    // visual_move_down
+    zc.setCursor(.{ .y = 0, .x = 0 });
+    zc.getAnchor().* = .{ .y = 10, .x = 10 };
+    zc.doVisualMode(.visual_move_down);
+    try t.expectEqual(Position{ .y = 1, .x = 0 }, zc.cursor);
+    try t.expectEqual(Position{ .y = 11, .x = 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.visual_move_down);
+    try t.expectEqual(Position{ .y = 2, .x = 0 }, zc.cursor);
+    try t.expectEqual(Position{ .y = 12, .x = 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.visual_move_down);
+    try t.expectEqual(Position{ .y = 3, .x = 0 }, zc.cursor);
+    try t.expectEqual(Position{ .y = 13, .x = 10 }, zc.getAnchor().*);
+
+    // with counts
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.visual_move_down);
+    try t.expectEqual(Position{ .y = 12, .x = 0 }, zc.cursor);
+    try t.expectEqual(Position{ .y = 22, .x = 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.{ .count = 1 });
+    zc.doVisualMode(.{ .count = 0 });
+    zc.doVisualMode(.visual_move_down);
+    try t.expectEqual(Position{ .y = 22, .x = 0 }, zc.cursor);
+    try t.expectEqual(Position{ .y = 32, .x = 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.visual_move_down);
+    try t.expectEqual(Position{ .y = 10021, .x = 0 }, zc.cursor);
+    try t.expectEqual(Position{ .y = 10031, .x = 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.{ .count = 9 });
+    zc.doVisualMode(.visual_move_down);
+    try t.expectEqual(Position{ .y = max - 10, .x = 0 }, zc.cursor);
+    try t.expectEqual(Position{ .y = max, .x = 10 }, zc.getAnchor().*);
+    zc.doVisualMode(.visual_move_down);
+    try t.expectEqual(Position{ .y = max - 10, .x = 0 }, zc.cursor);
+    try t.expectEqual(Position{ .y = max, .x = 10 }, zc.getAnchor().*);
 }
