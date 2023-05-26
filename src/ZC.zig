@@ -244,8 +244,7 @@ fn handleInput(self: *Self) !void {
         .prefix => return,
         .not_found => {
             if (self.mode == .command) {
-                _ = self.command_buf.do(.none, slice);
-                self.resetInputBuf();
+                _ = self.command_buf.do(.none, .{ .keys = slice });
             }
         },
     }
@@ -362,7 +361,7 @@ fn doVisualMode(self: *Self, action: Action) void {
 }
 
 fn doCommandMode(self: *Self, action: CommandAction) !void {
-    const status = self.command_buf.do(action, null);
+    const status = self.command_buf.do(action, .{});
     switch (status) {
         .waiting => {},
         .cancelled => self.setMode(.normal),
@@ -374,7 +373,9 @@ fn doCommandMode(self: *Self, action: CommandAction) !void {
     }
 }
 
-fn parseCommand(self: *Self, str: []const u8) !void {
+const ParseCommandError = Ast.ParseError || RunCommandError;
+
+fn parseCommand(self: *Self, str: []const u8) ParseCommandError!void {
     if (str.len == 0) return;
 
     if (str[0] == ':') {
@@ -510,7 +511,12 @@ const cmds = std.ComptimeStringMap(Cmd, .{
     .{ "q!", .quit_force },
 });
 
-pub fn runCommand(self: *Self, str: []const u8) !void {
+pub const RunCommandError = error{
+    InvalidCommand,
+    EmptyFileName,
+};
+
+pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
     var iter = utils.wordIterator(str);
     const cmd_str = iter.next() orelse return error.InvalidCommand;
     assert(cmd_str.len > 0);
@@ -1832,51 +1838,51 @@ test "Motions normal mode" {
 
     zc.setCursor(.{ .x = 0, .y = 0 });
     try zc.doNormalMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("B0"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("B0"), zc.cursor);
     try zc.doNormalMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("ZZZ0"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("ZZZ0"), zc.cursor);
     try zc.doNormalMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("B2"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("B2"), zc.cursor);
     try zc.doNormalMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("A4"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("A4"), zc.cursor);
     try zc.doNormalMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("C4"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("C4"), zc.cursor);
     try zc.doNormalMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("A500"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("A500"), zc.cursor);
     try zc.doNormalMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("A500"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("A500"), zc.cursor);
 
     zc.setCursor(.{ .x = 0, .y = 0 });
     try zc.doNormalMode(.{ .count = 2 });
     try zc.doNormalMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("ZZZ0"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("ZZZ0"), zc.cursor);
     try zc.doNormalMode(.{ .count = 9 });
     try zc.doNormalMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("A500"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("A500"), zc.cursor);
 
     zc.setCursor(.{ .x = max, .y = max });
     try zc.doNormalMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("A500"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("A500"), zc.cursor);
     try zc.doNormalMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("C4"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("C4"), zc.cursor);
     try zc.doNormalMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("A4"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("A4"), zc.cursor);
     try zc.doNormalMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("B2"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("B2"), zc.cursor);
     try zc.doNormalMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("ZZZ0"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("ZZZ0"), zc.cursor);
     try zc.doNormalMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("B0"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("B0"), zc.cursor);
     try zc.doNormalMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("B0"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("B0"), zc.cursor);
 
     zc.setCursor(.{ .x = max, .y = max });
     try zc.doNormalMode(.{ .count = 2 });
     try zc.doNormalMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("C4"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("C4"), zc.cursor);
     try zc.doNormalMode(.{ .count = 9 });
     try zc.doNormalMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("B0"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("B0"), zc.cursor);
 }
 
 test "Motions visual mode" {
@@ -2037,62 +2043,62 @@ test "Motions visual mode" {
 
     zc.setCursor(.{ .x = 0, .y = 0 });
     zc.doVisualMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("B0"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("B0"), zc.cursor);
     zc.doVisualMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("ZZZ0"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("ZZZ0"), zc.cursor);
     zc.doVisualMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("B2"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("B2"), zc.cursor);
     zc.doVisualMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("A4"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("A4"), zc.cursor);
     zc.doVisualMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("C4"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("C4"), zc.cursor);
     zc.doVisualMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("A500"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("A500"), zc.cursor);
     zc.doVisualMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("A500"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("A500"), zc.cursor);
 
     zc.setCursor(.{ .x = 0, .y = 0 });
     zc.doVisualMode(.{ .count = 2 });
     zc.doVisualMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("ZZZ0"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("ZZZ0"), zc.cursor);
     zc.doVisualMode(.{ .count = 9 });
     zc.doVisualMode(.next_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("A500"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("A500"), zc.cursor);
 
     zc.setCursor(.{ .x = max, .y = max });
     zc.doVisualMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("A500"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("A500"), zc.cursor);
     zc.doVisualMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("C4"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("C4"), zc.cursor);
     zc.doVisualMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("A4"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("A4"), zc.cursor);
     zc.doVisualMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("B2"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("B2"), zc.cursor);
     zc.doVisualMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("ZZZ0"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("ZZZ0"), zc.cursor);
     zc.doVisualMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("B0"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("B0"), zc.cursor);
     zc.doVisualMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("B0"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("B0"), zc.cursor);
 
     zc.setCursor(.{ .x = max, .y = max });
     zc.doVisualMode(.{ .count = 2 });
     zc.doVisualMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("C4"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("C4"), zc.cursor);
     zc.doVisualMode(.{ .count = 9 });
     zc.doVisualMode(.prev_populated_cell);
-    try t.expectEqual(try Position.fromCellAddress("B0"), zc.cursor);
+    try t.expectEqual(try Position.fromAddress("B0"), zc.cursor);
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.getAnchor().*);
 
     // swap_anchor
     zc.doVisualMode(.swap_anchor);
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
-    try t.expectEqual(Position.fromCellAddress("B0"), zc.getAnchor().*);
+    try t.expectEqual(Position.fromAddress("B0"), zc.getAnchor().*);
 
     zc.setCursor(.{ .x = max, .y = max });
     zc.doVisualMode(.swap_anchor);
     try t.expectEqual(Position{ .x = max, .y = max }, zc.getAnchor().*);
-    try t.expectEqual(Position.fromCellAddress("B0"), zc.cursor);
+    try t.expectEqual(Position.fromAddress("B0"), zc.cursor);
 
     zc.setCursor(.{ .x = max - 10, .y = max - 10 });
     zc.doVisualMode(.swap_anchor);

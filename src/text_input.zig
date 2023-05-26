@@ -68,7 +68,11 @@ pub fn TextInput(comptime size: u16) type {
         count: u32 = 0,
         cursor: u16 = 0,
 
-        pub fn do(self: *Self, action: Action, keys: ?[]const u8) Status {
+        pub const DoOptions = struct {
+            keys: []const u8 = &.{},
+        };
+
+        pub fn do(self: *Self, action: Action, opts: DoOptions) Status {
             switch (self.mode) {
                 .normal => switch (action) {
                     .submit_command => return .{ .string = self.finish() },
@@ -112,7 +116,7 @@ pub fn TextInput(comptime size: u16) type {
                     .operator_until_backwards => self.setToMode(.until_backwards),
                     .zero => {
                         if (self.count == 0) {
-                            _ = self.do(.motion_bol, keys);
+                            _ = self.do(.motion_bol, opts);
                         } else {
                             self.setCount(0);
                         }
@@ -126,9 +130,9 @@ pub fn TextInput(comptime size: u16) type {
                 },
                 .insert => switch (action) {
                     .none => {
-                        if (keys.?.len == 0) return .waiting;
-                        self.buf.insertSlice(self.cursor, keys.?) catch return .waiting;
-                        self.cursor += @intCast(u16, keys.?.len);
+                        if (opts.keys.len == 0) return .waiting;
+                        self.buf.insertSlice(self.cursor, opts.keys) catch return .waiting;
+                        self.cursor += @intCast(u16, opts.keys.len);
                     },
                     .backspace => self.backspace(),
                     .submit_command => return .{ .string = self.finish() },
@@ -136,7 +140,7 @@ pub fn TextInput(comptime size: u16) type {
                     .enter_select_mode => return .select,
                     .backwards_delete_word => {
                         self.mode = .{ .operator_pending = .change };
-                        _ = self.do(.motion_normal_word_start_prev, keys);
+                        _ = self.do(.motion_normal_word_start_prev, opts);
                     },
                     .change_line => self.reset(),
                     else => {
@@ -167,14 +171,14 @@ pub fn TextInput(comptime size: u16) type {
                 .to => |t| switch (action) {
                     .enter_normal_mode => self.setMode(.normal),
                     .none => {
-                        if (keys.?.len == 0) return .waiting;
+                        if (opts.keys.len == 0) return .waiting;
                         switch (t.prev_mode) {
                             .normal => self.setMode(.normal),
                             .insert => self.setMode(.insert),
                             .operator => |op| self.setMode(.{ .operator_pending = op }),
                         }
-                        const cp_len = std.unicode.utf8ByteSequenceLength(keys.?[0]) catch return .waiting;
-                        const cp = std.unicode.utf8Decode(keys.?[0..cp_len]) catch return .waiting;
+                        const cp_len = std.unicode.utf8ByteSequenceLength(opts.keys[0]) catch return .waiting;
+                        const cp = std.unicode.utf8Decode(opts.keys[0..cp_len]) catch return .waiting;
                         switch (t.to_mode) {
                             .to_forwards => self.doMotion(.{ .to_forwards = cp }),
                             .to_backwards => self.doMotion(.{ .to_backwards = cp }),
@@ -300,7 +304,7 @@ pub fn TextInput(comptime size: u16) type {
 
         fn backspace(self: *Self) void {
             self.mode = .{ .operator_pending = .change };
-            _ = self.do(.motion_char_prev, "");
+            _ = self.do(.motion_char_prev, .{});
         }
 
         pub fn setMode(self: *Self, mode: Mode) void {
@@ -1185,4 +1189,60 @@ test "Motions" {
     const delims = .{ .left = '(', .right = ')' };
     try testMotion("((word))", 5, "((".len, "((word".len, .{ .inside_delimiters = delims }, 1);
     try testMotion("((word))", 5, "(".len, "((word)".len, .{ .around_delimiters = delims }, 1);
+}
+
+test "Insert mode" {
+    const t = std.testing;
+    const T = TextInput(128);
+    var buf = T{};
+
+    const text = "this漢字is .my. epic漢字. .漢字text";
+
+    try t.expectEqual(T.Mode.insert, buf.mode);
+    try t.expectEqual(@as(u16, 0), buf.cursor);
+    try t.expectEqual(@as(u32, 0), buf.count);
+    try t.expectEqual(@as(usize, 0), buf.slice().len);
+
+    var status = buf.do(.none, .{ .keys = text });
+    try t.expectEqual(T.Status.waiting, status);
+    try t.expectEqualStrings(text, buf.slice());
+    try t.expectEqual(@intCast(u16, text.len), buf.cursor);
+
+    status = buf.do(.backspace, .{});
+    try t.expectEqual(T.Status.waiting, status);
+    try t.expectEqualStrings("this漢字is .my. epic漢字. .漢字tex", buf.slice());
+    try t.expectEqual(@intCast(u16, "this漢字is .my. epic漢字. .漢字tex".len), buf.cursor);
+
+    status = buf.do(.backspace, .{});
+    try t.expectEqual(T.Status.waiting, status);
+    try t.expectEqualStrings("this漢字is .my. epic漢字. .漢字te", buf.slice());
+    try t.expectEqual(@intCast(u16, "this漢字is .my. epic漢字. .漢字te".len), buf.cursor);
+
+    _ = buf.do(.backspace, .{});
+    _ = buf.do(.backspace, .{});
+    status = buf.do(.backspace, .{});
+    try t.expectEqual(T.Status.waiting, status);
+    try t.expectEqualStrings("this漢字is .my. epic漢字. .漢", buf.slice());
+    try t.expectEqual(@intCast(u16, "this漢字is .my. epic漢字. .漢".len), buf.cursor);
+
+    status = buf.do(.backspace, .{});
+    try t.expectEqual(T.Status.waiting, status);
+    try t.expectEqualStrings("this漢字is .my. epic漢字. .", buf.slice());
+    try t.expectEqual(@intCast(u16, "this漢字is .my. epic漢字. .".len), buf.cursor);
+
+    status = buf.do(.submit_command, .{});
+    try t.expectEqualStrings("this漢字is .my. epic漢字. .", status.string.slice());
+    try t.expectEqual(@as(u16, 0), buf.cursor);
+    try t.expectEqual(@as(usize, 0), buf.slice().len);
+    try t.expectEqual(T.Mode.insert, buf.mode);
+
+    _ = buf.do(.none, .{ .keys = "漢" });
+    try t.expectEqualStrings("漢", buf.slice());
+    try t.expectEqual(@intCast(u16, "漢".len), buf.cursor);
+
+    status = buf.do(.submit_command, .{});
+    try t.expectEqualStrings("漢", status.string.slice());
+    try t.expectEqual(@as(u16, 0), buf.cursor);
+    try t.expectEqual(@as(usize, 0), buf.slice().len);
+    try t.expectEqual(T.Mode.insert, buf.mode);
 }

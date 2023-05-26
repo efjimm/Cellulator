@@ -12,12 +12,11 @@ const assert = std.debug.assert;
 
 const Ast = @This();
 
-const TokenList = std.MultiArrayList(Token);
 const NodeList = std.MultiArrayList(Node);
 
 nodes: NodeList = .{},
 
-pub fn parse(ast: *Ast, allocator: Allocator, source: []const u8) !void {
+pub fn parse(ast: *Ast, allocator: Allocator, source: []const u8) ParseError!void {
     ast.nodes.len = 0;
     const tokenizer = Tokenizer.init(source);
 
@@ -28,14 +27,14 @@ pub fn parse(ast: *Ast, allocator: Allocator, source: []const u8) !void {
     ast.nodes = parser.nodes;
 }
 
-pub fn fromSource(allocator: Allocator, source: []const u8) !Ast {
+pub fn fromSource(allocator: Allocator, source: []const u8) ParseError!Ast {
     var ast = Ast{};
     errdefer ast.deinit(allocator);
     try ast.parse(allocator, source);
     return ast;
 }
 
-pub fn parseExpression(allocator: Allocator, source: []const u8) !Ast {
+pub fn parseExpression(allocator: Allocator, source: []const u8) ParseError!Ast {
     const tokenizer = Tokenizer.init(source);
 
     var parser = Parser.init(allocator, tokenizer, .{});
@@ -552,6 +551,11 @@ const builtins = std.ComptimeStringMap(Builtin.Tag, .{
     .{ "min", .min },
 });
 
+pub const ParseError = error{
+    UnexpectedToken,
+    InvalidCellAddress,
+} || Allocator.Error;
+
 const Parser = struct {
     current_token: Token,
 
@@ -591,18 +595,18 @@ const Parser = struct {
         return parser.tokenizer.bytes;
     }
 
-    fn parse(parser: *Parser) !void {
+    fn parse(parser: *Parser) ParseError!void {
         _ = try parser.parseStatement();
         _ = try parser.expectToken(.eof);
     }
 
     /// Statement <- Assignment
-    fn parseStatement(parser: *Parser) !u32 {
+    fn parseStatement(parser: *Parser) ParseError!u32 {
         return parser.parseAssignment();
     }
 
     /// Assignment <- CellName '=' Expression
-    fn parseAssignment(parser: *Parser) !u32 {
+    fn parseAssignment(parser: *Parser) ParseError!u32 {
         const lhs = try parser.parseCellName();
         _ = try parser.expectToken(.equals_sign);
         const rhs = try parser.parseExpression();
@@ -614,11 +618,6 @@ const Parser = struct {
             },
         });
     }
-
-    const ParseError = error{
-        UnexpectedToken,
-        InvalidCellAddress,
-    } || Allocator.Error;
 
     /// Expression <- AddExpr
     fn parseExpression(parser: *Parser) ParseError!u32 {
@@ -760,7 +759,7 @@ const Parser = struct {
         const text = token.text(parser.source());
 
         // TODO: check bounds
-        const pos = Position.fromCellAddress(text) catch return error.InvalidCellAddress;
+        const pos = Position.fromAddress(text) catch return error.InvalidCellAddress;
 
         return parser.addNode(.{
             .cell = pos,
@@ -1010,7 +1009,7 @@ test "Parse and Eval Expression" {
         }
     };
 
-    const Error = EvalError || Parser.ParseError;
+    const Error = EvalError || ParseError;
 
     const testExpr = struct {
         fn func(expected: Error!f64, expr: []const u8) !void {
