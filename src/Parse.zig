@@ -6,13 +6,14 @@
 
 const std = @import("std");
 const Position = @import("Sheet.zig").Position;
+const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 const Ast = @This();
 
-const NodeList = std.MultiArrayList(Node);
+const NodeList = MultiArrayList(Node);
 
 nodes: NodeList = .{},
 
@@ -95,7 +96,7 @@ pub const Slice = struct {
         const new_len = new_root + 1 - first_node;
 
         for (0..new_len, first_node..new_root + 1) |i, j| {
-            var n = ast.nodes.get(j);
+            var n = ast.nodes.get(@intCast(u32, j));
             switch (n) {
                 .assignment, .add, .sub, .mul, .div, .mod, .range => |*b| {
                     b.lhs -= first_node;
@@ -110,7 +111,7 @@ pub const Slice = struct {
                 },
                 .number, .column, .cell => {},
             }
-            ast.nodes.set(i, n);
+            ast.nodes.set(@intCast(u32, i), n);
         }
 
         ast.nodes.len = new_len;
@@ -1022,7 +1023,7 @@ test "Parse and Eval Expression" {
             const val = try expected;
             std.testing.expectApproxEqRel(val, res, 0.0001) catch |err| {
                 for (0..ast.nodes.len) |i| {
-                    const u = ast.nodes.get(i);
+                    const u = ast.nodes.get(@intCast(u32, i));
                     std.debug.print("{}\n", .{u});
                 }
                 return err;

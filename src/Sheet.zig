@@ -437,11 +437,12 @@ pub const Position = struct {
     }
 };
 
+comptime {
+    assert(@sizeOf(Cell) <= 24);
+}
+
 pub const Cell = struct {
-    // TODO: reduce memory usage
-    //         store optional bit somewhere where it won't waste 63 bits
-    //         reduce Ast.NodeList to from 24 to 16 bytes
-    num: ?f64 = null,
+    num: f64 = std.math.nan(f64),
     ast: Ast = .{},
 
     pub fn fromExpression(allocator: Allocator, expr: []const u8) !Cell {
@@ -457,10 +458,6 @@ pub const Cell = struct {
 
     pub inline fn isEmpty(cell: Cell) bool {
         return cell.ast.nodes.len == 0;
-    }
-
-    pub inline fn getValue(cell: *Cell, sheet: *Sheet) f64 {
-        return cell.num orelse cell.eval(sheet);
     }
 
     pub fn eval(cell: *Cell, sheet: *Sheet) Allocator.Error!f64 {
@@ -480,7 +477,7 @@ pub const Cell = struct {
                 }
 
                 const _cell = context.sheet.getCell(pos) orelse return null;
-                if (_cell.num) |num| return num;
+                if (_cell.getValue()) |num| return num;
 
                 const ret = try _cell.ast.eval(context);
                 _ = context.visited_cells.remove(pos);
@@ -499,12 +496,16 @@ pub const Cell = struct {
         cell.num = cell.ast.eval(&context) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.NotEvaluable, error.CyclicalReference => {
-                cell.num = null;
+                cell.num = std.math.nan(f64);
                 return 0;
             },
         };
 
-        return cell.num.?;
+        return cell.num;
+    }
+
+    pub inline fn getValue(cell: Cell) ?f64 {
+        return if (std.math.isNan(cell.num)) null else cell.num;
     }
 };
 
@@ -542,19 +543,19 @@ test "Sheet basics" {
 
     try t.expectEqual(@as(u32, 4), sheet.cellCount());
     try t.expectEqual(@as(u32, 1), sheet.colCount());
-    try t.expectEqual(cell1, sheet.getCell(.{ .x = 0, .y = 0 }).?);
-    try t.expectEqual(cell2, sheet.getCell(.{ .x = 0, .y = 1 }).?);
-    try t.expectEqual(cell3, sheet.getCell(.{ .x = 0, .y = 2 }).?);
-    try t.expectEqual(cell4, sheet.getCell(.{ .x = 0, .y = 3 }).?);
+    try t.expectEqual(cell1.ast, sheet.getCell(.{ .x = 0, .y = 0 }).?.ast);
+    try t.expectEqual(cell2.ast, sheet.getCell(.{ .x = 0, .y = 1 }).?.ast);
+    try t.expectEqual(cell3.ast, sheet.getCell(.{ .x = 0, .y = 2 }).?.ast);
+    try t.expectEqual(cell4.ast, sheet.getCell(.{ .x = 0, .y = 3 }).?.ast);
 
     for (0..4) |y| {
         const pos = .{ .x = 0, .y = @intCast(u16, y) };
-        try t.expectEqual(@as(?f64, null), sheet.cells.get(pos).?.num);
+        try t.expectEqual(@as(?f64, null), sheet.cells.get(pos).?.getValue());
     }
     try sheet.update();
     for (0..4) |y| {
         const pos = .{ .x = 0, .y = @intCast(u16, y) };
-        try t.expect(sheet.cells.get(pos).?.num != null);
+        try t.expect(sheet.cells.get(pos).?.getValue() != null);
     }
 
     var ast = sheet.deleteCell(.{ .x = 0, .y = 0 }).?;
@@ -789,7 +790,7 @@ fn testCellEvaluation(allocator: Allocator) !void {
     const testCell = struct {
         pub fn testCell(_sheet: *Sheet, pos: []const u8, expected: f64) !void {
             const cell = _sheet.getCell(try Position.fromAddress(pos)) orelse return error.CellNotFound;
-            try t.expectApproxEqRel(expected, cell.num.?, 0.001);
+            try t.expectApproxEqRel(expected, cell.num, 0.001);
         }
     }.testCell;
 

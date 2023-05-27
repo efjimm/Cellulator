@@ -405,7 +405,7 @@ pub fn renderCell(
     const writer = rpw.writer();
 
     if (zc.sheet.getCell(pos)) |cell| {
-        if (cell.num) |num| {
+        if (cell.getValue()) |num| {
             try writer.print("{d: >[1].[2]}", .{
                 num, width, col.precision,
             });
