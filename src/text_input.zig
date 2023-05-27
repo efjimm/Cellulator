@@ -3,8 +3,10 @@ const utils = @import("utils.zig");
 const spoon = @import("spoon");
 const wcWidth = @import("wcwidth").wcWidth;
 const inputParser = spoon.inputParser;
-const assert = std.debug.assert;
 const isWhitespace = std.ascii.isWhitespace;
+const utf8Encode = std.unicode.utf8Encode;
+
+const assert = std.debug.assert;
 const log = std.log.scoped(.text_input);
 
 /// A wrapper around a buffer that provides cli editing functions. Backed by a fixed size buffer.
@@ -177,14 +179,26 @@ pub fn TextInput(comptime size: u16) type {
                             .insert => self.setMode(.insert),
                             .operator => |op| self.setMode(.{ .operator_pending = op }),
                         }
-                        const cp_len = std.unicode.utf8ByteSequenceLength(opts.keys[0]) catch return .waiting;
-                        const cp = std.unicode.utf8Decode(opts.keys[0..cp_len]) catch return .waiting;
-                        switch (t.to_mode) {
-                            .to_forwards => self.doMotion(.{ .to_forwards = cp }),
-                            .to_backwards => self.doMotion(.{ .to_backwards = cp }),
-                            .until_forwards => self.doMotion(.{ .until_forwards = cp }),
-                            .until_backwards => self.doMotion(.{ .until_backwards = cp }),
-                        }
+                        const count = self.getCount();
+                        const range: Motion.Range = switch (t.to_mode) {
+                            .to_forwards => .{
+                                .start = self.cursor,
+                                .end = Motion.toForwards(self.slice(), opts.keys, self.cursor, count) orelse self.cursor,
+                            },
+                            .to_backwards => .{
+                                .start = Motion.toBackwards(self.slice(), opts.keys, self.cursor, count) orelse self.cursor,
+                                .end = self.cursor,
+                            },
+                            .until_forwards => .{
+                                .start = self.cursor,
+                                .end = Motion.untilForwards(self.slice(), opts.keys, self.cursor, count) orelse self.cursor,
+                            },
+                            .until_backwards => .{
+                                .start = Motion.untilBackwards(self.slice(), opts.keys, self.cursor, count) orelse self.cursor,
+                                .end = self.cursor,
+                            },
+                        };
+                        self.doNormalMotion(range);
                     },
                     else => {},
                 },
@@ -223,15 +237,16 @@ pub fn TextInput(comptime size: u16) type {
             } });
         }
 
+        inline fn doNormalMotion(self: *Self, range: Motion.Range) void {
+            self.cursor = if (range.start == self.cursor) range.end else range.start;
+        }
+
         fn doMotion(self: *Self, motion: Motion) void {
             const count = self.getCount();
             switch (self.mode) {
                 .normal, .insert => {
                     const range = motion.do(self.slice(), self.cursor, count);
-                    self.cursor = if (range.start == self.cursor)
-                        range.end
-                    else
-                        range.start;
+                    self.doNormalMotion(range);
                 },
                 .operator_pending => |op| switch (op) {
                     .change => {
@@ -621,28 +636,29 @@ pub const Motion = union(enum(u8)) {
             },
             .normal_word_inside => insideWord(bytes, .normal, pos),
             .long_word_inside => insideWord(bytes, .long, pos),
+
             .normal_word_around => aroundWord(bytes, .normal, pos),
             .long_word_around => aroundWord(bytes, .long, pos),
 
-            .inside_delimiters => |d| insideDelimiters(bytes, d.left, d.right, pos),
-            .around_delimiters => |d| aroundDelimiters(bytes, d.left, d.right, pos),
-            .inside_single_delimiter => |cp| insideSingleDelimiter(bytes, cp, pos),
-            .around_single_delimiter => |cp| aroundSingleDelimiter(bytes, cp, pos),
+            .inside_delimiters => |d| insideDelimitersCp(bytes, d.left, d.right, pos),
+            .around_delimiters => |d| aroundDelimitersCp(bytes, d.left, d.right, pos),
+            .inside_single_delimiter => |cp| insideSingleDelimiterCp(bytes, cp, pos),
+            .around_single_delimiter => |cp| aroundSingleDelimiterCp(bytes, cp, pos),
 
             .to_forwards => |cp| .{
                 .start = pos,
-                .end = toForwards(bytes, cp, pos, count) orelse pos,
+                .end = toForwardsCp(bytes, cp, pos, count) orelse pos,
             },
             .to_backwards => |cp| .{
-                .start = toBackwards(bytes, cp, pos, count) orelse pos,
+                .start = toBackwardsCp(bytes, cp, pos, count) orelse pos,
                 .end = pos,
             },
             .until_forwards => |cp| .{
                 .start = pos,
-                .end = untilForwards(bytes, cp, pos +| 1, count) orelse pos,
+                .end = untilForwardsCp(bytes, cp, pos +| 1, count) orelse pos,
             },
             .until_backwards => |cp| .{
-                .start = untilBackwards(bytes, cp, pos -| 1, count) orelse pos,
+                .start = untilBackwardsCp(bytes, cp, pos -| 1, count) orelse pos,
                 .end = pos,
             },
         };
@@ -863,7 +879,27 @@ pub const Motion = union(enum(u8)) {
         };
     }
 
-    fn insideDelimiters(bytes: []const u8, left: u21, right: u21, pos: u16) Range {
+    fn insideDelimitersCp(
+        bytes: []const u8,
+        left_cp: u21,
+        right_cp: u21,
+        pos: u16,
+    ) Range {
+        const err_ret = Range{
+            .start = pos,
+            .end = pos,
+        };
+        var buf: [8]u8 = undefined;
+        const left_len = utf8Encode(left_cp, &buf) catch return err_ret;
+        const left = buf[0..left_len];
+
+        const right_len = utf8Encode(right_cp, buf[4..]) catch return err_ret;
+        const right = buf[4 .. 4 + right_len];
+
+        return insideDelimiters(bytes, left, right, pos);
+    }
+
+    fn insideDelimiters(bytes: []const u8, left: []const u8, right: []const u8, pos: u16) Range {
         if (bytes.len == 0) return .{ .start = 0, .end = 0 };
 
         var ret = aroundDelimiters(bytes, left, right, pos);
@@ -873,17 +909,36 @@ pub const Motion = union(enum(u8)) {
         return ret;
     }
 
+    fn aroundDelimitersCp(
+        bytes: []const u8,
+        left_cp: u21,
+        right_cp: u21,
+        pos: u16,
+    ) Range {
+        const err_ret = Range{
+            .start = pos,
+            .end = pos,
+        };
+        var buf: [8]u8 = undefined;
+        const left_len = utf8Encode(left_cp, &buf) catch return err_ret;
+        const left = buf[0..left_len];
+
+        const right_len = utf8Encode(right_cp, buf[4..]) catch return err_ret;
+        const right = buf[4 .. 4 + right_len];
+        return aroundDelimiters(bytes, left, right, pos);
+    }
+
     // TODO: this is pretty inefficient
-    fn aroundDelimiters(bytes: []const u8, left_cp: u21, right_cp: u21, pos: u16) Range {
+    fn aroundDelimiters(
+        bytes: []const u8,
+        left: []const u8,
+        right: []const u8,
+        pos: u16,
+    ) Range {
         if (bytes.len == 0) return .{ .start = 0, .end = 0 };
         assert(pos < bytes.len);
-        var buf: [8]u8 = undefined;
-        const left = buf[0 .. std.unicode.utf8Encode(left_cp, &buf) catch 1];
-        const right = buf[left.len .. left.len + (std.unicode.utf8Encode(right_cp, buf[left.len..]) catch 1)];
-
-        log.debug("left_cp: '{u}', right_cp: '{u}', left: '{s}', right: '{s}'\n", .{
-            left_cp, right_cp, left, right,
-        });
+        assert((std.unicode.utf8ByteSequenceLength(left[0]) catch unreachable) == left.len);
+        assert((std.unicode.utf8ByteSequenceLength(right[0]) catch unreachable) == right.len);
 
         var i = pos;
         var depth: i32 = if (std.mem.startsWith(u8, bytes[pos..], right)) -1 else 0;
@@ -927,25 +982,44 @@ pub const Motion = union(enum(u8)) {
         };
     }
 
-    fn insideSingleDelimiter(bytes: []const u8, delim_cp: u21, pos: u16) Range {
+    fn insideSingleDelimiterCp(bytes: []const u8, delim_cp: u21, pos: u16) Range {
+        var buf: [4]u8 = undefined;
+        const len = utf8Encode(delim_cp, &buf) catch return .{
+            .start = pos,
+            .end = pos,
+        };
+        return insideSingleDelimiter(bytes, buf[0..len], pos);
+    }
+
+    fn insideSingleDelimiter(bytes: []const u8, delim: []const u8, pos: u16) Range {
         if (bytes.len == 0) return .{ .start = 0, .end = 0 };
 
-        var ret = aroundSingleDelimiter(bytes, delim_cp, pos);
+        var ret = aroundSingleDelimiter(bytes, delim, pos);
         if (ret.start == ret.end) return ret;
         ret.start += nextCodepoint(bytes, ret.start);
         ret.end -= prevCodepoint(bytes, ret.end);
         return ret;
     }
 
-    fn aroundSingleDelimiter(
+    fn aroundSingleDelimiterCp(
         bytes: []const u8,
         delim_cp: u21,
         pos: u16,
     ) Range {
         var buf: [4]u8 = undefined;
-        const len = std.unicode.utf8Encode(delim_cp, &buf) catch 1;
-        const delim = buf[0..len];
+        const len = utf8Encode(delim_cp, &buf) catch return .{
+            .start = pos,
+            .end = pos,
+        };
+        return aroundSingleDelimiter(bytes, buf[0..len], pos);
+    }
 
+    fn aroundSingleDelimiter(
+        bytes: []const u8,
+        delim: []const u8,
+        pos: u16,
+    ) Range {
+        const len = @intCast(u16, delim.len);
         if (std.mem.startsWith(u8, bytes[pos..], delim)) {
             const start = std.mem.lastIndexOf(u8, bytes[0..pos], delim) orelse pos;
             const end = std.mem.indexOf(u8, bytes[pos + len ..], delim) orelse pos;
@@ -965,11 +1039,32 @@ pub const Motion = union(enum(u8)) {
         }
     }
 
-    fn toForwards(bytes: []const u8, cp: u21, pos: u16, count: u32) ?u16 {
-        if (pos >= bytes.len or count == 0) return pos;
+    fn toForwardsCp(bytes: []const u8, cp: u21, pos: u16, count: u32) ?u16 {
         var buf: [4]u8 = undefined;
-        const len = std.unicode.utf8Encode(cp, &buf) catch 1;
-        const needle = buf[0..len];
+        const len = utf8Encode(cp, &buf) catch 1;
+        return toForwards(bytes, buf[0..len], pos, count);
+    }
+
+    fn toBackwardsCp(bytes: []const u8, cp: u21, pos: u16, count: u32) ?u16 {
+        var buf: [4]u8 = undefined;
+        const len = utf8Encode(cp, &buf) catch 1;
+        return toBackwards(bytes, buf[0..len], pos, count);
+    }
+
+    fn untilForwardsCp(bytes: []const u8, cp: u21, pos: u16, count: u32) ?u16 {
+        var buf: [4]u8 = undefined;
+        const len = utf8Encode(cp, &buf) catch 1;
+        return untilForwards(bytes, buf[0..len], pos, count);
+    }
+
+    fn untilBackwardsCp(bytes: []const u8, cp: u21, pos: u16, count: u32) ?u16 {
+        var buf: [4]u8 = undefined;
+        const len = utf8Encode(cp, &buf) catch 1;
+        return untilBackwards(bytes, buf[0..len], pos, count);
+    }
+
+    fn toForwards(bytes: []const u8, needle: []const u8, pos: u16, count: u32) ?u16 {
+        if (pos >= bytes.len or count == 0) return pos;
 
         const first = 1 + (std.mem.indexOf(u8, bytes[pos + 1 ..], needle) orelse return null);
         var p = pos + first;
@@ -982,12 +1077,9 @@ pub const Motion = union(enum(u8)) {
         return @intCast(u16, p);
     }
 
-    fn toBackwards(bytes: []const u8, cp: u21, pos: u16, count: u32) ?u16 {
+    fn toBackwards(bytes: []const u8, needle: []const u8, pos: u16, count: u32) ?u16 {
         assert(pos <= bytes.len);
         if (count == 0) return pos;
-        var buf: [4]u8 = undefined;
-        const len = std.unicode.utf8Encode(cp, &buf) catch 1;
-        const needle = buf[0..len];
 
         var p = std.mem.lastIndexOf(u8, bytes[0..pos], needle) orelse return null;
 
@@ -998,13 +1090,13 @@ pub const Motion = union(enum(u8)) {
         return @intCast(u16, p);
     }
 
-    fn untilForwards(bytes: []const u8, cp: u21, pos: u16, count: u32) ?u16 {
-        const ret = toForwards(bytes, cp, pos, count) orelse return null;
+    fn untilForwards(bytes: []const u8, needle: []const u8, pos: u16, count: u32) ?u16 {
+        const ret = toForwards(bytes, needle, pos, count) orelse return null;
         return ret - prevCharacter(bytes, ret, 1);
     }
 
-    fn untilBackwards(bytes: []const u8, cp: u21, pos: u16, count: u32) ?u16 {
-        const ret = toBackwards(bytes, cp, pos, count) orelse return null;
+    fn untilBackwards(bytes: []const u8, needle: []const u8, pos: u16, count: u32) ?u16 {
+        const ret = toBackwards(bytes, needle, pos, count) orelse return null;
         return ret + nextCharacter(bytes, ret, 1);
     }
 
