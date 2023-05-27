@@ -244,7 +244,7 @@ fn handleInput(self: *Self) !void {
         .prefix => return,
         .not_found => {
             if (self.mode == .command) {
-                _ = self.command_buf.do(.none, .{ .keys = slice });
+                _ = self.command_buf.do(.none, .{ .keys = self.input_buf.items });
             }
         },
     }
@@ -1002,7 +1002,7 @@ pub fn parseInput(bytes: []const u8, writer: anytype) @TypeOf(writer).Error!void
                     try writer.writeAll(buf[0..len]);
                 },
             },
-            .mouse, .unknown => try writer.writeAll("\x00"),
+            .mouse, .unknown => {},
         }
 
         if (special) {
