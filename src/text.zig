@@ -9,474 +9,15 @@ const utf8Encode = std.unicode.utf8Encode;
 const assert = std.debug.assert;
 const log = std.log.scoped(.text_input);
 
-/// A wrapper around a buffer that provides cli editing functions. Backed by a fixed size buffer.
-pub fn TextInput(comptime size: u16) type {
-    return struct {
-        const Self = @This();
-        const Array = std.BoundedArray(u8, size);
-
-        /// A tagged union representing the state of a TextInput instance.
-        pub const Status = union(enum) {
-            /// Waiting for more input
-            waiting,
-
-            /// Editing was cancelled
-            cancelled,
-
-            /// Signal to enter select mode
-            select,
-
-            /// Editing finished and the resulting string is stored in this field
-            string: Array,
-        };
-
-        /// Mode to go back to after finishing 'to' mode
-        pub const PrevMode = union(enum) {
-            normal,
-            insert,
-            operator: Operator,
-        };
-
-        pub const Mode = union(enum) {
-            normal,
-            insert,
-            operator_pending: Operator,
-
-            // TODO: This sucks, handle this better
-            to: struct {
-                prev_mode: PrevMode,
-                to_mode: ToMode,
-            },
-        };
-
-        pub const ToMode = enum {
-            to_forwards,
-            until_forwards,
-            to_backwards,
-            until_backwards,
-        };
-
-        /// Determines what happens when a motion is done.
-        pub const Operator = enum {
-            change,
-            delete,
-        };
-
-        pub const WriteError = error{};
-        pub const Writer = std.io.Writer(*Self, WriteError, write);
-
-        buf: Array = .{},
-        mode: Mode = .insert,
-        count: u32 = 0,
-        cursor: u16 = 0,
-
-        pub const DoOptions = struct {
-            keys: []const u8 = &.{},
-        };
-
-        pub fn do(self: *Self, action: Action, opts: DoOptions) Status {
-            switch (self.mode) {
-                .normal => switch (action) {
-                    .submit_command => return .{ .string = self.finish() },
-                    .enter_normal_mode => {
-                        self.reset();
-                        return .cancelled;
-                    },
-                    .enter_insert_mode => self.setMode(.insert),
-                    .enter_insert_mode_after => {
-                        self.setMode(.insert);
-                        self.doMotion(.char_next);
-                    },
-                    .enter_insert_mode_at_eol => {
-                        self.setMode(.insert);
-                        self.doMotion(.eol);
-                    },
-                    .enter_insert_mode_at_bol => {
-                        self.setMode(.insert);
-                        self.doMotion(.bol);
-                    },
-                    .operator_delete => self.setOperator(.delete),
-                    .operator_change => self.setOperator(.change),
-
-                    .delete_char => self.delChar(),
-                    .change_to_eol => {
-                        self.buf.len = self.cursor;
-                        self.setMode(.insert);
-                    },
-                    .delete_to_eol => {
-                        self.buf.len = self.cursor;
-                    },
-                    .change_char => {
-                        self.delChar();
-                        self.mode = .insert;
-                    },
-                    .change_line => self.reset(),
-
-                    .operator_to_forwards => self.setToMode(.to_forwards),
-                    .operator_to_backwards => self.setToMode(.to_backwards),
-                    .operator_until_forwards => self.setToMode(.until_forwards),
-                    .operator_until_backwards => self.setToMode(.until_backwards),
-                    .zero => {
-                        if (self.count == 0) {
-                            _ = self.do(.motion_bol, opts);
-                        } else {
-                            self.setCount(0);
-                        }
-                    },
-                    .count => |count| self.setCount(count),
-                    else => {
-                        if (action.isMotion()) {
-                            self.doMotion(action.toMotion());
-                        }
-                    },
-                },
-                .insert => switch (action) {
-                    .none => {
-                        if (opts.keys.len == 0) return .waiting;
-                        self.buf.insertSlice(self.cursor, opts.keys) catch return .waiting;
-                        self.cursor += @intCast(u16, opts.keys.len);
-                    },
-                    .backspace => self.backspace(),
-                    .submit_command => return .{ .string = self.finish() },
-                    .enter_normal_mode => self.setMode(.normal),
-                    .enter_select_mode => return .select,
-                    .backwards_delete_word => {
-                        self.mode = .{ .operator_pending = .change };
-                        _ = self.do(.motion_normal_word_start_prev, opts);
-                    },
-                    .change_line => self.reset(),
-                    else => {
-                        if (action.isMotion()) {
-                            self.doMotion(action.toMotion());
-                        }
-                    },
-                },
-                .operator_pending => |op| switch (action) {
-                    .enter_normal_mode => self.setMode(.normal),
-
-                    .operator_to_forwards => self.setToMode(.to_forwards),
-                    .operator_to_backwards => self.setToMode(.to_backwards),
-                    .operator_until_forwards => self.setToMode(.until_forwards),
-                    .operator_until_backwards => self.setToMode(.until_backwards),
-
-                    .zero => if (self.count == 0) self.doMotion(.bol) else self.setCount(0),
-                    .count => |count| self.setCount(count),
-
-                    .operator_delete => if (op == .delete) self.doMotion(.line),
-                    .operator_change => if (op == .change) self.doMotion(.line),
-                    else => {
-                        if (action.isMotion()) {
-                            self.doMotion(action.toMotion());
-                        }
-                    },
-                },
-                .to => |t| switch (action) {
-                    .enter_normal_mode => self.setMode(.normal),
-                    .none => {
-                        if (opts.keys.len == 0) return .waiting;
-                        switch (t.prev_mode) {
-                            .normal => self.setMode(.normal),
-                            .insert => self.setMode(.insert),
-                            .operator => |op| self.setMode(.{ .operator_pending = op }),
-                        }
-                        const count = self.getCount();
-                        const range: Motion.Range = switch (t.to_mode) {
-                            .to_forwards => .{
-                                .start = self.cursor,
-                                .end = Motion.toForwards(self.slice(), opts.keys, self.cursor, count) orelse self.cursor,
-                            },
-                            .to_backwards => .{
-                                .start = Motion.toBackwards(self.slice(), opts.keys, self.cursor, count) orelse self.cursor,
-                                .end = self.cursor,
-                            },
-                            .until_forwards => .{
-                                .start = self.cursor,
-                                .end = Motion.untilForwards(self.slice(), opts.keys, self.cursor, count) orelse self.cursor,
-                            },
-                            .until_backwards => .{
-                                .start = Motion.untilBackwards(self.slice(), opts.keys, self.cursor, count) orelse self.cursor,
-                                .end = self.cursor,
-                            },
-                        };
-                        self.doNormalMotion(range);
-                    },
-                    else => {},
-                },
-            }
-            return .waiting;
-        }
-
-        pub fn setOperator(self: *Self, operator: Operator) void {
-            self.mode = .{
-                .operator_pending = operator,
-            };
-        }
-
-        pub fn setCount(self: *Self, count: u4) void {
-            assert(count <= 9);
-            self.count = self.count *| 10 +| count;
-        }
-
-        pub fn getCount(self: Self) u32 {
-            return if (self.count == 0) 1 else self.count;
-        }
-
-        pub fn resetCount(self: *Self) void {
-            self.count = 0;
-        }
-
-        pub fn setToMode(self: *Self, mode: ToMode) void {
-            self.setMode(.{ .to = .{
-                .prev_mode = switch (self.mode) {
-                    .normal => .normal,
-                    .insert => .insert,
-                    .operator_pending => |op| .{ .operator = op },
-                    else => unreachable,
-                },
-                .to_mode = mode,
-            } });
-        }
-
-        inline fn doNormalMotion(self: *Self, range: Motion.Range) void {
-            self.cursor = if (range.start == self.cursor) range.end else range.start;
-        }
-
-        fn doMotion(self: *Self, motion: Motion) void {
-            const count = self.getCount();
-            switch (self.mode) {
-                .normal, .insert => {
-                    const range = motion.do(self.slice(), self.cursor, count);
-                    self.doNormalMotion(range);
-                },
-                .operator_pending => |op| switch (op) {
-                    .change => {
-                        const m = switch (motion) {
-                            .normal_word_start_next => .normal_word_end_next,
-                            .long_word_start_next => .long_word_end_next,
-                            else => motion,
-                        };
-
-                        const range = m.do(self.slice(), self.cursor, count);
-                        const start = range.start;
-
-                        // We want the 'end' part of the range to be inclusive for some motions and
-                        // exclusive for others.
-                        const end = range.end + switch (m) {
-                            .normal_word_end_next,
-                            .long_word_end_next,
-                            .to_forwards,
-                            .to_backwards,
-                            .until_forwards,
-                            .until_backwards,
-                            => nextCharacter(self.slice(), range.end, 1),
-                            else => 0,
-                        };
-
-                        assert(end >= start);
-                        self.buf.replaceRange(start, end - start, &.{}) catch unreachable;
-
-                        self.cursor = start;
-                        self.setMode(.insert);
-                    },
-                    .delete => {
-                        var range = motion.do(self.slice(), self.cursor, count);
-                        range.end += switch (motion) {
-                            .normal_word_end_next,
-                            .long_word_end_next,
-                            .to_forwards,
-                            .to_backwards,
-                            => nextCharacter(self.slice(), range.end, 1),
-                            else => 0,
-                        };
-                        self.buf.replaceRange(range.start, range.len(), &.{}) catch unreachable;
-                        self.cursor = range.start;
-                        self.setMode(.normal);
-                    },
-                },
-                .to => unreachable, // Attempted motion in 'to' mode
-            }
-            self.clampCursor();
-            self.resetCount();
-        }
-
-        fn delChar(self: *Self) void {
-            if (self.buf.len == 0) return;
-
-            const length = nextCharacter(self.slice(), self.cursor, 1);
-            self.buf.replaceRange(self.cursor, length, &.{}) catch unreachable;
-            self.clampCursor();
-        }
-
-        fn endPos(self: Self) u16 {
-            return self.len() - prevCharacter(self.slice(), self.len(), @boolToInt(self.mode == .normal));
-        }
-
-        fn clampCursor(self: *Self) void {
-            const end = self.endPos();
-            if (self.cursor > end)
-                self.cursor = end;
-        }
-
-        fn backspace(self: *Self) void {
-            self.mode = .{ .operator_pending = .change };
-            _ = self.do(.motion_char_prev, .{});
-        }
-
-        pub fn setMode(self: *Self, mode: Mode) void {
-            if (self.mode != .to and mode != .to) self.resetCount();
-            self.mode = mode;
-            self.clampCursor();
-        }
-
-        /// Returns a copy of the internal buffer and resets internal buffer
-        fn finish(self: *Self) Array {
-            defer self.reset();
-            return self.buf;
-        }
-
-        pub fn write(self: *Self, bytes: []const u8) WriteError!usize {
-            self.buf.insertSlice(self.cursor, bytes) catch return bytes.len;
-            self.cursor += @intCast(u16, bytes.len);
-            return bytes.len;
-        }
-
-        /// Writes to the buffer at the current cursor position, updating it accordingly
-        pub fn writer(self: *Self) Writer {
-            return Writer{
-                .context = self,
-            };
-        }
-
-        pub fn reset(self: *Self) void {
-            self.buf.len = 0;
-            self.cursor = 0;
-            self.setMode(.insert);
-        }
-
-        pub fn slice(self: *const Self) []const u8 {
-            return self.buf.slice();
-        }
-
-        pub fn len(self: Self) u16 {
-            return @intCast(u16, self.buf.len);
-        }
-    };
-}
-
-pub const Action = union(enum(u6)) {
-    submit_command = 26,
-    enter_normal_mode,
-
-    enter_select_mode,
-
-    enter_insert_mode,
-    enter_insert_mode_after,
-    enter_insert_mode_at_eol,
-    enter_insert_mode_at_bol,
-
-    backspace,
-    delete_char,
-    change_to_eol,
-    delete_to_eol,
-    change_char,
-    change_line,
-    backwards_delete_word,
-
-    operator_delete,
-    operator_change,
-
-    operator_to_forwards,
-    operator_until_forwards,
-    operator_to_backwards,
-    operator_until_backwards,
-
-    zero,
-    count: u4,
-
-    // Motion tagged union duplicated to reduce memory usage
-    motion_normal_word_inside = 0,
-    motion_long_word_inside = 1,
-    motion_normal_word_around = 2,
-    motion_long_word_around = 3,
-
-    /// Absolutely cursed - these fields store two UCS codepoints. This is done to save one byte.
-    /// Storing them as two UTF-8 codepoints would require 8 bytes. Storing them as two u21 values
-    /// would cause each one to get padded to 4 bytes, using 8 bytes total.
-    motion_inside_delimiters: [7]u8 align(4) = 4,
-    motion_around_delimiters: [7]u8 align(4) = 5,
-
-    motion_inside_single_delimiter: u21 = 6,
-    motion_around_single_delimiter: u21 = 7,
-    motion_to_forwards: u21 = 8,
-    motion_to_backwards: u21 = 9,
-    motion_until_forwards: u21 = 10,
-    motion_until_backwards: u21 = 11,
-
-    motion_normal_word_start_next = 12,
-    motion_normal_word_start_prev = 13,
-    motion_normal_word_end_next = 14,
-    motion_normal_word_end_prev = 15,
-    motion_long_word_start_next = 16,
-    motion_long_word_start_prev = 17,
-    motion_long_word_end_next = 18,
-    motion_long_word_end_prev = 19,
-    motion_char_next = 20,
-    motion_char_prev = 21,
-    motion_line = 22,
-    motion_eol = 23,
-    motion_bol = 24,
-
-    /// Any inputs that aren't a mapping get passed as this. Its usage depends on the mode. For
-    /// example, in insert mode the inputted text is passed along with this action if it does
-    /// not correspond to another action.
-    none,
-
-    pub fn isMotion(action: Action) bool {
-        return @enumToInt(action) <= 24;
-    }
-
-    // Cursed function that converts an Action to a Motion.
-    pub fn toMotion(action: Action) Motion {
-        switch (action) {
-            inline .motion_around_delimiters, .motion_inside_delimiters => |buf, action_tag| {
-                const b align(4) = buf; // `buf` is not aligned for some reason, so copy it
-                const cps align(4) = utils.unpackDoubleCp(&b);
-                const tag = @intToEnum(std.meta.Tag(Motion), @enumToInt(action_tag));
-                return @unionInit(Motion, @tagName(tag), .{
-                    .left = cps[0],
-                    .right = cps[1],
-                });
-            },
-            else => {},
-        }
-
-        @setEvalBranchQuota(1400);
-        const tag = @intToEnum(std.meta.Tag(Motion), @enumToInt(action));
-        switch (action) {
-            inline else => |payload, action_tag| switch (tag) {
-                inline else => |t| {
-                    if (comptime (@enumToInt(t) == @enumToInt(action_tag) and
-                        action_tag != .motion_inside_delimiters and
-                        action_tag != .motion_around_delimiters))
-                    {
-                        return @unionInit(Motion, @tagName(t), payload);
-                    }
-                },
-            },
-        }
-        unreachable;
-    }
-};
-
-fn isContinuation(c: u8) bool {
+pub fn isContinuation(c: u8) bool {
     return c & 0xC0 == 0x80;
 }
 
-fn nextCodepoint(bytes: []const u8, offset: u16) u16 {
+pub fn nextCodepoint(bytes: []const u8, offset: u16) u16 {
     return std.unicode.utf8ByteSequenceLength(bytes[offset]) catch unreachable;
 }
 
-fn prevCodepoint(bytes: []const u8, offset: u16) u16 {
+pub fn prevCodepoint(bytes: []const u8, offset: u16) u16 {
     if (offset == 0) return 0;
 
     var iter = std.mem.reverseIterator(bytes[0..offset]);
@@ -488,7 +29,7 @@ fn prevCodepoint(bytes: []const u8, offset: u16) u16 {
 
 // TODO: package & use libgrapheme for these
 //       waiting for https://github.com/ziglang/zig/issues/14719 to be fixed before this happens
-fn nextCharacter(bytes: []const u8, offset: u16, count: u32) u16 {
+pub fn nextCharacter(bytes: []const u8, offset: u16, count: u32) u16 {
     var iter = std.unicode.Utf8Iterator{
         .bytes = bytes[offset..],
         .i = 0,
@@ -503,7 +44,7 @@ fn nextCharacter(bytes: []const u8, offset: u16, count: u32) u16 {
     return @intCast(u16, iter.i);
 }
 
-fn prevCharacter(bytes: []const u8, offset: u16, count: u32) u16 {
+pub fn prevCharacter(bytes: []const u8, offset: u16, count: u32) u16 {
     var i: u16 = offset;
     for (0..count) |_| {
         while (i > 0) {
@@ -537,6 +78,15 @@ pub const Delimiters = struct {
     right: u21,
 };
 
+pub const Range = struct {
+    start: u16,
+    end: u16,
+
+    pub inline fn len(range: Range) u16 {
+        return range.end - range.start;
+    }
+};
+
 pub const Motion = union(enum(u8)) {
     normal_word_inside = 0,
     long_word_inside = 1,
@@ -547,6 +97,7 @@ pub const Motion = union(enum(u8)) {
     around_delimiters: Delimiters = 5,
     inside_single_delimiter: u21 = 6,
     around_single_delimiter: u21 = 7,
+
     to_forwards: u21 = 8,
     to_backwards: u21 = 9,
     until_forwards: u21 = 10,
@@ -566,18 +117,14 @@ pub const Motion = union(enum(u8)) {
     eol = 23,
     bol = 24,
 
+    to_forwards_utf8: []const u8,
+    to_backwards_utf8: []const u8,
+    until_forwards_utf8: []const u8,
+    until_backwards_utf8: []const u8,
+
     pub const WordType = enum {
         normal,
         long,
-    };
-
-    pub const Range = struct {
-        start: u16,
-        end: u16,
-
-        pub inline fn len(range: Range) u16 {
-            return range.end - range.start;
-        }
     };
 
     pub fn do(motion: Motion, bytes: []const u8, pos: u16, count: u32) Range {
@@ -659,6 +206,23 @@ pub const Motion = union(enum(u8)) {
             },
             .until_backwards => |cp| .{
                 .start = untilBackwardsCp(bytes, cp, pos -| 1, count) orelse pos,
+                .end = pos,
+            },
+
+            .to_forwards_utf8 => |needle| .{
+                .start = pos,
+                .end = toForwards(bytes, needle, pos, count) orelse pos,
+            },
+            .to_backwards_utf8 => |needle| .{
+                .start = toBackwards(bytes, needle, pos, count) orelse pos,
+                .end = pos,
+            },
+            .until_forwards_utf8 => |needle| .{
+                .start = pos,
+                .end = untilForwards(bytes, needle, pos +| 1, count) orelse pos,
+            },
+            .until_backwards_utf8 => |needle| .{
+                .start = untilBackwards(bytes, needle, pos -| 1, count) orelse pos,
                 .end = pos,
             },
         };
@@ -1281,60 +845,4 @@ test "Motions" {
     const delims = .{ .left = '(', .right = ')' };
     try testMotion("((word))", 5, "((".len, "((word".len, .{ .inside_delimiters = delims }, 1);
     try testMotion("((word))", 5, "(".len, "((word)".len, .{ .around_delimiters = delims }, 1);
-}
-
-test "Insert mode" {
-    const t = std.testing;
-    const T = TextInput(128);
-    var buf = T{};
-
-    const text = "this漢字is .my. epic漢字. .漢字text";
-
-    try t.expectEqual(T.Mode.insert, buf.mode);
-    try t.expectEqual(@as(u16, 0), buf.cursor);
-    try t.expectEqual(@as(u32, 0), buf.count);
-    try t.expectEqual(@as(usize, 0), buf.slice().len);
-
-    var status = buf.do(.none, .{ .keys = text });
-    try t.expectEqual(T.Status.waiting, status);
-    try t.expectEqualStrings(text, buf.slice());
-    try t.expectEqual(@intCast(u16, text.len), buf.cursor);
-
-    status = buf.do(.backspace, .{});
-    try t.expectEqual(T.Status.waiting, status);
-    try t.expectEqualStrings("this漢字is .my. epic漢字. .漢字tex", buf.slice());
-    try t.expectEqual(@intCast(u16, "this漢字is .my. epic漢字. .漢字tex".len), buf.cursor);
-
-    status = buf.do(.backspace, .{});
-    try t.expectEqual(T.Status.waiting, status);
-    try t.expectEqualStrings("this漢字is .my. epic漢字. .漢字te", buf.slice());
-    try t.expectEqual(@intCast(u16, "this漢字is .my. epic漢字. .漢字te".len), buf.cursor);
-
-    _ = buf.do(.backspace, .{});
-    _ = buf.do(.backspace, .{});
-    status = buf.do(.backspace, .{});
-    try t.expectEqual(T.Status.waiting, status);
-    try t.expectEqualStrings("this漢字is .my. epic漢字. .漢", buf.slice());
-    try t.expectEqual(@intCast(u16, "this漢字is .my. epic漢字. .漢".len), buf.cursor);
-
-    status = buf.do(.backspace, .{});
-    try t.expectEqual(T.Status.waiting, status);
-    try t.expectEqualStrings("this漢字is .my. epic漢字. .", buf.slice());
-    try t.expectEqual(@intCast(u16, "this漢字is .my. epic漢字. .".len), buf.cursor);
-
-    status = buf.do(.submit_command, .{});
-    try t.expectEqualStrings("this漢字is .my. epic漢字. .", status.string.slice());
-    try t.expectEqual(@as(u16, 0), buf.cursor);
-    try t.expectEqual(@as(usize, 0), buf.slice().len);
-    try t.expectEqual(T.Mode.insert, buf.mode);
-
-    _ = buf.do(.none, .{ .keys = "漢" });
-    try t.expectEqualStrings("漢", buf.slice());
-    try t.expectEqual(@intCast(u16, "漢".len), buf.cursor);
-
-    status = buf.do(.submit_command, .{});
-    try t.expectEqualStrings("漢", status.string.slice());
-    try t.expectEqual(@as(u16, 0), buf.cursor);
-    try t.expectEqual(@as(usize, 0), buf.slice().len);
-    try t.expectEqual(T.Mode.insert, buf.mode);
 }

@@ -93,7 +93,7 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
         try renderCursor(&rc, zc);
         self.update.cursor = false;
     }
-    if (self.update.command or zc.mode == .command) {
+    if (self.update.command or zc.mode.isCommandMode()) {
         try self.renderCommandLine(&rc, zc);
         self.update.command = false;
     }
@@ -132,13 +132,8 @@ pub fn renderStatus(
     try zc.cursor.writeCellAddress(writer);
     try writer.print(" {} ", .{zc.mode});
 
-    switch (zc.mode) {
-        .command => if (zc.command_buf.count != 0) {
-            try writer.print("{d} ", .{zc.command_buf.getCount()});
-        },
-        else => if (zc.count != 0) {
-            try writer.print("{d} ", .{zc.getCount()});
-        },
+    if (zc.count != 0) {
+        try writer.print("{d} ", .{zc.getCount()});
     }
 
     try writer.writeAll(zc.input_buf.items);
@@ -154,7 +149,7 @@ pub fn renderCommandLine(
     try rc.moveCursorTo(ZC.input_line, 0);
     try rc.clearToEol();
 
-    if (zc.mode == .command) {
+    if (zc.mode.isCommandMode()) {
         const writer = rc.buffer.writer();
         const slice = zc.command_buf.slice();
         try writer.writeAll(slice);
@@ -162,7 +157,7 @@ pub fn renderCommandLine(
         const cursor_pos = blk: {
             var pos: u16 = 0;
             var iter = std.unicode.Utf8Iterator{
-                .bytes = slice[0..zc.command_buf.cursor],
+                .bytes = slice[0..zc.command_cursor],
                 .i = 0,
             };
 
@@ -176,10 +171,17 @@ pub fn renderCommandLine(
         try writer.writeByte('|');
 
         try rc.moveCursorTo(ZC.input_line, cursor_pos);
-        switch (zc.command_buf.mode) {
-            .normal => try rc.setCursorShape(.block),
-            .insert => try rc.setCursorShape(.bar),
-            .to, .operator_pending => try rc.setCursorShape(.underline),
+        switch (zc.mode) {
+            .normal, .visual, .select => unreachable,
+            .command_normal => try rc.setCursorShape(.block),
+            .command_insert => try rc.setCursorShape(.bar),
+            .command_to_forwards,
+            .command_to_backwards,
+            .command_until_forwards,
+            .command_until_backwards,
+            .command_change,
+            .command_delete,
+            => try rc.setCursorShape(.underline),
         }
         try rc.showCursor();
     } else {
@@ -264,7 +266,7 @@ pub fn renderCursor(
 ) RenderError!void {
     switch (zc.mode) {
         .visual, .select => return,
-        .normal, .command => {},
+        else => {},
     }
     var buf: [16]u8 = undefined;
 
@@ -365,18 +367,18 @@ pub fn renderCells(
         for (zc.screen_pos.x..@as(usize, std.math.maxInt(u16)) + 1) |x| {
             const pos = Position{ .y = @intCast(u16, y), .x = @intCast(u16, x) };
             switch (zc.mode) {
-                .visual, .select => |anchor| {
+                .visual, .select => {
                     if (pos.hash() == zc.cursor.hash()) {
                         try rc.setStyle(.{ .fg = .black, .bg = .yellow });
                         w += try renderCell(rc, zc, pos);
                         try rc.setStyle(.{});
-                    } else if (pos.intersects(anchor, zc.cursor)) {
+                    } else if (pos.intersects(zc.anchor, zc.cursor)) {
                         w += try renderCursorCell(rc, zc, pos);
                     } else {
                         w += try renderCell(rc, zc, pos);
                     }
                 },
-                .normal, .command => {
+                else => {
                     if (pos.hash() == zc.cursor.hash()) {
                         w += try renderCursorCell(rc, zc, pos);
                     } else {

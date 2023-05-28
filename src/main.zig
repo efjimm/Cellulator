@@ -70,7 +70,6 @@ pub fn log(
     writer.print("[{s}] {s}: ", .{ @tagName(scope), @tagName(level) }) catch {};
     writer.print(format, args) catch {};
     writer.writeByte('\n') catch {};
-    logfile.sync() catch {};
 }
 
 // Reference all tests in other modules

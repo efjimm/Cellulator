@@ -769,7 +769,9 @@ const Parser = struct {
 
     fn addNode(parser: *Parser, data: Node) Allocator.Error!u32 {
         const ret = @intCast(u32, parser.nodes.len);
+        log.debug("Appending node", .{});
         try parser.nodes.append(parser.allocator, data);
+        log.debug("Finished", .{});
         return ret;
     }
 

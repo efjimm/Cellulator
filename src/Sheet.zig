@@ -91,6 +91,11 @@ pub fn colCount(sheet: *Sheet) u32 {
     return @intCast(u32, sheet.columns.entries.len);
 }
 
+/// Allocates enough space for `new_capacity` cells
+pub fn ensureTotalCapacity(sheet: *Sheet, new_capacity: usize) Allocator.Error!void {
+    return sheet.cells.ensureTotalCapacity(sheet.allocator, new_capacity);
+}
+
 pub fn setCell(
     sheet: *Sheet,
     position: Position,
@@ -106,6 +111,7 @@ pub fn setCell(
     if (!sheet.cells.contains(position)) {
         for (sheet.cells.keys(), 0..) |key, i| {
             if (key.hash() > position.hash()) {
+                log.debug("Inserting cell at {}", .{position});
                 try sheet.cells.entries.insert(sheet.allocator, i, .{
                     .hash = {},
                     .key = position,
@@ -115,19 +121,23 @@ pub fn setCell(
                 // If this fails with OOM we could potentially end up with the map in an invalid
                 // state. All instances of OOM must be recoverable. If we error here we remove the
                 // newly inserted entry so that the old index remains correct.
+                log.debug("Reindexing cells...", .{});
                 sheet.cells.reIndex(sheet.allocator) catch |err| switch (err) {
                     error.OutOfMemory => {
                         sheet.cells.entries.orderedRemove(i);
                         return err;
                     },
                 };
+                log.debug("Finished", .{});
                 sheet.has_changes = true;
                 return;
             }
         }
 
         // Found no entries
+        log.debug("Inserting cell at {}", .{position});
         try sheet.cells.put(sheet.allocator, position, data);
+        log.debug("Finished", .{});
         sheet.has_changes = true;
         return;
     }
