@@ -221,7 +221,6 @@ fn setMode(self: *Self, new_mode: Mode) void {
     }
 
     self.prev_mode = self.mode;
-    self.dismissStatusMessage();
     self.anchor = self.cursor;
     self.mode = new_mode;
 }
@@ -404,6 +403,7 @@ pub fn doCommandMotion(self: *Self, motion: Motion) void {
 
 pub fn submitCommand(self: *Self) !void {
     assert(self.mode.isCommandMode());
+    self.dismissStatusMessage();
     const res = self.parseCommand(self.command_buf.slice());
     self.resetCommandBuf();
     self.setMode(.normal);
@@ -819,15 +819,15 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
             if (self.sheet.has_changes) {
                 self.setStatusMessage("No write since last change (add ! to override)", .{});
             } else {
-                try self.loadCmd(&iter);
+                try self.loadCmd(iter.next() orelse "");
             }
         },
-        .load_force => try self.loadCmd(&iter),
+        .load_force => try self.loadCmd(iter.next() orelse ""),
     }
 }
 
-pub fn loadCmd(self: *Self, iter: *utils.WordIterator) !void {
-    const filepath = iter.next() orelse return error.EmptyFileName;
+pub fn loadCmd(self: *Self, filepath: []const u8) !void {
+    if (filepath.len == 0) return error.EmptyFileName;
 
     self.clearSheet(&self.sheet) catch |err| switch (err) {
         error.OutOfMemory => self.setStatusMessage("Error: out of memory!", .{}),
