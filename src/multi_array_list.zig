@@ -27,10 +27,6 @@ pub fn MultiArrayList(comptime T: type) type {
         len: u32 = 0,
         capacity: u32 = 0,
 
-        comptime {
-            assert(@sizeOf(Self) <= 16);
-        }
-
         const Elem = switch (@typeInfo(T)) {
             .Struct => T,
             .Union => |u| struct {
@@ -168,7 +164,7 @@ pub fn MultiArrayList(comptime T: type) type {
                     return lhs.alignment > rhs.alignment;
                 }
             };
-            std.sort.sort(Data, &data, {}, Sort.lessThan);
+            mem.sort(Data, &data, {}, Sort.lessThan);
             var sizes_bytes: [fields.len]u32 = undefined;
             var field_indexes: [fields.len]u32 = undefined;
             for (data, 0..) |elem, i| {
@@ -496,10 +492,7 @@ pub fn MultiArrayList(comptime T: type) type {
                 }
             };
 
-            std.sort.sortContext(self.len, SortContext{
-                .sub_ctx = ctx,
-                .slice = self.slice(),
-            });
+            mem.sortContext(0, self.len, SortContext{ .sub_ctx = ctx, .slice = self.slice() });
         }
 
         fn capacityInBytes(capacity: u32) u32 {
