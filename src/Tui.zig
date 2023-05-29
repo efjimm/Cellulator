@@ -183,7 +183,22 @@ pub fn renderCommandLine(
             => try rc.setCursorShape(.underline),
         }
         try rc.showCursor();
-    } else {
+    } else if (zc.status_message.len > 0) {
+        switch (zc.status_message_type) {
+            .info => {
+                try rc.setStyle(.{ .fg = .magenta });
+                try writer.writeAll("Info: ");
+            },
+            .warn => {
+                try rc.setStyle(.{ .fg = .yellow });
+                try writer.writeAll("Warning: ");
+            },
+            .err => {
+                try rc.setStyle(.{ .fg = .red });
+                try writer.writeAll("Error: ");
+            },
+        }
+        try rc.setStyle(.{});
         try writer.writeAll(zc.status_message.slice());
         try rpw.finish();
     }

@@ -16,6 +16,8 @@ const log = std.log.scoped(.zc);
 
 const Self = @This();
 
+running: bool = true,
+
 sheet: Sheet,
 tui: Tui,
 
@@ -34,8 +36,7 @@ cursor: Position = .{},
 
 command_screen_pos: u16 = 0,
 command_cursor: u16 = 0,
-
-running: bool = true,
+command_buf: std.BoundedArray(u8, 512) = .{},
 
 asts: std.ArrayListUnmanaged(Ast) = .{},
 
@@ -49,7 +50,7 @@ allocator: Allocator,
 input_buf_sfa: std.heap.StackFallbackAllocator(INPUT_BUF_LEN),
 input_buf: std.ArrayListUnmanaged(u8) = .{},
 
-command_buf: std.BoundedArray(u8, 512) = .{},
+status_message_type: StatusMessageType = .info,
 status_message: std.BoundedArray(u8, 256) = .{},
 
 const INPUT_BUF_LEN = 256;
@@ -187,8 +188,20 @@ pub fn run(self: *Self) !void {
     }
 }
 
-pub fn setStatusMessage(self: *Self, comptime fmt: []const u8, args: anytype) void {
+pub const StatusMessageType = enum {
+    info,
+    warn,
+    err,
+};
+
+pub fn setStatusMessage(
+    self: *Self,
+    t: StatusMessageType,
+    comptime fmt: []const u8,
+    args: anytype,
+) void {
     self.dismissStatusMessage();
+    self.status_message_type = t;
     const writer = self.status_message.writer();
     writer.print(fmt, args) catch {};
     self.tui.update.command = true;
@@ -284,8 +297,12 @@ fn handleInput(self: *Self) !void {
             .visual, .select => self.doVisualMode(action),
             else => unreachable,
         },
-        .command => |action| self.doCommandMode(action) catch |err| {
-            self.setStatusMessage("Error: {s}", .{@errorName(err)});
+        .command => |action| self.doCommandMode(action) catch |err| switch (err) {
+            error.EmptyFileName => self.setStatusMessage(.err, "Empty file name", .{}),
+            error.InvalidCellAddress => self.setStatusMessage(.err, "Invalid cell address", .{}),
+            error.InvalidCommand => self.setStatusMessage(.err, "Invalid command", .{}),
+            error.OutOfMemory => self.setStatusMessage(.err, "Out of memory!", .{}),
+            error.UnexpectedToken => self.setStatusMessage(.err, "Unexpected token", .{}),
         },
         .prefix => return,
         .not_found => {
@@ -602,7 +619,7 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
         .cell_cursor_col_last => self.cursorToLastCell(),
 
         .delete_cell => self.deleteCell() catch |err| switch (err) {
-            error.OutOfMemory => self.setStatusMessage("Error: out of memory!", .{}),
+            error.OutOfMemory => self.setStatusMessage(.err, "Out of memory!", .{}),
         },
         .next_populated_cell => self.cursorNextPopulatedCell(),
         .prev_populated_cell => self.cursorPrevPopulatedCell(),
@@ -835,7 +852,7 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
     switch (cmd) {
         .quit => {
             if (self.sheet.has_changes) {
-                self.setStatusMessage("No write since last change (add ! to override)", .{});
+                self.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
             } else {
                 self.running = false;
             }
@@ -843,14 +860,14 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
         .quit_force => self.running = false,
         .save, .save_force => { // save
             writeFile(&self.sheet, .{ .filepath = iter.next() }) catch |err| {
-                self.setStatusMessage("Could not write file: {s}", .{@errorName(err)});
+                self.setStatusMessage(.warn, "Could not write file: {s}", .{@errorName(err)});
                 return;
             };
             self.sheet.has_changes = false;
         },
         .load => { // load
             if (self.sheet.has_changes) {
-                self.setStatusMessage("No write since last change (add ! to override)", .{});
+                self.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
             } else {
                 try self.loadCmd(iter.next() orelse "");
             }
@@ -863,12 +880,12 @@ pub fn loadCmd(self: *Self, filepath: []const u8) !void {
     if (filepath.len == 0) return error.EmptyFileName;
 
     self.clearSheet(&self.sheet) catch |err| switch (err) {
-        error.OutOfMemory => self.setStatusMessage("Error: out of memory!", .{}),
+        error.OutOfMemory => self.setStatusMessage(.err, "Out of memory!", .{}),
     };
     self.tui.update.cells = true;
 
     self.loadFile(&self.sheet, filepath) catch |err| {
-        self.setStatusMessage("Could not open file: {s}", .{@errorName(err)});
+        self.setStatusMessage(.err, "Could not open file: {s}", .{@errorName(err)});
         return;
     };
 }
