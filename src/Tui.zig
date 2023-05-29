@@ -94,7 +94,7 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
         self.update.cursor = false;
     }
     if (self.update.command or zc.mode.isCommandMode()) {
-        try self.renderCommandLine(&rc, zc);
+        try renderCommandLine(&rc, zc);
         self.update.command = false;
     }
 
@@ -142,22 +142,22 @@ pub fn renderStatus(
 }
 
 pub fn renderCommandLine(
-    self: Self,
     rc: *RenderContext,
     zc: *ZC,
 ) RenderError!void {
     try rc.moveCursorTo(ZC.input_line, 0);
     try rc.clearToEol();
+    var rpw = rc.restrictedPaddingWriter(rc.term.width);
+    const writer = rpw.writer();
 
     if (zc.mode.isCommandMode()) {
-        const writer = rc.buffer.writer();
-        const slice = zc.command_buf.slice();
+        const slice = zc.command_buf.slice()[zc.command_screen_pos..];
         try writer.writeAll(slice);
 
         const cursor_pos = blk: {
             var pos: u16 = 0;
             var iter = std.unicode.Utf8Iterator{
-                .bytes = slice[0..zc.command_cursor],
+                .bytes = slice[0 .. zc.command_cursor - zc.command_screen_pos],
                 .i = 0,
             };
 
@@ -167,8 +167,7 @@ pub fn renderCommandLine(
 
             break :blk pos;
         };
-        try rc.setStyle(.{ .fg = .bright_black });
-        try writer.writeByte('|');
+        try rpw.finish();
 
         try rc.moveCursorTo(ZC.input_line, cursor_pos);
         switch (zc.mode) {
@@ -185,9 +184,6 @@ pub fn renderCommandLine(
         }
         try rc.showCursor();
     } else {
-        var rpw = rc.restrictedPaddingWriter(self.term.width);
-        const writer = rpw.writer();
-
         try writer.writeAll(zc.status_message.slice());
         try rpw.finish();
     }

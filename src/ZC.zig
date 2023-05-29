@@ -7,6 +7,7 @@ const Tui = @import("Tui.zig");
 const critbit = @import("critbit.zig");
 const text = @import("text.zig");
 const Motion = text.Motion;
+const wcWidth = @import("wcwidth").wcWidth;
 
 const Position = Sheet.Position;
 const Allocator = std.mem.Allocator;
@@ -31,6 +32,7 @@ prev_cursor: Position = .{},
 /// The cell position of the cursor
 cursor: Position = .{},
 
+command_screen_pos: u16 = 0,
 command_cursor: u16 = 0,
 
 running: bool = true,
@@ -311,11 +313,11 @@ pub fn doCommandMode(self: *Self, action: CommandAction) !void {
 
 pub fn resetCommandBuf(self: *Self) void {
     self.command_buf.len = 0;
-    self.command_cursor = 0;
+    self.setCommandCursor(0);
 }
 
 pub inline fn doCommandNormalMotion(self: *Self, range: text.Range) void {
-    self.command_cursor = if (range.start == self.command_cursor) range.end else range.start;
+    self.setCommandCursor(if (range.start == self.command_cursor) range.end else range.start);
 }
 
 fn clampCommandCursor(self: *Self) void {
@@ -324,12 +326,43 @@ fn clampCommandCursor(self: *Self) void {
     const end = len - text.prevCharacter(slice, len, @boolToInt(self.mode == .normal));
 
     if (self.command_cursor > end)
-        self.command_cursor = end;
+        self.setCommandCursor(end);
+}
+
+fn clampScreenToCommandCursor(self: *Self) void {
+    if (self.command_cursor < self.command_screen_pos) {
+        self.command_screen_pos = self.command_cursor;
+        return;
+    }
+
+    const slice = self.command_buf.slice();
+    var x: u16 = self.command_cursor;
+    // Reserve either the width of the character under the cursor, or 1 column if none.
+    var w: u16 = if (self.command_cursor < slice.len) blk: {
+        const len = std.unicode.utf8ByteSequenceLength(slice[x]) catch unreachable;
+        const cp = std.unicode.utf8Decode(slice[x .. x + len]) catch unreachable;
+        break :blk wcWidth(cp);
+    } else 1;
+
+    while (true) {
+        const prev = x;
+        x -= text.prevCodepoint(slice, x);
+        if (prev == x or x < self.screen_pos.x) break;
+
+        const cp = std.unicode.utf8Decode(slice[x..prev]) catch unreachable;
+        w += wcWidth(cp);
+
+        if (w > self.tui.term.width) {
+            if (prev > self.command_screen_pos) self.command_screen_pos = prev;
+            break;
+        }
+    }
 }
 
 pub fn setCommandCursor(self: *Self, pos: u16) void {
     self.command_cursor = pos;
     self.clampCommandCursor();
+    self.clampScreenToCommandCursor();
 }
 
 pub fn doCommandMotion(self: *Self, motion: Motion) void {
@@ -475,7 +508,7 @@ pub fn doCommandNormalMode(self: *Self, action: CommandAction) !void {
         .operator_until_backwards => self.setMode(.command_until_backwards),
         .zero => {
             if (self.count == 0) {
-                self.command_cursor = 0;
+                self.setCommandCursor(0);
             } else {
                 self.setCount(0);
             }
@@ -495,7 +528,7 @@ fn doCommandInsertMode(self: *Self, action: CommandAction) !void {
             const keys = self.input_buf.items;
             if (keys.len > 0) {
                 self.command_buf.insertSlice(self.command_cursor, keys) catch return;
-                self.command_cursor += @intCast(u16, keys.len);
+                self.setCommandCursor(self.command_cursor + @intCast(u16, keys.len));
             }
         },
         .backspace => {
@@ -545,9 +578,9 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
     switch (action) {
         .enter_command_mode => {
             self.setMode(.command_insert);
-            self.command_cursor = 1;
             const writer = self.command_buf.writer();
             writer.writeByte(':') catch unreachable;
+            self.setCommandCursor(1);
         },
         .enter_visual_mode => self.setMode(.visual),
         .enter_normal_mode => {},
@@ -582,7 +615,7 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
             const writer = self.command_buf.writer();
             self.cursor.writeCellAddress(writer) catch unreachable;
             writer.writeAll(" = ") catch unreachable;
-            self.command_cursor = @intCast(u16, self.command_buf.len);
+            self.setCommandCursor(@intCast(u16, self.command_buf.len));
         },
 
         .zero => {
