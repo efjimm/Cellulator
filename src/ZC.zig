@@ -34,13 +34,13 @@ prev_cursor: Position = .{},
 /// The cell position of the cursor
 cursor: Position = .{},
 
+count: u32 = 0,
+
 command_screen_pos: u16 = 0,
 command_cursor: u16 = 0,
 command_buf: std.BoundedArray(u8, 512) = .{},
 
 asts: std.ArrayListUnmanaged(Ast) = .{},
-
-count: u32 = 0,
 
 keymaps: KeyMap(Action, MapType),
 command_keymaps: KeyMap(CommandAction, CommandMapType),

@@ -378,7 +378,10 @@ pub const Position = struct {
         return slice;
     }
 
-    pub const FromAddressError = error{Overflow};
+    pub const FromAddressError = error{
+        Overflow,
+        InvalidCellAddress,
+    };
 
     pub fn columnFromAddress(address: []const u8) FromAddressError!u16 {
         assert(address.len > 0);
@@ -394,20 +397,18 @@ pub const Position = struct {
     }
 
     pub fn fromAddress(address: []const u8) FromAddressError!Position {
-        assert(address.len > 1);
-        assert(std.ascii.isAlphabetic(address[0]));
-        assert(std.ascii.isDigit(address[address.len - 1]));
-
         const letters_end = for (address, 0..) |c, i| {
             if (!std.ascii.isAlphabetic(c))
                 break i;
         } else unreachable;
 
+        if (letters_end == 0) return error.InvalidCellAddress;
+
         return .{
             .x = try columnFromAddress(address[0..letters_end]),
             .y = std.fmt.parseInt(u16, address[letters_end..], 0) catch |err| switch (err) {
                 error.Overflow => return error.Overflow,
-                error.InvalidCharacter => unreachable, // Invalid data should not get to this function
+                error.InvalidCharacter => return error.InvalidCellAddress,
             },
         };
     }
