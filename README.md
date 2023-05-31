@@ -137,6 +137,8 @@ will repeat the following motion that many times. This does not currently work f
 - `Esc` Enter command normal mode
 - `Return`, `C-m`, `C-j` Submit the current text as a command
 - `Backspace`, `Del` Delete the character before the cursor and move backwards one
+- `C-p`, `Up` Previous command
+- `C-n`, `Down` Next command
 - `C-a`, `Home` Move cursor to the beginning of the line
 - `C-e`, `End` Move cursor to the end of the line
 - `C-f`, `Right` Move cursor forward one character
@@ -150,6 +152,8 @@ will repeat the following motion that many times. This does not currently work f
 - `Esc` Leaves command mode without submitting command
 - `h`, `Left` Move cursor left
 - `l`, `Right` Move cursor right
+- `k`, `Up` Previous command
+- `j`, `Down` Next command
 - `i` Enter command insert mode
 - `I` Enter command insert mode and move to the beginning of the line
 - `a` Enter command insert mode and move one character to the right

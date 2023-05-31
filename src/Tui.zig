@@ -151,7 +151,7 @@ pub fn renderCommandLine(
     const writer = rpw.writer();
 
     if (zc.mode.isCommandMode()) {
-        const slice = zc.command_buf.slice()[zc.command_screen_pos..];
+        const slice = zc.commandSlice()[zc.command_screen_pos..];
         try writer.writeAll(slice);
 
         const cursor_pos = blk: {

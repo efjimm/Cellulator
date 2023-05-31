@@ -38,7 +38,9 @@ count: u32 = 0,
 
 command_screen_pos: u16 = 0,
 command_cursor: u16 = 0,
-command_buf: std.BoundedArray(u8, 512) = .{},
+
+command_history: CommandHist = .{},
+current_command: usize = 0,
 
 asts: std.ArrayListUnmanaged(Ast) = .{},
 
@@ -54,6 +56,8 @@ status_message_type: StatusMessageType = .info,
 status_message: std.BoundedArray(u8, 256) = .{},
 
 const INPUT_BUF_LEN = 256;
+
+const CommandHist = std.ArrayListUnmanaged(std.ArrayListUnmanaged(u8));
 
 pub const status_line = 0;
 pub const input_line = 1;
@@ -140,7 +144,9 @@ pub fn init(allocator: Allocator, options: InitOptions) !Self {
         .keymaps = keymaps,
         .command_keymaps = command_keymaps,
         .input_buf_sfa = std.heap.stackFallback(INPUT_BUF_LEN, allocator),
+        .command_history = try CommandHist.initCapacity(allocator, 32),
     };
+    ret.command_history.appendAssumeCapacity(.{});
 
     try ret.sheet.ensureTotalCapacity(128);
 
@@ -157,6 +163,11 @@ pub fn deinit(self: *Self) void {
     for (self.asts.items) |*ast| {
         ast.deinit(self.allocator);
     }
+
+    for (self.command_history.items) |*hist_item| {
+        hist_item.deinit(self.allocator);
+    }
+    self.command_history.deinit(self.allocator);
 
     self.input_buf.deinit(self.allocator);
     self.keymaps.deinit(self.allocator);
@@ -297,7 +308,7 @@ fn handleInput(self: *Self) !void {
             .visual, .select => self.doVisualMode(action),
             else => unreachable,
         },
-        .command => |action| self.doCommandMode(action) catch |err| switch (err) {
+        .command => |action| self.doCommandMode(action, self.input_buf.items) catch |err| switch (err) {
             error.EmptyFileName => self.setStatusMessage(.err, "Empty file name", .{}),
             error.InvalidCellAddress => self.setStatusMessage(.err, "Invalid cell address", .{}),
             error.InvalidCommand => self.setStatusMessage(.err, "Invalid command", .{}),
@@ -307,17 +318,17 @@ fn handleInput(self: *Self) !void {
         .prefix => return,
         .not_found => {
             if (self.mode.isCommandMode()) {
-                try self.doCommandMode(.none);
+                try self.doCommandMode(.none, input);
             }
         },
     }
     self.resetInputBuf();
 }
 
-pub fn doCommandMode(self: *Self, action: CommandAction) !void {
+pub fn doCommandMode(self: *Self, action: CommandAction, keys: []const u8) !void {
     switch (self.mode) {
         .command_normal => try self.doCommandNormalMode(action),
-        .command_insert => try self.doCommandInsertMode(action),
+        .command_insert => try self.doCommandInsertMode(action, keys),
         .command_change, .command_delete => self.doCommandOperatorPendingMode(action),
         .command_to_forwards,
         .command_to_backwards,
@@ -328,17 +339,12 @@ pub fn doCommandMode(self: *Self, action: CommandAction) !void {
     }
 }
 
-pub fn resetCommandBuf(self: *Self) void {
-    self.command_buf.len = 0;
-    self.setCommandCursor(0);
-}
-
 pub inline fn doCommandNormalMotion(self: *Self, range: text.Range) void {
     self.setCommandCursor(if (range.start == self.command_cursor) range.end else range.start);
 }
 
 fn clampCommandCursor(self: *Self) void {
-    const slice = self.command_buf.slice();
+    const slice = self.commandSlice();
     const len = @intCast(u16, slice.len);
     const end = len - text.prevCharacter(slice, len, @boolToInt(self.mode == .normal));
 
@@ -352,7 +358,7 @@ fn clampScreenToCommandCursor(self: *Self) void {
         return;
     }
 
-    const slice = self.command_buf.slice();
+    const slice = self.commandSlice();
     var x: u16 = self.command_cursor;
     // Reserve either the width of the character under the cursor, or 1 column if none.
     var w: u16 = if (self.command_cursor < slice.len) blk: {
@@ -382,9 +388,58 @@ pub fn setCommandCursor(self: *Self, pos: u16) void {
     self.clampScreenToCommandCursor();
 }
 
+pub fn submitCommand(self: *Self) !void {
+    assert(self.mode.isCommandMode());
+
+    self.dismissStatusMessage();
+
+    defer {
+        self.resetCommandBuf();
+        self.setMode(.normal);
+    }
+
+    const slice = self.commandSlice();
+    const res = self.parseCommand(slice);
+
+    if (self.current_command == self.command_history.items.len - 1) {
+        try self.command_history.append(self.allocator, .{});
+    }
+    self.commandHistoryNext();
+
+    try res;
+}
+
+pub fn resetCommandBuf(self: *Self) void {
+    self.current_command = self.command_history.items.len - 1;
+    self.commandList().items.len = 0;
+    self.setCommandCursor(0);
+}
+
+pub fn commandSlice(self: *Self) []const u8 {
+    assert(self.current_command <= self.command_history.items.len);
+    return self.command_history.items[self.current_command].items;
+}
+
+pub fn commandList(self: *Self) *std.ArrayListUnmanaged(u8) {
+    assert(self.current_command <= self.command_history.items.len);
+    return &self.command_history.items[self.current_command];
+}
+
+pub fn commandHistoryNext(self: *Self) void {
+    if (self.current_command < self.command_history.items.len - 1) {
+        self.current_command += 1;
+        self.setCommandCursor(@intCast(u16, self.commandSlice().len));
+    }
+}
+
+pub fn commandHistoryPrev(self: *Self) void {
+    self.current_command -|= 1;
+    self.setCommandCursor(@intCast(u16, self.commandSlice().len));
+}
+
 pub fn doCommandMotion(self: *Self, motion: Motion) void {
     const count = self.getCount();
-    const range = motion.do(self.command_buf.slice(), self.command_cursor, count);
+    const range = motion.do(self.commandSlice(), self.command_cursor, count);
     switch (self.mode) {
         .normal, .visual, .select => unreachable,
         .command_normal, .command_insert => {
@@ -411,12 +466,12 @@ pub fn doCommandMotion(self: *Self, motion: Motion) void {
                     .until_forwards_utf8,
                     .until_backwards,
                     .until_backwards_utf8,
-                    => text.nextCharacter(self.command_buf.slice(), range.end, 1),
+                    => text.nextCharacter(self.commandSlice(), range.end, 1),
                     else => 0,
                 };
 
                 assert(end >= range.start);
-                self.command_buf.replaceRange(range.start, end - range.start, &.{}) catch unreachable;
+                self.commandList().replaceRange(self.allocator, range.start, end - range.start, &.{}) catch unreachable;
                 self.setCommandCursor(range.start);
             }
             self.setMode(.command_insert);
@@ -434,10 +489,10 @@ pub fn doCommandMotion(self: *Self, motion: Motion) void {
                     .until_forwards_utf8,
                     .until_backwards,
                     .until_backwards_utf8,
-                    => text.nextCharacter(self.command_buf.slice(), range.end, 1),
+                    => text.nextCharacter(self.commandSlice(), range.end, 1),
                     else => 0,
                 };
-                self.command_buf.replaceRange(range.start, end - range.start, &.{}) catch unreachable;
+                self.commandList().replaceRange(self.allocator, range.start, end - range.start, &.{}) catch unreachable;
                 self.setCommandCursor(range.start);
             }
             self.setMode(.command_normal);
@@ -451,37 +506,10 @@ pub fn doCommandMotion(self: *Self, motion: Motion) void {
     self.resetCount();
 }
 
-pub fn submitCommand(self: *Self) !void {
-    assert(self.mode.isCommandMode());
-    self.dismissStatusMessage();
-    const res = self.parseCommand(self.command_buf.slice());
-    self.resetCommandBuf();
-    self.setMode(.normal);
-    try res;
-}
-
-pub fn doCommandToMode(self: *Self, action: CommandAction) void {
-    switch (action) {
-        .enter_normal_mode => self.setMode(.command_normal),
-        .none => {
-            const keys = self.input_buf.items;
-            if (keys.len > 0) {
-                self.setMode(self.prev_mode);
-                switch (self.prev_mode) {
-                    .command_to_forwards => self.doCommandMotion(.{ .to_forwards_utf8 = keys }),
-                    .command_to_backwards => self.doCommandMotion(.{ .to_backwards_utf8 = keys }),
-                    .command_until_forwards => self.doCommandMotion(.{ .until_forwards_utf8 = keys }),
-                    .command_until_backwards => self.doCommandMotion(.{ .until_backwards_utf8 = keys }),
-                    else => unreachable,
-                }
-            }
-        },
-        else => {},
-    }
-}
-
 pub fn doCommandNormalMode(self: *Self, action: CommandAction) !void {
     switch (action) {
+        .history_next => self.commandHistoryNext(),
+        .history_prev => self.commandHistoryPrev(),
         .submit_command => try self.submitCommand(),
         .enter_normal_mode => {
             self.resetCommandBuf();
@@ -503,17 +531,17 @@ pub fn doCommandNormalMode(self: *Self, action: CommandAction) !void {
         .operator_delete => self.setMode(.command_delete),
         .operator_change => self.setMode(.command_change),
         inline .delete_char, .change_char => |_, a| {
-            const len = text.nextCharacter(self.command_buf.slice(), self.command_cursor, 1);
-            self.command_buf.replaceRange(self.command_cursor, len, &.{}) catch unreachable;
+            const len = text.nextCharacter(self.commandSlice(), self.command_cursor, 1);
+            try self.commandList().replaceRange(self.allocator, self.command_cursor, len, &.{});
             if (a == .change_char) self.setMode(.command_insert);
             self.clampCommandCursor();
         },
         .change_to_eol => {
-            self.command_buf.len = self.command_cursor;
+            self.commandList().items.len = self.command_cursor;
             self.setMode(.command_insert);
         },
         .delete_to_eol => {
-            self.command_buf.len = self.command_cursor;
+            self.commandList().items.len = self.command_cursor;
         },
         .change_line => {
             self.resetCommandBuf();
@@ -539,15 +567,16 @@ pub fn doCommandNormalMode(self: *Self, action: CommandAction) !void {
     }
 }
 
-fn doCommandInsertMode(self: *Self, action: CommandAction) !void {
+fn doCommandInsertMode(self: *Self, action: CommandAction, keys: []const u8) !void {
     try switch (action) {
         .none => {
-            const keys = self.input_buf.items;
             if (keys.len > 0) {
-                self.command_buf.insertSlice(self.command_cursor, keys) catch return;
+                self.commandList().insertSlice(self.allocator, self.command_cursor, keys) catch return;
                 self.setCommandCursor(self.command_cursor + @intCast(u16, keys.len));
             }
         },
+        .history_next => self.commandHistoryNext(),
+        .history_prev => self.commandHistoryPrev(),
         .backspace => {
             self.setMode(.command_change);
             self.doCommandMotion(.char_prev);
@@ -591,11 +620,31 @@ fn doCommandOperatorPendingMode(self: *Self, action: CommandAction) void {
     }
 }
 
+pub fn doCommandToMode(self: *Self, action: CommandAction) void {
+    switch (action) {
+        .enter_normal_mode => self.setMode(.command_normal),
+        .none => {
+            const keys = self.input_buf.items;
+            if (keys.len > 0) {
+                self.setMode(self.prev_mode);
+                switch (self.prev_mode) {
+                    .command_to_forwards => self.doCommandMotion(.{ .to_forwards_utf8 = keys }),
+                    .command_to_backwards => self.doCommandMotion(.{ .to_backwards_utf8 = keys }),
+                    .command_until_forwards => self.doCommandMotion(.{ .until_forwards_utf8 = keys }),
+                    .command_until_backwards => self.doCommandMotion(.{ .until_backwards_utf8 = keys }),
+                    else => unreachable,
+                }
+            }
+        },
+        else => {},
+    }
+}
+
 pub fn doNormalMode(self: *Self, action: Action) !void {
     switch (action) {
         .enter_command_mode => {
             self.setMode(.command_insert);
-            const writer = self.command_buf.writer();
+            const writer = self.commandList().writer(self.allocator);
             writer.writeByte(':') catch unreachable;
             self.setCommandCursor(1);
         },
@@ -629,10 +678,11 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
         .decrease_width => self.cursorDecWidth(),
         .assign_cell => {
             self.setMode(.command_insert);
-            const writer = self.command_buf.writer();
+            const list = self.commandList();
+            const writer = list.writer(self.allocator);
             self.cursor.writeCellAddress(writer) catch unreachable;
             writer.writeAll(" = ") catch unreachable;
-            self.setCommandCursor(@intCast(u16, self.command_buf.len));
+            self.setCommandCursor(@intCast(u16, list.items.len));
         },
 
         .zero => {
@@ -664,7 +714,7 @@ fn doVisualMode(self: *Self, action: Action) void {
 
         .select_cancel => self.setMode(.command_insert),
         .select_submit => {
-            const writer = self.command_buf.writer();
+            const writer = self.commandList().writer(self.allocator);
             const tl = Position.topLeft(self.cursor, self.anchor);
             const br = Position.bottomRight(self.cursor, self.anchor);
             writer.print("{}:{}", .{ tl, br }) catch {};
@@ -1390,6 +1440,9 @@ pub const CommandAction = union(enum(u6)) {
     enter_insert_mode_at_eol,
     enter_insert_mode_at_bol,
 
+    history_next,
+    history_prev,
+
     backspace,
     delete_char,
     change_to_eol,
@@ -1734,6 +1787,10 @@ const command_keys = [_]CommandKeyMaps{
         .type = .normal,
         .parents = &.{ .common_keys, .non_insert_keys },
         .keys = &.{
+            .{ "k", .history_prev },
+            .{ "j", .history_next },
+            .{ "<Up>", .history_prev },
+            .{ "<Down>", .history_next },
             .{ "x", .delete_char },
             .{ "d", .operator_delete },
             .{ "D", .delete_to_eol },
@@ -1751,6 +1808,10 @@ const command_keys = [_]CommandKeyMaps{
         .type = .insert,
         .parents = &.{.common_keys},
         .keys = &.{
+            .{ "<C-p>", .history_prev },
+            .{ "<C-n>", .history_next },
+            .{ "<Up>", .history_prev },
+            .{ "<Down>", .history_next },
             .{ "<C-h>", .backspace },
             .{ "<Delete>", .backspace },
             .{ "<C-u>", .change_line },
@@ -2701,4 +2762,47 @@ test "Motions visual mode" {
     zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = max - 10, .x = 0 }, zc.cursor);
     try t.expectEqual(Position{ .y = max, .x = 10 }, zc.getAnchor().*);
+}
+
+test "Command history" {
+    const t = std.testing;
+
+    var zc = try Self.init(t.allocator, .{ .ui = false });
+    defer zc.deinit();
+
+    try t.expectEqual(@as(usize, 0), zc.current_command);
+    try t.expectEqual(@as(usize, 1), zc.command_history.items.len);
+    zc.setMode(.command_insert);
+    try zc.doCommandInsertMode(.none, "A0 = 5");
+    try zc.doCommandInsertMode(.submit_command, "");
+    zc.setMode(.command_insert);
+    try t.expectEqual(@as(usize, 1), zc.current_command);
+    try t.expectEqual(@as(usize, 2), zc.command_history.items.len);
+    try zc.doCommandInsertMode(.none, "A0 = 10");
+    try zc.doCommandInsertMode(.submit_command, "");
+    zc.setMode(.command_insert);
+    try t.expectEqual(@as(usize, 2), zc.current_command);
+    try t.expectEqual(@as(usize, 3), zc.command_history.items.len);
+
+    try t.expectEqualStrings("A0 = 5", zc.command_history.items[0].items);
+    try t.expectEqualStrings("A0 = 10", zc.command_history.items[1].items);
+    try t.expectEqualStrings("", zc.command_history.items[2].items);
+
+    zc.commandHistoryPrev();
+    try t.expectEqual(@as(usize, 1), zc.current_command);
+    zc.commandHistoryPrev();
+    try t.expectEqual(@as(usize, 0), zc.current_command);
+    zc.commandHistoryPrev();
+    try t.expectEqual(@as(usize, 0), zc.current_command);
+    zc.commandHistoryPrev();
+    try t.expectEqual(@as(usize, 0), zc.current_command);
+
+    zc.commandHistoryNext();
+    try t.expectEqual(@as(usize, 1), zc.current_command);
+    zc.commandHistoryNext();
+    try t.expectEqual(@as(usize, 2), zc.current_command);
+    zc.commandHistoryNext();
+    try t.expectEqual(@as(usize, 2), zc.current_command);
+    zc.commandHistoryNext();
+    try t.expectEqual(@as(usize, 2), zc.current_command);
 }
