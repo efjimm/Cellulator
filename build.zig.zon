@@ -1,14 +1,14 @@
 .{
-	.name = "zc",
-	.version = "0.0.1",
-	.dependencies = .{
-		.spoon = .{
-			.url = "https://github.com/efjimm/zig-spoon/archive/c2481feabc9c23540c76d283c5c436b80393bcb1.tar.gz",
-			.hash = "1220b6e3b9e74369a77814969d9172376d714f33c814af3241f5ff73e6ed4bd6aaf5",
-		},
-		.wcwidth = .{
-			.url = "https://github.com/efjimm/zig-wcwidth/archive/91891b022dd680dfac8a8ce703418cac65db8ee6.tar.gz",
-			.hash = "1220457c28f164c8095eaa49f81265f233eaaccedc7ed0a1ca299c99e11265c3ce10",
-		},
-	},
+    .name = "Cellulator",
+    .version = "0.0.1",
+    .dependencies = .{
+        .spoon = .{
+            .url = "https://github.com/efjimm/zig-spoon/archive/c2481feabc9c23540c76d283c5c436b80393bcb1.tar.gz",
+            .hash = "1220b6e3b9e74369a77814969d9172376d714f33c814af3241f5ff73e6ed4bd6aaf5",
+        },
+        .wcwidth = .{
+            .url = "https://github.com/efjimm/zig-wcwidth/archive/91891b022dd680dfac8a8ce703418cac65db8ee6.tar.gz",
+            .hash = "1220457c28f164c8095eaa49f81265f233eaaccedc7ed0a1ca299c99e11265c3ce10",
+        },
+    },
 }
