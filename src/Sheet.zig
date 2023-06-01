@@ -63,7 +63,20 @@ needs_update: bool = false,
 /// True if there have been any changes since the last save
 has_changes: bool = false,
 
+undos: std.ArrayListUnmanaged(Undo) = .{},
+redos: std.ArrayListUnmanaged(Undo) = .{},
+
 allocator: Allocator,
+
+pub const UndoType = enum { undo, redo };
+
+pub const Undo = union(enum) {
+    set_cell: struct {
+        pos: Position,
+        ast: Ast,
+    },
+    delete_cell: Position,
+};
 
 pub fn init(allocator: Allocator) Sheet {
     return .{
@@ -76,11 +89,77 @@ pub fn deinit(sheet: *Sheet) void {
         cell.deinit(sheet.allocator);
     }
 
+    for (sheet.undos.items) |*u| switch (u.*) {
+        .set_cell => |*v| v.ast.deinit(sheet.allocator),
+        else => {},
+    };
+
+    for (sheet.redos.items) |*r| switch (r.*) {
+        .set_cell => |*v| v.ast.deinit(sheet.allocator),
+        else => {},
+    };
+
+    sheet.undos.deinit(sheet.allocator);
+    sheet.redos.deinit(sheet.allocator);
     sheet.cells.deinit(sheet.allocator);
     sheet.visited_nodes.deinit(sheet.allocator);
     sheet.sorted_nodes.deinit(sheet.allocator);
     sheet.columns.deinit(sheet.allocator);
     sheet.* = undefined;
+}
+
+pub const UndoOpts = struct {
+    undo_type: UndoType = .undo,
+    clear_redos: bool = true,
+};
+
+pub fn pushUndo(sheet: *Sheet, un: Undo, opts: UndoOpts) Allocator.Error!void {
+    var u = un;
+    // The ast is left dangling if adding an undo fails, so we destroy it as a last resort.
+    errdefer switch (u) {
+        .set_cell => |*t| t.ast.deinit(sheet.allocator),
+        .delete_cell => {},
+    };
+
+    switch (opts.undo_type) {
+        .undo => {
+            try sheet.undos.append(sheet.allocator, u);
+            if (opts.clear_redos) {
+                for (sheet.redos.items) |*r| switch (r.*) {
+                    .set_cell => |*t| t.ast.deinit(sheet.allocator),
+                    else => {},
+                };
+                sheet.redos.clearRetainingCapacity();
+            }
+        },
+        .redo => try sheet.redos.append(sheet.allocator, u),
+    }
+}
+
+pub fn undo(sheet: *Sheet) Allocator.Error!void {
+    var u = sheet.undos.popOrNull() orelse return;
+    switch (u) {
+        .set_cell => |*t| {
+            errdefer t.ast.deinit(sheet.allocator);
+            try sheet.setCell(t.pos, .{ .ast = t.ast }, .{ .undo_type = .redo });
+        },
+        .delete_cell => |pos| {
+            try sheet.deleteCell(pos, .{ .undo_type = .redo });
+        },
+    }
+}
+
+pub fn redo(sheet: *Sheet) Allocator.Error!void {
+    var u = sheet.redos.popOrNull() orelse return;
+    switch (u) {
+        .set_cell => |*t| {
+            errdefer t.ast.deinit(sheet.allocator);
+            try sheet.setCell(t.pos, .{ .ast = t.ast }, .{ .clear_redos = false });
+        },
+        .delete_cell => |pos| {
+            try sheet.deleteCell(pos, .{ .clear_redos = false });
+        },
+    }
 }
 
 pub fn cellCount(sheet: *Sheet) u32 {
@@ -100,6 +179,7 @@ pub fn setCell(
     sheet: *Sheet,
     position: Position,
     data: Cell,
+    undo_opts: UndoOpts,
 ) Allocator.Error!void {
     const col_entry = try sheet.columns.getOrPut(sheet.allocator, position.x);
     sheet.needs_update = true;
@@ -111,53 +191,71 @@ pub fn setCell(
     if (!sheet.cells.contains(position)) {
         for (sheet.cells.keys(), 0..) |key, i| {
             if (key.hash() > position.hash()) {
-                log.debug("Inserting cell at {}", .{position});
                 try sheet.cells.entries.insert(sheet.allocator, i, .{
                     .hash = {},
                     .key = position,
                     .value = data,
                 });
+                errdefer sheet.cells.entries.orderedRemove(i);
 
                 // If this fails with OOM we could potentially end up with the map in an invalid
                 // state. All instances of OOM must be recoverable. If we error here we remove the
                 // newly inserted entry so that the old index remains correct.
-                log.debug("Reindexing cells...", .{});
-                sheet.cells.reIndex(sheet.allocator) catch |err| switch (err) {
-                    error.OutOfMemory => {
-                        sheet.cells.entries.orderedRemove(i);
-                        return err;
-                    },
-                };
-                log.debug("Finished", .{});
+                try sheet.cells.reIndex(sheet.allocator);
+
+                try sheet.pushUndo(.{ .delete_cell = position }, undo_opts);
+
                 sheet.has_changes = true;
                 return;
             }
         }
 
         // Found no entries
-        log.debug("Inserting cell at {}", .{position});
         try sheet.cells.put(sheet.allocator, position, data);
-        log.debug("Finished", .{});
+        errdefer _ = sheet.cells.orderedRemove(position);
+
+        try sheet.pushUndo(.{ .delete_cell = position }, undo_opts);
         sheet.has_changes = true;
         return;
     }
 
     const ptr = sheet.cells.getPtr(position).?;
-    ptr.ast.deinit(sheet.allocator);
+    var ast = ptr.ast;
+    errdefer ast.deinit(sheet.allocator);
+
     ptr.* = data;
     sheet.has_changes = true;
+
+    try sheet.pushUndo(
+        .{
+            .set_cell = .{
+                .pos = position,
+                .ast = ast,
+            },
+        },
+        undo_opts,
+    );
 }
 
-pub fn deleteCell(sheet: *Sheet, pos: Position) ?Ast {
-    const cell = sheet.cells.get(pos) orelse return null;
+pub fn deleteCell(sheet: *Sheet, pos: Position, undo_opts: UndoOpts) Allocator.Error!void {
+    const cell = sheet.cells.get(pos) orelse return;
     _ = sheet.cells.orderedRemove(pos);
+
+    try sheet.pushUndo(
+        .{
+            .set_cell = .{
+                .pos = pos,
+                .ast = cell.ast,
+            },
+        },
+        undo_opts,
+    );
+
     sheet.needs_update = true;
     sheet.has_changes = true;
-
-    return cell.ast;
 }
 
-pub fn deleteCellsInRange(sheet: *Sheet, p1: Position, p2: Position) void {
+pub fn deleteCellsInRange(sheet: *Sheet, p1: Position, p2: Position) Allocator.Error!void {
     var i: usize = 0;
     const positions = sheet.cells.keys();
     const tl = Position.topLeft(p1, p2);
@@ -167,8 +265,7 @@ pub fn deleteCellsInRange(sheet: *Sheet, p1: Position, p2: Position) void {
         const pos = positions[i];
         if (pos.y > br.y) break;
         if (pos.y >= tl.y and pos.x >= tl.x and pos.x <= br.x) {
-            var ast = sheet.deleteCell(pos).?;
-            ast.deinit(sheet.allocator);
+            try sheet.deleteCell(pos, .{});
         } else {
             i += 1;
         }
@@ -547,10 +644,10 @@ test "Sheet basics" {
     const cell2 = try Cell.fromExpression(t.allocator, "500 * 2 / 34 + 1");
     const cell3 = try Cell.fromExpression(t.allocator, "a0");
     const cell4 = try Cell.fromExpression(t.allocator, "a2 * a1");
-    try sheet.setCell(.{ .x = 0, .y = 0 }, cell1);
-    try sheet.setCell(.{ .x = 0, .y = 1 }, cell2);
-    try sheet.setCell(.{ .x = 0, .y = 2 }, cell3);
-    try sheet.setCell(.{ .x = 0, .y = 3 }, cell4);
+    try sheet.setCell(.{ .x = 0, .y = 0 }, cell1, .{});
+    try sheet.setCell(.{ .x = 0, .y = 1 }, cell2, .{});
+    try sheet.setCell(.{ .x = 0, .y = 2 }, cell3, .{});
+    try sheet.setCell(.{ .x = 0, .y = 3 }, cell4, .{});
 
     try t.expectEqual(@as(u32, 4), sheet.cellCount());
     try t.expectEqual(@as(u32, 1), sheet.colCount());
@@ -569,11 +666,8 @@ test "Sheet basics" {
         try t.expect(sheet.cells.get(pos).?.getValue() != null);
     }
 
-    var ast = sheet.deleteCell(.{ .x = 0, .y = 0 }).?;
-    ast.deinit(t.allocator);
+    try sheet.deleteCell(.{ .x = 0, .y = 0 }, .{});
 
-    try t.expectEqual(@as(u32, 3), sheet.cellCount());
-    try t.expectEqual(@as(?Ast, null), sheet.deleteCell(.{ .x = 0, .y = 0 }));
     try t.expectEqual(@as(u32, 3), sheet.cellCount());
 }
 
@@ -587,17 +681,16 @@ test "setCell allocations" {
             {
                 var cell1 = try Cell.fromExpression(allocator, "a4 * a1 * a3");
                 errdefer cell1.deinit(allocator);
-                try sheet.setCell(.{ .x = 0, .y = 0 }, cell1);
+                try sheet.setCell(.{ .x = 0, .y = 0 }, cell1, .{});
             }
 
             {
                 var cell2 = try Cell.fromExpression(allocator, "a2 * a1 * a3");
                 errdefer cell2.deinit(allocator);
-                try sheet.setCell(.{ .x = 1, .y = 0 }, cell2);
+                try sheet.setCell(.{ .x = 1, .y = 0 }, cell2, .{});
             }
 
-            var ast = sheet.deleteCell(.{ .x = 0, .y = 0 }).?;
-            ast.deinit(allocator);
+            try sheet.deleteCell(.{ .x = 0, .y = 0 }, .{});
 
             try sheet.update();
         }
@@ -633,7 +726,7 @@ fn testCellEvaluation(allocator: Allocator) !void {
             cell: Cell,
         ) Allocator.Error!void {
             var c = cell;
-            _sheet.setCell(pos, c) catch |err| {
+            _sheet.setCell(pos, c, .{}) catch |err| {
                 c.deinit(_allocator);
                 return err;
             };
@@ -805,7 +898,6 @@ fn testCellEvaluation(allocator: Allocator) !void {
         }
     }.testCell;
 
-    try testCell(&sheet, "A0", 1);
     try testCell(&sheet, "A0", 1.00);
     try testCell(&sheet, "B0", 2.00);
     try testCell(&sheet, "C0", 3.00);
@@ -963,6 +1055,47 @@ fn testCellEvaluation(allocator: Allocator) !void {
         try t.expect(pos.hash() > last_pos.hash());
         last_pos = pos;
     }
+
+    // Check undos
+    try t.expectEqual(@as(usize, 149), sheet.undos.items.len);
+    try t.expectEqual(@as(usize, 0), sheet.redos.items.len);
+
+    try sheet.undo();
+    try t.expectEqual(@as(usize, 148), sheet.undos.items.len);
+    try t.expectEqual(@as(usize, 1), sheet.redos.items.len);
+
+    try sheet.redo();
+    try t.expectEqual(@as(usize, 149), sheet.undos.items.len);
+    try t.expectEqual(@as(usize, 0), sheet.redos.items.len);
+
+    try sheet.deleteCell(try Position.fromAddress("A22"), .{});
+    try sheet.deleteCell(try Position.fromAddress("G20"), .{});
+
+    try t.expectEqual(@as(usize, 151), sheet.undos.items.len);
+    try t.expectEqual(@as(usize, 0), sheet.redos.items.len);
+
+    try sheet.undo();
+    try t.expectEqual(@as(usize, 150), sheet.undos.items.len);
+    try t.expectEqual(@as(usize, 1), sheet.redos.items.len);
+    try sheet.undo();
+    try t.expectEqual(@as(usize, 149), sheet.undos.items.len);
+    try t.expectEqual(@as(usize, 2), sheet.redos.items.len);
+    try sheet.undo();
+    try t.expectEqual(@as(usize, 148), sheet.undos.items.len);
+    try t.expectEqual(@as(usize, 3), sheet.redos.items.len);
+
+    try sheet.redo();
+    try t.expectEqual(@as(usize, 149), sheet.undos.items.len);
+    try t.expectEqual(@as(usize, 2), sheet.redos.items.len);
+    try sheet.redo();
+    try t.expectEqual(@as(usize, 150), sheet.undos.items.len);
+    try t.expectEqual(@as(usize, 1), sheet.redos.items.len);
+    try sheet.redo();
+    try t.expectEqual(@as(usize, 151), sheet.undos.items.len);
+    try t.expectEqual(@as(usize, 0), sheet.redos.items.len);
+    try sheet.redo();
+    try t.expectEqual(@as(usize, 151), sheet.undos.items.len);
+    try t.expectEqual(@as(usize, 0), sheet.redos.items.len);
 }
 
 test "Cell assignment, updating, evaluation" {

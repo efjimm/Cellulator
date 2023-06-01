@@ -114,6 +114,8 @@ will repeat the following motion that many times. This does not currently work f
 - `F` Decrease decimal precision of the current column
 - `+` Increase width of current column if non-empty
 - `-` Decrease width of current column if non-empty
+- `u` Undo
+- `U` Redo
 
 ### Visual Mode
 

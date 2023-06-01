@@ -1053,6 +1053,7 @@ test "Parse and Eval Expression" {
 
 test "Functions on Ranges" {
     const Sheet = @import("Sheet.zig");
+    const Cell = Sheet.Cell;
     const t = std.testing;
     const Test = struct {
         sheet: *Sheet,
@@ -1066,10 +1067,10 @@ test "Functions on Ranges" {
             var sheet = Sheet.init(t.allocator);
             defer sheet.deinit();
 
-            try sheet.setCell(.{ .x = 0, .y = 0 }, .{ .ast = try parseExpression(t.allocator, "0") });
-            try sheet.setCell(.{ .x = 1, .y = 0 }, .{ .ast = try parseExpression(t.allocator, "100") });
-            try sheet.setCell(.{ .x = 0, .y = 1 }, .{ .ast = try parseExpression(t.allocator, "500") });
-            try sheet.setCell(.{ .x = 1, .y = 1 }, .{ .ast = try parseExpression(t.allocator, "333.33") });
+            try sheet.setCell(.{ .x = 0, .y = 0 }, try Cell.fromExpression(t.allocator, "0"), .{});
+            try sheet.setCell(.{ .x = 1, .y = 0 }, try Cell.fromExpression(t.allocator, "100"), .{});
+            try sheet.setCell(.{ .x = 0, .y = 1 }, try Cell.fromExpression(t.allocator, "500"), .{});
+            try sheet.setCell(.{ .x = 1, .y = 1 }, try Cell.fromExpression(t.allocator, "333.33"), .{});
 
             var ast = try parseExpression(t.allocator, expr);
             defer ast.deinit(t.allocator);

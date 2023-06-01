@@ -305,7 +305,9 @@ fn handleInput(self: *Self) !void {
     switch (res) {
         .normal => |action| switch (self.mode) {
             .normal => try self.doNormalMode(action),
-            .visual, .select => self.doVisualMode(action),
+            .visual, .select => self.doVisualMode(action) catch |err| switch (err) {
+                error.OutOfMemory => self.setStatusMessage(.err, "Out of memory!", .{}),
+            },
             else => unreachable,
         },
         .command => |action| self.doCommandMode(action, self.input_buf.items) catch |err| switch (err) {
@@ -658,6 +660,15 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
             }
         },
 
+        .undo => {
+            try self.sheet.undo();
+            self.tui.update.cells = true;
+        },
+        .redo => {
+            try self.sheet.redo();
+            self.tui.update.cells = true;
+        },
+
         .cell_cursor_up => self.cursorUp(),
         .cell_cursor_down => self.cursorDown(),
         .cell_cursor_left => self.cursorLeft(),
@@ -701,7 +712,7 @@ fn getAnchor(self: *Self) *Position {
     return &self.anchor;
 }
 
-fn doVisualMode(self: *Self, action: Action) void {
+fn doVisualMode(self: *Self, action: Action) Allocator.Error!void {
     assert(self.mode == .visual or self.mode == .select);
     switch (action) {
         .enter_normal_mode => self.setMode(.normal),
@@ -741,7 +752,7 @@ fn doVisualMode(self: *Self, action: Action) void {
         .visual_move_right => self.selectionRight(),
 
         .delete_cell => {
-            self.sheet.deleteCellsInRange(self.cursor, self.anchor);
+            try self.sheet.deleteCellsInRange(self.cursor, self.anchor);
             self.setMode(.normal);
             self.tui.update.cells = true;
         },
@@ -770,7 +781,7 @@ fn parseCommand(self: *Self, str: []const u8) ParseCommandError!void {
             const pos = ast.nodes.items(.data)[op.lhs].cell;
             ast.splice(op.rhs);
 
-            self.sheet.setCell(pos, .{ .ast = ast }) catch |err| {
+            self.sheet.setCell(pos, .{ .ast = ast }, .{}) catch |err| {
                 self.delAstAssumeCapacity(ast);
                 return err;
             };
@@ -941,10 +952,30 @@ pub fn loadCmd(self: *Self, filepath: []const u8) !void {
 }
 
 pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
-    try self.asts.ensureUnusedCapacity(self.allocator, self.sheet.cellCount());
+    const count = self.sheet.cellCount() + sheet.undos.items.len + sheet.redos.items.len;
+    try self.asts.ensureUnusedCapacity(self.allocator, count);
     for (sheet.cells.values()) |cell| {
         self.delAstAssumeCapacity(cell.ast);
     }
+    for (sheet.undos.items) |undo| {
+        switch (undo) {
+            .set_cell => |t| {
+                self.delAstAssumeCapacity(t.ast);
+            },
+            .delete_cell => {},
+        }
+    }
+    for (sheet.redos.items) |undo| {
+        switch (undo) {
+            .set_cell => |t| {
+                self.delAstAssumeCapacity(t.ast);
+            },
+            .delete_cell => {},
+        }
+    }
+
+    sheet.undos.clearRetainingCapacity();
+    sheet.redos.clearRetainingCapacity();
     sheet.cells.clearRetainingCapacity();
 }
 
@@ -981,7 +1012,7 @@ pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
                 const assignment = ast.nodes.items(.data)[ast.rootNodeIndex()].assignment;
                 const pos = ast.nodes.items(.data)[assignment.lhs].cell;
                 ast.splice(assignment.rhs);
-                try sheet.setCell(pos, .{ .ast = ast });
+                try sheet.setCell(pos, .{ .ast = ast }, .{});
             },
             else => continue,
         }
@@ -1023,8 +1054,7 @@ pub fn writeFile(sheet: *Sheet, opts: WriteFileOptions) !void {
 }
 
 pub fn deleteCell(self: *Self) Allocator.Error!void {
-    const ast = self.sheet.deleteCell(self.cursor) orelse return;
-    try self.delAst(ast);
+    try self.sheet.deleteCell(self.cursor, .{});
 
     self.tui.update.cells = true;
     self.tui.update.cursor = true;
@@ -1397,6 +1427,9 @@ pub const Action = union(enum) {
     enter_command_mode,
     dismiss_count_or_status_message,
 
+    undo,
+    redo,
+
     cell_cursor_up,
     cell_cursor_down,
     cell_cursor_left,
@@ -1701,6 +1734,8 @@ const outer_keys = [_]KeyMaps{
             .{ "dd", .delete_cell },
             .{ ":", .enter_command_mode },
             .{ "v", .enter_visual_mode },
+            .{ "u", .undo },
+            .{ "U", .redo },
         },
     },
     .{
@@ -2390,139 +2425,139 @@ test "Motions visual mode" {
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.getAnchor().*);
 
     // cell_cursor_right
-    zc.doVisualMode(.cell_cursor_right);
+    try zc.doVisualMode(.cell_cursor_right);
     try t.expectEqual(Position{ .x = 1, .y = 0 }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_right);
+    try zc.doVisualMode(.cell_cursor_right);
     try t.expectEqual(Position{ .x = 2, .y = 0 }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_right);
+    try zc.doVisualMode(.cell_cursor_right);
     try t.expectEqual(Position{ .x = 3, .y = 0 }, zc.cursor);
 
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.cell_cursor_right);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.cell_cursor_right);
     try t.expectEqual(Position{ .x = 12, .y = 0 }, zc.cursor);
-    zc.doVisualMode(.{ .count = 1 });
-    zc.doVisualMode(.{ .count = 0 });
-    zc.doVisualMode(.cell_cursor_right);
+    try zc.doVisualMode(.{ .count = 1 });
+    try zc.doVisualMode(.{ .count = 0 });
+    try zc.doVisualMode(.cell_cursor_right);
     try t.expectEqual(Position{ .x = 22, .y = 0 }, zc.cursor);
 
     zc.setCursor(.{ .x = max - 2, .y = 0 });
     try t.expectEqual(Position{ .x = max - 2, .y = 0 }, zc.cursor);
 
-    zc.doVisualMode(.cell_cursor_right);
+    try zc.doVisualMode(.cell_cursor_right);
     try t.expectEqual(Position{ .x = max - 1, .y = 0 }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_right);
+    try zc.doVisualMode(.cell_cursor_right);
     try t.expectEqual(Position{ .x = max, .y = 0 }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_right);
+    try zc.doVisualMode(.cell_cursor_right);
     try t.expectEqual(Position{ .x = max, .y = 0 }, zc.cursor);
 
     // cell_cursor_left
     zc.setCursor(.{ .x = max, .y = 0 });
     try t.expectEqual(Position{ .x = max, .y = 0 }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_left);
+    try zc.doVisualMode(.cell_cursor_left);
     try t.expectEqual(Position{ .x = max - 1, .y = 0 }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_left);
+    try zc.doVisualMode(.cell_cursor_left);
     try t.expectEqual(Position{ .x = max - 2, .y = 0 }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_left);
+    try zc.doVisualMode(.cell_cursor_left);
     try t.expectEqual(Position{ .x = max - 3, .y = 0 }, zc.cursor);
 
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.cell_cursor_left);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.cell_cursor_left);
     try t.expectEqual(Position{ .x = max - 12, .y = 0 }, zc.cursor);
-    zc.doVisualMode(.{ .count = 1 });
-    zc.doVisualMode(.{ .count = 0 });
-    zc.doVisualMode(.cell_cursor_left);
+    try zc.doVisualMode(.{ .count = 1 });
+    try zc.doVisualMode(.{ .count = 0 });
+    try zc.doVisualMode(.cell_cursor_left);
     try t.expectEqual(Position{ .x = max - 22, .y = 0 }, zc.cursor);
 
     zc.setCursor(.{ .x = 2, .y = 0 });
     try t.expectEqual(Position{ .x = 2, .y = 0 }, zc.cursor);
 
-    zc.doVisualMode(.cell_cursor_left);
+    try zc.doVisualMode(.cell_cursor_left);
     try t.expectEqual(Position{ .x = 1, .y = 0 }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_left);
+    try zc.doVisualMode(.cell_cursor_left);
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_left);
+    try zc.doVisualMode(.cell_cursor_left);
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
 
     // cell cursor down
     zc.setCursor(.{ .x = 0, .y = 0 });
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
 
-    zc.doVisualMode(.cell_cursor_down);
+    try zc.doVisualMode(.cell_cursor_down);
     try t.expectEqual(Position{ .x = 0, .y = 1 }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_down);
+    try zc.doVisualMode(.cell_cursor_down);
     try t.expectEqual(Position{ .x = 0, .y = 2 }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_down);
+    try zc.doVisualMode(.cell_cursor_down);
     try t.expectEqual(Position{ .x = 0, .y = 3 }, zc.cursor);
 
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.cell_cursor_down);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.cell_cursor_down);
     try t.expectEqual(Position{ .x = 0, .y = 12 }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_down);
-    zc.doVisualMode(.{ .count = 1 });
-    zc.doVisualMode(.{ .count = 0 });
-    zc.doVisualMode(.cell_cursor_down);
+    try zc.doVisualMode(.cell_cursor_down);
+    try zc.doVisualMode(.{ .count = 1 });
+    try zc.doVisualMode(.{ .count = 0 });
+    try zc.doVisualMode(.cell_cursor_down);
     try t.expectEqual(Position{ .x = 0, .y = 23 }, zc.cursor);
 
     zc.setCursor(.{ .x = 0, .y = max - 1 });
     try t.expectEqual(Position{ .x = 0, .y = max - 1 }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_down);
+    try zc.doVisualMode(.cell_cursor_down);
     try t.expectEqual(Position{ .x = 0, .y = max }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_down);
+    try zc.doVisualMode(.cell_cursor_down);
     try t.expectEqual(Position{ .x = 0, .y = max }, zc.cursor);
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.cell_cursor_down);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.cell_cursor_down);
     try t.expectEqual(Position{ .x = 0, .y = max }, zc.cursor);
 
     // cell cursor up
     zc.setCursor(.{ .x = 0, .y = max });
     try t.expectEqual(Position{ .x = 0, .y = max }, zc.cursor);
 
-    zc.doVisualMode(.cell_cursor_up);
+    try zc.doVisualMode(.cell_cursor_up);
     try t.expectEqual(Position{ .x = 0, .y = max - 1 }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_up);
+    try zc.doVisualMode(.cell_cursor_up);
     try t.expectEqual(Position{ .x = 0, .y = max - 2 }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_up);
+    try zc.doVisualMode(.cell_cursor_up);
     try t.expectEqual(Position{ .x = 0, .y = max - 3 }, zc.cursor);
 
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.cell_cursor_up);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.cell_cursor_up);
     try t.expectEqual(Position{ .x = 0, .y = max - 12 }, zc.cursor);
-    zc.doVisualMode(.{ .count = 1 });
-    zc.doVisualMode(.{ .count = 0 });
-    zc.doVisualMode(.cell_cursor_up);
+    try zc.doVisualMode(.{ .count = 1 });
+    try zc.doVisualMode(.{ .count = 0 });
+    try zc.doVisualMode(.cell_cursor_up);
     try t.expectEqual(Position{ .x = 0, .y = max - 22 }, zc.cursor);
 
     zc.setCursor(.{ .x = 0, .y = 2 });
-    zc.doVisualMode(.cell_cursor_up);
+    try zc.doVisualMode(.cell_cursor_up);
     try t.expectEqual(Position{ .x = 0, .y = 1 }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_up);
+    try zc.doVisualMode(.cell_cursor_up);
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
-    zc.doVisualMode(.cell_cursor_up);
+    try zc.doVisualMode(.cell_cursor_up);
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.cell_cursor_up);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.cell_cursor_up);
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.cell_cursor_up);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.cell_cursor_up);
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
 
     // next/prev_populated_cell
     // empty sheet - cursor shouldn't move
-    zc.doVisualMode(.next_populated_cell);
+    try zc.doVisualMode(.next_populated_cell);
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
     zc.setCursor(.{ .x = 50, .y = 50 });
-    zc.doVisualMode(.next_populated_cell);
+    try zc.doVisualMode(.next_populated_cell);
     try t.expectEqual(Position{ .x = 50, .y = 50 }, zc.cursor);
 
     zc.setCursor(.{ .x = 0, .y = 0 });
-    zc.doVisualMode(.prev_populated_cell);
+    try zc.doVisualMode(.prev_populated_cell);
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
     zc.setCursor(.{ .x = 50, .y = 50 });
-    zc.doVisualMode(.prev_populated_cell);
+    try zc.doVisualMode(.prev_populated_cell);
     try t.expectEqual(Position{ .x = 50, .y = 50 }, zc.cursor);
 
     try zc.parseCommand("C4 = 0");
@@ -2534,232 +2569,232 @@ test "Motions visual mode" {
     try zc.updateCells();
 
     zc.setCursor(.{ .x = 0, .y = 0 });
-    zc.doVisualMode(.next_populated_cell);
+    try zc.doVisualMode(.next_populated_cell);
     try t.expectEqual(try Position.fromAddress("B0"), zc.cursor);
-    zc.doVisualMode(.next_populated_cell);
+    try zc.doVisualMode(.next_populated_cell);
     try t.expectEqual(try Position.fromAddress("ZZZ0"), zc.cursor);
-    zc.doVisualMode(.next_populated_cell);
+    try zc.doVisualMode(.next_populated_cell);
     try t.expectEqual(try Position.fromAddress("B2"), zc.cursor);
-    zc.doVisualMode(.next_populated_cell);
+    try zc.doVisualMode(.next_populated_cell);
     try t.expectEqual(try Position.fromAddress("A4"), zc.cursor);
-    zc.doVisualMode(.next_populated_cell);
+    try zc.doVisualMode(.next_populated_cell);
     try t.expectEqual(try Position.fromAddress("C4"), zc.cursor);
-    zc.doVisualMode(.next_populated_cell);
+    try zc.doVisualMode(.next_populated_cell);
     try t.expectEqual(try Position.fromAddress("A500"), zc.cursor);
-    zc.doVisualMode(.next_populated_cell);
+    try zc.doVisualMode(.next_populated_cell);
     try t.expectEqual(try Position.fromAddress("A500"), zc.cursor);
 
     zc.setCursor(.{ .x = 0, .y = 0 });
-    zc.doVisualMode(.{ .count = 2 });
-    zc.doVisualMode(.next_populated_cell);
+    try zc.doVisualMode(.{ .count = 2 });
+    try zc.doVisualMode(.next_populated_cell);
     try t.expectEqual(try Position.fromAddress("ZZZ0"), zc.cursor);
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.next_populated_cell);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.next_populated_cell);
     try t.expectEqual(try Position.fromAddress("A500"), zc.cursor);
 
     zc.setCursor(.{ .x = max, .y = max });
-    zc.doVisualMode(.prev_populated_cell);
+    try zc.doVisualMode(.prev_populated_cell);
     try t.expectEqual(try Position.fromAddress("A500"), zc.cursor);
-    zc.doVisualMode(.prev_populated_cell);
+    try zc.doVisualMode(.prev_populated_cell);
     try t.expectEqual(try Position.fromAddress("C4"), zc.cursor);
-    zc.doVisualMode(.prev_populated_cell);
+    try zc.doVisualMode(.prev_populated_cell);
     try t.expectEqual(try Position.fromAddress("A4"), zc.cursor);
-    zc.doVisualMode(.prev_populated_cell);
+    try zc.doVisualMode(.prev_populated_cell);
     try t.expectEqual(try Position.fromAddress("B2"), zc.cursor);
-    zc.doVisualMode(.prev_populated_cell);
+    try zc.doVisualMode(.prev_populated_cell);
     try t.expectEqual(try Position.fromAddress("ZZZ0"), zc.cursor);
-    zc.doVisualMode(.prev_populated_cell);
+    try zc.doVisualMode(.prev_populated_cell);
     try t.expectEqual(try Position.fromAddress("B0"), zc.cursor);
-    zc.doVisualMode(.prev_populated_cell);
+    try zc.doVisualMode(.prev_populated_cell);
     try t.expectEqual(try Position.fromAddress("B0"), zc.cursor);
 
     zc.setCursor(.{ .x = max, .y = max });
-    zc.doVisualMode(.{ .count = 2 });
-    zc.doVisualMode(.prev_populated_cell);
+    try zc.doVisualMode(.{ .count = 2 });
+    try zc.doVisualMode(.prev_populated_cell);
     try t.expectEqual(try Position.fromAddress("C4"), zc.cursor);
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.prev_populated_cell);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.prev_populated_cell);
     try t.expectEqual(try Position.fromAddress("B0"), zc.cursor);
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.getAnchor().*);
 
     // swap_anchor
-    zc.doVisualMode(.swap_anchor);
+    try zc.doVisualMode(.swap_anchor);
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
     try t.expectEqual(Position.fromAddress("B0"), zc.getAnchor().*);
 
     zc.setCursor(.{ .x = max, .y = max });
-    zc.doVisualMode(.swap_anchor);
+    try zc.doVisualMode(.swap_anchor);
     try t.expectEqual(Position{ .x = max, .y = max }, zc.getAnchor().*);
     try t.expectEqual(Position.fromAddress("B0"), zc.cursor);
 
     zc.setCursor(.{ .x = max - 10, .y = max - 10 });
-    zc.doVisualMode(.swap_anchor);
+    try zc.doVisualMode(.swap_anchor);
     try t.expectEqual(Position{ .x = max - 10, .y = max - 10 }, zc.getAnchor().*);
     try t.expectEqual(Position{ .x = max, .y = max }, zc.cursor);
 
     // visual_move_left
-    zc.doVisualMode(.visual_move_left);
+    try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = max - 1, .y = max }, zc.cursor);
     try t.expectEqual(Position{ .x = max - 11, .y = max - 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.visual_move_left);
+    try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = max - 2, .y = max }, zc.cursor);
     try t.expectEqual(Position{ .x = max - 12, .y = max - 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.visual_move_left);
+    try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = max - 3, .y = max }, zc.cursor);
     try t.expectEqual(Position{ .x = max - 13, .y = max - 10 }, zc.getAnchor().*);
 
     // with counts
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.visual_move_left);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = max - 12, .y = max }, zc.cursor);
     try t.expectEqual(Position{ .x = max - 22, .y = max - 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.{ .count = 1 });
-    zc.doVisualMode(.{ .count = 0 });
-    zc.doVisualMode(.visual_move_left);
+    try zc.doVisualMode(.{ .count = 1 });
+    try zc.doVisualMode(.{ .count = 0 });
+    try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = max - 22, .y = max }, zc.cursor);
     try t.expectEqual(Position{ .x = max - 32, .y = max - 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.visual_move_left);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = max - 10021, .y = max }, zc.cursor);
     try t.expectEqual(Position{ .x = max - 10031, .y = max - 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.visual_move_left);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = 10, .y = max }, zc.cursor);
     try t.expectEqual(Position{ .x = 0, .y = max - 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.visual_move_left);
+    try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = 10, .y = max }, zc.cursor);
     try t.expectEqual(Position{ .x = 0, .y = max - 10 }, zc.getAnchor().*);
 
     // visual_move_right
     zc.setCursor(.{ .x = 0, .y = 0 });
     zc.getAnchor().* = .{ .x = 10, .y = 10 };
-    zc.doVisualMode(.visual_move_right);
+    try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = 1, .y = 0 }, zc.cursor);
     try t.expectEqual(Position{ .x = 11, .y = 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.visual_move_right);
+    try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = 2, .y = 0 }, zc.cursor);
     try t.expectEqual(Position{ .x = 12, .y = 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.visual_move_right);
+    try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = 3, .y = 0 }, zc.cursor);
     try t.expectEqual(Position{ .x = 13, .y = 10 }, zc.getAnchor().*);
 
     // with counts
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.visual_move_right);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = 12, .y = 0 }, zc.cursor);
     try t.expectEqual(Position{ .x = 22, .y = 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.{ .count = 1 });
-    zc.doVisualMode(.{ .count = 0 });
-    zc.doVisualMode(.visual_move_right);
+    try zc.doVisualMode(.{ .count = 1 });
+    try zc.doVisualMode(.{ .count = 0 });
+    try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = 22, .y = 0 }, zc.cursor);
     try t.expectEqual(Position{ .x = 32, .y = 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.visual_move_right);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = 10021, .y = 0 }, zc.cursor);
     try t.expectEqual(Position{ .x = 10031, .y = 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.visual_move_right);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = max - 10, .y = 0 }, zc.cursor);
     try t.expectEqual(Position{ .x = max, .y = 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.visual_move_right);
+    try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = max - 10, .y = 0 }, zc.cursor);
     try t.expectEqual(Position{ .x = max, .y = 10 }, zc.getAnchor().*);
 
     // visual_move_up
     zc.setCursor(.{ .x = max, .y = max });
     zc.getAnchor().* = .{ .x = max - 10, .y = max - 10 };
-    zc.doVisualMode(.visual_move_up);
+    try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = max - 1, .x = max }, zc.cursor);
     try t.expectEqual(Position{ .y = max - 11, .x = max - 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.visual_move_up);
+    try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = max - 2, .x = max }, zc.cursor);
     try t.expectEqual(Position{ .y = max - 12, .x = max - 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.visual_move_up);
+    try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = max - 3, .x = max }, zc.cursor);
     try t.expectEqual(Position{ .y = max - 13, .x = max - 10 }, zc.getAnchor().*);
 
     // with counts
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.visual_move_up);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = max - 12, .x = max }, zc.cursor);
     try t.expectEqual(Position{ .y = max - 22, .x = max - 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.{ .count = 1 });
-    zc.doVisualMode(.{ .count = 0 });
-    zc.doVisualMode(.visual_move_up);
+    try zc.doVisualMode(.{ .count = 1 });
+    try zc.doVisualMode(.{ .count = 0 });
+    try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = max - 22, .x = max }, zc.cursor);
     try t.expectEqual(Position{ .y = max - 32, .x = max - 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.visual_move_up);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = max - 10021, .x = max }, zc.cursor);
     try t.expectEqual(Position{ .y = max - 10031, .x = max - 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.visual_move_up);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = 10, .x = max }, zc.cursor);
     try t.expectEqual(Position{ .y = 0, .x = max - 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.visual_move_up);
+    try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = 10, .x = max }, zc.cursor);
     try t.expectEqual(Position{ .y = 0, .x = max - 10 }, zc.getAnchor().*);
 
     // visual_move_down
     zc.setCursor(.{ .y = 0, .x = 0 });
     zc.getAnchor().* = .{ .y = 10, .x = 10 };
-    zc.doVisualMode(.visual_move_down);
+    try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = 1, .x = 0 }, zc.cursor);
     try t.expectEqual(Position{ .y = 11, .x = 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.visual_move_down);
+    try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = 2, .x = 0 }, zc.cursor);
     try t.expectEqual(Position{ .y = 12, .x = 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.visual_move_down);
+    try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = 3, .x = 0 }, zc.cursor);
     try t.expectEqual(Position{ .y = 13, .x = 10 }, zc.getAnchor().*);
 
     // with counts
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.visual_move_down);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = 12, .x = 0 }, zc.cursor);
     try t.expectEqual(Position{ .y = 22, .x = 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.{ .count = 1 });
-    zc.doVisualMode(.{ .count = 0 });
-    zc.doVisualMode(.visual_move_down);
+    try zc.doVisualMode(.{ .count = 1 });
+    try zc.doVisualMode(.{ .count = 0 });
+    try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = 22, .x = 0 }, zc.cursor);
     try t.expectEqual(Position{ .y = 32, .x = 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.visual_move_down);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = 10021, .x = 0 }, zc.cursor);
     try t.expectEqual(Position{ .y = 10031, .x = 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.{ .count = 9 });
-    zc.doVisualMode(.visual_move_down);
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.{ .count = 9 });
+    try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = max - 10, .x = 0 }, zc.cursor);
     try t.expectEqual(Position{ .y = max, .x = 10 }, zc.getAnchor().*);
-    zc.doVisualMode(.visual_move_down);
+    try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = max - 10, .x = 0 }, zc.cursor);
     try t.expectEqual(Position{ .y = max, .x = 10 }, zc.getAnchor().*);
 }
