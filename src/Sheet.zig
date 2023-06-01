@@ -76,6 +76,14 @@ pub const Undo = union(enum) {
         ast: Ast,
     },
     delete_cell: Position,
+    set_column_width: struct {
+        col: u16,
+        width: u16,
+    },
+    set_column_precision: struct {
+        col: u16,
+        precision: u8,
+    },
 };
 
 pub fn init(allocator: Allocator) Sheet {
@@ -118,7 +126,7 @@ pub fn pushUndo(sheet: *Sheet, un: Undo, opts: UndoOpts) Allocator.Error!void {
     // The ast is left dangling if adding an undo fails, so we destroy it as a last resort.
     errdefer switch (u) {
         .set_cell => |*t| t.ast.deinit(sheet.allocator),
-        .delete_cell => {},
+        .delete_cell, .set_column_width, .set_column_precision => {},
     };
 
     switch (opts.undo_type) {
@@ -138,27 +146,141 @@ pub fn pushUndo(sheet: *Sheet, un: Undo, opts: UndoOpts) Allocator.Error!void {
 
 pub fn undo(sheet: *Sheet) Allocator.Error!void {
     var u = sheet.undos.popOrNull() orelse return;
+    const opts = .{ .undo_type = .redo };
     switch (u) {
         .set_cell => |*t| {
             errdefer t.ast.deinit(sheet.allocator);
-            try sheet.setCell(t.pos, .{ .ast = t.ast }, .{ .undo_type = .redo });
+            try sheet.setCell(t.pos, .{ .ast = t.ast }, opts);
         },
         .delete_cell => |pos| {
-            try sheet.deleteCell(pos, .{ .undo_type = .redo });
+            try sheet.deleteCell(pos, opts);
         },
+        .set_column_width => |t| try sheet.setWidth(t.col, t.width, opts),
+        .set_column_precision => |t| try sheet.setPrecision(t.col, t.precision, opts),
     }
 }
 
 pub fn redo(sheet: *Sheet) Allocator.Error!void {
     var u = sheet.redos.popOrNull() orelse return;
+    const opts = .{ .clear_redos = false };
     switch (u) {
         .set_cell => |*t| {
             errdefer t.ast.deinit(sheet.allocator);
-            try sheet.setCell(t.pos, .{ .ast = t.ast }, .{ .clear_redos = false });
+            try sheet.setCell(t.pos, .{ .ast = t.ast }, opts);
         },
         .delete_cell => |pos| {
-            try sheet.deleteCell(pos, .{ .clear_redos = false });
+            try sheet.deleteCell(pos, opts);
         },
+        .set_column_width => |t| try sheet.setWidth(t.col, t.width, opts),
+        .set_column_precision => |t| try sheet.setPrecision(t.col, t.precision, opts),
+    }
+}
+
+pub fn setWidth(
+    sheet: *Sheet,
+    column_index: u16,
+    width: u16,
+    opts: UndoOpts,
+) Allocator.Error!void {
+    if (sheet.columns.getPtr(column_index)) |col| {
+        try sheet.setColWidth(col, column_index, width, opts);
+    }
+}
+
+pub fn setColWidth(
+    sheet: *Sheet,
+    col: *Column,
+    index: u16,
+    width: u16,
+    opts: UndoOpts,
+) Allocator.Error!void {
+    if (width == col.width) return;
+    const old_width = col.width;
+    col.width = width;
+    try sheet.pushUndo(
+        .{
+            .set_column_width = .{
+                .col = index,
+                .width = old_width,
+            },
+        },
+        opts,
+    );
+}
+
+pub fn incWidth(
+    sheet: *Sheet,
+    column_index: u16,
+    n: u16,
+    opts: UndoOpts,
+) Allocator.Error!void {
+    if (sheet.columns.getPtr(column_index)) |col| {
+        try sheet.setColWidth(col, column_index, col.width +| n, opts);
+    }
+}
+
+pub fn decWidth(
+    sheet: *Sheet,
+    column_index: u16,
+    n: u16,
+    opts: UndoOpts,
+) Allocator.Error!void {
+    if (sheet.columns.getPtr(column_index)) |col| {
+        try sheet.setColWidth(col, column_index, col.width -| n, opts);
+    }
+}
+
+pub fn setPrecision(
+    sheet: *Sheet,
+    column_index: u16,
+    precision: u8,
+    opts: UndoOpts,
+) Allocator.Error!void {
+    if (sheet.columns.getPtr(column_index)) |col| {
+        try sheet.setColPrecision(col, column_index, precision, opts);
+    }
+}
+
+pub fn setColPrecision(
+    sheet: *Sheet,
+    col: *Column,
+    index: u16,
+    precision: u8,
+    opts: UndoOpts,
+) Allocator.Error!void {
+    if (precision == col.precision) return;
+    const old_precision = col.precision;
+    col.precision = precision;
+    try sheet.pushUndo(
+        .{
+            .set_column_precision = .{
+                .col = index,
+                .precision = old_precision,
+            },
+        },
+        opts,
+    );
+}
+
+pub fn incPrecision(
+    sheet: *Sheet,
+    column_index: u16,
+    n: u8,
+    opts: UndoOpts,
+) Allocator.Error!void {
+    if (sheet.columns.getPtr(column_index)) |col| {
+        try sheet.setColPrecision(col, column_index, col.precision +| n, opts);
+    }
+}
+
+pub fn decPrecision(
+    sheet: *Sheet,
+    column_index: u16,
+    n: u8,
+    opts: UndoOpts,
+) Allocator.Error!void {
+    if (sheet.columns.getPtr(column_index)) |col| {
+        try sheet.setColPrecision(col, column_index, col.precision -| n, opts);
     }
 }
 

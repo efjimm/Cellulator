@@ -668,7 +668,6 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
             try self.sheet.redo();
             self.tui.update.cells = true;
         },
-
         .cell_cursor_up => self.cursorUp(),
         .cell_cursor_down => self.cursorDown(),
         .cell_cursor_left => self.cursorLeft(),
@@ -683,10 +682,10 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
         },
         .next_populated_cell => self.cursorNextPopulatedCell(),
         .prev_populated_cell => self.cursorPrevPopulatedCell(),
-        .increase_precision => self.cursorIncPrecision(),
-        .decrease_precision => self.cursorDecPrecision(),
-        .increase_width => self.cursorIncWidth(),
-        .decrease_width => self.cursorDecWidth(),
+        .increase_precision => try self.cursorIncPrecision(),
+        .decrease_precision => try self.cursorDecPrecision(),
+        .increase_width => try self.cursorIncWidth(),
+        .decrease_width => try self.cursorDecWidth(),
         .assign_cell => {
             self.setMode(.command_insert);
             const list = self.commandList();
@@ -962,7 +961,7 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
             .set_cell => |t| {
                 self.delAstAssumeCapacity(t.ast);
             },
-            .delete_cell => {},
+            .delete_cell, .set_column_width, .set_column_precision => {},
         }
     }
     for (sheet.redos.items) |undo| {
@@ -970,7 +969,7 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
             .set_cell => |t| {
                 self.delAstAssumeCapacity(t.ast);
             },
-            .delete_cell => {},
+            .delete_cell, .set_column_width, .set_column_precision => {},
         }
     }
 
@@ -1241,65 +1240,54 @@ pub fn clampScreenToCursorX(self: *Self) void {
     }
 }
 
-pub fn setPrecision(self: *Self, column: u16, new_precision: u8) void {
-    if (self.sheet.columns.getPtr(column)) |col| {
-        col.precision = new_precision;
-        self.tui.update.cells = true;
-    }
+pub fn setPrecision(self: *Self, column: u16, new_precision: u8) Allocator.Error!void {
+    try self.sheet.setPrecision(column, new_precision, .{});
+    self.tui.update.cells = true;
 }
 
-pub fn incPrecision(self: *Self, column: u16, count: u8) void {
-    if (self.sheet.columns.getPtr(column)) |col| {
-        col.precision +|= count;
-        self.tui.update.cells = true;
-    }
+pub fn incPrecision(self: *Self, column: u16, count: u8) Allocator.Error!void {
+    try self.sheet.incPrecision(column, count, .{});
+    self.tui.update.cells = true;
 }
 
-pub fn decPrecision(self: *Self, column: u16, count: u8) void {
-    if (self.sheet.columns.getPtr(column)) |col| {
-        col.precision -|= count;
-        self.tui.update.cells = true;
-    }
+pub fn decPrecision(self: *Self, column: u16, count: u8) Allocator.Error!void {
+    try self.sheet.decPrecision(column, count, .{});
+    self.tui.update.cells = true;
 }
 
-pub inline fn cursorIncPrecision(self: *Self) void {
+pub inline fn cursorIncPrecision(self: *Self) Allocator.Error!void {
     const count = @intCast(u8, @min(std.math.maxInt(u8), self.getCount()));
-    self.incPrecision(self.cursor.x, count);
+    try self.incPrecision(self.cursor.x, count);
     self.resetCount();
 }
 
-pub inline fn cursorDecPrecision(self: *Self) void {
+pub inline fn cursorDecPrecision(self: *Self) Allocator.Error!void {
     const count = @intCast(u8, @min(std.math.maxInt(u8), self.getCount()));
-    self.decPrecision(self.cursor.x, count);
+    try self.decPrecision(self.cursor.x, count);
     self.resetCount();
 }
 
-pub fn incWidth(self: *Self, column: u16, n: u8) void {
-    if (self.sheet.columns.getPtr(column)) |col| {
-        col.width +|= n;
-        self.tui.update.cells = true;
-        self.tui.update.column_headings = true;
-    }
+pub fn incWidth(self: *Self, column: u16, n: u8) Allocator.Error!void {
+    try self.sheet.incWidth(column, n, .{});
+    self.tui.update.cells = true;
+    self.tui.update.column_headings = true;
 }
 
-pub fn decWidth(self: *Self, column: u16, n: u8) void {
-    if (self.sheet.columns.getPtr(column)) |col| {
-        const new_width = col.width -| n;
-        col.width = @max(1, new_width);
-        self.tui.update.cells = true;
-        self.tui.update.column_headings = true;
-    }
+pub fn decWidth(self: *Self, column: u16, n: u8) Allocator.Error!void {
+    try self.sheet.decWidth(column, n, .{});
+    self.tui.update.cells = true;
+    self.tui.update.column_headings = true;
 }
 
-pub inline fn cursorIncWidth(self: *Self) void {
+pub inline fn cursorIncWidth(self: *Self) Allocator.Error!void {
     const count = @intCast(u8, @min(std.math.maxInt(u8), self.getCount()));
-    self.incWidth(self.cursor.x, count);
+    try self.incWidth(self.cursor.x, count);
     self.resetCount();
 }
 
-pub inline fn cursorDecWidth(self: *Self) void {
+pub inline fn cursorDecWidth(self: *Self) Allocator.Error!void {
     const count = @intCast(u8, @min(std.math.maxInt(u8), self.getCount()));
-    self.decWidth(self.cursor.x, count);
+    try self.decWidth(self.cursor.x, count);
     self.resetCount();
 }
 
