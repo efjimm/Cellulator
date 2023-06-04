@@ -85,6 +85,9 @@ implemented commands. Values surrounded in {} are optional.
 - `e{!} filepath` Try to load from the given file. Will not continue if there are unsaved changes.
   This can be overridden by specifying a ! after 'e'.
 - `q{!}` Quit the program. Will not continue if there are unsaved changes, unless ! is specified.
+- fill (range) (value) {increment}
+  - Fills the given range with value, incrementing by increment each cell. Increment is applied
+    left to right, top to bottom. Example: ":fill b1:d12 30 0.2"
 
 ## Keybinds
 

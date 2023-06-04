@@ -316,6 +316,7 @@ fn handleInput(self: *Self) !void {
             error.InvalidCommand => self.setStatusMessage(.err, "Invalid command", .{}),
             error.OutOfMemory => self.setStatusMessage(.err, "Out of memory!", .{}),
             error.UnexpectedToken => self.setStatusMessage(.err, "Unexpected token", .{}),
+            error.InvalidSyntax => self.setStatusMessage(.err, "Invalid syntax", .{}),
         },
         .prefix => return,
         .not_found => {
@@ -887,6 +888,7 @@ const Cmd = enum {
     load_force,
     quit,
     quit_force,
+    fill,
 };
 
 const cmds = std.ComptimeStringMap(Cmd, .{
@@ -896,12 +898,15 @@ const cmds = std.ComptimeStringMap(Cmd, .{
     .{ "e!", .load_force },
     .{ "q", .quit },
     .{ "q!", .quit_force },
+    .{ "fill", .fill },
 });
 
 pub const RunCommandError = error{
     InvalidCommand,
+    InvalidSyntax,
+    InvalidCellAddress,
     EmptyFileName,
-};
+} || Allocator.Error;
 
 pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
     var iter = utils.wordIterator(str);
@@ -934,6 +939,57 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
             }
         },
         .load_force => try self.loadCmd(iter.next() orelse ""),
+        .fill => {
+            // TODO: This parses differently than ranges in assignments, due to using a WordIterator
+
+            const range = blk: {
+                const string = iter.next() orelse return error.InvalidSyntax;
+                var range_iter = std.mem.splitScalar(u8, string, ':');
+                const lhs = range_iter.next() orelse return error.InvalidSyntax;
+                const rhs = range_iter.next() orelse return error.InvalidSyntax;
+
+                const p1 = Position.fromAddress(lhs) catch return error.InvalidCellAddress;
+                const p2 = Position.fromAddress(rhs) catch return error.InvalidCellAddress;
+
+                break :blk .{
+                    .tl = Position.topLeft(p1, p2),
+                    .br = Position.bottomRight(p1, p2),
+                };
+            };
+
+            const value = blk: {
+                const string = iter.next() orelse return error.InvalidSyntax;
+                const num = std.fmt.parseFloat(f64, string) catch return error.InvalidSyntax;
+                break :blk num;
+            };
+
+            const increment = blk: {
+                const string = iter.next() orelse break :blk 0;
+                const num = std.fmt.parseFloat(f64, string) catch return error.InvalidSyntax;
+                break :blk num;
+            };
+
+            defer self.sheet.endUndoGroup();
+            self.tui.update.cells = true;
+
+            var i: f64 = value;
+            for (range.tl.y..@as(usize, range.br.y) + 1) |y| {
+                for (range.tl.x..@as(usize, range.br.x) + 1) |x| {
+                    var ast = self.newAst();
+
+                    try ast.nodes.append(self.allocator, .{ .number = i });
+                    errdefer ast.deinit(self.allocator);
+
+                    try self.sheet.setCell(
+                        .{ .y = @intCast(u16, y), .x = @intCast(u16, x) },
+                        .{ .ast = ast },
+                        .{},
+                    );
+
+                    i += increment;
+                }
+            }
+        },
     }
 }
 
