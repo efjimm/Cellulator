@@ -784,6 +784,7 @@ fn parseCommand(self: *Self, str: []const u8) ParseCommandError!void {
                 self.delAstAssumeCapacity(ast);
                 return err;
             };
+            self.sheet.endUndoGroup();
             self.tui.update.cursor = true;
             self.tui.update.cells = true;
         },
@@ -969,6 +970,7 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
             .delete_cell,
             .set_column_width,
             .set_column_precision,
+            .group_end,
             => {},
         }
     }
@@ -977,13 +979,14 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
     for (redo_slice.items(.tags), 0..) |tag, i| {
         switch (tag) {
             .set_cell => {
-                const index = undo_slice.items(.data)[i].set_cell.index;
+                const index = redo_slice.items(.data)[i].set_cell.index;
                 const ast = sheet.undo_asts.get(index);
                 self.delAstAssumeCapacity(ast);
             },
             .delete_cell,
             .set_column_width,
             .set_column_precision,
+            .group_end,
             => {},
         }
     }
@@ -1007,6 +1010,7 @@ pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
 
     var sfa = std.heap.stackFallback(8192, sheet.allocator);
     var allocator = sfa.get();
+    defer sheet.endUndoGroup();
     while (try reader.readUntilDelimiterOrEofAlloc(allocator, '\n', std.math.maxInt(u30))) |line| {
         defer {
             allocator.free(line);
@@ -1069,6 +1073,7 @@ pub fn writeFile(sheet: *Sheet, opts: WriteFileOptions) !void {
 
 pub fn deleteCell(self: *Self) Allocator.Error!void {
     try self.sheet.deleteCell(self.cursor, .{});
+    self.sheet.endUndoGroup();
 
     self.tui.update.cells = true;
     self.tui.update.cursor = true;

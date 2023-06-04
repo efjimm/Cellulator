@@ -76,6 +76,8 @@ pub const AstMap = std.AutoArrayHashMapUnmanaged(u32, Ast);
 pub const UndoType = enum { undo, redo };
 
 pub const Undo = union(enum) {
+    group_end,
+
     set_cell: struct {
         pos: Position,
         index: u32,
@@ -145,27 +147,55 @@ pub fn clearAndFreeUndos(sheet: *Sheet, comptime kind: UndoType) void {
             .delete_cell,
             .set_column_width,
             .set_column_precision,
+            .group_end,
             => {},
         }
     }
     list.len = 0;
 }
 
+pub fn endUndoGroup(sheet: *Sheet) void {
+    if (sheet.undos.len > 0 and sheet.undos.items(.tags)[sheet.undos.len - 1] != .group_end) {
+        sheet.undos.appendAssumeCapacity(.group_end);
+    }
+}
+
+fn endRedoGroup(sheet: *Sheet) void {
+    if (sheet.redos.len > 0 and sheet.redos.items(.tags)[sheet.redos.len - 1] != .group_end) {
+        sheet.redos.appendAssumeCapacity(.group_end);
+    }
+}
+
 pub fn pushUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
     switch (opts.undo_type) {
         .undo => {
-            try sheet.undos.append(sheet.allocator, u);
+            // Ensure capacity for 3 elements so the group marker can be always
+            // added without extra error handling.
+            try sheet.undos.ensureUnusedCapacity(sheet.allocator, 3);
+            sheet.undos.appendAssumeCapacity(u);
             if (opts.clear_redos) sheet.clearAndFreeUndos(.redo);
         },
-        .redo => try sheet.redos.append(sheet.allocator, u),
+        .redo => {
+            try sheet.redos.ensureUnusedCapacity(sheet.allocator, 3);
+            sheet.redos.appendAssumeCapacity(u);
+        },
     }
 }
 
 pub fn undo(sheet: *Sheet) Allocator.Error!void {
-    var u = sheet.undos.popOrNull() orelse return;
+    const _u = sheet.undos.popOrNull() orelse return;
+    // All undo groups MUST end with a group marker.
+    assert(_u == .group_end);
+
+    defer {
+        sheet.endUndoGroup();
+        sheet.endRedoGroup();
+    }
+
     const opts = .{ .undo_type = .redo };
-    switch (u) {
-        .set_cell => |*t| {
+    while (sheet.undos.popOrNull()) |u| switch (u) {
+        .group_end => break,
+        .set_cell => |t| {
             errdefer sheet.freeUndoAst(t.index);
             const ast = sheet.undo_asts.get(t.index);
             try sheet.setCell(t.pos, .{ .ast = ast }, opts);
@@ -175,14 +205,23 @@ pub fn undo(sheet: *Sheet) Allocator.Error!void {
         },
         .set_column_width => |t| try sheet.setWidth(t.col, t.width, opts),
         .set_column_precision => |t| try sheet.setPrecision(t.col, t.precision, opts),
-    }
+    };
 }
 
 pub fn redo(sheet: *Sheet) Allocator.Error!void {
-    var u = sheet.redos.popOrNull() orelse return;
+    const _u = sheet.redos.popOrNull() orelse return;
+    // All undo groups MUST end with a group marker.
+    assert(_u == .group_end);
+
+    defer {
+        sheet.endUndoGroup();
+        sheet.endRedoGroup();
+    }
+
     const opts = .{ .clear_redos = false };
-    switch (u) {
-        .set_cell => |*t| {
+    while (sheet.redos.popOrNull()) |u| switch (u) {
+        .group_end => break,
+        .set_cell => |t| {
             errdefer sheet.freeUndoAst(t.index);
             const ast = sheet.undo_asts.get(t.index);
             try sheet.setCell(t.pos, .{ .ast = ast }, opts);
@@ -192,7 +231,7 @@ pub fn redo(sheet: *Sheet) Allocator.Error!void {
         },
         .set_column_width => |t| try sheet.setWidth(t.col, t.width, opts),
         .set_column_precision => |t| try sheet.setPrecision(t.col, t.precision, opts),
-    }
+    };
 }
 
 pub fn setWidth(
@@ -412,6 +451,8 @@ pub fn deleteCellsInRange(sheet: *Sheet, p1: Position, p2: Position) Allocator.E
     const positions = sheet.cells.keys();
     const tl = Position.topLeft(p1, p2);
     const br = Position.bottomRight(p1, p2);
+
+    defer sheet.endUndoGroup();
 
     while (i < positions.len) {
         const pos = positions[i];
@@ -878,6 +919,7 @@ fn testCellEvaluation(allocator: Allocator) !void {
             cell: Cell,
         ) Allocator.Error!void {
             var c = cell;
+            defer _sheet.endUndoGroup();
             _sheet.setCell(pos, c, .{}) catch |err| {
                 c.deinit(_allocator);
                 return err;
@@ -1209,44 +1251,45 @@ fn testCellEvaluation(allocator: Allocator) !void {
     }
 
     // Check undos
-    try t.expectEqual(@as(usize, 149), sheet.undos.len);
+    try t.expectEqual(@as(usize, 298), sheet.undos.len);
     try t.expectEqual(@as(usize, 0), sheet.redos.len);
 
     try sheet.undo();
-    try t.expectEqual(@as(usize, 148), sheet.undos.len);
-    try t.expectEqual(@as(usize, 1), sheet.redos.len);
+    try t.expectEqual(@as(usize, 296), sheet.undos.len);
+    try t.expectEqual(@as(usize, 2), sheet.redos.len);
 
     try sheet.redo();
-    try t.expectEqual(@as(usize, 149), sheet.undos.len);
+    try t.expectEqual(@as(usize, 298), sheet.undos.len);
     try t.expectEqual(@as(usize, 0), sheet.redos.len);
 
     try sheet.deleteCell(try Position.fromAddress("A22"), .{});
     try sheet.deleteCell(try Position.fromAddress("G20"), .{});
+    sheet.endUndoGroup();
 
-    try t.expectEqual(@as(usize, 151), sheet.undos.len);
+    try t.expectEqual(@as(usize, 301), sheet.undos.len);
     try t.expectEqual(@as(usize, 0), sheet.redos.len);
 
     try sheet.undo();
-    try t.expectEqual(@as(usize, 150), sheet.undos.len);
-    try t.expectEqual(@as(usize, 1), sheet.redos.len);
-    try sheet.undo();
-    try t.expectEqual(@as(usize, 149), sheet.undos.len);
-    try t.expectEqual(@as(usize, 2), sheet.redos.len);
-    try sheet.undo();
-    try t.expectEqual(@as(usize, 148), sheet.undos.len);
+    try t.expectEqual(@as(usize, 298), sheet.undos.len);
     try t.expectEqual(@as(usize, 3), sheet.redos.len);
+    try sheet.undo();
+    try t.expectEqual(@as(usize, 296), sheet.undos.len);
+    try t.expectEqual(@as(usize, 5), sheet.redos.len);
+    try sheet.undo();
+    try t.expectEqual(@as(usize, 294), sheet.undos.len);
+    try t.expectEqual(@as(usize, 7), sheet.redos.len);
 
     try sheet.redo();
-    try t.expectEqual(@as(usize, 149), sheet.undos.len);
-    try t.expectEqual(@as(usize, 2), sheet.redos.len);
+    try t.expectEqual(@as(usize, 296), sheet.undos.len);
+    try t.expectEqual(@as(usize, 5), sheet.redos.len);
     try sheet.redo();
-    try t.expectEqual(@as(usize, 150), sheet.undos.len);
-    try t.expectEqual(@as(usize, 1), sheet.redos.len);
+    try t.expectEqual(@as(usize, 298), sheet.undos.len);
+    try t.expectEqual(@as(usize, 3), sheet.redos.len);
     try sheet.redo();
-    try t.expectEqual(@as(usize, 151), sheet.undos.len);
+    try t.expectEqual(@as(usize, 301), sheet.undos.len);
     try t.expectEqual(@as(usize, 0), sheet.redos.len);
     try sheet.redo();
-    try t.expectEqual(@as(usize, 151), sheet.undos.len);
+    try t.expectEqual(@as(usize, 301), sheet.undos.len);
     try t.expectEqual(@as(usize, 0), sheet.redos.len);
 }
 
