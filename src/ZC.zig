@@ -951,30 +951,45 @@ pub fn loadCmd(self: *Self, filepath: []const u8) !void {
 }
 
 pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
-    const count = self.sheet.cellCount() + sheet.undos.items.len + sheet.redos.items.len;
+    const count = self.sheet.cellCount() + sheet.undos.len + sheet.redos.len;
     try self.asts.ensureUnusedCapacity(self.allocator, count);
+
     for (sheet.cells.values()) |cell| {
         self.delAstAssumeCapacity(cell.ast);
     }
-    for (sheet.undos.items) |undo| {
-        switch (undo) {
-            .set_cell => |t| {
-                self.delAstAssumeCapacity(t.ast);
+
+    const undo_slice = sheet.undos.slice();
+    for (undo_slice.items(.tags), 0..) |tag, i| {
+        switch (tag) {
+            .set_cell => {
+                const index = undo_slice.items(.data)[i].set_cell.index;
+                const ast = sheet.undo_asts.get(index);
+                self.delAstAssumeCapacity(ast);
             },
-            .delete_cell, .set_column_width, .set_column_precision => {},
-        }
-    }
-    for (sheet.redos.items) |undo| {
-        switch (undo) {
-            .set_cell => |t| {
-                self.delAstAssumeCapacity(t.ast);
-            },
-            .delete_cell, .set_column_width, .set_column_precision => {},
+            .delete_cell,
+            .set_column_width,
+            .set_column_precision,
+            => {},
         }
     }
 
-    sheet.undos.clearRetainingCapacity();
-    sheet.redos.clearRetainingCapacity();
+    const redo_slice = sheet.redos.slice();
+    for (redo_slice.items(.tags), 0..) |tag, i| {
+        switch (tag) {
+            .set_cell => {
+                const index = undo_slice.items(.data)[i].set_cell.index;
+                const ast = sheet.undo_asts.get(index);
+                self.delAstAssumeCapacity(ast);
+            },
+            .delete_cell,
+            .set_column_width,
+            .set_column_precision,
+            => {},
+        }
+    }
+
+    sheet.undos.len = 0;
+    sheet.redos.len = 0;
     sheet.cells.clearRetainingCapacity();
 }
 
