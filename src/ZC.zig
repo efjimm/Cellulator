@@ -1,6 +1,6 @@
 const std = @import("std");
 const utils = @import("utils.zig");
-const Ast = @import("Parse.zig");
+const Ast = @import("Ast.zig").Ast(false);
 const spoon = @import("spoon");
 const Sheet = @import("Sheet.zig");
 const Tui = @import("Tui.zig");
@@ -645,12 +645,17 @@ pub fn doCommandToMode(self: *Self, action: CommandAction) void {
 
 pub fn doNormalMode(self: *Self, action: Action) !void {
     switch (action) {
-        .enter_command_mode => {
+        inline .enter_command_mode, .enter_cell_text => |_, tag| {
             self.setMode(.command_insert);
             const writer = self.commandList().writer(self.allocator);
-            writer.writeByte(':') catch unreachable;
+            if (tag == .enter_command_mode) {
+                writer.writeByte(':') catch unreachable;
+            } else {
+                writer.writeByte('\\') catch unreachable;
+            }
             self.setCommandCursor(1);
         },
+        .fit_text => {},
         .enter_visual_mode => self.setMode(.visual),
         .enter_normal_mode => {},
         .dismiss_count_or_status_message => {
@@ -765,8 +770,9 @@ const ParseCommandError = Ast.ParseError || RunCommandError;
 fn parseCommand(self: *Self, str: []const u8) ParseCommandError!void {
     if (str.len == 0) return;
 
-    if (str[0] == ':') {
-        return self.runCommand(str[1..]);
+    switch (str[0]) {
+        ':' => return self.runCommand(str[1..]),
+        else => {},
     }
 
     var ast = self.newAst();
@@ -781,7 +787,7 @@ fn parseCommand(self: *Self, str: []const u8) ParseCommandError!void {
             const pos = ast.nodes.items(.data)[op.lhs].cell;
             ast.splice(op.rhs);
 
-            self.sheet.setCell(pos, .{ .ast = ast }, .{}) catch |err| {
+            self.sheet.setCellAst(pos, ast, .{}) catch |err| {
                 self.delAstAssumeCapacity(ast);
                 return err;
             };
@@ -789,6 +795,7 @@ fn parseCommand(self: *Self, str: []const u8) ParseCommandError!void {
             self.tui.update.cursor = true;
             self.tui.update.cells = true;
         },
+        .label => {},
         else => {
             self.delAstAssumeCapacity(ast);
         },
@@ -980,9 +987,9 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
                     try ast.nodes.append(self.allocator, .{ .number = i });
                     errdefer ast.deinit(self.allocator);
 
-                    try self.sheet.setCell(
+                    try self.sheet.setCellAst(
                         .{ .y = @intCast(u16, y), .x = @intCast(u16, x) },
-                        .{ .ast = ast },
+                        ast,
                         .{},
                     );
 
@@ -1086,7 +1093,7 @@ pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
                 const assignment = ast.nodes.items(.data)[ast.rootNodeIndex()].assignment;
                 const pos = ast.nodes.items(.data)[assignment.lhs].cell;
                 ast.splice(assignment.rhs);
-                try sheet.setCell(pos, .{ .ast = ast }, .{});
+                try sheet.setCellAst(pos, ast, .{});
             },
             else => continue,
         }
@@ -1374,12 +1381,18 @@ pub fn newAst(self: *Self) Ast {
 pub fn delAst(self: *Self, ast: Ast) Allocator.Error!void {
     var temp = ast;
     temp.nodes.len = 0;
+    // if (temp.strings) |strings| {
+    //     strings.clearRetainingCapacity();
+    // }
     try self.asts.append(self.allocator, temp);
 }
 
 pub fn delAstAssumeCapacity(self: *Self, ast: Ast) void {
     var temp = ast;
     temp.nodes.len = 0;
+    // if (temp.strings) |strings| {
+    //     strings.clearRetainingCapacity();
+    // }
     self.asts.appendAssumeCapacity(temp);
 }
 
@@ -1489,6 +1502,7 @@ pub const Action = union(enum) {
     enter_normal_mode,
     enter_visual_mode,
     enter_command_mode,
+    enter_cell_text,
     dismiss_count_or_status_message,
 
     undo,
@@ -1511,6 +1525,7 @@ pub const Action = union(enum) {
     increase_width,
     decrease_width,
     assign_cell,
+    fit_text,
 
     visual_move_left,
     visual_move_right,
@@ -1790,6 +1805,8 @@ const outer_keys = [_]KeyMaps{
         .keys = &.{
             .{ "<C-[>", .dismiss_count_or_status_message },
             .{ "<Escape>", .dismiss_count_or_status_message },
+            .{ "\\", .enter_cell_text },
+            .{ "aa", .fit_text },
             .{ "+", .increase_width },
             .{ "-", .decrease_width },
             .{ "f", .increase_precision },
@@ -2419,12 +2436,12 @@ test "Motions normal mode" {
     try zc.doNormalMode(.prev_populated_cell);
     try t.expectEqual(Position{ .x = 50, .y = 50 }, zc.cursor);
 
-    try zc.parseCommand("C4 = 0");
-    try zc.parseCommand("ZZZ0 = 5");
-    try zc.parseCommand("A4 = 1");
-    try zc.parseCommand("B2 = 4");
-    try zc.parseCommand("B0 = 3");
-    try zc.parseCommand("A500 = 2");
+    try zc.parseCommand("let C4 = 0");
+    try zc.parseCommand("let ZZZ0 = 5");
+    try zc.parseCommand("let A4 = 1");
+    try zc.parseCommand("let B2 = 4");
+    try zc.parseCommand("let B0 = 3");
+    try zc.parseCommand("let A500 = 2");
     try zc.updateCells();
 
     zc.setCursor(.{ .x = 0, .y = 0 });
@@ -2624,12 +2641,12 @@ test "Motions visual mode" {
     try zc.doVisualMode(.prev_populated_cell);
     try t.expectEqual(Position{ .x = 50, .y = 50 }, zc.cursor);
 
-    try zc.parseCommand("C4 = 0");
-    try zc.parseCommand("ZZZ0 = 5");
-    try zc.parseCommand("A4 = 1");
-    try zc.parseCommand("B2 = 4");
-    try zc.parseCommand("B0 = 3");
-    try zc.parseCommand("A500 = 2");
+    try zc.parseCommand("let C4 = 0");
+    try zc.parseCommand("let ZZZ0 = 5");
+    try zc.parseCommand("let A4 = 1");
+    try zc.parseCommand("let B2 = 4");
+    try zc.parseCommand("let B0 = 3");
+    try zc.parseCommand("let A500 = 2");
     try zc.updateCells();
 
     zc.setCursor(.{ .x = 0, .y = 0 });
@@ -2872,19 +2889,19 @@ test "Command history" {
     try t.expectEqual(@as(usize, 0), zc.current_command);
     try t.expectEqual(@as(usize, 1), zc.command_history.items.len);
     zc.setMode(.command_insert);
-    try zc.doCommandInsertMode(.none, "A0 = 5");
+    try zc.doCommandInsertMode(.none, "let A0 = 5");
     try zc.doCommandInsertMode(.submit_command, "");
     zc.setMode(.command_insert);
     try t.expectEqual(@as(usize, 1), zc.current_command);
     try t.expectEqual(@as(usize, 2), zc.command_history.items.len);
-    try zc.doCommandInsertMode(.none, "A0 = 10");
+    try zc.doCommandInsertMode(.none, "let A0 = 10");
     try zc.doCommandInsertMode(.submit_command, "");
     zc.setMode(.command_insert);
     try t.expectEqual(@as(usize, 2), zc.current_command);
     try t.expectEqual(@as(usize, 3), zc.command_history.items.len);
 
-    try t.expectEqualStrings("A0 = 5", zc.command_history.items[0].items);
-    try t.expectEqualStrings("A0 = 10", zc.command_history.items[1].items);
+    try t.expectEqualStrings("let A0 = 5", zc.command_history.items[0].items);
+    try t.expectEqualStrings("let A0 = 10", zc.command_history.items[1].items);
     try t.expectEqualStrings("", zc.command_history.items[2].items);
 
     zc.commandHistoryPrev();

@@ -138,6 +138,19 @@ pub fn renderStatus(
 
     try writer.writeAll(zc.input_buf.items);
 
+    if (zc.sheet.getCell(zc.cursor)) |cell| {
+        switch (cell.getValue()) {
+            .err => {
+                try writer.writeByte('[');
+                try rc.setStyle(.{ .fg = .red });
+                try writer.print("{}", .{cell});
+                try rc.setStyle(.{});
+                try writer.writeByte(']');
+            },
+            else => try writer.print("[{}]", .{cell}),
+        }
+    }
+
     try rpw.pad();
 }
 
@@ -418,18 +431,22 @@ pub fn renderCell(
     const writer = rpw.writer();
 
     if (zc.sheet.getCell(pos)) |cell| {
-        if (cell.getValue()) |num| {
-            try writer.print("{d: >[1].[2]}", .{
-                num, width, col.precision,
-            });
-        } else {
-            if (pos.hash() != zc.cursor.hash()) {
-                try rc.setStyle(.{ .fg = .red });
-                try writer.print("{s: >[1]}", .{ "ERROR", width });
-                try rc.setStyle(.{});
-            } else {
-                try writer.print("{s: >[1]}", .{ "ERROR", width });
-            }
+        switch (cell.getValue()) {
+            .none => {},
+            .err => {
+                if (pos.hash() != zc.cursor.hash()) {
+                    try rc.setStyle(.{ .fg = .red });
+                    try writer.print("{s: >[1]}", .{ "ERROR", width });
+                    try rc.setStyle(.{});
+                } else {
+                    try writer.print("{s: >[1]}", .{ "ERROR", width });
+                }
+            },
+            .num => |num| {
+                try writer.print("{d: >[1].[2]}", .{
+                    num, width, col.precision,
+                });
+            },
         }
     } else {
         try writer.print("{s: >[1]}", .{ "", width });
