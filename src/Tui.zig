@@ -138,7 +138,9 @@ pub fn renderStatus(
 
     try writer.writeAll(zc.input_buf.items);
 
-    if (zc.sheet.getCell(zc.cursor)) |cell| {
+    if (zc.sheet.text_cells.get(zc.cursor)) |cell| {
+        try writer.writeAll(cell.text.items());
+    } else if (zc.sheet.getCell(zc.cursor)) |cell| {
         switch (cell.getValue()) {
             .err => {
                 try writer.writeByte('[');
@@ -430,7 +432,15 @@ pub fn renderCell(
     var rpw = rc.restrictedPaddingWriter(width);
     const writer = rpw.writer();
 
-    if (zc.sheet.getCell(pos)) |cell| {
+    if (zc.sheet.text_cells.get(pos)) |cell| {
+        if (pos.hash() == zc.cursor.hash()) {
+            try writer.print("{s: ^[1]}", .{ cell.text.items(), width });
+        } else {
+            try rc.setStyle(.{ .fg = .green });
+            try writer.print("{s: ^[1]}", .{ cell.text.items(), width });
+            try rc.setStyle(.{});
+        }
+    } else if (zc.sheet.getCell(pos)) |cell| {
         switch (cell.getValue()) {
             .none => {},
             .err => {
@@ -451,7 +461,7 @@ pub fn renderCell(
     } else {
         try writer.print("{s: >[1]}", .{ "", width });
     }
-    try rpw.finish();
+    try rpw.pad();
     return width;
 }
 

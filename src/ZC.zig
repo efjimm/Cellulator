@@ -1,6 +1,6 @@
 const std = @import("std");
 const utils = @import("utils.zig");
-const Ast = @import("Ast.zig").Ast(false);
+const Ast = @import("Ast.zig");
 const spoon = @import("spoon");
 const Sheet = @import("Sheet.zig");
 const Tui = @import("Tui.zig");
@@ -194,6 +194,7 @@ pub fn inputBufSlice(self: *Self) ![:0]const u8 {
 pub fn run(self: *Self) !void {
     while (self.running) {
         try self.updateCells();
+        try self.updateTextCells();
         try self.tui.render(self);
         try self.handleInput();
     }
@@ -224,7 +225,11 @@ pub fn dismissStatusMessage(self: *Self) void {
 }
 
 pub fn updateCells(self: *Self) Allocator.Error!void {
-    return self.sheet.update();
+    return self.sheet.update(.number);
+}
+
+pub fn updateTextCells(self: *Self) Allocator.Error!void {
+    return self.sheet.update(.text);
 }
 
 fn setMode(self: *Self, new_mode: Mode) void {
@@ -645,14 +650,10 @@ pub fn doCommandToMode(self: *Self, action: CommandAction) void {
 
 pub fn doNormalMode(self: *Self, action: Action) !void {
     switch (action) {
-        inline .enter_command_mode, .enter_cell_text => |_, tag| {
+        .enter_command_mode => {
             self.setMode(.command_insert);
             const writer = self.commandList().writer(self.allocator);
-            if (tag == .enter_command_mode) {
-                writer.writeByte(':') catch unreachable;
-            } else {
-                writer.writeByte('\\') catch unreachable;
-            }
+            writer.writeByte(':') catch unreachable;
             self.setCommandCursor(1);
         },
         .fit_text => {},
@@ -692,10 +693,15 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
         .decrease_precision => try self.cursorDecPrecision(),
         .increase_width => try self.cursorIncWidth(),
         .decrease_width => try self.cursorDecWidth(),
-        .assign_cell => {
+        inline .assign_cell, .assign_label => |_, tag| {
             self.setMode(.command_insert);
             const list = self.commandList();
             const writer = list.writer(self.allocator);
+            switch (tag) {
+                .assign_cell => writer.writeAll("let ") catch unreachable,
+                .assign_label => writer.writeAll("label ") catch unreachable,
+                else => unreachable,
+            }
             self.cursor.writeCellAddress(writer) catch unreachable;
             writer.writeAll(" = ") catch unreachable;
             self.setCommandCursor(@intCast(u16, list.items.len));
@@ -776,10 +782,8 @@ fn parseCommand(self: *Self, str: []const u8) ParseCommandError!void {
     }
 
     var ast = self.newAst();
-    ast.parse(self.allocator, str) catch |err| {
-        self.delAstAssumeCapacity(ast);
-        return err;
-    };
+    errdefer self.delAstAssumeCapacity(ast);
+    try ast.parse(self.allocator, str);
 
     const root = ast.rootNode();
     switch (root) {
@@ -787,15 +791,22 @@ fn parseCommand(self: *Self, str: []const u8) ParseCommandError!void {
             const pos = ast.nodes.items(.data)[op.lhs].cell;
             ast.splice(op.rhs);
 
-            self.sheet.setCellAst(pos, ast, .{}) catch |err| {
-                self.delAstAssumeCapacity(ast);
-                return err;
-            };
+            try self.sheet.setCell(pos, ast, .{});
             self.sheet.endUndoGroup();
             self.tui.update.cursor = true;
             self.tui.update.cells = true;
         },
-        .label => {},
+        .label => |op| {
+            const pos = ast.nodes.items(.data)[op.lhs].cell;
+            ast.splice(op.rhs);
+
+            const strings = try ast.dupeStrings(self.allocator, str);
+            errdefer if (strings) |s| s.destroy(self.allocator);
+            try self.sheet.setTextCell(pos, strings, ast, .{});
+            self.sheet.endUndoGroup();
+            self.tui.update.cursor = true;
+            self.tui.update.cells = true;
+        },
         else => {
             self.delAstAssumeCapacity(ast);
         },
@@ -987,7 +998,7 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
                     try ast.nodes.append(self.allocator, .{ .number = i });
                     errdefer ast.deinit(self.allocator);
 
-                    try self.sheet.setCellAst(
+                    try self.sheet.setCell(
                         .{ .y = @intCast(u16, y), .x = @intCast(u16, x) },
                         ast,
                         .{},
@@ -1015,11 +1026,18 @@ pub fn loadCmd(self: *Self, filepath: []const u8) !void {
 }
 
 pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
-    const count = self.sheet.cellCount() + sheet.undos.len + sheet.redos.len;
+    const count = self.sheet.cellCount() + self.sheet.text_cells.entries.len +
+        sheet.undos.len + sheet.redos.len;
     try self.asts.ensureUnusedCapacity(self.allocator, count);
 
     for (sheet.cells.values()) |cell| {
         self.delAstAssumeCapacity(cell.ast);
+    }
+
+    for (sheet.text_cells.values()) |*cell| {
+        self.delAstAssumeCapacity(cell.ast);
+        cell.text.deinit(self.allocator);
+        if (cell.strings) |strings| strings.destroy(self.allocator);
     }
 
     const undo_slice = sheet.undos.slice();
@@ -1030,7 +1048,14 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
                 const ast = sheet.undo_asts.get(index);
                 self.delAstAssumeCapacity(ast);
             },
+            .set_text_cell => {
+                const index = undo_slice.items(.data)[i].set_text_cell.index;
+                const t = sheet.undo_text_asts.get(index);
+                if (t.strings) |strings| strings.destroy(self.allocator);
+                self.delAstAssumeCapacity(t.ast);
+            },
             .delete_cell,
+            .delete_text_cell,
             .set_column_width,
             .set_column_precision,
             .group_end,
@@ -1046,7 +1071,14 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
                 const ast = sheet.undo_asts.get(index);
                 self.delAstAssumeCapacity(ast);
             },
+            .set_text_cell => {
+                const index = redo_slice.items(.data)[i].set_text_cell.index;
+                const t = sheet.undo_text_asts.get(index);
+                if (t.strings) |strings| strings.destroy(self.allocator);
+                self.delAstAssumeCapacity(t.ast);
+            },
             .delete_cell,
+            .delete_text_cell,
             .set_column_width,
             .set_column_precision,
             .group_end,
@@ -1057,6 +1089,7 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
     sheet.undos.len = 0;
     sheet.redos.len = 0;
     sheet.cells.clearRetainingCapacity();
+    sheet.text_cells.clearRetainingCapacity();
 }
 
 pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
@@ -1087,15 +1120,28 @@ pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
         };
         errdefer self.asts.appendAssumeCapacity(ast);
 
+        const data = ast.nodes.items(.data);
         const root = ast.rootTag();
         switch (root) {
             .assignment => {
-                const assignment = ast.nodes.items(.data)[ast.rootNodeIndex()].assignment;
-                const pos = ast.nodes.items(.data)[assignment.lhs].cell;
+                const assignment = data[ast.rootNodeIndex()].assignment;
+                const pos = data[assignment.lhs].cell;
                 ast.splice(assignment.rhs);
-                try sheet.setCellAst(pos, ast, .{});
+                try sheet.setCell(pos, ast, .{});
             },
-            else => continue,
+            .label => {
+                const label = data[ast.rootNodeIndex()].label;
+                const pos = data[label.lhs].cell;
+                ast.splice(label.rhs);
+
+                const strings = try ast.dupeStrings(self.allocator, line);
+                errdefer if (strings) |s| s.destroy(self.allocator);
+
+                try sheet.setTextCell(pos, strings, ast, .{});
+            },
+            else => {
+                self.delAstAssumeCapacity(ast);
+            },
         }
     }
 
@@ -1119,11 +1165,12 @@ pub fn writeFile(sheet: *Sheet, opts: WriteFileOptions) !void {
     var buf = std.io.bufferedWriter(atomic_file.file.writer());
     const writer = buf.writer();
 
-    for (sheet.cells.keys(), sheet.cells.values()) |pos, *cell| {
-        try pos.writeCellAddress(writer);
-        try writer.writeAll(" = ");
-        try cell.ast.print(writer);
-        try writer.writeByte('\n');
+    for (sheet.cells.keys(), sheet.cells.values()) |pos, cell| {
+        try writer.print("let {} = {}\n", .{ pos, cell });
+    }
+
+    for (sheet.text_cells.keys(), sheet.text_cells.values()) |pos, cell| {
+        try writer.print("label {} = {}\n", .{ pos, cell });
     }
 
     try buf.flush();
@@ -1135,7 +1182,8 @@ pub fn writeFile(sheet: *Sheet, opts: WriteFileOptions) !void {
 }
 
 pub fn deleteCell(self: *Self) Allocator.Error!void {
-    try self.sheet.deleteCell(self.cursor, .{});
+    try self.sheet.deleteCell(.number, self.cursor, .{});
+    try self.sheet.deleteCell(.text, self.cursor, .{});
     self.sheet.endUndoGroup();
 
     self.tui.update.cells = true;
@@ -1381,18 +1429,12 @@ pub fn newAst(self: *Self) Ast {
 pub fn delAst(self: *Self, ast: Ast) Allocator.Error!void {
     var temp = ast;
     temp.nodes.len = 0;
-    // if (temp.strings) |strings| {
-    //     strings.clearRetainingCapacity();
-    // }
     try self.asts.append(self.allocator, temp);
 }
 
 pub fn delAstAssumeCapacity(self: *Self, ast: Ast) void {
     var temp = ast;
     temp.nodes.len = 0;
-    // if (temp.strings) |strings| {
-    //     strings.clearRetainingCapacity();
-    // }
     self.asts.appendAssumeCapacity(temp);
 }
 
@@ -1502,7 +1544,6 @@ pub const Action = union(enum) {
     enter_normal_mode,
     enter_visual_mode,
     enter_command_mode,
-    enter_cell_text,
     dismiss_count_or_status_message,
 
     undo,
@@ -1525,6 +1566,7 @@ pub const Action = union(enum) {
     increase_width,
     decrease_width,
     assign_cell,
+    assign_label,
     fit_text,
 
     visual_move_left,
@@ -1805,7 +1847,7 @@ const outer_keys = [_]KeyMaps{
         .keys = &.{
             .{ "<C-[>", .dismiss_count_or_status_message },
             .{ "<Escape>", .dismiss_count_or_status_message },
-            .{ "\\", .enter_cell_text },
+            .{ "\\", .assign_label },
             .{ "aa", .fit_text },
             .{ "+", .increase_width },
             .{ "-", .decrease_width },

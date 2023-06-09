@@ -8,6 +8,7 @@ const std = @import("std");
 const Position = @import("Sheet.zig").Position;
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 const HeaderList = @import("header_list.zig").HeaderList;
+const SizedArrayListUnmanaged = @import("sized_array_list.zig").SizedArrayListUnmanaged;
 
 const Tokenizer = @import("Tokenizer.zig");
 const Parser = @import("Parser.zig");
@@ -18,660 +19,824 @@ const Builtin = Parser.Builtin;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-pub fn Ast(comptime _: bool) type {
-    return struct {
-        pub const Node = Parser.Node;
+pub const Node = Parser.Node;
 
-        const NodeList = MultiArrayList(Node);
-        pub const ParseError = Parser.ParseError;
+const NodeList = MultiArrayList(Node);
+pub const ParseError = Parser.ParseError;
 
-        nodes: NodeList = .{},
+nodes: NodeList = .{},
 
-        const Self = @This();
+const Self = @This();
 
-        pub fn parse(ast: *Self, allocator: Allocator, source: []const u8) ParseError!void {
-            ast.nodes.len = 0;
-            const tokenizer = Tokenizer.init(source);
+pub fn parse(ast: *Self, allocator: Allocator, source: []const u8) ParseError!void {
+    ast.nodes.len = 0;
+    const tokenizer = Tokenizer.init(source);
 
-            var parser = Parser.init(allocator, tokenizer, .{ .nodes = ast.nodes });
-            errdefer parser.deinit();
-            try parser.parse();
+    var parser = Parser.init(allocator, tokenizer, .{ .nodes = ast.nodes });
+    errdefer parser.deinit();
+    try parser.parse();
 
-            ast.nodes = parser.nodes;
-            //ast.strings = parser.strings;
+    ast.nodes = parser.nodes;
+}
+
+pub fn dupeStrings(
+    ast: *Self,
+    allocator: Allocator,
+    source: []const u8,
+) Allocator.Error!?*HeaderList(u8, u32) {
+    const slice = ast.nodes.slice();
+    var nstrings: u32 = 0;
+    const len = blk: {
+        var len: u32 = 0;
+        for (slice.items(.tags), slice.items(.data)) |tag, data| {
+            switch (tag) {
+                .string_literal => {
+                    const str = data.string_literal;
+                    len += str.end - str.start;
+                    nstrings += 1;
+                },
+                else => {},
+            }
         }
+        break :blk len;
+    };
 
-        pub fn fromSource(allocator: Allocator, source: []const u8) ParseError!Self {
-            var ast = Self{};
-            errdefer ast.deinit(allocator);
-            try ast.parse(allocator, source);
-            return ast;
-        }
-
-        pub fn parseExpression(allocator: Allocator, source: []const u8) ParseError!Self {
-            const tokenizer = Tokenizer.init(source);
-
-            var parser = Parser.init(allocator, tokenizer, .{});
-            errdefer parser.deinit();
-
-            _ = try parser.parseExpression();
-            _ = try parser.expectToken(.eof);
-
-            return Self{
-                .nodes = parser.nodes,
+    if (len == 0) {
+        if (nstrings != 0) {
+            for (slice.items(.tags), 0..) |tag, i| switch (tag) {
+                .string_literal => {
+                    slice.items(.data)[i].string_literal = .{
+                        .start = 0,
+                        .end = 0,
+                    };
+                },
+                else => {},
             };
         }
+        return null;
+    }
 
-        pub fn deinit(ast: *Self, allocator: Allocator) void {
-            ast.nodes.deinit(allocator);
-            // if (ast.strings) |strings| {
-            //     strings.destroy(allocator);
-            // }
-            ast.* = .{};
+    const list = try HeaderList(u8, u32).create(allocator, len);
+
+    // Append contents of all string literals to the list, and update their `start` and `end`
+    // indices to be into this list.
+    for (slice.items(.tags), 0..) |tag, i| switch (tag) {
+        .string_literal => {
+            const str = &slice.items(.data)[i].string_literal;
+            const bytes = source[str.start..str.end];
+            str.start = list.len;
+            list.appendSliceAssumeCapacity(bytes);
+            str.end = list.len;
+        },
+        else => {},
+    };
+    return list;
+}
+
+pub fn fromSource(allocator: Allocator, source: []const u8) ParseError!Self {
+    var ast = Self{};
+    errdefer ast.deinit(allocator);
+    try ast.parse(allocator, source);
+    return ast;
+}
+
+pub fn parseExpression(allocator: Allocator, source: []const u8) ParseError!Self {
+    const tokenizer = Tokenizer.init(source);
+
+    var parser = Parser.init(allocator, tokenizer, .{});
+    errdefer parser.deinit();
+
+    _ = try parser.parseExpression();
+    _ = try parser.expectToken(.eof);
+
+    return Self{
+        .nodes = parser.nodes,
+    };
+}
+
+pub fn deinit(ast: *Self, allocator: Allocator) void {
+    ast.nodes.deinit(allocator);
+    // if (ast.strings) |strings| {
+    //     strings.destroy(allocator);
+    // }
+    ast.* = .{};
+}
+
+pub const Slice = struct {
+    nodes: NodeList.Slice,
+
+    pub fn toAst(ast: *Slice) Self {
+        return .{
+            .nodes = ast.nodes.toMultiArrayList(),
+        };
+    }
+
+    pub fn rootNodeIndex(ast: Slice) u32 {
+        return @intCast(u32, ast.nodes.len) - 1;
+    }
+
+    pub fn rootTag(ast: Slice) u32 {
+        return ast.nodes.items(.tags)[ast.nodes.len - 1];
+    }
+
+    pub fn rootNode(ast: Slice) Node {
+        return ast.nodes.get(ast.rootNodeIndex());
+    }
+
+    pub fn leftMostChild(ast: Slice, index: u32) u32 {
+        assert(index < ast.nodes.len);
+
+        const node = ast.nodes.get(index);
+
+        return switch (node) {
+            .string_literal, .number, .column, .cell => index,
+            .assignment,
+            .label,
+            .concat,
+            .add,
+            .sub,
+            .mul,
+            .div,
+            .mod,
+            .range,
+            => |b| ast.leftMostChild(b.lhs),
+            .builtin => |b| ast.leftMostChild(b.args),
+            .arg_list => |args| ast.leftMostChild(args.start),
+        };
+    }
+
+    /// Removes all nodes except for the given index and its children
+    /// Nodes in the list are already sorted in reverse topological order which allows us to overwrite
+    /// nodes sequentially without loss. This function preserves reverse topological order.
+    pub fn splice(ast: *Slice, new_root: u32) void {
+        const first_node = ast.leftMostChild(new_root);
+        const new_len = new_root + 1 - first_node;
+
+        for (0..new_len, first_node..new_root + 1) |i, j| {
+            var n = ast.nodes.get(@intCast(u32, j));
+            switch (n) {
+                .assignment,
+                .label,
+                .concat,
+                .add,
+                .sub,
+                .mul,
+                .div,
+                .mod,
+                .range,
+                => |*b| {
+                    b.lhs -= first_node;
+                    b.rhs -= first_node;
+                },
+                .builtin => |*b| {
+                    b.args -= first_node;
+                },
+                .arg_list => |*b| {
+                    b.start -= first_node;
+                    b.end -= first_node;
+                },
+                .string_literal, .number, .column, .cell => {},
+            }
+            ast.nodes.set(@intCast(u32, i), n);
         }
 
-        pub const Slice = struct {
-            nodes: NodeList.Slice,
-            strings: ?*HeaderList(u8, u32) = null,
+        ast.nodes.len = new_len;
+    }
 
-            pub fn toAst(ast: *Slice) Self {
-                return .{
-                    .nodes = ast.nodes.toMultiArrayList(),
-                };
-            }
+    pub fn printFrom(ast: Slice, index: u32, writer: anytype, strings: []const u8) !void {
+        const node = ast.nodes.get(index);
 
-            pub fn rootNodeIndex(ast: Slice) u32 {
-                return @intCast(u32, ast.nodes.len) - 1;
-            }
+        switch (node) {
+            .number => |n| try writer.print("{d}", .{n}),
+            .column => |col| try Position.writeColumnAddress(col, writer),
+            .cell => |pos| try pos.writeCellAddress(writer),
 
-            pub fn rootTag(ast: Slice) u32 {
-                return ast.nodes.items(.tags)[ast.nodes.len - 1];
-            }
+            .string_literal => |str| {
+                try writer.print("\"{s}\"", .{strings[str.start..str.end]});
+            },
+            .concat => |b| {
+                try ast.printFrom(b.lhs, writer, strings);
+                try writer.writeAll(" # ");
+                try ast.printFrom(b.rhs, writer, strings);
+            },
+            .assignment => |b| {
+                try writer.writeAll("let ");
+                try ast.printFrom(b.lhs, writer, strings);
+                try writer.writeAll(" = ");
+                try ast.printFrom(b.rhs, writer, strings);
+            },
+            .label => |b| {
+                try writer.writeAll("label ");
+                try ast.printFrom(b.lhs, writer, strings);
+                try writer.writeAll(" = ");
+                try ast.printFrom(b.rhs, writer, strings);
+            },
+            .add => |b| {
+                try ast.printFrom(b.lhs, writer, strings);
+                try writer.writeAll(" + ");
+                try ast.printFrom(b.rhs, writer, strings);
+            },
+            .sub => |b| {
+                try ast.printFrom(b.lhs, writer, strings);
+                try writer.writeAll(" - ");
+                try ast.printFrom(b.rhs, writer, strings);
+            },
+            .mul => |b| {
+                try ast.printFrom(b.lhs, writer, strings);
+                try writer.writeAll(" * ");
+                try ast.printFrom(b.rhs, writer, strings);
+            },
+            .div => |b| {
+                try ast.printFrom(b.lhs, writer, strings);
+                try writer.writeAll(" / ");
+                try ast.printFrom(b.rhs, writer, strings);
+            },
+            .mod => |b| {
+                try ast.printFrom(b.lhs, writer, strings);
+                try writer.writeAll(" % ");
+                try ast.printFrom(b.rhs, writer, strings);
+            },
+            .range => |b| {
+                try ast.printFrom(b.lhs, writer, strings);
+                try writer.writeByte(':');
+                try ast.printFrom(b.rhs, writer, strings);
+            },
 
-            pub fn rootNode(ast: Slice) Node {
-                return ast.nodes.get(ast.rootNodeIndex());
-            }
-
-            pub fn leftMostChild(ast: Slice, index: u32) u32 {
-                assert(index < ast.nodes.len);
-
-                const node = ast.nodes.get(index);
-
-                return switch (node) {
-                    .string_literal, .number, .column, .cell => index,
-                    .assignment, .label, .add, .sub, .mul, .div, .mod, .range => |b| ast.leftMostChild(b.lhs),
-                    .builtin => |b| ast.leftMostChild(b.args),
-                    .arg_list => |args| ast.leftMostChild(args.start),
-                };
-            }
-
-            /// Removes all nodes except for the given index and its children
-            /// Nodes in the list are already sorted in reverse topological order which allows us to overwrite
-            /// nodes sequentially without loss. This function preserves reverse topological order.
-            pub fn splice(ast: *Slice, new_root: u32) void {
-                const first_node = ast.leftMostChild(new_root);
-                const new_len = new_root + 1 - first_node;
-
-                for (0..new_len, first_node..new_root + 1) |i, j| {
-                    var n = ast.nodes.get(@intCast(u32, j));
-                    switch (n) {
-                        .assignment, .label, .add, .sub, .mul, .div, .mod, .range => |*b| {
-                            b.lhs -= first_node;
-                            b.rhs -= first_node;
-                        },
-                        .builtin => |*b| {
-                            b.args -= first_node;
-                        },
-                        .arg_list => |*b| {
-                            b.start -= first_node;
-                            b.end -= first_node;
-                        },
-                        .string_literal, .number, .column, .cell => {},
-                    }
-                    ast.nodes.set(@intCast(u32, i), n);
+            .builtin => |b| {
+                switch (b.tag) {
+                    inline else => |tag| try writer.print("@{s}(", .{@tagName(tag)}),
                 }
+                try ast.printFrom(b.args, writer, strings);
+                try writer.writeByte(')');
+            },
 
-                ast.nodes.len = new_len;
-            }
-
-            pub fn printFrom(ast: Slice, index: u32, writer: anytype) !void {
-                const node = ast.nodes.get(index);
-
-                switch (node) {
-                    .number => |n| try writer.print("{d}", .{n}),
-                    .column => |col| try Position.writeColumnAddress(col, writer),
-                    .cell => |pos| try pos.writeCellAddress(writer),
-
-                    .string_literal => |str| {
-                        const items = ast.strings.?.items();
-                        try writer.print("\"{s}\"", .{items[str.start .. str.start + str.len]});
-                    },
-                    .assignment => |b| {
-                        try writer.writeAll("let ");
-                        try ast.printFrom(b.lhs, writer);
-                        try writer.writeAll(" = ");
-                        try ast.printFrom(b.rhs, writer);
-                    },
-                    .label => |b| {
-                        try writer.writeAll("label ");
-                        try ast.printFrom(b.lhs, writer);
-                        try writer.writeAll(" = ");
-                        try ast.printFrom(b.rhs, writer);
-                    },
-                    .add => |b| {
-                        try ast.printFrom(b.lhs, writer);
-                        try writer.writeAll(" + ");
-                        try ast.printFrom(b.rhs, writer);
-                    },
-                    .sub => |b| {
-                        try ast.printFrom(b.lhs, writer);
-                        try writer.writeAll(" - ");
-                        try ast.printFrom(b.rhs, writer);
-                    },
-                    .mul => |b| {
-                        try ast.printFrom(b.lhs, writer);
-                        try writer.writeAll(" * ");
-                        try ast.printFrom(b.rhs, writer);
-                    },
-                    .div => |b| {
-                        try ast.printFrom(b.lhs, writer);
-                        try writer.writeAll(" / ");
-                        try ast.printFrom(b.rhs, writer);
-                    },
-                    .mod => |b| {
-                        try ast.printFrom(b.lhs, writer);
-                        try writer.writeAll(" % ");
-                        try ast.printFrom(b.rhs, writer);
-                    },
-                    .range => |b| {
-                        try ast.printFrom(b.lhs, writer);
-                        try writer.writeByte(':');
-                        try ast.printFrom(b.rhs, writer);
-                    },
-
-                    .builtin => |b| {
-                        switch (b.tag) {
-                            inline else => |tag| try writer.print("@{s}(", .{@tagName(tag)}),
-                        }
-                        try ast.printFrom(b.args, writer);
-                        try writer.writeByte(')');
-                    },
-
-                    .arg_list => |args| {
-                        try ast.printFrom(args.start, writer);
-                        for (args.start + 1..args.end) |i| {
-                            try writer.writeAll(", ");
-                            try ast.printFrom(@intCast(u32, i), writer);
-                        }
-                    },
+            .arg_list => |args| {
+                try ast.printFrom(args.start, writer, strings);
+                for (args.start + 1..args.end) |i| {
+                    try writer.writeAll(", ");
+                    try ast.printFrom(@intCast(u32, i), writer, strings);
                 }
-            }
+            },
+        }
+    }
 
-            /// Same as `traverse`, but starting from the node at the given index.
-            fn traverseFrom(ast: Slice, index: u32, order: TraverseOrder, context: anytype) !bool {
-                const node = ast.nodes.get(index);
+    /// Same as `traverse`, but starting from the node at the given index.
+    fn traverseFrom(ast: Slice, index: u32, order: TraverseOrder, context: anytype) !bool {
+        const node = ast.nodes.get(index);
 
-                switch (node) {
-                    .assignment, .label, .add, .sub, .mul, .div, .mod, .range => |b| {
-                        switch (order) {
-                            .first => {
-                                if (!try context.evalCell(index)) return false;
-                                if (!try ast.traverseFrom(b.lhs, order, context)) return false;
-                                if (!try ast.traverseFrom(b.rhs, order, context)) return false;
-                            },
-                            .middle => {
-                                if (!try ast.traverseFrom(b.lhs, order, context)) return false;
-                                if (!try context.evalCell(index)) return false;
-                                if (!try ast.traverseFrom(b.rhs, order, context)) return false;
-                            },
-                            .last => {
-                                if (!try ast.traverseFrom(b.lhs, order, context)) return false;
-                                if (!try ast.traverseFrom(b.rhs, order, context)) return false;
-                                if (!try context.evalCell(index)) return false;
-                            },
-                        }
+        switch (node) {
+            .assignment, .label, .concat, .add, .sub, .mul, .div, .mod, .range => |b| {
+                switch (order) {
+                    .first => {
+                        if (!try context.evalCell(index)) return false;
+                        if (!try ast.traverseFrom(b.lhs, order, context)) return false;
+                        if (!try ast.traverseFrom(b.rhs, order, context)) return false;
                     },
-                    .string_literal, .number, .cell, .column => {
+                    .middle => {
+                        if (!try ast.traverseFrom(b.lhs, order, context)) return false;
+                        if (!try context.evalCell(index)) return false;
+                        if (!try ast.traverseFrom(b.rhs, order, context)) return false;
+                    },
+                    .last => {
+                        if (!try ast.traverseFrom(b.lhs, order, context)) return false;
+                        if (!try ast.traverseFrom(b.rhs, order, context)) return false;
                         if (!try context.evalCell(index)) return false;
                     },
-                    .builtin => |b| {
-                        if (!try ast.traverseFrom(b.args, order, context)) return false;
-                    },
-                    .arg_list => |args| {
-                        var iter = ast.argIterator(args);
-
-                        if (order != .last and !try context.evalCell(index)) return false;
-                        while (iter.next()) |arg| {
-                            if (!try ast.traverseFrom(arg, order, context)) return false;
-                        }
-                        if (order == .last and !try context.evalCell(index)) return false;
-                    },
                 }
-
-                return true;
-            }
-
-            /// Iterates over the arguments in an ArgList backwards
-            pub const ArgIterator = struct {
-                ast: *const Slice,
-                args: ArgList,
-                index: u32,
-
-                pub fn next(iter: *ArgIterator) ?u32 {
-                    if (iter.index <= iter.args.start) return null;
-                    const ret = iter.index - 1;
-                    iter.index = iter.ast.leftMostChild(ret);
-                    return ret;
-                }
-            };
-
-            pub fn argIterator(ast: *const Slice, args: ArgList) ArgIterator {
-                return ArgIterator{
-                    .ast = ast,
-                    .args = args,
-                    .index = args.end,
-                };
-            }
-
-            pub fn evalNode(ast: Slice, index: u32, context: anytype) !f64 {
-                const node = ast.nodes.get(index);
-
-                return switch (node) {
-                    .number => |n| n,
-                    .cell => |pos| try context.evalCell(pos) orelse 0,
-                    .add => |op| (try ast.evalNode(op.lhs, context) + try ast.evalNode(op.rhs, context)),
-                    .sub => |op| (try ast.evalNode(op.lhs, context) - try ast.evalNode(op.rhs, context)),
-                    .mul => |op| (try ast.evalNode(op.lhs, context) * try ast.evalNode(op.rhs, context)),
-                    .div => |op| (try ast.evalNode(op.lhs, context) / try ast.evalNode(op.rhs, context)),
-                    .mod => |op| @rem(try ast.evalNode(op.lhs, context), try ast.evalNode(op.rhs, context)),
-                    .builtin => |b| ast.evalBuiltin(b, context),
-                    .string_literal, .range, .column, .assignment, .label, .arg_list => EvalError.NotEvaluable,
-                };
-            }
-
-            fn evalBuiltin(ast: Slice, builtin: Builtin, context: anytype) !f64 {
-                const args = ast.nodes.items(.data)[builtin.args].arg_list;
-                return switch (builtin.tag) {
-                    .sum => try ast.evalSum(args, context),
-                    .prod => try ast.evalProd(args, context),
-                    .avg => try ast.evalAvg(args, context),
-                    .max => try ast.evalMax(args, context),
-                    .min => try ast.evalMin(args, context),
-                };
-            }
-
-            pub fn evalSum(ast: Slice, args: ArgList, context: anytype) !f64 {
+            },
+            .string_literal, .number, .cell, .column => {
+                if (!try context.evalCell(index)) return false;
+            },
+            .builtin => |b| {
+                if (!try ast.traverseFrom(b.args, order, context)) return false;
+            },
+            .arg_list => |args| {
                 var iter = ast.argIterator(args);
 
-                var total: f64 = 0;
-                while (iter.next()) |i| {
-                    const tag = ast.nodes.items(.tags)[i];
-                    total += if (tag == .range) try ast.sumRange(ast.nodes.items(.data)[i].range, context) else try ast.evalNode(i, context);
+                if (order != .last and !try context.evalCell(index)) return false;
+                while (iter.next()) |arg| {
+                    if (!try ast.traverseFrom(arg, order, context)) return false;
                 }
-                return total;
-            }
-
-            pub fn sumRange(ast: Slice, range: BinaryOperator, context: anytype) !f64 {
-                const pos1 = ast.nodes.items(.data)[range.lhs].cell;
-                const pos2 = ast.nodes.items(.data)[range.rhs].cell;
-
-                const start = Position.topLeft(pos1, pos2);
-                const end = Position.bottomRight(pos1, pos2);
-
-                var total: f64 = 0;
-                for (start.y..end.y + @as(u32, 1)) |y| {
-                    for (start.x..end.x + @as(u32, 1)) |x| {
-                        total += try context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse 0;
-                    }
-                }
-                return total;
-            }
-
-            pub fn evalProd(ast: Slice, args: ArgList, context: anytype) !f64 {
-                var iter = ast.argIterator(args);
-                var total: f64 = 1;
-
-                while (iter.next()) |i| {
-                    const tag = ast.nodes.items(.tags)[i];
-                    total *= if (tag == .range) try ast.prodRange(ast.nodes.items(.data)[i].range, context) else try ast.evalNode(i, context);
-                }
-                return total;
-            }
-
-            pub fn prodRange(ast: Slice, range: BinaryOperator, context: anytype) !f64 {
-                const pos1 = ast.nodes.items(.data)[range.lhs].cell;
-                const pos2 = ast.nodes.items(.data)[range.rhs].cell;
-
-                const start = Position.topLeft(pos1, pos2);
-                const end = Position.bottomRight(pos1, pos2);
-
-                var total: f64 = 1;
-                for (start.y..end.y + @as(u32, 1)) |y| {
-                    for (start.x..end.x + @as(u32, 1)) |x| {
-                        total *= try context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse continue;
-                    }
-                }
-                return total;
-            }
-
-            pub fn evalAvg(ast: Slice, args: ArgList, context: anytype) !f64 {
-                var iter = ast.argIterator(args);
-                var total: f64 = 0;
-                var total_items: u32 = 0;
-
-                while (iter.next()) |i| {
-                    const tag = ast.nodes.items(.tags)[i];
-                    if (tag == .range) {
-                        const range = ast.nodes.items(.data)[i].range;
-                        total += try ast.sumRange(range, context);
-
-                        const p1 = ast.nodes.items(.data)[range.lhs].cell;
-                        const p2 = ast.nodes.items(.data)[range.rhs].cell;
-                        total_items += Position.area(p1, p2);
-                    } else {
-                        total += try ast.evalNode(i, context);
-                        total_items += 1;
-                    }
-                }
-
-                return total / @intToFloat(f64, total_items);
-            }
-
-            pub fn evalMax(ast: Slice, args: ArgList, context: anytype) !f64 {
-                var iter = ast.argIterator(args);
-                var max: ?f64 = null;
-
-                while (iter.next()) |i| {
-                    const tag = ast.nodes.items(.tags)[i];
-                    const res = if (tag == .range) try ast.maxRange(ast.nodes.items(.data)[i].range, context) orelse continue else try ast.evalNode(i, context);
-                    if (max == null or res > max.?)
-                        max = res;
-                }
-
-                return max orelse 0;
-            }
-
-            pub fn maxRange(ast: Slice, range: BinaryOperator, context: anytype) !?f64 {
-                const pos1 = ast.nodes.items(.data)[range.lhs].cell;
-                const pos2 = ast.nodes.items(.data)[range.rhs].cell;
-
-                const start = Position.topLeft(pos1, pos2);
-                const end = Position.bottomRight(pos1, pos2);
-
-                var max: ?f64 = null;
-                for (start.y..end.y + @as(u32, 1)) |y| {
-                    for (start.x..end.x + @as(u32, 1)) |x| {
-                        const res = try context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse continue;
-                        if (max == null or res > max.?)
-                            max = res;
-                    }
-                }
-                return max;
-            }
-
-            pub fn evalMin(ast: Slice, args: ArgList, context: anytype) !f64 {
-                var iter = ast.argIterator(args);
-                var min: ?f64 = null;
-
-                while (iter.next()) |i| {
-                    const tag = ast.nodes.items(.tags)[i];
-                    const res = if (tag == .range) try ast.minRange(ast.nodes.items(.data)[i].range, context) orelse continue else try ast.evalNode(i, context);
-                    if (min == null or res < min.?)
-                        min = res;
-                }
-
-                return min orelse 0;
-            }
-
-            pub fn minRange(ast: Slice, range: BinaryOperator, context: anytype) !?f64 {
-                const pos1 = ast.nodes.items(.data)[range.lhs].cell;
-                const pos2 = ast.nodes.items(.data)[range.rhs].cell;
-
-                const start = Position.topLeft(pos1, pos2);
-                const end = Position.bottomRight(pos1, pos2);
-
-                var min: ?f64 = null;
-                for (start.y..end.y + @as(u32, 1)) |y| {
-                    for (start.x..end.x + @as(u32, 1)) |x| {
-                        const res = try context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse continue;
-                        if (min == null or res < min.?)
-                            min = res;
-                    }
-                }
-                return min;
-            }
-        };
-
-        pub fn rootNode(ast: Self) Node {
-            return ast.nodes.get(ast.rootNodeIndex());
+                if (order == .last and !try context.evalCell(index)) return false;
+            },
         }
 
-        pub fn rootNodeIndex(ast: Self) u32 {
-            return @intCast(u32, ast.nodes.len) - 1;
-        }
+        return true;
+    }
 
-        pub fn rootTag(ast: Self) std.meta.Tag(Node) {
-            return ast.nodes.items(.tags)[ast.nodes.len - 1];
-        }
+    /// Iterates over the arguments in an ArgList backwards
+    pub const ArgIterator = struct {
+        ast: *const Slice,
+        args: ArgList,
+        index: u32,
 
-        /// Removes all nodes except for the given index and its children
-        /// Nodes in the list are already sorted in reverse topological order which allows us to overwrite
-        /// nodes sequentially without loss. This function preserves reverse topological order.
-        pub fn splice(ast: *Self, new_root: u32) void {
-            var slice = ast.toSlice();
-            slice.splice(new_root);
-            ast.* = slice.toAst();
-        }
-
-        pub fn toSlice(ast: Self) Slice {
-            return .{
-                .nodes = ast.nodes.slice(),
-            };
-        }
-
-        pub fn print(ast: *Self, writer: anytype) @TypeOf(writer).Error!void {
-            const slice = ast.toSlice();
-            return slice.printFrom(slice.rootNodeIndex(), writer);
-        }
-
-        /// The order in which nodes are evaluated.
-        const TraverseOrder = enum {
-            /// Nodes with children will be evaluated before their children
-            first,
-            /// Nodes with children will have their left child evaluated first, then themselves, then their
-            /// right child.
-            middle,
-            /// Nodes with children will be evaluated after all their children.
-            last,
-        };
-
-        /// Recursively visits every node in the tree. `context` is an instance of a type which must have
-        /// the function `fn evalCell(@TypeOf(context), u32) !bool`. This function is run on every leaf
-        /// node in the tree, with `index` being the index of the node in the `nodes` array. If the
-        /// function returns false, traversal stops immediately.
-        pub fn traverse(ast: Self, order: TraverseOrder, context: anytype) !bool {
-            const slice = ast.toSlice();
-            return slice.traverseFrom(slice.rootNodeIndex(), order, context);
-        }
-
-        pub fn leftMostChild(ast: Self, index: u32) u32 {
-            assert(index < ast.nodes.len);
-
-            const node = ast.nodes.get(index);
-
-            return switch (node) {
-                .number, .column, .cell => index,
-                .assignment, .add, .sub, .mul, .div, .mod, .range => |b| ast.leftMostChild(b.lhs),
-                .builtin => |b| ast.leftMostChild(b.args),
-                .arg_list => |args| ast.leftMostChild(args.start),
-            };
-        }
-
-        pub const EvalError = error{
-            NotEvaluable,
-        };
-
-        pub fn eval(
-            ast: Self,
-            /// An instance of a type which has the function `fn evalCell(@TypeOf(context), Position) ?f64`.
-            /// This function should return the value of the cell at the given position. It may do this
-            /// by calling this function.
-            context: anytype,
-        ) !f64 {
-            const slice = ast.toSlice();
-            return slice.evalNode(slice.rootNodeIndex(), context);
-        }
-
-        test "Parse and Eval Expression" {
-            const t = std.testing;
-            const Context = struct {
-                pub fn evalCell(_: @This(), _: Position) !?f64 {
-                    unreachable;
-                }
-            };
-
-            const Error = EvalError || Parser.ParseError;
-
-            const testExpr = struct {
-                fn func(expected: Error!f64, expr: []const u8) !void {
-                    var ast = parseExpression(t.allocator, expr) catch |err| {
-                        return if (err != expected) err else {};
-                    };
-                    defer ast.deinit(t.allocator);
-
-                    const res = ast.eval(Context{}) catch |err| return if (err != expected) err else {};
-                    const val = try expected;
-                    std.testing.expectApproxEqRel(val, res, 0.0001) catch |err| {
-                        for (0..ast.nodes.len) |i| {
-                            const u = ast.nodes.get(@intCast(u32, i));
-                            std.debug.print("{}\n", .{u});
-                        }
-                        return err;
-                    };
-                }
-            }.func;
-
-            try testExpr(-4, "3 - 5 - 2");
-            try testExpr(2, "8 / 2 / 2");
-            try testExpr(15.833333, "8 + 5 / 2 * 3 - 5 / 3 + 2");
-            try testExpr(-4, "(3 + 1) - (4 * 2)");
-            try testExpr(2, "1 + 1");
-            try testExpr(0, "100 - 100");
-            try testExpr(100, "50 - -50");
-            try testExpr(3, "@max(-500, -50000, 3, 1, 2, 0, 100 - 100, 4 / 2)");
-            try testExpr(-50000, "@min(-500, -50000, 3, 1, 2, 0, 100 - 100, 4 / 2)");
-            try testExpr(-50492, "@sum(-500, -50000, 3, 1, 2, 0, 100 - 100, 4 / 2)");
-            try testExpr(0, "@prod(-500, -50000, 3, 1, 2, 0, 100 - 100, 4 / 2)");
-            try testExpr(5.5, "@avg(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)");
-            try testExpr(5, "@max(3, 5, 100 - 100)");
-
-            // Cannot evaluate a range on its own
-            try testExpr(error.NotEvaluable, "a0:a0");
-            try testExpr(error.NotEvaluable, "a0:crxo65535");
-            try testExpr(error.NotEvaluable, "z10:xxx500");
-        }
-
-        test "Functions on Ranges" {
-            const Sheet = @import("Sheet.zig");
-            const t = std.testing;
-            const Test = struct {
-                sheet: *Sheet,
-
-                fn evalCell(context: @This(), pos: Position) !?f64 {
-                    const cell = context.sheet.getCellPtr(pos) orelse return null;
-                    return try cell.eval(context.sheet);
-                }
-
-                fn testSheetExpr(expected: f64, expr: []const u8) !void {
-                    var sheet = Sheet.init(t.allocator);
-                    defer sheet.deinit();
-
-                    try sheet.setCellAst(.{ .x = 0, .y = 0 }, try Self.parseExpression(t.allocator, "0"), .{});
-                    try sheet.setCellAst(.{ .x = 1, .y = 0 }, try Self.parseExpression(t.allocator, "100"), .{});
-                    try sheet.setCellAst(.{ .x = 0, .y = 1 }, try Self.parseExpression(t.allocator, "500"), .{});
-                    try sheet.setCellAst(.{ .x = 1, .y = 1 }, try Self.parseExpression(t.allocator, "333.33"), .{});
-
-                    var ast = try parseExpression(t.allocator, expr);
-                    defer ast.deinit(t.allocator);
-
-                    try sheet.update();
-                    const res = try ast.eval(@This(){ .sheet = &sheet });
-                    try std.testing.expectApproxEqRel(expected, res, 0.0001);
-                }
-            };
-
-            try Test.testSheetExpr(0, "@sum(a0:a0)");
-            try Test.testSheetExpr(100, "@sum(a0:b0)");
-            try Test.testSheetExpr(500, "@sum(a0:a1)");
-            try Test.testSheetExpr(933.33, "@sum(a0:b1)");
-            try Test.testSheetExpr(933.33, "@sum(a0:z10)");
-            try Test.testSheetExpr(833.33, "@sum(a1:z10)");
-            try Test.testSheetExpr(0, "@sum(c3:z10)");
-            try Test.testSheetExpr(953.33, "@sum(5, a0:z10, 5, 10)");
-            try Test.testSheetExpr(35, "@sum(5, 30 / 2, c3:z10, 5, 10)");
-            try t.expectError(error.UnexpectedToken, Test.testSheetExpr(0, "@sum()"));
-
-            try Test.testSheetExpr(0, "@prod(a0:a0)");
-            try Test.testSheetExpr(0, "@prod(a0:b0)");
-            try Test.testSheetExpr(0, "@prod(a0:a1)");
-            try Test.testSheetExpr(0, "@prod(a0:b1)");
-            try Test.testSheetExpr(166665, "@prod(a1:b1)");
-            try Test.testSheetExpr(166665, "@prod(a1:z10)");
-            try Test.testSheetExpr(333.33, "@prod(b1:z10)");
-            try Test.testSheetExpr(0, "@prod(100, -1, a0:z10, 50)");
-            try Test.testSheetExpr(-166665000, "@prod(100, -1, b0:b1, 50)");
-            try t.expectError(error.UnexpectedToken, Test.testSheetExpr(0, "@prod()"));
-
-            try Test.testSheetExpr(0, "@avg(a0:a0)");
-            try Test.testSheetExpr(50, "@avg(a0:b0)");
-            try Test.testSheetExpr(250, "@avg(a0:a1)");
-            try Test.testSheetExpr(233.3325, "@avg(a0:b1)");
-            try Test.testSheetExpr(135.47571428571428571428, "@avg(5, 5, a0:b1, 5)");
-            try t.expectError(error.UnexpectedToken, Test.testSheetExpr(0, "@avg()"));
-
-            try Test.testSheetExpr(0, "@max(a0:a0)");
-            try Test.testSheetExpr(100, "@max(a0:b0)");
-            try Test.testSheetExpr(500, "@max(a0:a1)");
-            try Test.testSheetExpr(500, "@max(a0:b1)");
-            try Test.testSheetExpr(100, "@max(a0:z0)");
-            try Test.testSheetExpr(500, "@max(a0:z10)");
-            try Test.testSheetExpr(0, "@max(c3:z10)");
-            try Test.testSheetExpr(3, "@max(3, c3:z10, 1, 2)");
-            try Test.testSheetExpr(500, "@max(3, a0:b1, 1, 2)");
-            try t.expectError(error.UnexpectedToken, Test.testSheetExpr(0, "@max()"));
-
-            try Test.testSheetExpr(0, "@min(a0:a0)");
-            try Test.testSheetExpr(0, "@min(a0:b0)");
-            try Test.testSheetExpr(0, "@min(a0:a1)");
-            try Test.testSheetExpr(0, "@min(a0:b1)");
-            try Test.testSheetExpr(333.33, "@min(a1:z10)");
-            try Test.testSheetExpr(0, "@min(c3:z10)");
-            try Test.testSheetExpr(1, "@min(3, c3:z10, 1, 2)");
-            try Test.testSheetExpr(0, "@min(3, a0:b1, 1, 2)");
-            try t.expectError(error.UnexpectedToken, Test.testSheetExpr(0, "@min()"));
-        }
-
-        test "Splice" {
-            const t = std.testing;
-            var arena = std.heap.ArenaAllocator.init(t.allocator);
-            defer arena.deinit();
-            const allocator = arena.allocator();
-
-            const Context = struct {
-                pub fn evalCell(_: @This(), _: Position) !?f64 {
-                    return null;
-                }
-            };
-
-            var ast = try fromSource(allocator, "let a0 = 100 * 3 + 5 / 2 + @avg(1, 10)");
-
-            ast.splice(ast.rootNode().assignment.rhs);
-            try t.expectApproxEqRel(@as(f64, 308), try ast.eval(Context{}), 0.0001);
-            try t.expectEqual(@as(usize, 12), ast.nodes.len);
-
-            ast.splice(ast.rootNode().add.rhs);
-            try t.expectApproxEqRel(@as(f64, 5.5), try ast.eval(Context{}), 0.0001);
-            try t.expectEqual(@as(usize, 4), ast.nodes.len);
+        pub fn next(iter: *ArgIterator) ?u32 {
+            if (iter.index <= iter.args.start) return null;
+            const ret = iter.index - 1;
+            iter.index = iter.ast.leftMostChild(ret);
+            return ret;
         }
     };
+
+    pub fn argIterator(ast: *const Slice, args: ArgList) ArgIterator {
+        return ArgIterator{
+            .ast = ast,
+            .args = args,
+            .index = args.end,
+        };
+    }
+
+    pub fn evalNode(ast: Slice, index: u32, context: anytype) !f64 {
+        const node = ast.nodes.get(index);
+
+        return switch (node) {
+            .number => |n| n,
+            .cell => |pos| try context.evalCell(pos) orelse 0,
+            .add => |op| (try ast.evalNode(op.lhs, context) + try ast.evalNode(op.rhs, context)),
+            .sub => |op| (try ast.evalNode(op.lhs, context) - try ast.evalNode(op.rhs, context)),
+            .mul => |op| (try ast.evalNode(op.lhs, context) * try ast.evalNode(op.rhs, context)),
+            .div => |op| (try ast.evalNode(op.lhs, context) / try ast.evalNode(op.rhs, context)),
+            .mod => |op| @rem(try ast.evalNode(op.lhs, context), try ast.evalNode(op.rhs, context)),
+            .builtin => |b| ast.evalBuiltin(b, context),
+            .concat,
+            .string_literal,
+            .range,
+            .column,
+            .assignment,
+            .label,
+            .arg_list,
+            => EvalError.NotEvaluable,
+        };
+    }
+
+    pub fn stringEvalNode(
+        ast: Slice,
+        allocator: Allocator,
+        index: u32,
+        context: anytype,
+        strings: []const u8,
+        buffer: *SizedArrayListUnmanaged(u8, u32),
+    ) !struct {
+        start: u32,
+        end: u32,
+    } {
+        const tag = ast.nodes.items(.tags)[index];
+        switch (tag) {
+            .string_literal => {
+                const str = ast.nodes.items(.data)[index].string_literal;
+                const start = buffer.len;
+                try buffer.appendSlice(allocator, strings[str.start..str.end]);
+                return .{
+                    .start = start,
+                    .end = buffer.len,
+                };
+            },
+            .concat => {
+                const b = ast.nodes.items(.data)[index].concat;
+                const start = buffer.len;
+                _ = try ast.stringEvalNode(allocator, b.lhs, context, strings, buffer);
+                _ = try ast.stringEvalNode(allocator, b.rhs, context, strings, buffer);
+                const end = buffer.len;
+                return .{
+                    .start = start,
+                    .end = end,
+                };
+            },
+            .cell => {
+                const pos = ast.nodes.items(.data)[index].cell;
+                const bytes = try context.evalTextCell(pos);
+                const start = buffer.len;
+                try buffer.appendSlice(allocator, bytes);
+                const end = buffer.len;
+                return .{
+                    .start = start,
+                    .end = end,
+                };
+            },
+            .number,
+            .add,
+            .sub,
+            .mul,
+            .div,
+            .mod,
+            .builtin,
+            .range,
+            .column,
+            .assignment,
+            .label,
+            .arg_list,
+            => return EvalError.NotEvaluable,
+        }
+    }
+
+    fn evalBuiltin(ast: Slice, builtin: Builtin, context: anytype) !f64 {
+        const args = ast.nodes.items(.data)[builtin.args].arg_list;
+        return switch (builtin.tag) {
+            .sum => try ast.evalSum(args, context),
+            .prod => try ast.evalProd(args, context),
+            .avg => try ast.evalAvg(args, context),
+            .max => try ast.evalMax(args, context),
+            .min => try ast.evalMin(args, context),
+        };
+    }
+
+    pub fn evalSum(ast: Slice, args: ArgList, context: anytype) !f64 {
+        var iter = ast.argIterator(args);
+
+        var total: f64 = 0;
+        while (iter.next()) |i| {
+            const tag = ast.nodes.items(.tags)[i];
+            total += if (tag == .range) try ast.sumRange(ast.nodes.items(.data)[i].range, context) else try ast.evalNode(i, context);
+        }
+        return total;
+    }
+
+    pub fn sumRange(ast: Slice, range: BinaryOperator, context: anytype) !f64 {
+        const pos1 = ast.nodes.items(.data)[range.lhs].cell;
+        const pos2 = ast.nodes.items(.data)[range.rhs].cell;
+
+        const start = Position.topLeft(pos1, pos2);
+        const end = Position.bottomRight(pos1, pos2);
+
+        var total: f64 = 0;
+        for (start.y..end.y + @as(u32, 1)) |y| {
+            for (start.x..end.x + @as(u32, 1)) |x| {
+                total += try context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse 0;
+            }
+        }
+        return total;
+    }
+
+    pub fn evalProd(ast: Slice, args: ArgList, context: anytype) !f64 {
+        var iter = ast.argIterator(args);
+        var total: f64 = 1;
+
+        while (iter.next()) |i| {
+            const tag = ast.nodes.items(.tags)[i];
+            total *= if (tag == .range) try ast.prodRange(ast.nodes.items(.data)[i].range, context) else try ast.evalNode(i, context);
+        }
+        return total;
+    }
+
+    pub fn prodRange(ast: Slice, range: BinaryOperator, context: anytype) !f64 {
+        const pos1 = ast.nodes.items(.data)[range.lhs].cell;
+        const pos2 = ast.nodes.items(.data)[range.rhs].cell;
+
+        const start = Position.topLeft(pos1, pos2);
+        const end = Position.bottomRight(pos1, pos2);
+
+        var total: f64 = 1;
+        for (start.y..end.y + @as(u32, 1)) |y| {
+            for (start.x..end.x + @as(u32, 1)) |x| {
+                total *= try context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse continue;
+            }
+        }
+        return total;
+    }
+
+    pub fn evalAvg(ast: Slice, args: ArgList, context: anytype) !f64 {
+        var iter = ast.argIterator(args);
+        var total: f64 = 0;
+        var total_items: u32 = 0;
+
+        while (iter.next()) |i| {
+            const tag = ast.nodes.items(.tags)[i];
+            if (tag == .range) {
+                const range = ast.nodes.items(.data)[i].range;
+                total += try ast.sumRange(range, context);
+
+                const p1 = ast.nodes.items(.data)[range.lhs].cell;
+                const p2 = ast.nodes.items(.data)[range.rhs].cell;
+                total_items += Position.area(p1, p2);
+            } else {
+                total += try ast.evalNode(i, context);
+                total_items += 1;
+            }
+        }
+
+        return total / @intToFloat(f64, total_items);
+    }
+
+    pub fn evalMax(ast: Slice, args: ArgList, context: anytype) !f64 {
+        var iter = ast.argIterator(args);
+        var max: ?f64 = null;
+
+        while (iter.next()) |i| {
+            const tag = ast.nodes.items(.tags)[i];
+            const res = if (tag == .range) try ast.maxRange(ast.nodes.items(.data)[i].range, context) orelse continue else try ast.evalNode(i, context);
+            if (max == null or res > max.?)
+                max = res;
+        }
+
+        return max orelse 0;
+    }
+
+    pub fn maxRange(ast: Slice, range: BinaryOperator, context: anytype) !?f64 {
+        const pos1 = ast.nodes.items(.data)[range.lhs].cell;
+        const pos2 = ast.nodes.items(.data)[range.rhs].cell;
+
+        const start = Position.topLeft(pos1, pos2);
+        const end = Position.bottomRight(pos1, pos2);
+
+        var max: ?f64 = null;
+        for (start.y..end.y + @as(u32, 1)) |y| {
+            for (start.x..end.x + @as(u32, 1)) |x| {
+                const res = try context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse continue;
+                if (max == null or res > max.?)
+                    max = res;
+            }
+        }
+        return max;
+    }
+
+    pub fn evalMin(ast: Slice, args: ArgList, context: anytype) !f64 {
+        var iter = ast.argIterator(args);
+        var min: ?f64 = null;
+
+        while (iter.next()) |i| {
+            const tag = ast.nodes.items(.tags)[i];
+            const res = if (tag == .range) try ast.minRange(ast.nodes.items(.data)[i].range, context) orelse continue else try ast.evalNode(i, context);
+            if (min == null or res < min.?)
+                min = res;
+        }
+
+        return min orelse 0;
+    }
+
+    pub fn minRange(ast: Slice, range: BinaryOperator, context: anytype) !?f64 {
+        const pos1 = ast.nodes.items(.data)[range.lhs].cell;
+        const pos2 = ast.nodes.items(.data)[range.rhs].cell;
+
+        const start = Position.topLeft(pos1, pos2);
+        const end = Position.bottomRight(pos1, pos2);
+
+        var min: ?f64 = null;
+        for (start.y..end.y + @as(u32, 1)) |y| {
+            for (start.x..end.x + @as(u32, 1)) |x| {
+                const res = try context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse continue;
+                if (min == null or res < min.?)
+                    min = res;
+            }
+        }
+        return min;
+    }
+};
+
+pub fn rootNode(ast: Self) Node {
+    return ast.nodes.get(ast.rootNodeIndex());
+}
+
+pub fn rootNodeIndex(ast: Self) u32 {
+    return @intCast(u32, ast.nodes.len) - 1;
+}
+
+pub fn rootTag(ast: Self) std.meta.Tag(Node) {
+    return ast.nodes.items(.tags)[ast.nodes.len - 1];
+}
+
+/// Removes all nodes except for the given index and its children
+/// Nodes in the list are already sorted in reverse topological order which allows us to overwrite
+/// nodes sequentially without loss. This function preserves reverse topological order.
+pub fn splice(ast: *Self, new_root: u32) void {
+    var slice = ast.toSlice();
+    slice.splice(new_root);
+    ast.* = slice.toAst();
+}
+
+pub fn toSlice(ast: Self) Slice {
+    return .{
+        .nodes = ast.nodes.slice(),
+    };
+}
+
+pub fn print(ast: Self, writer: anytype, strings: []const u8) @TypeOf(writer).Error!void {
+    const slice = ast.toSlice();
+    return slice.printFrom(slice.rootNodeIndex(), writer, strings);
+}
+
+/// The order in which nodes are evaluated.
+const TraverseOrder = enum {
+    /// Nodes with children will be evaluated before their children
+    first,
+    /// Nodes with children will have their left child evaluated first, then themselves, then their
+    /// right child.
+    middle,
+    /// Nodes with children will be evaluated after all their children.
+    last,
+};
+
+/// Recursively visits every node in the tree. `context` is an instance of a type which must have
+/// the function `fn evalCell(@TypeOf(context), u32) !bool`. This function is run on every leaf
+/// node in the tree, with `index` being the index of the node in the `nodes` array. If the
+/// function returns false, traversal stops immediately.
+pub fn traverse(ast: Self, order: TraverseOrder, context: anytype) !bool {
+    const slice = ast.toSlice();
+    return slice.traverseFrom(slice.rootNodeIndex(), order, context);
+}
+
+pub fn leftMostChild(ast: Self, index: u32) u32 {
+    assert(index < ast.nodes.len);
+
+    const node = ast.nodes.get(index);
+
+    return switch (node) {
+        .string_literal, .number, .column, .cell => index,
+        .label,
+        .assignment,
+        .concat,
+        .add,
+        .sub,
+        .mul,
+        .div,
+        .mod,
+        .range,
+        => |b| ast.leftMostChild(b.lhs),
+        .builtin => |b| ast.leftMostChild(b.args),
+        .arg_list => |args| ast.leftMostChild(args.start),
+    };
+}
+
+pub const EvalError = error{
+    NotEvaluable,
+};
+
+pub const StringEvalError = EvalError || Allocator.Error;
+
+pub fn eval(
+    ast: Self,
+    /// An instance of a type which has the function `fn evalCell(@TypeOf(context), Position) ?f64`.
+    /// This function should return the value of the cell at the given position. It may do this
+    /// by calling this function. `null` indicates no value, which may be interpreted differently by
+    /// differing eval functions - e.g. @max treats a null value as 1, @sum treats it as 0, etc...
+    context: anytype,
+) !f64 {
+    const slice = ast.toSlice();
+    return slice.evalNode(slice.rootNodeIndex(), context);
+}
+
+pub fn stringEval(
+    ast: Self,
+    allocator: Allocator,
+    context: anytype,
+    strings: []const u8,
+    buffer: *SizedArrayListUnmanaged(u8, u32),
+) !void {
+    buffer.clearRetainingCapacity();
+
+    std.log.debug("Have strings '{s}'", .{strings});
+
+    const slice = ast.toSlice();
+    _ = try slice.stringEvalNode(allocator, slice.rootNodeIndex(), context, strings, buffer);
+}
+
+test "Parse and Eval Expression" {
+    const t = std.testing;
+    const Context = struct {
+        pub fn evalCell(_: @This(), _: Position) !?f64 {
+            unreachable;
+        }
+    };
+
+    const Error = EvalError || Parser.ParseError;
+
+    const testExpr = struct {
+        fn func(expected: Error!f64, expr: []const u8) !void {
+            var ast = parseExpression(t.allocator, expr) catch |err| {
+                return if (err != expected) err else {};
+            };
+            defer ast.deinit(t.allocator);
+
+            const res = ast.eval(Context{}) catch |err| return if (err != expected) err else {};
+            const val = try expected;
+            std.testing.expectApproxEqRel(val, res, 0.0001) catch |err| {
+                for (0..ast.nodes.len) |i| {
+                    const u = ast.nodes.get(@intCast(u32, i));
+                    std.debug.print("{}\n", .{u});
+                }
+                return err;
+            };
+        }
+    }.func;
+
+    try testExpr(-4, "3 - 5 - 2");
+    try testExpr(2, "8 / 2 / 2");
+    try testExpr(15.833333, "8 + 5 / 2 * 3 - 5 / 3 + 2");
+    try testExpr(-4, "(3 + 1) - (4 * 2)");
+    try testExpr(2, "1 + 1");
+    try testExpr(0, "100 - 100");
+    try testExpr(100, "50 - -50");
+    try testExpr(3, "@max(-500, -50000, 3, 1, 2, 0, 100 - 100, 4 / 2)");
+    try testExpr(-50000, "@min(-500, -50000, 3, 1, 2, 0, 100 - 100, 4 / 2)");
+    try testExpr(-50492, "@sum(-500, -50000, 3, 1, 2, 0, 100 - 100, 4 / 2)");
+    try testExpr(0, "@prod(-500, -50000, 3, 1, 2, 0, 100 - 100, 4 / 2)");
+    try testExpr(5.5, "@avg(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)");
+    try testExpr(5, "@max(3, 5, 100 - 100)");
+
+    // Cannot evaluate a range on its own
+    try testExpr(error.NotEvaluable, "a0:a0");
+    try testExpr(error.NotEvaluable, "a0:crxo65535");
+    try testExpr(error.NotEvaluable, "z10:xxx500");
+}
+
+test "Functions on Ranges" {
+    const Sheet = @import("Sheet.zig");
+    const t = std.testing;
+    const Test = struct {
+        sheet: *Sheet,
+
+        fn evalCell(context: @This(), pos: Position) !?f64 {
+            const cell = context.sheet.getCellPtr(pos) orelse return null;
+            return try cell.eval(context.sheet);
+        }
+
+        fn testSheetExpr(expected: f64, expr: []const u8) !void {
+            var sheet = Sheet.init(t.allocator);
+            defer sheet.deinit();
+
+            try sheet.setCell(.{ .x = 0, .y = 0 }, try Self.parseExpression(t.allocator, "0"), .{});
+            try sheet.setCell(.{ .x = 1, .y = 0 }, try Self.parseExpression(t.allocator, "100"), .{});
+            try sheet.setCell(.{ .x = 0, .y = 1 }, try Self.parseExpression(t.allocator, "500"), .{});
+            try sheet.setCell(.{ .x = 1, .y = 1 }, try Self.parseExpression(t.allocator, "333.33"), .{});
+
+            var ast = try parseExpression(t.allocator, expr);
+            defer ast.deinit(t.allocator);
+
+            try sheet.update(.number);
+            const res = try ast.eval(@This(){ .sheet = &sheet });
+            try std.testing.expectApproxEqRel(expected, res, 0.0001);
+        }
+    };
+
+    try Test.testSheetExpr(0, "@sum(a0:a0)");
+    try Test.testSheetExpr(100, "@sum(a0:b0)");
+    try Test.testSheetExpr(500, "@sum(a0:a1)");
+    try Test.testSheetExpr(933.33, "@sum(a0:b1)");
+    try Test.testSheetExpr(933.33, "@sum(a0:z10)");
+    try Test.testSheetExpr(833.33, "@sum(a1:z10)");
+    try Test.testSheetExpr(0, "@sum(c3:z10)");
+    try Test.testSheetExpr(953.33, "@sum(5, a0:z10, 5, 10)");
+    try Test.testSheetExpr(35, "@sum(5, 30 / 2, c3:z10, 5, 10)");
+    try t.expectError(error.UnexpectedToken, Test.testSheetExpr(0, "@sum()"));
+
+    try Test.testSheetExpr(0, "@prod(a0:a0)");
+    try Test.testSheetExpr(0, "@prod(a0:b0)");
+    try Test.testSheetExpr(0, "@prod(a0:a1)");
+    try Test.testSheetExpr(0, "@prod(a0:b1)");
+    try Test.testSheetExpr(166665, "@prod(a1:b1)");
+    try Test.testSheetExpr(166665, "@prod(a1:z10)");
+    try Test.testSheetExpr(333.33, "@prod(b1:z10)");
+    try Test.testSheetExpr(0, "@prod(100, -1, a0:z10, 50)");
+    try Test.testSheetExpr(-166665000, "@prod(100, -1, b0:b1, 50)");
+    try t.expectError(error.UnexpectedToken, Test.testSheetExpr(0, "@prod()"));
+
+    try Test.testSheetExpr(0, "@avg(a0:a0)");
+    try Test.testSheetExpr(50, "@avg(a0:b0)");
+    try Test.testSheetExpr(250, "@avg(a0:a1)");
+    try Test.testSheetExpr(233.3325, "@avg(a0:b1)");
+    try Test.testSheetExpr(135.47571428571428571428, "@avg(5, 5, a0:b1, 5)");
+    try t.expectError(error.UnexpectedToken, Test.testSheetExpr(0, "@avg()"));
+
+    try Test.testSheetExpr(0, "@max(a0:a0)");
+    try Test.testSheetExpr(100, "@max(a0:b0)");
+    try Test.testSheetExpr(500, "@max(a0:a1)");
+    try Test.testSheetExpr(500, "@max(a0:b1)");
+    try Test.testSheetExpr(100, "@max(a0:z0)");
+    try Test.testSheetExpr(500, "@max(a0:z10)");
+    try Test.testSheetExpr(0, "@max(c3:z10)");
+    try Test.testSheetExpr(3, "@max(3, c3:z10, 1, 2)");
+    try Test.testSheetExpr(500, "@max(3, a0:b1, 1, 2)");
+    try t.expectError(error.UnexpectedToken, Test.testSheetExpr(0, "@max()"));
+
+    try Test.testSheetExpr(0, "@min(a0:a0)");
+    try Test.testSheetExpr(0, "@min(a0:b0)");
+    try Test.testSheetExpr(0, "@min(a0:a1)");
+    try Test.testSheetExpr(0, "@min(a0:b1)");
+    try Test.testSheetExpr(333.33, "@min(a1:z10)");
+    try Test.testSheetExpr(0, "@min(c3:z10)");
+    try Test.testSheetExpr(1, "@min(3, c3:z10, 1, 2)");
+    try Test.testSheetExpr(0, "@min(3, a0:b1, 1, 2)");
+    try t.expectError(error.UnexpectedToken, Test.testSheetExpr(0, "@min()"));
+}
+
+test "Splice" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const Context = struct {
+        pub fn evalCell(_: @This(), _: Position) !?f64 {
+            return null;
+        }
+    };
+
+    var ast = try fromSource(allocator, "let a0 = 100 * 3 + 5 / 2 + @avg(1, 10)");
+
+    ast.splice(ast.rootNode().assignment.rhs);
+    try t.expectApproxEqRel(@as(f64, 308), try ast.eval(Context{}), 0.0001);
+    try t.expectEqual(@as(usize, 12), ast.nodes.len);
+
+    ast.splice(ast.rootNode().add.rhs);
+    try t.expectApproxEqRel(@as(f64, 5.5), try ast.eval(Context{}), 0.0001);
+    try t.expectEqual(@as(usize, 4), ast.nodes.len);
 }

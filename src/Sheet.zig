@@ -1,9 +1,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const utils = @import("utils.zig");
-const Ast = @import("Ast.zig").Ast(false);
+const Ast = @import("Ast.zig");
 const MAX = std.math.maxInt(u16);
 const ArrayMemoryPool = @import("array_memory_pool.zig").ArrayMemoryPool;
+const HeaderList = @import("header_list.zig").HeaderList;
+pub const HeaderString = HeaderList(u8, u32);
+const SizedArrayListUnmanaged = @import("sized_array_list.zig").SizedArrayListUnmanaged;
 
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -36,6 +39,7 @@ const PositionContext = struct {
 };
 
 const CellMap = std.ArrayHashMapUnmanaged(Position, Cell, ArrayPositionContext, false);
+const TextCellMap = std.ArrayHashMapUnmanaged(Position, TextCell, ArrayPositionContext, false);
 
 /// Used for cell evaluation
 const NodeMap = std.HashMapUnmanaged(Position, NodeMark, PositionContext, 99);
@@ -49,6 +53,9 @@ const NodeMark = enum {
 /// ArrayHashMap mapping spreadsheet positions to cells.
 cells: CellMap = .{},
 
+/// ArrayHashMap mapping spreadsheet positions to text cells.
+text_cells: TextCellMap = .{},
+
 /// Maps column indexes (0 - 65535) to `Column` structs containing info about that column.
 columns: std.AutoArrayHashMapUnmanaged(u16, Column) = .{},
 filepath: std.BoundedArray(u8, std.fs.MAX_PATH_BYTES) = .{},
@@ -59,14 +66,22 @@ visited_nodes: NodeMap = .{},
 sorted_nodes: NodeListUnmanaged = .{},
 
 /// If true, the next call to Sheet.update will re-evaluate all cells in the sheet.
-needs_update: bool = false,
+update_numbers: bool = false,
+update_text: bool = false,
 
 /// True if there have been any changes since the last save
 has_changes: bool = false,
 
 undos: UndoList = .{},
 redos: UndoList = .{},
+
+/// Stores Asts used for undo states.
 undo_asts: ArrayMemoryPool(Ast, u32) = .{},
+/// Stores Asts and strings used for undoing text cells.
+undo_text_asts: ArrayMemoryPool(struct {
+    ast: Ast,
+    strings: ?*HeaderString,
+}, u32) = .{},
 
 allocator: Allocator,
 
@@ -83,6 +98,13 @@ pub const Undo = union(enum) {
         index: u32,
     },
     delete_cell: Position,
+
+    set_text_cell: struct {
+        pos: Position,
+        index: u32,
+    },
+    delete_text_cell: Position,
+
     set_column_width: struct {
         col: u16,
         width: u16,
@@ -104,13 +126,19 @@ pub fn deinit(sheet: *Sheet) void {
         cell.deinit(sheet.allocator);
     }
 
+    for (sheet.text_cells.values()) |*cell| {
+        cell.deinit(sheet.allocator);
+    }
+
     sheet.clearAndFreeUndos(.undo);
     sheet.clearAndFreeUndos(.redo);
 
     sheet.undos.deinit(sheet.allocator);
     sheet.redos.deinit(sheet.allocator);
     sheet.undo_asts.deinit(sheet.allocator);
+    sheet.undo_text_asts.deinit(sheet.allocator);
     sheet.cells.deinit(sheet.allocator);
+    sheet.text_cells.deinit(sheet.allocator);
     sheet.visited_nodes.deinit(sheet.allocator);
     sheet.sorted_nodes.deinit(sheet.allocator);
     sheet.columns.deinit(sheet.allocator);
@@ -122,14 +150,35 @@ pub const UndoOpts = struct {
     clear_redos: bool = true,
 };
 
-fn createUndoAst(sheet: *Sheet, ast: Ast) Allocator.Error!u32 {
-    return sheet.undo_asts.createWithInit(sheet.allocator, ast);
+fn createUndoAst(sheet: *Sheet, cell: anytype) Allocator.Error!u32 {
+    return switch (@TypeOf(cell)) {
+        Cell => sheet.undo_asts.createWithInit(sheet.allocator, cell.ast),
+        TextCell => sheet.undo_text_asts.createWithInit(sheet.allocator, .{
+            .ast = cell.ast,
+            .strings = cell.strings,
+        }),
+        else => @compileError(
+            \\Invalid type passed for 'cell' parameter of 'Sheet.createUndoAst'
+            \\  Expected 'Cell' or 'TextCell', got 
+            ++ @typeName(@TypeOf(cell)),
+        ),
+    };
 }
 
-fn freeUndoAst(sheet: *Sheet, index: u32) void {
-    var ast = sheet.undo_asts.get(index);
-    ast.deinit(sheet.allocator);
-    sheet.undo_asts.destroy(index);
+fn freeUndoAst(sheet: *Sheet, comptime cell_type: CellType, index: u32) void {
+    switch (cell_type) {
+        .number => {
+            var ast = sheet.undo_asts.get(index);
+            ast.deinit(sheet.allocator);
+            sheet.undo_asts.destroy(index);
+        },
+        .text => {
+            var t = sheet.undo_text_asts.get(index);
+            t.ast.deinit(sheet.allocator);
+            if (t.strings) |strings| strings.destroy(sheet.allocator);
+            sheet.undo_text_asts.destroy(index);
+        },
+    }
 }
 
 pub fn clearAndFreeUndos(sheet: *Sheet, comptime kind: UndoType) void {
@@ -143,8 +192,10 @@ pub fn clearAndFreeUndos(sheet: *Sheet, comptime kind: UndoType) void {
 
     for (slice.items(.tags), 0..) |tag, i| {
         switch (tag) {
-            .set_cell => sheet.freeUndoAst(data[i].set_cell.index),
+            .set_cell => sheet.freeUndoAst(.number, data[i].set_cell.index),
+            .set_text_cell => sheet.freeUndoAst(.text, data[i].set_text_cell.index),
             .delete_cell,
+            .delete_text_cell,
             .set_column_width,
             .set_column_precision,
             .group_end,
@@ -182,6 +233,28 @@ pub fn pushUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
     }
 }
 
+pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!bool {
+    switch (u) {
+        .group_end => return false,
+        .set_cell => |t| {
+            // TODO: Is this errdefer correct?
+            errdefer sheet.freeUndoAst(.number, t.index);
+            const ast = sheet.undo_asts.get(t.index);
+            try sheet.setCell(t.pos, ast, opts);
+        },
+        .set_text_cell => |t| {
+            errdefer sheet.freeUndoAst(.text, t.index);
+            const text = sheet.undo_text_asts.get(t.index);
+            try sheet.setTextCell(t.pos, text.strings, text.ast, opts);
+        },
+        .delete_cell => |pos| try sheet.deleteCell(.number, pos, opts),
+        .delete_text_cell => |pos| try sheet.deleteCell(.text, pos, opts),
+        .set_column_width => |t| try sheet.setWidth(t.col, t.width, opts),
+        .set_column_precision => |t| try sheet.setPrecision(t.col, t.precision, opts),
+    }
+    return true;
+}
+
 pub fn undo(sheet: *Sheet) Allocator.Error!void {
     const _u = sheet.undos.popOrNull() orelse return;
     // All undo groups MUST end with a group marker.
@@ -193,19 +266,9 @@ pub fn undo(sheet: *Sheet) Allocator.Error!void {
     }
 
     const opts = .{ .undo_type = .redo };
-    while (sheet.undos.popOrNull()) |u| switch (u) {
-        .group_end => break,
-        .set_cell => |t| {
-            errdefer sheet.freeUndoAst(t.index);
-            const ast = sheet.undo_asts.get(t.index);
-            try sheet.setCellAst(t.pos, ast, opts);
-        },
-        .delete_cell => |pos| {
-            try sheet.deleteCell(pos, opts);
-        },
-        .set_column_width => |t| try sheet.setWidth(t.col, t.width, opts),
-        .set_column_precision => |t| try sheet.setPrecision(t.col, t.precision, opts),
-    };
+    while (sheet.undos.popOrNull()) |u| {
+        if (!try sheet.doUndo(u, opts)) break;
+    }
 }
 
 pub fn redo(sheet: *Sheet) Allocator.Error!void {
@@ -219,19 +282,9 @@ pub fn redo(sheet: *Sheet) Allocator.Error!void {
     }
 
     const opts = .{ .clear_redos = false };
-    while (sheet.redos.popOrNull()) |u| switch (u) {
-        .group_end => break,
-        .set_cell => |t| {
-            errdefer sheet.freeUndoAst(t.index);
-            const ast = sheet.undo_asts.get(t.index);
-            try sheet.setCellAst(t.pos, ast, opts);
-        },
-        .delete_cell => |pos| {
-            try sheet.deleteCell(pos, opts);
-        },
-        .set_column_width => |t| try sheet.setWidth(t.col, t.width, opts),
-        .set_column_precision => |t| try sheet.setPrecision(t.col, t.precision, opts),
-    };
+    while (sheet.redos.popOrNull()) |u| {
+        if (!try sheet.doUndo(u, opts)) break;
+    }
 }
 
 pub fn setWidth(
@@ -355,37 +408,57 @@ pub fn ensureTotalCapacity(sheet: *Sheet, new_capacity: usize) Allocator.Error!v
     return sheet.cells.ensureTotalCapacity(sheet.allocator, new_capacity);
 }
 
-pub fn setCellAst(
+pub fn insertCell(
     sheet: *Sheet,
     position: Position,
-    ast: Ast,
+    cell: anytype,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
     const col_entry = try sheet.columns.getOrPut(sheet.allocator, position.x);
-    sheet.needs_update = true;
+    const cell_type: CellType = switch (@TypeOf(cell)) {
+        Cell => .number,
+        TextCell => .text,
+        else => @compileError(
+            \\Invalid type passed for 'cell' parameter of 'Sheet.insertCell'
+            \\  Expected Cell or TextCell, got 
+        ++ @typeName(@TypeOf(cell))),
+    };
+
+    switch (cell_type) {
+        .number => sheet.update_numbers = true,
+        .text => sheet.update_text = true,
+    }
 
     if (!col_entry.found_existing) {
         col_entry.value_ptr.* = Column{};
     }
 
-    if (!sheet.cells.contains(position)) {
-        for (sheet.cells.keys(), 0..) |key, i| {
+    const cells = switch (cell_type) {
+        .number => &sheet.cells,
+        .text => &sheet.text_cells,
+    };
+
+    if (!cells.contains(position)) {
+        const u: Undo = switch (cell_type) {
+            .number => .{ .delete_cell = position },
+            .text => .{ .delete_text_cell = position },
+        };
+
+        for (cells.keys(), 0..) |key, i| {
             if (key.hash() > position.hash()) {
-                try sheet.cells.entries.insert(sheet.allocator, i, .{
+                try cells.entries.insert(sheet.allocator, i, .{
                     .hash = {},
                     .key = position,
-                    .value = .{
-                        .ast = ast,
-                    },
+                    .value = cell,
                 });
-                errdefer sheet.cells.entries.orderedRemove(i);
+                errdefer cells.entries.orderedRemove(i);
 
                 // If this fails with OOM we could potentially end up with the map in an invalid
                 // state. All instances of OOM must be recoverable. If we error here we remove the
                 // newly inserted entry so that the old index remains correct.
-                try sheet.cells.reIndex(sheet.allocator);
+                try cells.reIndex(sheet.allocator);
 
-                try sheet.pushUndo(.{ .delete_cell = position }, undo_opts);
+                try sheet.pushUndo(u, undo_opts);
 
                 sheet.has_changes = true;
                 return;
@@ -393,59 +466,97 @@ pub fn setCellAst(
         }
 
         // Found no entries
-        try sheet.cells.put(sheet.allocator, position, .{ .ast = ast });
-        errdefer _ = sheet.cells.orderedRemove(position);
+        try cells.put(sheet.allocator, position, cell);
+        errdefer _ = cells.orderedRemove(position);
 
-        try sheet.pushUndo(.{ .delete_cell = position }, undo_opts);
+        try sheet.pushUndo(u, undo_opts);
         sheet.has_changes = true;
         return;
     }
 
-    const ptr = sheet.cells.getPtr(position).?;
-    var old_ast = ptr.ast;
+    const ptr = cells.getPtr(position).?;
+    var old_cell = ptr.*;
 
-    ptr.ast = ast;
-    ptr.num = std.math.nan(f64);
+    switch (cell_type) {
+        .number => ptr.* = cell,
+        .text => {
+            ptr.ast = cell.ast;
+            ptr.strings = cell.strings;
+        },
+    }
     sheet.has_changes = true;
 
-    const index = sheet.createUndoAst(old_ast) catch |err| {
-        old_ast.deinit(sheet.allocator);
+    const index = sheet.createUndoAst(old_cell) catch |err| {
+        old_cell.deinit(sheet.allocator);
         return err;
     };
-    errdefer sheet.freeUndoAst(index);
 
-    try sheet.pushUndo(
-        .{
-            .set_cell = .{
-                .pos = position,
-                .index = index,
-            },
-        },
-        undo_opts,
-    );
+    errdefer sheet.freeUndoAst(cell_type, index);
+
+    const u: Undo = switch (cell_type) {
+        .number => .{ .set_cell = .{ .pos = position, .index = index } },
+        .text => .{ .set_text_cell = .{ .pos = position, .index = index } },
+    };
+
+    try sheet.pushUndo(u, undo_opts);
 }
 
-pub fn deleteCell(sheet: *Sheet, pos: Position, undo_opts: UndoOpts) Allocator.Error!void {
-    var cell = sheet.cells.get(pos) orelse return;
-    _ = sheet.cells.orderedRemove(pos);
+pub fn setTextCell(
+    sheet: *Sheet,
+    position: Position,
+    strings: ?*HeaderString,
+    ast: Ast,
+    undo_opts: UndoOpts,
+) Allocator.Error!void {
+    const cell = TextCell{
+        .ast = ast,
+        .strings = strings,
+    };
+    try sheet.insertCell(position, cell, undo_opts);
+}
 
-    const index = sheet.createUndoAst(cell.ast) catch |err| {
-        cell.ast.deinit(sheet.allocator);
+pub fn setCell(
+    sheet: *Sheet,
+    position: Position,
+    ast: Ast,
+    undo_opts: UndoOpts,
+) Allocator.Error!void {
+    const cell = Cell{
+        .ast = ast,
+    };
+    try sheet.insertCell(position, cell, undo_opts);
+}
+
+pub fn deleteCell(
+    sheet: *Sheet,
+    comptime cell_type: CellType,
+    pos: Position,
+    undo_opts: UndoOpts,
+) Allocator.Error!void {
+    const cells = switch (cell_type) {
+        .number => &sheet.cells,
+        .text => &sheet.text_cells,
+    };
+
+    var cell = cells.get(pos) orelse return;
+    _ = cells.orderedRemove(pos);
+    // TODO: re-use text
+    if (cell_type == .text) cell.text.deinit(sheet.allocator);
+
+    const index = sheet.createUndoAst(cell) catch |err| {
+        cell.deinit(sheet.allocator);
         return err;
     };
-    errdefer sheet.freeUndoAst(index);
+    errdefer sheet.freeUndoAst(cell_type, index);
 
-    try sheet.pushUndo(
-        .{
-            .set_cell = .{
-                .pos = pos,
-                .index = index,
-            },
-        },
-        undo_opts,
-    );
+    const tag: std.meta.Tag(Undo) = switch (cell_type) {
+        .number => .set_cell,
+        .text => .set_text_cell,
+    };
 
-    sheet.needs_update = true;
+    try sheet.pushUndo(@unionInit(Undo, @tagName(tag), .{ .pos = pos, .index = index }), undo_opts);
+
+    sheet.update_numbers = true;
     sheet.has_changes = true;
 }
 
@@ -461,7 +572,8 @@ pub fn deleteCellsInRange(sheet: *Sheet, p1: Position, p2: Position) Allocator.E
         const pos = positions[i];
         if (pos.y > br.y) break;
         if (pos.y >= tl.y and pos.x >= tl.x and pos.x <= br.x) {
-            try sheet.deleteCell(pos, .{});
+            try sheet.deleteCell(.number, pos, .{});
+            try sheet.deleteCell(.text, pos, .{});
         } else {
             i += 1;
         }
@@ -479,24 +591,37 @@ pub fn getCellPtr(sheet: *Sheet, pos: Position) ?*Cell {
 /// Re-evaluates all cells in the sheet. Evaluates cells in reverse topological order to ensure
 /// that each cell is only evaluated once. Cell results are cached after they are evaluted
 /// (see Cell.eval)
-pub fn update(sheet: *Sheet) Allocator.Error!void {
-    if (!sheet.needs_update) return;
-
-    log.debug("Updating...", .{});
-
-    // Is void unless in debug build
-    const begin = (if (builtin.mode == .Debug) std.time.Instant.now() catch unreachable else {});
-
-    try sheet.rebuildSortedNodeList();
-
-    for (sheet.sorted_nodes.items) |pos| {
-        const cell = sheet.getCellPtr(pos).?;
-        _ = try cell.eval(sheet);
+pub fn update(sheet: *Sheet, comptime cell_type: CellType) Allocator.Error!void {
+    switch (cell_type) {
+        .number => if (!sheet.update_numbers) return,
+        .text => if (!sheet.update_text) return,
     }
 
-    sheet.needs_update = false;
+    log.debug("Updating {s}...", .{@tagName(cell_type)});
+
+    const cells = switch (cell_type) {
+        .number => sheet.cells,
+        .text => sheet.text_cells,
+    };
+
+    const begin = (if (builtin.mode == .Debug) std.time.Instant.now() catch unreachable else {});
+
+    try sheet.rebuildSortedNodeList(cell_type);
+
+    for (sheet.sorted_nodes.items) |pos| {
+        const cell = cells.getPtr(pos).?;
+        _ = cell.eval(sheet) catch |err| {
+            if (cell_type != .text or err != error.NotEvaluable) return error.OutOfMemory;
+        };
+    }
+
+    switch (cell_type) {
+        .number => sheet.update_numbers = false,
+        .text => sheet.update_text = false,
+    }
     if (builtin.mode == .Debug) {
-        log.debug("Finished update in {d} seconds", .{
+        log.debug("Finished {s} update in {d} seconds", .{
+            @tagName(cell_type),
             blk: {
                 const now = std.time.Instant.now() catch unreachable;
                 const elapsed = now.since(begin);
@@ -506,23 +631,37 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
     }
 }
 
-fn rebuildSortedNodeList(sheet: *Sheet) Allocator.Error!void {
-    const node_count = @intCast(u32, sheet.cells.entries.len);
+const CellType = enum { number, text };
+
+fn rebuildSortedNodeList(
+    sheet: *Sheet,
+    comptime cell_type: CellType,
+) Allocator.Error!void {
+    const cells = switch (cell_type) {
+        .number => &sheet.cells,
+        .text => &sheet.text_cells,
+    };
+    const node_count = @intCast(u32, cells.entries.len);
 
     // Topologically sorted set of cell positions
     sheet.visited_nodes.clearRetainingCapacity();
     sheet.sorted_nodes.clearRetainingCapacity();
+
+    if (node_count == 0) return;
+
     try sheet.visited_nodes.ensureTotalCapacity(sheet.allocator, node_count + 1);
     try sheet.sorted_nodes.ensureTotalCapacity(sheet.allocator, node_count + 1);
 
-    for (sheet.cells.keys()) |pos| {
-        if (!sheet.visited_nodes.contains(pos))
-            visit(sheet, pos, &sheet.visited_nodes, &sheet.sorted_nodes);
+    for (cells.keys()) |pos| {
+        if (!sheet.visited_nodes.contains(pos)) {
+            sheet.visit(cell_type, pos, &sheet.visited_nodes, &sheet.sorted_nodes);
+        }
     }
 }
 
 fn visit(
     sheet: *const Sheet,
+    comptime cell_type: CellType,
     node: Position,
     nodes: *NodeMap,
     sorted_nodes: *NodeListUnmanaged,
@@ -534,7 +673,10 @@ fn visit(
         }
     }
 
-    var cell = sheet.getCell(node) orelse return;
+    var cell = switch (cell_type) {
+        .number => sheet.cells.get(node),
+        .text => sheet.text_cells.get(node),
+    } orelse return;
 
     if (cell.isEmpty()) return;
 
@@ -542,14 +684,17 @@ fn visit(
 
     const Context = struct {
         sheet: *const Sheet,
-        cell: *Cell,
+        cell: switch (cell_type) {
+            .text => *TextCell,
+            .number => *Cell,
+        },
         nodes: *NodeMap,
         sorted_nodes: *NodeListUnmanaged,
 
         pub fn evalCell(context: @This(), index: u32) !bool {
             const ast_node = context.cell.ast.nodes.get(index);
             if (ast_node == .cell and !context.nodes.contains(ast_node.cell)) {
-                visit(context.sheet, ast_node.cell, context.nodes, context.sorted_nodes);
+                context.sheet.visit(cell_type, ast_node.cell, context.nodes, context.sorted_nodes);
             }
             return true;
         }
@@ -743,12 +888,81 @@ pub const Position = struct {
     }
 };
 
+pub const TextCell = struct {
+    // Is not a HeaderString because we always need to store the length/capacity of this anyway,
+    // so use an ArrayList for quality of life
+    text: SizedArrayListUnmanaged(u8, u32) = .{},
+    ast: Ast,
+
+    /// Strings required for evaluation, e.g. the contents of string literals.
+    strings: ?*HeaderString = null,
+
+    pub fn deinit(cell: *TextCell, allocator: Allocator) void {
+        cell.text.deinit(allocator);
+        if (cell.strings) |strings| strings.destroy(allocator);
+        cell.ast.deinit(allocator);
+    }
+
+    pub fn eval(cell: *TextCell, sheet: *Sheet) Ast.StringEvalError!void {
+        const Context = struct {
+            sheet: *const Sheet,
+            visited_cells: Map,
+
+            const Map = std.HashMap(Position, void, PositionContext, 80);
+            const EvalError = error{CyclicalReference} || Ast.StringEvalError;
+
+            pub fn evalTextCell(context: *@This(), pos: Position) EvalError![]const u8 {
+                // Check for cyclical references
+                const res = try context.visited_cells.getOrPut(pos);
+                if (res.found_existing) {
+                    log.debug("TEXT CYCLICAL REFERENCE at {}", .{pos});
+                    return error.CyclicalReference;
+                }
+
+                // All dependencies should have been evaluated before this one and had their
+                // results cached.
+                const _cell = context.sheet.text_cells.get(pos) orelse return "";
+                return _cell.text.items();
+            }
+        };
+
+        // Only heavily nested cell references will heap allocate
+        var sfa = std.heap.stackFallback(4096, sheet.allocator);
+        var context = Context{
+            .sheet = sheet,
+            .visited_cells = Context.Map.init(sfa.get()),
+        };
+        defer context.visited_cells.deinit();
+        errdefer cell.text.clearRetainingCapacity();
+
+        const strings = if (cell.strings) |strings| strings.items() else "";
+        cell.ast.stringEval(sheet.allocator, &context, strings, &cell.text) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NotEvaluable, error.CyclicalReference => {},
+        };
+    }
+
+    pub fn isEmpty(cell: TextCell) bool {
+        return cell.ast.nodes.len == 0;
+    }
+
+    pub fn format(
+        cell: TextCell,
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        const strings = if (cell.strings) |strings| strings.items() else "";
+        return cell.ast.print(writer, strings);
+    }
+};
+
 pub const Cell = struct {
     num: f64 = std.math.nan(f64),
     ast: Ast = .{},
 
     comptime {
-        assert(@sizeOf(Cell) <= 40);
+        assert(@sizeOf(Cell) <= 24);
     }
 
     pub fn fromExpression(allocator: Allocator, expr: []const u8) !Cell {
@@ -828,18 +1042,10 @@ pub const Cell = struct {
     pub fn format(
         cell: Cell,
         comptime _: []const u8,
-        options: std.fmt.FormatOptions,
+        _: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        switch (cell.getValue()) {
-            .none => {},
-            .err => {
-                try writer.writeAll("ERROR");
-            },
-            .num => |num| {
-                try std.fmt.formatFloatDecimal(num, options, writer);
-            },
-        }
+        return cell.ast.print(writer, "");
     }
 };
 
@@ -870,10 +1076,10 @@ test "Sheet basics" {
     const ast2 = try Ast.parseExpression(t.allocator, "500 * 2 / 34 + 1");
     const ast3 = try Ast.parseExpression(t.allocator, "a0");
     const ast4 = try Ast.parseExpression(t.allocator, "a2 * a1");
-    try sheet.setCellAst(.{ .x = 0, .y = 0 }, ast1, .{});
-    try sheet.setCellAst(.{ .x = 0, .y = 1 }, ast2, .{});
-    try sheet.setCellAst(.{ .x = 0, .y = 2 }, ast3, .{});
-    try sheet.setCellAst(.{ .x = 0, .y = 3 }, ast4, .{});
+    try sheet.setCell(.{ .x = 0, .y = 0 }, ast1, .{});
+    try sheet.setCell(.{ .x = 0, .y = 1 }, ast2, .{});
+    try sheet.setCell(.{ .x = 0, .y = 2 }, ast3, .{});
+    try sheet.setCell(.{ .x = 0, .y = 3 }, ast4, .{});
 
     try t.expectEqual(@as(u32, 4), sheet.cellCount());
     try t.expectEqual(@as(u32, 1), sheet.colCount());
@@ -886,13 +1092,13 @@ test "Sheet basics" {
     //const pos = .{ .x = 0, .y = @intCast(u16, y) };
     //try t.expectEqual(@as(?f64, null), sheet.cells.get(pos).?.getValue());
     // }
-    try sheet.update();
+    try sheet.update(.number);
     // for (0..4) |y| {
     // const pos = .{ .x = 0, .y = @intCast(u16, y) };
     // try t.expect(sheet.cells.get(pos).?.getValue() != null);
     // }
 
-    try sheet.deleteCell(.{ .x = 0, .y = 0 }, .{});
+    try sheet.deleteCell(.number, .{ .x = 0, .y = 0 }, .{});
 
     try t.expectEqual(@as(u32, 3), sheet.cellCount());
 }
@@ -907,18 +1113,18 @@ test "setCell allocations" {
             {
                 var ast = try Ast.parseExpression(allocator, "a4 * a1 * a3");
                 errdefer ast.deinit(allocator);
-                try sheet.setCellAst(.{ .x = 0, .y = 0 }, ast, .{});
+                try sheet.setCell(.{ .x = 0, .y = 0 }, ast, .{});
             }
 
             {
                 var ast = try Ast.parseExpression(allocator, "a2 * a1 * a3");
                 errdefer ast.deinit(allocator);
-                try sheet.setCellAst(.{ .x = 1, .y = 0 }, ast, .{});
+                try sheet.setCell(.{ .x = 1, .y = 0 }, ast, .{});
             }
 
-            try sheet.deleteCell(.{ .x = 0, .y = 0 }, .{});
+            try sheet.deleteCell(.number, .{ .x = 0, .y = 0 }, .{});
 
-            try sheet.update();
+            try sheet.update(.number);
         }
     };
 
@@ -953,7 +1159,7 @@ fn testCellEvaluation(allocator: Allocator) !void {
         ) Allocator.Error!void {
             var c = ast;
             defer _sheet.endUndoGroup();
-            _sheet.setCellAst(pos, c, .{}) catch |err| {
+            _sheet.setCell(pos, c, .{}) catch |err| {
                 c.deinit(_allocator);
                 return err;
             };
@@ -1113,7 +1319,7 @@ fn testCellEvaluation(allocator: Allocator) !void {
 
     // Test that updating this takes less than 10 ms
     const begin = try std.time.Instant.now();
-    try sheet.update();
+    try sheet.update(.number);
     const elapsed_time = (try std.time.Instant.now()).since(begin);
     try t.expect(@intToFloat(f64, elapsed_time) / std.time.ns_per_ms < 10);
 
@@ -1295,8 +1501,8 @@ fn testCellEvaluation(allocator: Allocator) !void {
     try t.expectEqual(@as(usize, 298), sheet.undos.len);
     try t.expectEqual(@as(usize, 0), sheet.redos.len);
 
-    try sheet.deleteCell(try Position.fromAddress("A22"), .{});
-    try sheet.deleteCell(try Position.fromAddress("G20"), .{});
+    try sheet.deleteCell(.number, try Position.fromAddress("A22"), .{});
+    try sheet.deleteCell(.number, try Position.fromAddress("G20"), .{});
     sheet.endUndoGroup();
 
     try t.expectEqual(@as(usize, 301), sheet.undos.len);

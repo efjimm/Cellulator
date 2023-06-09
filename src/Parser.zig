@@ -12,7 +12,7 @@ const Parser = @This();
 
 pub const String = struct {
     start: u32,
-    len: u32,
+    end: u32,
 };
 
 pub const BinaryOperator = struct {
@@ -65,6 +65,7 @@ pub const Node = union(enum) {
     cell: Position,
     assignment: BinaryOperator,
     label: BinaryOperator,
+    concat: BinaryOperator,
     add: BinaryOperator,
     sub: BinaryOperator,
     mul: BinaryOperator,
@@ -81,7 +82,8 @@ current_token: Tokenizer.Token,
 tokenizer: Tokenizer,
 nodes: NodeList,
 
-strings: ?*HeaderList(u8, u32) = null,
+/// Total length of all string literals parsed
+strings_len: u32 = 0,
 
 allocator: Allocator,
 
@@ -148,9 +150,33 @@ fn parseLabel(parser: *Parser) ParseError!u32 {
     });
 }
 
-/// StringExpression <- StringLiteral
+/// StringExpression <- PrimaryStringExpression ('#' PrimaryStringExpression)*
 fn parseStringExpression(parser: *Parser) ParseError!u32 {
-    return parser.parseStringLiteral();
+    var index = try parser.parsePrimaryStringExpression();
+
+    while (parser.eatToken(.hash)) |_| {
+        const node = Node{
+            .concat = .{
+                .lhs = index,
+                .rhs = try parser.parsePrimaryStringExpression(),
+            },
+        };
+
+        index = try parser.addNode(node);
+    }
+
+    return index;
+}
+
+/// PrimaryStringExpression <- StringLiteral / CellName
+fn parsePrimaryStringExpression(parser: *Parser) ParseError!u32 {
+    return switch (parser.current_token.tag) {
+        .cell_name => parser.parseCellName(),
+        .single_string_literal,
+        .double_string_literal,
+        => parser.parseStringLiteral(),
+        else => error.UnexpectedToken,
+    };
 }
 
 fn parseStringLiteral(parser: *Parser) ParseError!u32 {
@@ -159,18 +185,15 @@ fn parseStringLiteral(parser: *Parser) ParseError!u32 {
         .single_string_literal,
     }) orelse return error.UnexpectedToken;
 
+    parser.strings_len += token.end - token.start;
+
     // TODO: Handle escapes of quotes
-    const text = token.text(parser.source());
-    const str = try parser.addString(text);
-
-    errdefer for (0..text.len) |_| {
-        _ = parser.strings.?.pop();
-    };
-
-    const ret = try parser.addNode(.{
-        .string_literal = str,
+    return parser.addNode(.{
+        .string_literal = .{
+            .start = token.start,
+            .end = token.end,
+        },
     });
-    return ret;
 }
 
 fn addString(parser: *Parser, bytes: []const u8) ParseError!String {

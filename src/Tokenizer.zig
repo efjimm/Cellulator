@@ -43,6 +43,7 @@ pub const Token = struct {
         percent,
         comma,
         colon,
+        hash,
 
         lparen,
         rparen,
@@ -153,13 +154,18 @@ pub fn next(tokenizer: *Tokenizer) ?Token {
                     tokenizer.pos += 1;
                     break;
                 },
+                '#' => {
+                    tag = .hash;
+                    tokenizer.pos += 1;
+                    break;
+                },
                 '\'' => {
                     tag = .single_string_literal;
                     state = .single_string_literal;
                 },
                 '"' => {
                     tag = .double_string_literal;
-                    state = .single_string_literal;
+                    state = .double_string_literal;
                 },
                 else => {
                     defer tokenizer.pos += 1;
@@ -196,11 +202,25 @@ pub fn next(tokenizer: *Tokenizer) ?Token {
                 else => break,
             },
             .single_string_literal => switch (c) {
-                '\'' => break,
+                '\'' => {
+                    tokenizer.pos += 1;
+                    return Token{
+                        .tag = tag,
+                        .start = start + 1,
+                        .end = tokenizer.pos - 1,
+                    };
+                },
                 else => {},
             },
             .double_string_literal => switch (c) {
-                '"' => break,
+                '"' => {
+                    tokenizer.pos += 1;
+                    return Token{
+                        .tag = tag,
+                        .start = start + 1,
+                        .end = tokenizer.pos - 1,
+                    };
+                },
                 else => {},
             },
         }
