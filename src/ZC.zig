@@ -445,6 +445,21 @@ pub fn commandHistoryPrev(self: *Self) void {
     self.setCommandCursor(@intCast(u16, self.commandSlice().len));
 }
 
+pub fn commandWrite(self: *Self, bytes: []const u8) Allocator.Error!usize {
+    const list = self.commandList();
+    try list.insertSlice(self.allocator, self.command_cursor, bytes);
+    self.command_cursor += @intCast(u16, bytes.len);
+    return bytes.len;
+}
+
+pub fn commandWriter(self: *Self) CommandWriter {
+    return .{
+        .context = self,
+    };
+}
+
+pub const CommandWriter = std.io.Writer(*Self, Allocator.Error, commandWrite);
+
 pub fn doCommandMotion(self: *Self, motion: Motion) void {
     const count = self.getCount();
     const range = motion.do(self.commandSlice(), self.command_cursor, count);
@@ -652,9 +667,8 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
     switch (action) {
         .enter_command_mode => {
             self.setMode(.command_insert);
-            const writer = self.commandList().writer(self.allocator);
-            writer.writeByte(':') catch unreachable;
-            self.setCommandCursor(1);
+            const writer = self.commandWriter();
+            try writer.writeByte(':');
         },
         .fit_text => {},
         .enter_visual_mode => self.setMode(.visual),
@@ -693,18 +707,13 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
         .decrease_precision => try self.cursorDecPrecision(),
         .increase_width => try self.cursorIncWidth(),
         .decrease_width => try self.cursorDecWidth(),
-        inline .assign_cell, .assign_label => |_, tag| {
+        .assign_cell => {
             self.setMode(.command_insert);
-            const list = self.commandList();
-            const writer = list.writer(self.allocator);
-            switch (tag) {
-                .assign_cell => writer.writeAll("let ") catch unreachable,
-                .assign_label => writer.writeAll("label ") catch unreachable,
-                else => unreachable,
-            }
-            self.cursor.writeCellAddress(writer) catch unreachable;
-            writer.writeAll(" = ") catch unreachable;
-            self.setCommandCursor(@intCast(u16, list.items.len));
+            try self.commandWriter().print("let {} = ", .{self.cursor});
+        },
+        .assign_label => {
+            self.setMode(.command_insert);
+            try self.commandWriter().print("label {} = ", .{self.cursor});
         },
 
         .zero => {
@@ -736,11 +745,13 @@ fn doVisualMode(self: *Self, action: Action) Allocator.Error!void {
 
         .select_cancel => self.setMode(.command_insert),
         .select_submit => {
-            const writer = self.commandList().writer(self.allocator);
+            self.setMode(.command_insert);
+            const writer = self.commandWriter();
+
             const tl = Position.topLeft(self.cursor, self.anchor);
             const br = Position.bottomRight(self.cursor, self.anchor);
-            writer.print("{}:{}", .{ tl, br }) catch {};
-            self.setMode(.command_insert);
+
+            try writer.print("{}:{}", .{ tl, br });
         },
 
         .cell_cursor_up => self.cursorUp(),
