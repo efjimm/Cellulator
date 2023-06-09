@@ -462,10 +462,10 @@ pub const CommandWriter = std.io.Writer(*Self, Allocator.Error, commandWrite);
 
 pub fn doCommandMotion(self: *Self, motion: Motion) void {
     const count = self.getCount();
-    const range = motion.do(self.commandSlice(), self.command_cursor, count);
     switch (self.mode) {
         .normal, .visual, .select => unreachable,
         .command_normal, .command_insert => {
+            const range = motion.do(self.commandSlice(), self.command_cursor, count);
             self.doCommandNormalMotion(range);
         },
         .command_change => {
@@ -474,6 +474,7 @@ pub fn doCommandMotion(self: *Self, motion: Motion) void {
                 .long_word_start_next => .long_word_end_next,
                 else => motion,
             };
+            const range = m.do(self.commandSlice(), self.command_cursor, count);
 
             if (range.start != range.end) {
                 // We want the 'end' part of the range to be inclusive for some motions and
@@ -500,6 +501,7 @@ pub fn doCommandMotion(self: *Self, motion: Motion) void {
             self.setMode(.command_insert);
         },
         .command_delete => {
+            const range = motion.do(self.commandSlice(), self.command_cursor, count);
             if (range.start != range.end) {
                 const end = range.end + switch (motion) {
                     .normal_word_end_next,
