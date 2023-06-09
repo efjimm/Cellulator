@@ -160,11 +160,9 @@ pub fn next(tokenizer: *Tokenizer) ?Token {
                     break;
                 },
                 '\'' => {
-                    tag = .single_string_literal;
                     state = .single_string_literal;
                 },
                 '"' => {
-                    tag = .double_string_literal;
                     state = .double_string_literal;
                 },
                 else => {
@@ -203,23 +201,15 @@ pub fn next(tokenizer: *Tokenizer) ?Token {
             },
             .single_string_literal => switch (c) {
                 '\'' => {
-                    tokenizer.pos += 1;
-                    return Token{
-                        .tag = tag,
-                        .start = start + 1,
-                        .end = tokenizer.pos - 1,
-                    };
+                    tag = .single_string_literal;
+                    break;
                 },
                 else => {},
             },
             .double_string_literal => switch (c) {
                 '"' => {
-                    tokenizer.pos += 1;
-                    return Token{
-                        .tag = tag,
-                        .start = start + 1,
-                        .end = tokenizer.pos - 1,
-                    };
+                    tag = .double_string_literal;
+                    break;
                 },
                 else => {},
             },
@@ -230,6 +220,14 @@ pub fn next(tokenizer: *Tokenizer) ?Token {
         .word => {
             const str = tokenizer.bytes[start..tokenizer.pos];
             tag = keywords.get(str) orelse .column_name;
+        },
+        .single_string_literal, .double_string_literal => {
+            tokenizer.pos += 1;
+            return Token{
+                .tag = tag,
+                .start = start + 1,
+                .end = tokenizer.pos - 1,
+            };
         },
         else => {},
     }
