@@ -8,6 +8,7 @@ const critbit = @import("critbit.zig");
 const text = @import("text.zig");
 const Motion = text.Motion;
 const wcWidth = @import("wcwidth").wcWidth;
+const SizedArrayListUnmanaged = @import("sized_array_list.zig").SizedArrayListUnmanaged;
 
 const Position = Sheet.Position;
 const Allocator = std.mem.Allocator;
@@ -36,8 +37,8 @@ cursor: Position = .{},
 
 count: u32 = 0,
 
-command_screen_pos: u16 = 0,
-command_cursor: u16 = 0,
+command_screen_pos: u32 = 0,
+command_cursor: u32 = 0,
 
 command_history: CommandHist = .{},
 current_command: usize = 0,
@@ -57,7 +58,8 @@ status_message: std.BoundedArray(u8, 256) = .{},
 
 const INPUT_BUF_LEN = 256;
 
-const CommandHist = std.ArrayListUnmanaged(std.ArrayListUnmanaged(u8));
+const CommandBuf = SizedArrayListUnmanaged(u8, u32);
+const CommandHist = std.ArrayListUnmanaged(CommandBuf);
 
 pub const status_line = 0;
 pub const input_line = 1;
@@ -367,7 +369,7 @@ fn clampScreenToCommandCursor(self: *Self) void {
     }
 
     const slice = self.commandSlice();
-    var x: u16 = self.command_cursor;
+    var x: u32 = self.command_cursor;
     // Reserve either the width of the character under the cursor, or 1 column if none.
     var w: u16 = if (self.command_cursor < slice.len) blk: {
         const len = std.unicode.utf8ByteSequenceLength(slice[x]) catch unreachable;
@@ -390,7 +392,7 @@ fn clampScreenToCommandCursor(self: *Self) void {
     }
 }
 
-pub fn setCommandCursor(self: *Self, pos: u16) void {
+pub fn setCommandCursor(self: *Self, pos: u32) void {
     self.command_cursor = pos;
     self.clampCommandCursor();
     self.clampScreenToCommandCursor();
@@ -419,16 +421,16 @@ pub fn submitCommand(self: *Self) !void {
 
 pub fn resetCommandBuf(self: *Self) void {
     self.current_command = self.command_history.items.len - 1;
-    self.commandList().items.len = 0;
+    self.commandList().len = 0;
     self.setCommandCursor(0);
 }
 
 pub fn commandSlice(self: *Self) []const u8 {
     assert(self.current_command <= self.command_history.items.len);
-    return self.command_history.items[self.current_command].items;
+    return self.command_history.items[self.current_command].items();
 }
 
-pub fn commandList(self: *Self) *std.ArrayListUnmanaged(u8) {
+pub fn commandList(self: *Self) *CommandBuf {
     assert(self.current_command <= self.command_history.items.len);
     return &self.command_history.items[self.current_command];
 }
@@ -562,11 +564,11 @@ pub fn doCommandNormalMode(self: *Self, action: CommandAction) !void {
             self.clampCommandCursor();
         },
         .change_to_eol => {
-            self.commandList().items.len = self.command_cursor;
+            self.commandList().len = self.command_cursor;
             self.setMode(.command_insert);
         },
         .delete_to_eol => {
-            self.commandList().items.len = self.command_cursor;
+            self.commandList().len = self.command_cursor;
         },
         .change_line => {
             self.resetCommandBuf();
@@ -597,7 +599,7 @@ fn doCommandInsertMode(self: *Self, action: CommandAction, keys: []const u8) !vo
         .none => {
             if (keys.len > 0) {
                 self.commandList().insertSlice(self.allocator, self.command_cursor, keys) catch return;
-                self.setCommandCursor(self.command_cursor + @intCast(u16, keys.len));
+                self.setCommandCursor(self.command_cursor + @intCast(u32, keys.len));
             }
         },
         .history_next => self.commandHistoryNext(),
@@ -2955,9 +2957,9 @@ test "Command history" {
     try t.expectEqual(@as(usize, 2), zc.current_command);
     try t.expectEqual(@as(usize, 3), zc.command_history.items.len);
 
-    try t.expectEqualStrings("let A0 = 5", zc.command_history.items[0].items);
-    try t.expectEqualStrings("let A0 = 10", zc.command_history.items[1].items);
-    try t.expectEqualStrings("", zc.command_history.items[2].items);
+    try t.expectEqualStrings("let A0 = 5", zc.command_history.items[0].items());
+    try t.expectEqualStrings("let A0 = 10", zc.command_history.items[1].items());
+    try t.expectEqualStrings("", zc.command_history.items[2].items());
 
     zc.commandHistoryPrev();
     try t.expectEqual(@as(usize, 1), zc.current_command);

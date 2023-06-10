@@ -27,7 +27,7 @@ pub fn SizedArrayListUnmanaged(comptime T: type, comptime Size: type) type {
             return self.ptr[self.len..self.capacity];
         }
 
-        pub fn items(self: Self) []T {
+        pub inline fn items(self: Self) []T {
             return self.ptr[0..self.len];
         }
 
@@ -112,6 +112,50 @@ pub fn SizedArrayListUnmanaged(comptime T: type, comptime Size: type) type {
 
         pub fn clearRetainingCapacity(self: *Self) void {
             self.len = 0;
+        }
+
+        pub fn insertSlice(
+            self: *Self,
+            allocator: Allocator,
+            i: Size,
+            slice: []const T,
+        ) Allocator.Error!void {
+            const len = @intCast(Size, slice.len);
+            try self.ensureUnusedCapacity(allocator, len);
+            self.len += len;
+
+            std.mem.copyBackwards(T, self.items()[i + len .. self.len], self.items()[i .. self.len - len]);
+            @memcpy(self.items()[i..][0..len], slice);
+        }
+
+        pub fn replaceRange(
+            self: *Self,
+            allocator: Allocator,
+            start: Size,
+            len: Size,
+            new_items: []const T,
+        ) Allocator.Error!void {
+            const after_range = start + len;
+            const range = self.items()[start..after_range];
+
+            if (range.len == new_items.len)
+                @memcpy(range[0..new_items.len], new_items)
+            else if (range.len < new_items.len) {
+                const first = new_items[0..range.len];
+                const rest = new_items[range.len..];
+
+                @memcpy(range[0..first.len], first);
+                try self.insertSlice(allocator, after_range, rest);
+            } else {
+                @memcpy(range[0..new_items.len], new_items);
+                const after_subrange = start + new_items.len;
+
+                for (self.items()[after_range..], 0..) |item, i| {
+                    self.items()[after_subrange..][i] = item;
+                }
+
+                self.len -= len - @intCast(Size, new_items.len);
+            }
         }
     };
 }
