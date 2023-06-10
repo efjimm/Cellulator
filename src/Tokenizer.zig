@@ -59,7 +59,7 @@ pub const Token = struct {
         keyword_label,
 
         eof,
-        invalid,
+        unknown,
     };
 };
 
@@ -75,10 +75,11 @@ pub fn init(bytes: []const u8) Tokenizer {
 }
 
 pub fn next(tokenizer: *Tokenizer) ?Token {
+    if (tokenizer.pos >= tokenizer.bytes.len) return null;
     var start = tokenizer.pos;
 
     var state: State = .start;
-    var tag = Token.Tag.eof;
+    var tag = Token.Tag.unknown;
 
     while (tokenizer.pos < tokenizer.bytes.len) : (tokenizer.pos += 1) {
         const c = tokenizer.bytes[tokenizer.pos];
@@ -168,7 +169,7 @@ pub fn next(tokenizer: *Tokenizer) ?Token {
                 else => {
                     defer tokenizer.pos += 1;
                     return .{
-                        .tag = .invalid,
+                        .tag = .unknown,
                         .start = start,
                         .end = tokenizer.pos,
                     };
@@ -232,9 +233,6 @@ pub fn next(tokenizer: *Tokenizer) ?Token {
         else => {},
     }
 
-    if (tag == .eof)
-        return null;
-
     return Token{
         .tag = tag,
         .start = start,
@@ -250,23 +248,41 @@ pub fn eofToken() Token {
     };
 }
 
-// test "Tokenizer" {
-//     const t = std.testing;
-//     const testTokens = struct {
-//         fn func(bytes: []const u8, tokens: []const Token.Tag) !void {
-//             var tokenizer = Tokenizer.init(bytes);
-//             for (tokens) |tag| {
-//                 if (tag == .eof) {
-//                     try t.expectEqual(@as(?Token, null), tokenizer.next());
-//                 } else {
-//                     try t.expectEqual(tag, tokenizer.next().?.tag);
-//                 }
-//             }
-//             try t.expectEqual(@as(?Token, null), tokenizer.next());
-//         }
-//     }.func;
+test "Tokens" {
+    const t = std.testing;
+    const testTokens = struct {
+        fn func(bytes: []const u8, tokens: []const Token.Tag) !void {
+            var tokenizer = Tokenizer.init(bytes);
+            for (tokens) |tag| {
+                if (tag == .eof) {
+                    try t.expectEqual(@as(?Token, null), tokenizer.next());
+                } else {
+                    try t.expectEqual(tag, tokenizer.next().?.tag);
+                }
+            }
+            try t.expectEqual(@as(?Token, null), tokenizer.next());
+        }
+    }.func;
 
-//     try testTokens("a = 3", &.{ .column_name, .equals_sign, .number, .eof });
-//     try testTokens("@max(34, 100 + 45, @min(3, 1))", &.{ .builtin, .lparen, .number, .comma, .number, .plus, .number, .comma, .builtin, .lparen, .number, .comma, .number, .rparen, .rparen, .eof });
-//     try testTokens("", &.{.eof});
-// }
+    const data = .{
+        .{ "", .{.eof} },
+        .{ "'what'", .{ .single_string_literal, .eof } },
+        .{ "\"what\"", .{ .double_string_literal, .eof } },
+        .{ "'what", .{ .unknown, .eof } },
+        .{ "what'", .{ .column_name, .unknown, .eof } },
+        .{ "123", .{ .number, .eof } },
+        .{ "123.123", .{ .number, .eof } },
+        .{ "123.123.123", .{ .number, .number, .eof } },
+        .{ "123_123_123", .{ .number, .eof } },
+        .{ "=+-*/%,:#", .{ .equals_sign, .plus, .minus, .asterisk, .forward_slash, .percent, .comma, .colon, .hash, .eof } },
+        .{ "() aaaaaa a0", .{ .lparen, .rparen, .column_name, .cell_name } },
+        .{ "a = 3", .{ .column_name, .equals_sign, .number, .eof } },
+        .{ "@max(34, 100 + 45, @min(3, 1))", .{ .builtin, .lparen, .number, .comma, .number, .plus, .number, .comma, .builtin, .lparen, .number, .comma, .number, .rparen, .rparen, .eof } },
+    };
+
+    inline for (data) |d| {
+        try testTokens(d[0], &d[1]);
+    }
+}
+
+test "Token text range" {}
