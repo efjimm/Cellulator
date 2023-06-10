@@ -65,7 +65,7 @@ pub fn SizedArrayListUnmanaged(comptime T: type, comptime Size: type) type {
             allocator: Allocator,
             n: Size,
         ) Allocator.Error!void {
-            return self.ensureTotalCapacity(allocator, self.capacity + n);
+            return self.ensureTotalCapacity(allocator, self.len + n);
         }
 
         pub fn addOne(self: *Self, allocator: Allocator) Allocator.Error!*T {

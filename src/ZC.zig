@@ -597,10 +597,8 @@ pub fn doCommandNormalMode(self: *Self, action: CommandAction) !void {
 fn doCommandInsertMode(self: *Self, action: CommandAction, keys: []const u8) !void {
     try switch (action) {
         .none => {
-            if (keys.len > 0) {
-                self.commandList().insertSlice(self.allocator, self.command_cursor, keys) catch return;
-                self.setCommandCursor(self.command_cursor + @intCast(u32, keys.len));
-            }
+            const writer = self.commandWriter();
+            try writer.writeAll(keys);
         },
         .history_next => self.commandHistoryNext(),
         .history_prev => self.commandHistoryPrev(),
