@@ -7,17 +7,28 @@
 const std = @import("std");
 const Position = @import("Sheet.zig").Position;
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
+const HeaderList = @import("header_list.zig").HeaderList;
+const SizedArrayListUnmanaged = @import("sized_array_list.zig").SizedArrayListUnmanaged;
+
+const Tokenizer = @import("Tokenizer.zig");
+const Parser = @import("Parser.zig");
+const ArgList = Parser.ArgList;
+const BinaryOperator = Parser.BinaryOperator;
+const Builtin = Parser.Builtin;
 
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-const Ast = @This();
+pub const Node = Parser.Node;
 
 const NodeList = MultiArrayList(Node);
+pub const ParseError = Parser.ParseError;
 
 nodes: NodeList = .{},
 
-pub fn parse(ast: *Ast, allocator: Allocator, source: []const u8) ParseError!void {
+const Self = @This();
+
+pub fn parse(ast: *Self, allocator: Allocator, source: []const u8) ParseError!void {
     ast.nodes.len = 0;
     const tokenizer = Tokenizer.init(source);
 
@@ -28,14 +39,68 @@ pub fn parse(ast: *Ast, allocator: Allocator, source: []const u8) ParseError!voi
     ast.nodes = parser.nodes;
 }
 
-pub fn fromSource(allocator: Allocator, source: []const u8) ParseError!Ast {
-    var ast = Ast{};
+pub fn dupeStrings(
+    ast: *Self,
+    allocator: Allocator,
+    source: []const u8,
+) Allocator.Error!?*HeaderList(u8, u32) {
+    const slice = ast.nodes.slice();
+    var nstrings: u32 = 0;
+    const len = blk: {
+        var len: u32 = 0;
+        for (slice.items(.tags), slice.items(.data)) |tag, data| {
+            switch (tag) {
+                .string_literal => {
+                    const str = data.string_literal;
+                    len += str.end - str.start;
+                    nstrings += 1;
+                },
+                else => {},
+            }
+        }
+        break :blk len;
+    };
+
+    if (len == 0) {
+        if (nstrings != 0) {
+            for (slice.items(.tags), 0..) |tag, i| switch (tag) {
+                .string_literal => {
+                    slice.items(.data)[i].string_literal = .{
+                        .start = 0,
+                        .end = 0,
+                    };
+                },
+                else => {},
+            };
+        }
+        return null;
+    }
+
+    const list = try HeaderList(u8, u32).create(allocator, len);
+
+    // Append contents of all string literals to the list, and update their `start` and `end`
+    // indices to be into this list.
+    for (slice.items(.tags), 0..) |tag, i| switch (tag) {
+        .string_literal => {
+            const str = &slice.items(.data)[i].string_literal;
+            const bytes = source[str.start..str.end];
+            str.start = list.len;
+            list.appendSliceAssumeCapacity(bytes);
+            str.end = list.len;
+        },
+        else => {},
+    };
+    return list;
+}
+
+pub fn fromSource(allocator: Allocator, source: []const u8) ParseError!Self {
+    var ast = Self{};
     errdefer ast.deinit(allocator);
     try ast.parse(allocator, source);
     return ast;
 }
 
-pub fn parseExpression(allocator: Allocator, source: []const u8) ParseError!Ast {
+pub fn parseExpression(allocator: Allocator, source: []const u8) ParseError!Self {
     const tokenizer = Tokenizer.init(source);
 
     var parser = Parser.init(allocator, tokenizer, .{});
@@ -44,20 +109,37 @@ pub fn parseExpression(allocator: Allocator, source: []const u8) ParseError!Ast 
     _ = try parser.parseExpression();
     _ = try parser.expectToken(.eof);
 
-    return Ast{
+    return Self{
         .nodes = parser.nodes,
     };
 }
 
-pub fn deinit(ast: *Ast, allocator: Allocator) void {
+pub fn fromStringExpression(allocator: Allocator, source: []const u8) ParseError!Self {
+    const tokenizer = Tokenizer.init(source);
+
+    var parser = Parser.init(allocator, tokenizer, .{});
+    errdefer parser.deinit();
+
+    _ = try parser.parseStringExpression();
+    _ = try parser.expectToken(.eof);
+
+    return Self{
+        .nodes = parser.nodes,
+    };
+}
+
+pub fn deinit(ast: *Self, allocator: Allocator) void {
     ast.nodes.deinit(allocator);
-    ast.nodes = .{};
+    // if (ast.strings) |strings| {
+    //     strings.destroy(allocator);
+    // }
+    ast.* = .{};
 }
 
 pub const Slice = struct {
     nodes: NodeList.Slice,
 
-    pub fn toAst(ast: *Slice) Ast {
+    pub fn toAst(ast: *Slice) Self {
         return .{
             .nodes = ast.nodes.toMultiArrayList(),
         };
@@ -81,8 +163,17 @@ pub const Slice = struct {
         const node = ast.nodes.get(index);
 
         return switch (node) {
-            .number, .column, .cell => index,
-            .assignment, .add, .sub, .mul, .div, .mod, .range => |b| ast.leftMostChild(b.lhs),
+            .string_literal, .number, .column, .cell => index,
+            .assignment,
+            .label,
+            .concat,
+            .add,
+            .sub,
+            .mul,
+            .div,
+            .mod,
+            .range,
+            => |b| ast.leftMostChild(b.lhs),
             .builtin => |b| ast.leftMostChild(b.args),
             .arg_list => |args| ast.leftMostChild(args.start),
         };
@@ -98,7 +189,16 @@ pub const Slice = struct {
         for (0..new_len, first_node..new_root + 1) |i, j| {
             var n = ast.nodes.get(@intCast(u32, j));
             switch (n) {
-                .assignment, .add, .sub, .mul, .div, .mod, .range => |*b| {
+                .assignment,
+                .label,
+                .concat,
+                .add,
+                .sub,
+                .mul,
+                .div,
+                .mod,
+                .range,
+                => |*b| {
                     b.lhs -= first_node;
                     b.rhs -= first_node;
                 },
@@ -109,7 +209,7 @@ pub const Slice = struct {
                     b.start -= first_node;
                     b.end -= first_node;
                 },
-                .number, .column, .cell => {},
+                .string_literal, .number, .column, .cell => {},
             }
             ast.nodes.set(@intCast(u32, i), n);
         }
@@ -117,7 +217,7 @@ pub const Slice = struct {
         ast.nodes.len = new_len;
     }
 
-    pub fn printFrom(ast: Slice, index: u32, writer: anytype) !void {
+    pub fn printFrom(ast: Slice, index: u32, writer: anytype, strings: []const u8) !void {
         const node = ast.nodes.get(index);
 
         switch (node) {
@@ -125,55 +225,70 @@ pub const Slice = struct {
             .column => |col| try Position.writeColumnAddress(col, writer),
             .cell => |pos| try pos.writeCellAddress(writer),
 
+            .string_literal => |str| {
+                try writer.print("\"{s}\"", .{strings[str.start..str.end]});
+            },
+            .concat => |b| {
+                try ast.printFrom(b.lhs, writer, strings);
+                try writer.writeAll(" # ");
+                try ast.printFrom(b.rhs, writer, strings);
+            },
             .assignment => |b| {
-                try ast.printFrom(b.lhs, writer);
+                try writer.writeAll("let ");
+                try ast.printFrom(b.lhs, writer, strings);
                 try writer.writeAll(" = ");
-                try ast.printFrom(b.rhs, writer);
+                try ast.printFrom(b.rhs, writer, strings);
+            },
+            .label => |b| {
+                try writer.writeAll("label ");
+                try ast.printFrom(b.lhs, writer, strings);
+                try writer.writeAll(" = ");
+                try ast.printFrom(b.rhs, writer, strings);
             },
             .add => |b| {
-                try ast.printFrom(b.lhs, writer);
+                try ast.printFrom(b.lhs, writer, strings);
                 try writer.writeAll(" + ");
-                try ast.printFrom(b.rhs, writer);
+                try ast.printFrom(b.rhs, writer, strings);
             },
             .sub => |b| {
-                try ast.printFrom(b.lhs, writer);
+                try ast.printFrom(b.lhs, writer, strings);
                 try writer.writeAll(" - ");
-                try ast.printFrom(b.rhs, writer);
+                try ast.printFrom(b.rhs, writer, strings);
             },
             .mul => |b| {
-                try ast.printFrom(b.lhs, writer);
+                try ast.printFrom(b.lhs, writer, strings);
                 try writer.writeAll(" * ");
-                try ast.printFrom(b.rhs, writer);
+                try ast.printFrom(b.rhs, writer, strings);
             },
             .div => |b| {
-                try ast.printFrom(b.lhs, writer);
+                try ast.printFrom(b.lhs, writer, strings);
                 try writer.writeAll(" / ");
-                try ast.printFrom(b.rhs, writer);
+                try ast.printFrom(b.rhs, writer, strings);
             },
             .mod => |b| {
-                try ast.printFrom(b.lhs, writer);
+                try ast.printFrom(b.lhs, writer, strings);
                 try writer.writeAll(" % ");
-                try ast.printFrom(b.rhs, writer);
+                try ast.printFrom(b.rhs, writer, strings);
             },
             .range => |b| {
-                try ast.printFrom(b.lhs, writer);
+                try ast.printFrom(b.lhs, writer, strings);
                 try writer.writeByte(':');
-                try ast.printFrom(b.rhs, writer);
+                try ast.printFrom(b.rhs, writer, strings);
             },
 
             .builtin => |b| {
                 switch (b.tag) {
                     inline else => |tag| try writer.print("@{s}(", .{@tagName(tag)}),
                 }
-                try ast.printFrom(b.args, writer);
+                try ast.printFrom(b.args, writer, strings);
                 try writer.writeByte(')');
             },
 
             .arg_list => |args| {
-                try ast.printFrom(args.start, writer);
+                try ast.printFrom(args.start, writer, strings);
                 for (args.start + 1..args.end) |i| {
                     try writer.writeAll(", ");
-                    try ast.printFrom(@intCast(u32, i), writer);
+                    try ast.printFrom(@intCast(u32, i), writer, strings);
                 }
             },
         }
@@ -184,7 +299,7 @@ pub const Slice = struct {
         const node = ast.nodes.get(index);
 
         switch (node) {
-            .assignment, .add, .sub, .mul, .div, .mod, .range => |b| {
+            .assignment, .label, .concat, .add, .sub, .mul, .div, .mod, .range => |b| {
                 switch (order) {
                     .first => {
                         if (!try context.evalCell(index)) return false;
@@ -203,7 +318,7 @@ pub const Slice = struct {
                     },
                 }
             },
-            .number, .cell, .column => {
+            .string_literal, .number, .cell, .column => {
                 if (!try context.evalCell(index)) return false;
             },
             .builtin => |b| {
@@ -257,8 +372,79 @@ pub const Slice = struct {
             .div => |op| (try ast.evalNode(op.lhs, context) / try ast.evalNode(op.rhs, context)),
             .mod => |op| @rem(try ast.evalNode(op.lhs, context), try ast.evalNode(op.rhs, context)),
             .builtin => |b| ast.evalBuiltin(b, context),
-            .range, .column, .assignment, .arg_list => EvalError.NotEvaluable,
+            .concat,
+            .string_literal,
+            .range,
+            .column,
+            .assignment,
+            .label,
+            .arg_list,
+            => EvalError.NotEvaluable,
         };
+    }
+
+    pub fn stringEvalNode(
+        ast: Slice,
+        allocator: Allocator,
+        index: u32,
+        context: anytype,
+        strings: []const u8,
+        buffer: *SizedArrayListUnmanaged(u8, u32),
+    ) !struct {
+        start: u32,
+        end: u32,
+    } {
+        const tag = ast.nodes.items(.tags)[index];
+        switch (tag) {
+            .string_literal => {
+                const str = ast.nodes.items(.data)[index].string_literal;
+                const start = buffer.len;
+                try buffer.appendSlice(allocator, strings[str.start..str.end]);
+                return .{
+                    .start = start,
+                    .end = buffer.len,
+                };
+            },
+            .concat => {
+                const b = ast.nodes.items(.data)[index].concat;
+                const start = buffer.len;
+                _ = try ast.stringEvalNode(allocator, b.lhs, context, strings, buffer);
+                _ = try ast.stringEvalNode(allocator, b.rhs, context, strings, buffer);
+                const end = buffer.len;
+                return .{
+                    .start = start,
+                    .end = end,
+                };
+            },
+            .cell => {
+                if (@TypeOf(context) == void) return .{
+                    .start = buffer.len,
+                    .end = buffer.len,
+                };
+                const pos = ast.nodes.items(.data)[index].cell;
+                const bytes = try context.evalTextCell(pos);
+                const start = buffer.len;
+                try buffer.appendSlice(allocator, bytes);
+                const end = buffer.len;
+                return .{
+                    .start = start,
+                    .end = end,
+                };
+            },
+            .number,
+            .add,
+            .sub,
+            .mul,
+            .div,
+            .mod,
+            .builtin,
+            .range,
+            .column,
+            .assignment,
+            .label,
+            .arg_list,
+            => return EvalError.NotEvaluable,
+        }
     }
 
     fn evalBuiltin(ast: Slice, builtin: Builtin, context: anytype) !f64 {
@@ -414,36 +600,36 @@ pub const Slice = struct {
     }
 };
 
-pub fn rootNode(ast: Ast) Node {
+pub fn rootNode(ast: Self) Node {
     return ast.nodes.get(ast.rootNodeIndex());
 }
 
-pub fn rootNodeIndex(ast: Ast) u32 {
+pub fn rootNodeIndex(ast: Self) u32 {
     return @intCast(u32, ast.nodes.len) - 1;
 }
 
-pub fn rootTag(ast: Ast) std.meta.Tag(Node) {
+pub fn rootTag(ast: Self) std.meta.Tag(Node) {
     return ast.nodes.items(.tags)[ast.nodes.len - 1];
 }
 
 /// Removes all nodes except for the given index and its children
 /// Nodes in the list are already sorted in reverse topological order which allows us to overwrite
 /// nodes sequentially without loss. This function preserves reverse topological order.
-pub fn splice(ast: *Ast, new_root: u32) void {
+pub fn splice(ast: *Self, new_root: u32) void {
     var slice = ast.toSlice();
     slice.splice(new_root);
     ast.* = slice.toAst();
 }
 
-pub fn toSlice(ast: Ast) Slice {
+pub fn toSlice(ast: Self) Slice {
     return .{
         .nodes = ast.nodes.slice(),
     };
 }
 
-pub fn print(ast: *Ast, writer: anytype) @TypeOf(writer).Error!void {
+pub fn print(ast: Self, writer: anytype, strings: []const u8) @TypeOf(writer).Error!void {
     const slice = ast.toSlice();
-    return slice.printFrom(slice.rootNodeIndex(), writer);
+    return slice.printFrom(slice.rootNodeIndex(), writer, strings);
 }
 
 /// The order in which nodes are evaluated.
@@ -461,19 +647,28 @@ const TraverseOrder = enum {
 /// the function `fn evalCell(@TypeOf(context), u32) !bool`. This function is run on every leaf
 /// node in the tree, with `index` being the index of the node in the `nodes` array. If the
 /// function returns false, traversal stops immediately.
-pub fn traverse(ast: Ast, order: TraverseOrder, context: anytype) !bool {
+pub fn traverse(ast: Self, order: TraverseOrder, context: anytype) !bool {
     const slice = ast.toSlice();
     return slice.traverseFrom(slice.rootNodeIndex(), order, context);
 }
 
-pub fn leftMostChild(ast: Ast, index: u32) u32 {
+pub fn leftMostChild(ast: Self, index: u32) u32 {
     assert(index < ast.nodes.len);
 
     const node = ast.nodes.get(index);
 
     return switch (node) {
-        .number, .column, .cell => index,
-        .assignment, .add, .sub, .mul, .div, .mod, .range => |b| ast.leftMostChild(b.lhs),
+        .string_literal, .number, .column, .cell => index,
+        .label,
+        .assignment,
+        .concat,
+        .add,
+        .sub,
+        .mul,
+        .div,
+        .mod,
+        .range,
+        => |b| ast.leftMostChild(b.lhs),
         .builtin => |b| ast.leftMostChild(b.args),
         .arg_list => |args| ast.leftMostChild(args.start),
     };
@@ -483,523 +678,33 @@ pub const EvalError = error{
     NotEvaluable,
 };
 
+pub const StringEvalError = EvalError || Allocator.Error;
+
 pub fn eval(
-    ast: Ast,
+    ast: Self,
     /// An instance of a type which has the function `fn evalCell(@TypeOf(context), Position) ?f64`.
     /// This function should return the value of the cell at the given position. It may do this
-    /// by calling this function.
+    /// by calling this function. `null` indicates no value, which may be interpreted differently by
+    /// differing eval functions - e.g. @max treats a null value as 1, @sum treats it as 0, etc...
     context: anytype,
 ) !f64 {
     const slice = ast.toSlice();
     return slice.evalNode(slice.rootNodeIndex(), context);
 }
 
-pub const Node = union(enum) {
-    number: f64,
-    column: u16,
-    cell: Position,
-    assignment: BinaryOperator,
-    add: BinaryOperator,
-    sub: BinaryOperator,
-    mul: BinaryOperator,
-    div: BinaryOperator,
-    mod: BinaryOperator,
-    builtin: Builtin,
-    arg_list: ArgList,
-    range: BinaryOperator,
-};
-
-comptime {
-    assert(@sizeOf(Node) <= 16);
-}
-
-const Builtin = struct {
-    tag: Tag,
-    args: u32,
-
-    const Tag = enum {
-        sum,
-        prod,
-        avg,
-        max,
-        min,
-    };
-
-    comptime {
-        assert(@sizeOf(Tag) <= 4);
-    }
-};
-
-const ArgList = packed struct(u64) {
-    start: u32,
-    end: u32,
-
-    pub fn count(args: ArgList) u32 {
-        return args.end - args.start;
-    }
-};
-
-const BinaryOperator = struct {
-    lhs: u32,
-    rhs: u32,
-};
-
-const builtins = std.ComptimeStringMap(Builtin.Tag, .{
-    .{ "sum", .sum },
-    .{ "prod", .prod },
-    .{ "avg", .avg },
-    .{ "max", .max },
-    .{ "min", .min },
-});
-
-pub const ParseError = error{
-    UnexpectedToken,
-    InvalidCellAddress,
-} || Allocator.Error;
-
-const Parser = struct {
-    current_token: Token,
-
-    tokenizer: Tokenizer,
-    nodes: NodeList,
-
+pub fn stringEval(
+    ast: Self,
     allocator: Allocator,
-
-    const log = std.log.scoped(.parser);
-
-    const InitOptions = struct {
-        nodes: NodeList = .{},
-    };
-
-    fn init(
-        allocator: Allocator,
-        tokenizer: Tokenizer,
-        options: InitOptions,
-    ) Parser {
-        var ret = Parser{
-            .tokenizer = tokenizer,
-            .nodes = options.nodes,
-            .allocator = allocator,
-            .current_token = undefined,
-        };
-
-        ret.current_token = ret.tokenizer.next() orelse Tokenizer.eofToken();
-        return ret;
-    }
-
-    fn deinit(parser: *Parser) void {
-        parser.nodes.deinit(parser.allocator);
-        parser.* = undefined;
-    }
-
-    fn source(parser: Parser) []const u8 {
-        return parser.tokenizer.bytes;
-    }
-
-    fn parse(parser: *Parser) ParseError!void {
-        _ = try parser.parseStatement();
-        _ = try parser.expectToken(.eof);
-    }
-
-    /// Statement <- Assignment
-    fn parseStatement(parser: *Parser) ParseError!u32 {
-        return parser.parseAssignment();
-    }
-
-    /// Assignment <- CellName '=' Expression
-    fn parseAssignment(parser: *Parser) ParseError!u32 {
-        const lhs = try parser.parseCellName();
-        _ = try parser.expectToken(.equals_sign);
-        const rhs = try parser.parseExpression();
-
-        return parser.addNode(.{
-            .assignment = .{
-                .lhs = lhs,
-                .rhs = rhs,
-            },
-        });
-    }
-
-    /// Expression <- AddExpr
-    fn parseExpression(parser: *Parser) ParseError!u32 {
-        return parser.parseAddExpr();
-    }
-
-    /// AddExpr <- MulExpr (('+' / '-') MulExpr)*
-    fn parseAddExpr(parser: *Parser) !u32 {
-        var index = try parser.parseMulExpr();
-
-        while (parser.eatTokenMulti(.{ .plus, .minus })) |token| {
-            const op = BinaryOperator{
-                .lhs = index,
-                .rhs = try parser.parseMulExpr(),
-            };
-
-            const node: Node = switch (token.tag) {
-                .plus => .{ .add = op },
-                .minus => .{ .sub = op },
-                else => unreachable,
-            };
-
-            index = try parser.addNode(node);
-        }
-
-        return index;
-    }
-
-    /// MulExpr <- PrimaryExpr (('*' / '/' / '%') PrimaryExpr)*
-    fn parseMulExpr(parser: *Parser) !u32 {
-        var index = try parser.parsePrimaryExpr();
-
-        while (parser.eatTokenMulti(.{ .asterisk, .forward_slash, .percent })) |token| {
-            const op = BinaryOperator{
-                .lhs = index,
-                .rhs = try parser.parsePrimaryExpr(),
-            };
-
-            const node: Node = switch (token.tag) {
-                .asterisk => .{ .mul = op },
-                .forward_slash => .{ .div = op },
-                .percent => .{ .mod = op },
-                else => unreachable,
-            };
-
-            index = try parser.addNode(node);
-        }
-
-        return index;
-    }
-
-    /// PrimaryExpr <- Number / Range / Builtin / '(' Expression ')'
-    fn parsePrimaryExpr(parser: *Parser) !u32 {
-        return switch (parser.current_token.tag) {
-            .minus, .plus, .number => parser.parseNumber(),
-            .cell_name => parser.parseRange(),
-            .lparen => {
-                _ = try parser.expectToken(.lparen);
-                const ret = parser.parseExpression();
-                _ = try parser.expectToken(.rparen);
-                return ret;
-            },
-            .builtin => parser.parseFunction(),
-            else => error.UnexpectedToken,
-        };
-    }
-
-    /// Range <- CellName (':' CellName)?
-    fn parseRange(parser: *Parser) !u32 {
-        const lhs = try parser.parseCellName();
-
-        if (parser.eatToken(.colon) == null) return lhs;
-
-        const rhs = try parser.parseCellName();
-
-        return parser.addNode(.{
-            .range = .{
-                .lhs = lhs,
-                .rhs = rhs,
-            },
-        });
-    }
-
-    /// Builtin <- builtin '(' ArgList? ')'
-    fn parseFunction(parser: *Parser) !u32 {
-        const token = try parser.expectToken(.builtin);
-        _ = try parser.expectToken(.lparen);
-
-        const identifier = token.text(parser.source());
-        const builtin = builtins.get(identifier) orelse return error.UnexpectedToken;
-
-        const args = try parser.parseArgList();
-        _ = try parser.expectToken(.rparen);
-        return parser.addNode(.{
-            .builtin = .{
-                .tag = builtin,
-                .args = args,
-            },
-        });
-    }
-
-    /// ArgList <- Expression (',' Expression)*
-    fn parseArgList(parser: *Parser) !u32 {
-        const start = try parser.parseExpression();
-        var end = start + 1;
-
-        while (parser.eatToken(.comma)) |_| {
-            end = 1 + try parser.parseExpression();
-        }
-
-        return parser.addNode(.{
-            .arg_list = .{
-                .start = start,
-                .end = end,
-            },
-        });
-    }
-
-    /// Number <- ('+' / '-')? ('0'-'9')+
-    fn parseNumber(parser: *Parser) !u32 {
-        const is_positive = parser.eatToken(.minus) == null;
-        if (is_positive) _ = parser.eatToken(.plus);
-
-        const token = try parser.expectToken(.number);
-        const text = token.text(parser.source());
-
-        // Correctness of the number is guaranteed because the tokenizer wouldn't have generated a
-        // number token on invalid format.
-        const num = std.fmt.parseFloat(f64, text) catch unreachable;
-
-        return parser.addNode(.{
-            .number = if (is_positive) num else -num,
-        });
-    }
-
-    /// CellName <- ('a'-'z' / 'A'-'Z')+ ('0'-'9')+
-    fn parseCellName(parser: *Parser) !u32 {
-        const token = try parser.expectToken(.cell_name);
-        const text = token.text(parser.source());
-
-        // TODO: check bounds
-        const pos = Position.fromAddress(text) catch return error.InvalidCellAddress;
-
-        return parser.addNode(.{
-            .cell = pos,
-        });
-    }
-
-    fn addNode(parser: *Parser, data: Node) Allocator.Error!u32 {
-        const ret = @intCast(u32, parser.nodes.len);
-        try parser.nodes.append(parser.allocator, data);
-        return ret;
-    }
-
-    fn expectToken(parser: *Parser, expected_tag: Token.Tag) !Token {
-        return parser.eatToken(expected_tag) orelse error.UnexpectedToken;
-    }
-
-    fn eatToken(parser: *Parser, expected_tag: Token.Tag) ?Token {
-        return if (parser.current_token.tag == expected_tag)
-            parser.nextToken()
-        else
-            null;
-    }
-
-    fn eatTokenMulti(parser: *Parser, tags: anytype) ?Token {
-        inline for (tags) |tag| {
-            if (parser.eatToken(tag)) |token|
-                return token;
-        }
-
-        return null;
-    }
-
-    fn nextToken(parser: *Parser) Token {
-        const ret = parser.current_token;
-        parser.current_token = parser.tokenizer.next() orelse Tokenizer.eofToken();
-        return ret;
-    }
-};
-
-pub const Token = struct {
-    tag: Tag,
-    start: u32,
-    end: u32,
-
-    pub fn text(ast: Token, source: []const u8) []const u8 {
-        return source[ast.start..ast.end];
-    }
-
-    pub const Tag = enum {
-        number,
-        equals_sign,
-
-        plus,
-        minus,
-        asterisk,
-        forward_slash,
-        percent,
-        comma,
-        colon,
-
-        lparen,
-        rparen,
-
-        column_name,
-        cell_name,
-        builtin,
-
-        eof,
-        invalid,
-    };
-};
-
-pub const Tokenizer = struct {
-    bytes: []const u8,
-    pos: u32 = 0,
-
-    const State = union(enum) {
-        start,
-        number: bool,
-        builtin,
-        column_or_cell_name,
-    };
-
-    pub fn init(bytes: []const u8) Tokenizer {
-        return .{
-            .bytes = bytes,
-        };
-    }
-
-    pub fn next(tokenizer: *Tokenizer) ?Token {
-        var start = tokenizer.pos;
-
-        var state: State = .start;
-        var tag = Token.Tag.eof;
-
-        while (tokenizer.pos < tokenizer.bytes.len) : (tokenizer.pos += 1) {
-            const c = tokenizer.bytes[tokenizer.pos];
-
-            switch (state) {
-                .start => switch (c) {
-                    '0'...'9' => {
-                        state = .{ .number = false };
-                        tag = .number;
-                    },
-                    '.' => {
-                        state = .{ .number = true };
-                        tag = .number;
-                    },
-                    '=' => {
-                        tag = .equals_sign;
-                        tokenizer.pos += 1;
-                        break;
-                    },
-                    ' ', '\t', '\r', '\n' => {
-                        start += 1;
-                    },
-                    'a'...'z', 'A'...'Z' => {
-                        state = .column_or_cell_name;
-                        tag = .column_name;
-                    },
-                    '@' => {
-                        state = .builtin;
-                        tag = .builtin;
-                        start += 1;
-                    },
-                    ',' => {
-                        tag = .comma;
-                        tokenizer.pos += 1;
-                        break;
-                    },
-                    '+' => {
-                        tag = .plus;
-                        tokenizer.pos += 1;
-                        break;
-                    },
-                    '-' => {
-                        tag = .minus;
-                        tokenizer.pos += 1;
-                        break;
-                    },
-                    '*' => {
-                        tag = .asterisk;
-                        tokenizer.pos += 1;
-                        break;
-                    },
-                    '/' => {
-                        tag = .forward_slash;
-                        tokenizer.pos += 1;
-                        break;
-                    },
-                    '%' => {
-                        tag = .percent;
-                        tokenizer.pos += 1;
-                        break;
-                    },
-                    '(' => {
-                        tag = .lparen;
-                        tokenizer.pos += 1;
-                        break;
-                    },
-                    ')' => {
-                        tag = .rparen;
-                        tokenizer.pos += 1;
-                        break;
-                    },
-                    ':' => {
-                        tag = .colon;
-                        tokenizer.pos += 1;
-                        break;
-                    },
-                    else => {
-                        defer tokenizer.pos += 1;
-                        return .{
-                            .tag = .invalid,
-                            .start = start,
-                            .end = tokenizer.pos,
-                        };
-                    },
-                },
-                .number => switch (c) {
-                    '0'...'9' => {},
-                    '.' => {
-                        if (state.number) break;
-                        state.number = true;
-                    },
-                    else => break,
-                },
-                .column_or_cell_name => switch (c) {
-                    'a'...'z', 'A'...'Z' => {},
-                    '0'...'9' => {
-                        tag = .cell_name;
-                    },
-                    else => break,
-                },
-                .builtin => switch (c) {
-                    'a'...'z', 'A'...'Z', '_' => {},
-                    else => break,
-                },
-            }
-        }
-
-        if (tag == .eof)
-            return null;
-
-        return Token{
-            .tag = tag,
-            .start = start,
-            .end = tokenizer.pos,
-        };
-    }
-
-    pub fn eofToken() Token {
-        return Token{
-            .tag = .eof,
-            .start = undefined,
-            .end = undefined,
-        };
-    }
-};
-
-test "Tokenizer" {
-    const t = std.testing;
-    const testTokens = struct {
-        fn func(bytes: []const u8, tokens: []const Token.Tag) !void {
-            var tokenizer = Tokenizer.init(bytes);
-            for (tokens) |tag| {
-                if (tag == .eof) {
-                    try t.expectEqual(@as(?Token, null), tokenizer.next());
-                } else {
-                    try t.expectEqual(tag, tokenizer.next().?.tag);
-                }
-            }
-            try t.expectEqual(@as(?Token, null), tokenizer.next());
-        }
-    }.func;
-
-    try testTokens("a = 3", &.{ .column_name, .equals_sign, .number, .eof });
-    try testTokens("@max(34, 100 + 45, @min(3, 1))", &.{ .builtin, .lparen, .number, .comma, .number, .plus, .number, .comma, .builtin, .lparen, .number, .comma, .number, .rparen, .rparen, .eof });
-    try testTokens("", &.{.eof});
+    context: anytype,
+    strings: []const u8,
+    buffer: *SizedArrayListUnmanaged(u8, u32),
+) !void {
+    buffer.clearRetainingCapacity();
+
+    std.log.debug("Have strings '{s}'", .{strings});
+
+    const slice = ast.toSlice();
+    _ = try slice.stringEvalNode(allocator, slice.rootNodeIndex(), context, strings, buffer);
 }
 
 test "Parse and Eval Expression" {
@@ -1010,7 +715,7 @@ test "Parse and Eval Expression" {
         }
     };
 
-    const Error = EvalError || ParseError;
+    const Error = EvalError || Parser.ParseError;
 
     const testExpr = struct {
         fn func(expected: Error!f64, expr: []const u8) !void {
@@ -1053,7 +758,6 @@ test "Parse and Eval Expression" {
 
 test "Functions on Ranges" {
     const Sheet = @import("Sheet.zig");
-    const Cell = Sheet.Cell;
     const t = std.testing;
     const Test = struct {
         sheet: *Sheet,
@@ -1067,15 +771,15 @@ test "Functions on Ranges" {
             var sheet = Sheet.init(t.allocator);
             defer sheet.deinit();
 
-            try sheet.setCell(.{ .x = 0, .y = 0 }, try Cell.fromExpression(t.allocator, "0"), .{});
-            try sheet.setCell(.{ .x = 1, .y = 0 }, try Cell.fromExpression(t.allocator, "100"), .{});
-            try sheet.setCell(.{ .x = 0, .y = 1 }, try Cell.fromExpression(t.allocator, "500"), .{});
-            try sheet.setCell(.{ .x = 1, .y = 1 }, try Cell.fromExpression(t.allocator, "333.33"), .{});
+            try sheet.setCell(.{ .x = 0, .y = 0 }, try Self.parseExpression(t.allocator, "0"), .{});
+            try sheet.setCell(.{ .x = 1, .y = 0 }, try Self.parseExpression(t.allocator, "100"), .{});
+            try sheet.setCell(.{ .x = 0, .y = 1 }, try Self.parseExpression(t.allocator, "500"), .{});
+            try sheet.setCell(.{ .x = 1, .y = 1 }, try Self.parseExpression(t.allocator, "333.33"), .{});
 
             var ast = try parseExpression(t.allocator, expr);
             defer ast.deinit(t.allocator);
 
-            try sheet.update();
+            try sheet.update(.number);
             const res = try ast.eval(@This(){ .sheet = &sheet });
             try std.testing.expectApproxEqRel(expected, res, 0.0001);
         }
@@ -1144,7 +848,7 @@ test "Splice" {
         }
     };
 
-    var ast = try fromSource(allocator, "a0 = 100 * 3 + 5 / 2 + @avg(1, 10)");
+    var ast = try fromSource(allocator, "let a0 = 100 * 3 + 5 / 2 + @avg(1, 10)");
 
     ast.splice(ast.rootNode().assignment.rhs);
     try t.expectApproxEqRel(@as(f64, 308), try ast.eval(Context{}), 0.0001);
@@ -1153,4 +857,54 @@ test "Splice" {
     ast.splice(ast.rootNode().add.rhs);
     try t.expectApproxEqRel(@as(f64, 5.5), try ast.eval(Context{}), 0.0001);
     try t.expectEqual(@as(usize, 4), ast.nodes.len);
+}
+
+test "StringEval" {
+    const data = .{
+        .{ "'string'", "string" },
+        .{ "'string1' # 'string2'", "string1string2" },
+        .{ "'string1' # 'string2' # 'string3'", "string1string2string3" },
+    };
+    var buf = SizedArrayListUnmanaged(u8, u32){};
+    defer buf.deinit(std.testing.allocator);
+
+    inline for (data) |d| {
+        var ast = try fromStringExpression(std.testing.allocator, d[0]);
+        defer ast.deinit(std.testing.allocator);
+
+        buf.clearRetainingCapacity();
+        switch (@typeInfo(@TypeOf(d[1]))) {
+            .Null => {
+                const res = ast.stringEval(std.testing.allocator, {}, d[0], &buf);
+                try std.testing.expectError(error.NotEvaluable, res);
+            },
+            else => {
+                try ast.stringEval(std.testing.allocator, {}, d[0], &buf);
+
+                try std.testing.expectEqualStrings(d[1], buf.items());
+            },
+        }
+    }
+}
+
+test "DupeStrings" {
+    const t = std.testing;
+    {
+        const source = "label a0 = 'this is epic' # 'nice' # 'string!'";
+        var ast = try fromSource(t.allocator, source);
+        defer ast.deinit(t.allocator);
+
+        const strings = (try ast.dupeStrings(t.allocator, source)).?;
+        defer strings.destroy(t.allocator);
+
+        try t.expectEqualStrings("this is epicnicestring!", strings.items());
+    }
+
+    {
+        const source = "label a0 = b0";
+        var ast = try fromSource(t.allocator, source);
+        defer ast.deinit(t.allocator);
+
+        try t.expect(try ast.dupeStrings(t.allocator, source) == null);
+    }
 }

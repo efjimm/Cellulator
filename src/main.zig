@@ -74,7 +74,7 @@ pub fn log(
 
 // Reference all tests in other modules
 comptime {
-    std.testing.refAllDecls(@import("Parse.zig"));
+    std.testing.refAllDecls(@import("Ast.zig"));
     std.testing.refAllDecls(ZC);
     std.testing.refAllDecls(@import("utils.zig"));
 }

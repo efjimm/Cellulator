@@ -35,6 +35,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    b.installArtifact(tests);
+
     tests.addModule("spoon", spoon);
     tests.addModule("wcwidth", wcwidth);
 
@@ -42,4 +44,7 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run all unit tests");
     test_step.dependOn(&run_tests.step);
+
+    const test_exe_step = b.step("test-exe", "Build test executable");
+    test_exe_step.dependOn(b.getInstallStep());
 }

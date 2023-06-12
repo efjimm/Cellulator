@@ -138,6 +138,21 @@ pub fn renderStatus(
 
     try writer.writeAll(zc.input_buf.items);
 
+    if (zc.sheet.text_cells.get(zc.cursor)) |cell| {
+        try writer.print("[{}]", .{cell});
+    } else if (zc.sheet.getCell(zc.cursor)) |cell| {
+        switch (cell.getValue()) {
+            .err => {
+                try writer.writeByte('[');
+                try rc.setStyle(.{ .fg = .red });
+                try writer.print("{}", .{cell});
+                try rc.setStyle(.{});
+                try writer.writeByte(']');
+            },
+            else => try writer.print("[{}]", .{cell}),
+        }
+    }
+
     try rpw.pad();
 }
 
@@ -425,24 +440,36 @@ pub fn renderCell(
     var rpw = rc.restrictedPaddingWriter(width);
     const writer = rpw.writer();
 
-    if (zc.sheet.getCell(pos)) |cell| {
-        if (cell.getValue()) |num| {
-            try writer.print("{d: >[1].[2]}", .{
-                num, width, col.precision,
-            });
+    if (zc.sheet.text_cells.get(pos)) |cell| {
+        if (pos.hash() == zc.cursor.hash()) {
+            try writer.print("{s: ^[1]}", .{ cell.text.items(), width });
         } else {
-            if (pos.hash() != zc.cursor.hash()) {
-                try rc.setStyle(.{ .fg = .red });
-                try writer.print("{s: >[1]}", .{ "ERROR", width });
-                try rc.setStyle(.{});
-            } else {
-                try writer.print("{s: >[1]}", .{ "ERROR", width });
-            }
+            try rc.setStyle(.{ .fg = .green });
+            try writer.print("{s: ^[1]}", .{ cell.text.items(), width });
+            try rc.setStyle(.{});
+        }
+    } else if (zc.sheet.getCell(pos)) |cell| {
+        switch (cell.getValue()) {
+            .none => {},
+            .err => {
+                if (pos.hash() != zc.cursor.hash()) {
+                    try rc.setStyle(.{ .fg = .red });
+                    try writer.print("{s: >[1]}", .{ "ERROR", width });
+                    try rc.setStyle(.{});
+                } else {
+                    try writer.print("{s: >[1]}", .{ "ERROR", width });
+                }
+            },
+            .num => |num| {
+                try writer.print("{d: >[1].[2]}", .{
+                    num, width, col.precision,
+                });
+            },
         }
     } else {
         try writer.print("{s: >[1]}", .{ "", width });
     }
-    try rpw.finish();
+    try rpw.pad();
     return width;
 }
 

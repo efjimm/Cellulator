@@ -1,6 +1,6 @@
 const std = @import("std");
 const utils = @import("utils.zig");
-const Ast = @import("Parse.zig");
+const Ast = @import("Ast.zig");
 const spoon = @import("spoon");
 const Sheet = @import("Sheet.zig");
 const Tui = @import("Tui.zig");
@@ -8,6 +8,7 @@ const critbit = @import("critbit.zig");
 const text = @import("text.zig");
 const Motion = text.Motion;
 const wcWidth = @import("wcwidth").wcWidth;
+const SizedArrayListUnmanaged = @import("sized_array_list.zig").SizedArrayListUnmanaged;
 
 const Position = Sheet.Position;
 const Allocator = std.mem.Allocator;
@@ -36,8 +37,8 @@ cursor: Position = .{},
 
 count: u32 = 0,
 
-command_screen_pos: u16 = 0,
-command_cursor: u16 = 0,
+command_screen_pos: u32 = 0,
+command_cursor: u32 = 0,
 
 command_history: CommandHist = .{},
 current_command: usize = 0,
@@ -57,7 +58,8 @@ status_message: std.BoundedArray(u8, 256) = .{},
 
 const INPUT_BUF_LEN = 256;
 
-const CommandHist = std.ArrayListUnmanaged(std.ArrayListUnmanaged(u8));
+const CommandBuf = SizedArrayListUnmanaged(u8, u32);
+const CommandHist = std.ArrayListUnmanaged(CommandBuf);
 
 pub const status_line = 0;
 pub const input_line = 1;
@@ -194,6 +196,7 @@ pub fn inputBufSlice(self: *Self) ![:0]const u8 {
 pub fn run(self: *Self) !void {
     while (self.running) {
         try self.updateCells();
+        try self.updateTextCells();
         try self.tui.render(self);
         try self.handleInput();
     }
@@ -224,7 +227,11 @@ pub fn dismissStatusMessage(self: *Self) void {
 }
 
 pub fn updateCells(self: *Self) Allocator.Error!void {
-    return self.sheet.update();
+    return self.sheet.update(.number);
+}
+
+pub fn updateTextCells(self: *Self) Allocator.Error!void {
+    return self.sheet.update(.text);
 }
 
 fn setMode(self: *Self, new_mode: Mode) void {
@@ -362,7 +369,7 @@ fn clampScreenToCommandCursor(self: *Self) void {
     }
 
     const slice = self.commandSlice();
-    var x: u16 = self.command_cursor;
+    var x: u32 = self.command_cursor;
     // Reserve either the width of the character under the cursor, or 1 column if none.
     var w: u16 = if (self.command_cursor < slice.len) blk: {
         const len = std.unicode.utf8ByteSequenceLength(slice[x]) catch unreachable;
@@ -385,7 +392,7 @@ fn clampScreenToCommandCursor(self: *Self) void {
     }
 }
 
-pub fn setCommandCursor(self: *Self, pos: u16) void {
+pub fn setCommandCursor(self: *Self, pos: u32) void {
     self.command_cursor = pos;
     self.clampCommandCursor();
     self.clampScreenToCommandCursor();
@@ -414,16 +421,16 @@ pub fn submitCommand(self: *Self) !void {
 
 pub fn resetCommandBuf(self: *Self) void {
     self.current_command = self.command_history.items.len - 1;
-    self.commandList().items.len = 0;
+    self.commandList().len = 0;
     self.setCommandCursor(0);
 }
 
 pub fn commandSlice(self: *Self) []const u8 {
     assert(self.current_command <= self.command_history.items.len);
-    return self.command_history.items[self.current_command].items;
+    return self.command_history.items[self.current_command].items();
 }
 
-pub fn commandList(self: *Self) *std.ArrayListUnmanaged(u8) {
+pub fn commandList(self: *Self) *CommandBuf {
     assert(self.current_command <= self.command_history.items.len);
     return &self.command_history.items[self.current_command];
 }
@@ -457,10 +464,10 @@ pub const CommandWriter = std.io.Writer(*Self, Allocator.Error, commandWrite);
 
 pub fn doCommandMotion(self: *Self, motion: Motion) void {
     const count = self.getCount();
-    const range = motion.do(self.commandSlice(), self.command_cursor, count);
     switch (self.mode) {
         .normal, .visual, .select => unreachable,
         .command_normal, .command_insert => {
+            const range = motion.do(self.commandSlice(), self.command_cursor, count);
             self.doCommandNormalMotion(range);
         },
         .command_change => {
@@ -469,6 +476,7 @@ pub fn doCommandMotion(self: *Self, motion: Motion) void {
                 .long_word_start_next => .long_word_end_next,
                 else => motion,
             };
+            const range = m.do(self.commandSlice(), self.command_cursor, count);
 
             if (range.start != range.end) {
                 // We want the 'end' part of the range to be inclusive for some motions and
@@ -495,6 +503,7 @@ pub fn doCommandMotion(self: *Self, motion: Motion) void {
             self.setMode(.command_insert);
         },
         .command_delete => {
+            const range = motion.do(self.commandSlice(), self.command_cursor, count);
             if (range.start != range.end) {
                 const end = range.end + switch (motion) {
                     .normal_word_end_next,
@@ -555,11 +564,11 @@ pub fn doCommandNormalMode(self: *Self, action: CommandAction) !void {
             self.clampCommandCursor();
         },
         .change_to_eol => {
-            self.commandList().items.len = self.command_cursor;
+            self.commandList().len = self.command_cursor;
             self.setMode(.command_insert);
         },
         .delete_to_eol => {
-            self.commandList().items.len = self.command_cursor;
+            self.commandList().len = self.command_cursor;
         },
         .change_line => {
             self.resetCommandBuf();
@@ -588,10 +597,8 @@ pub fn doCommandNormalMode(self: *Self, action: CommandAction) !void {
 fn doCommandInsertMode(self: *Self, action: CommandAction, keys: []const u8) !void {
     try switch (action) {
         .none => {
-            if (keys.len > 0) {
-                self.commandList().insertSlice(self.allocator, self.command_cursor, keys) catch return;
-                self.setCommandCursor(self.command_cursor + @intCast(u16, keys.len));
-            }
+            const writer = self.commandWriter();
+            try writer.writeAll(keys);
         },
         .history_next => self.commandHistoryNext(),
         .history_prev => self.commandHistoryPrev(),
@@ -662,10 +669,10 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
     switch (action) {
         .enter_command_mode => {
             self.setMode(.command_insert);
-            const writer = self.commandList().writer(self.allocator);
-            writer.writeByte(':') catch unreachable;
-            self.setCommandCursor(1);
+            const writer = self.commandWriter();
+            try writer.writeByte(':');
         },
+        .fit_text => {},
         .enter_visual_mode => self.setMode(.visual),
         .enter_normal_mode => {},
         .dismiss_count_or_status_message => {
@@ -704,11 +711,11 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
         .decrease_width => try self.cursorDecWidth(),
         .assign_cell => {
             self.setMode(.command_insert);
-            const list = self.commandList();
-            const writer = list.writer(self.allocator);
-            self.cursor.writeCellAddress(writer) catch unreachable;
-            writer.writeAll(" = ") catch unreachable;
-            self.setCommandCursor(@intCast(u16, list.items.len));
+            try self.commandWriter().print("let {} = ", .{self.cursor});
+        },
+        .assign_label => {
+            self.setMode(.command_insert);
+            try self.commandWriter().print("label {} = ", .{self.cursor});
         },
 
         .zero => {
@@ -740,11 +747,13 @@ fn doVisualMode(self: *Self, action: Action) Allocator.Error!void {
 
         .select_cancel => self.setMode(.command_insert),
         .select_submit => {
-            const writer = self.commandList().writer(self.allocator);
+            self.setMode(.command_insert);
+            const writer = self.commandWriter();
+
             const tl = Position.topLeft(self.cursor, self.anchor);
             const br = Position.bottomRight(self.cursor, self.anchor);
-            writer.print("{}:{}", .{ tl, br }) catch {};
-            self.setMode(.command_insert);
+
+            try writer.print("{}:{}", .{ tl, br });
         },
 
         .cell_cursor_up => self.cursorUp(),
@@ -780,15 +789,14 @@ const ParseCommandError = Ast.ParseError || RunCommandError;
 fn parseCommand(self: *Self, str: []const u8) ParseCommandError!void {
     if (str.len == 0) return;
 
-    if (str[0] == ':') {
-        return self.runCommand(str[1..]);
+    switch (str[0]) {
+        ':' => return self.runCommand(str[1..]),
+        else => {},
     }
 
     var ast = self.newAst();
-    ast.parse(self.allocator, str) catch |err| {
-        self.delAstAssumeCapacity(ast);
-        return err;
-    };
+    errdefer self.delAstAssumeCapacity(ast);
+    try ast.parse(self.allocator, str);
 
     const root = ast.rootNode();
     switch (root) {
@@ -796,10 +804,18 @@ fn parseCommand(self: *Self, str: []const u8) ParseCommandError!void {
             const pos = ast.nodes.items(.data)[op.lhs].cell;
             ast.splice(op.rhs);
 
-            self.sheet.setCell(pos, .{ .ast = ast }, .{}) catch |err| {
-                self.delAstAssumeCapacity(ast);
-                return err;
-            };
+            try self.sheet.setCell(pos, ast, .{});
+            self.sheet.endUndoGroup();
+            self.tui.update.cursor = true;
+            self.tui.update.cells = true;
+        },
+        .label => |op| {
+            const pos = ast.nodes.items(.data)[op.lhs].cell;
+            ast.splice(op.rhs);
+
+            const strings = try ast.dupeStrings(self.allocator, str);
+            errdefer if (strings) |s| s.destroy(self.allocator);
+            try self.sheet.setTextCell(pos, strings, ast, .{});
             self.sheet.endUndoGroup();
             self.tui.update.cursor = true;
             self.tui.update.cells = true;
@@ -997,7 +1013,7 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
 
                     try self.sheet.setCell(
                         .{ .y = @intCast(u16, y), .x = @intCast(u16, x) },
-                        .{ .ast = ast },
+                        ast,
                         .{},
                     );
 
@@ -1023,11 +1039,18 @@ pub fn loadCmd(self: *Self, filepath: []const u8) !void {
 }
 
 pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
-    const count = self.sheet.cellCount() + sheet.undos.len + sheet.redos.len;
+    const count = self.sheet.cellCount() + self.sheet.text_cells.entries.len +
+        sheet.undos.len + sheet.redos.len;
     try self.asts.ensureUnusedCapacity(self.allocator, count);
 
     for (sheet.cells.values()) |cell| {
         self.delAstAssumeCapacity(cell.ast);
+    }
+
+    for (sheet.text_cells.values()) |*cell| {
+        self.delAstAssumeCapacity(cell.ast);
+        cell.text.deinit(self.allocator);
+        if (cell.strings) |strings| strings.destroy(self.allocator);
     }
 
     const undo_slice = sheet.undos.slice();
@@ -1038,7 +1061,14 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
                 const ast = sheet.undo_asts.get(index);
                 self.delAstAssumeCapacity(ast);
             },
+            .set_text_cell => {
+                const index = undo_slice.items(.data)[i].set_text_cell.index;
+                const t = sheet.undo_text_asts.get(index);
+                if (t.strings) |strings| strings.destroy(self.allocator);
+                self.delAstAssumeCapacity(t.ast);
+            },
             .delete_cell,
+            .delete_text_cell,
             .set_column_width,
             .set_column_precision,
             .group_end,
@@ -1054,7 +1084,14 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
                 const ast = sheet.undo_asts.get(index);
                 self.delAstAssumeCapacity(ast);
             },
+            .set_text_cell => {
+                const index = redo_slice.items(.data)[i].set_text_cell.index;
+                const t = sheet.undo_text_asts.get(index);
+                if (t.strings) |strings| strings.destroy(self.allocator);
+                self.delAstAssumeCapacity(t.ast);
+            },
             .delete_cell,
+            .delete_text_cell,
             .set_column_width,
             .set_column_precision,
             .group_end,
@@ -1065,6 +1102,7 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
     sheet.undos.len = 0;
     sheet.redos.len = 0;
     sheet.cells.clearRetainingCapacity();
+    sheet.text_cells.clearRetainingCapacity();
 }
 
 pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
@@ -1095,15 +1133,28 @@ pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
         };
         errdefer self.asts.appendAssumeCapacity(ast);
 
+        const data = ast.nodes.items(.data);
         const root = ast.rootTag();
         switch (root) {
             .assignment => {
-                const assignment = ast.nodes.items(.data)[ast.rootNodeIndex()].assignment;
-                const pos = ast.nodes.items(.data)[assignment.lhs].cell;
+                const assignment = data[ast.rootNodeIndex()].assignment;
+                const pos = data[assignment.lhs].cell;
                 ast.splice(assignment.rhs);
-                try sheet.setCell(pos, .{ .ast = ast }, .{});
+                try sheet.setCell(pos, ast, .{});
             },
-            else => continue,
+            .label => {
+                const label = data[ast.rootNodeIndex()].label;
+                const pos = data[label.lhs].cell;
+                ast.splice(label.rhs);
+
+                const strings = try ast.dupeStrings(self.allocator, line);
+                errdefer if (strings) |s| s.destroy(self.allocator);
+
+                try sheet.setTextCell(pos, strings, ast, .{});
+            },
+            else => {
+                self.delAstAssumeCapacity(ast);
+            },
         }
     }
 
@@ -1127,11 +1178,12 @@ pub fn writeFile(sheet: *Sheet, opts: WriteFileOptions) !void {
     var buf = std.io.bufferedWriter(atomic_file.file.writer());
     const writer = buf.writer();
 
-    for (sheet.cells.keys(), sheet.cells.values()) |pos, *cell| {
-        try pos.writeCellAddress(writer);
-        try writer.writeAll(" = ");
-        try cell.ast.print(writer);
-        try writer.writeByte('\n');
+    for (sheet.cells.keys(), sheet.cells.values()) |pos, cell| {
+        try writer.print("let {} = {}\n", .{ pos, cell });
+    }
+
+    for (sheet.text_cells.keys(), sheet.text_cells.values()) |pos, cell| {
+        try writer.print("label {} = {}\n", .{ pos, cell });
     }
 
     try buf.flush();
@@ -1143,7 +1195,8 @@ pub fn writeFile(sheet: *Sheet, opts: WriteFileOptions) !void {
 }
 
 pub fn deleteCell(self: *Self) Allocator.Error!void {
-    try self.sheet.deleteCell(self.cursor, .{});
+    try self.sheet.deleteCell(.number, self.cursor, .{});
+    try self.sheet.deleteCell(.text, self.cursor, .{});
     self.sheet.endUndoGroup();
 
     self.tui.update.cells = true;
@@ -1526,6 +1579,8 @@ pub const Action = union(enum) {
     increase_width,
     decrease_width,
     assign_cell,
+    assign_label,
+    fit_text,
 
     visual_move_left,
     visual_move_right,
@@ -1805,6 +1860,8 @@ const outer_keys = [_]KeyMaps{
         .keys = &.{
             .{ "<C-[>", .dismiss_count_or_status_message },
             .{ "<Escape>", .dismiss_count_or_status_message },
+            .{ "\\", .assign_label },
+            .{ "aa", .fit_text },
             .{ "+", .increase_width },
             .{ "-", .decrease_width },
             .{ "f", .increase_precision },
@@ -2434,12 +2491,12 @@ test "Motions normal mode" {
     try zc.doNormalMode(.prev_populated_cell);
     try t.expectEqual(Position{ .x = 50, .y = 50 }, zc.cursor);
 
-    try zc.parseCommand("C4 = 0");
-    try zc.parseCommand("ZZZ0 = 5");
-    try zc.parseCommand("A4 = 1");
-    try zc.parseCommand("B2 = 4");
-    try zc.parseCommand("B0 = 3");
-    try zc.parseCommand("A500 = 2");
+    try zc.parseCommand("let C4 = 0");
+    try zc.parseCommand("let ZZZ0 = 5");
+    try zc.parseCommand("let A4 = 1");
+    try zc.parseCommand("let B2 = 4");
+    try zc.parseCommand("let B0 = 3");
+    try zc.parseCommand("let A500 = 2");
     try zc.updateCells();
 
     zc.setCursor(.{ .x = 0, .y = 0 });
@@ -2639,12 +2696,12 @@ test "Motions visual mode" {
     try zc.doVisualMode(.prev_populated_cell);
     try t.expectEqual(Position{ .x = 50, .y = 50 }, zc.cursor);
 
-    try zc.parseCommand("C4 = 0");
-    try zc.parseCommand("ZZZ0 = 5");
-    try zc.parseCommand("A4 = 1");
-    try zc.parseCommand("B2 = 4");
-    try zc.parseCommand("B0 = 3");
-    try zc.parseCommand("A500 = 2");
+    try zc.parseCommand("let C4 = 0");
+    try zc.parseCommand("let ZZZ0 = 5");
+    try zc.parseCommand("let A4 = 1");
+    try zc.parseCommand("let B2 = 4");
+    try zc.parseCommand("let B0 = 3");
+    try zc.parseCommand("let A500 = 2");
     try zc.updateCells();
 
     zc.setCursor(.{ .x = 0, .y = 0 });
@@ -2887,20 +2944,20 @@ test "Command history" {
     try t.expectEqual(@as(usize, 0), zc.current_command);
     try t.expectEqual(@as(usize, 1), zc.command_history.items.len);
     zc.setMode(.command_insert);
-    try zc.doCommandInsertMode(.none, "A0 = 5");
+    try zc.doCommandInsertMode(.none, "let A0 = 5");
     try zc.doCommandInsertMode(.submit_command, "");
     zc.setMode(.command_insert);
     try t.expectEqual(@as(usize, 1), zc.current_command);
     try t.expectEqual(@as(usize, 2), zc.command_history.items.len);
-    try zc.doCommandInsertMode(.none, "A0 = 10");
+    try zc.doCommandInsertMode(.none, "let A0 = 10");
     try zc.doCommandInsertMode(.submit_command, "");
     zc.setMode(.command_insert);
     try t.expectEqual(@as(usize, 2), zc.current_command);
     try t.expectEqual(@as(usize, 3), zc.command_history.items.len);
 
-    try t.expectEqualStrings("A0 = 5", zc.command_history.items[0].items);
-    try t.expectEqualStrings("A0 = 10", zc.command_history.items[1].items);
-    try t.expectEqualStrings("", zc.command_history.items[2].items);
+    try t.expectEqualStrings("let A0 = 5", zc.command_history.items[0].items());
+    try t.expectEqualStrings("let A0 = 10", zc.command_history.items[1].items());
+    try t.expectEqualStrings("", zc.command_history.items[2].items());
 
     zc.commandHistoryPrev();
     try t.expectEqual(@as(usize, 1), zc.current_command);

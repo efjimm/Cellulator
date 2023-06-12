@@ -13,23 +13,23 @@ pub fn isContinuation(c: u8) bool {
     return c & 0xC0 == 0x80;
 }
 
-pub fn nextCodepoint(bytes: []const u8, offset: u16) u16 {
+pub fn nextCodepoint(bytes: []const u8, offset: u32) u32 {
     return std.unicode.utf8ByteSequenceLength(bytes[offset]) catch unreachable;
 }
 
-pub fn prevCodepoint(bytes: []const u8, offset: u16) u16 {
+pub fn prevCodepoint(bytes: []const u8, offset: u32) u32 {
     if (offset == 0) return 0;
 
     var iter = std.mem.reverseIterator(bytes[0..offset]);
     while (iter.next()) |c| {
         if (!isContinuation(c)) break;
     }
-    return offset - @intCast(u16, iter.index);
+    return offset - @intCast(u32, iter.index);
 }
 
 // TODO: package & use libgrapheme for these
 //       waiting for https://github.com/ziglang/zig/issues/14719 to be fixed before this happens
-pub fn nextCharacter(bytes: []const u8, offset: u16, count: u32) u16 {
+pub fn nextCharacter(bytes: []const u8, offset: u32, count: u32) u32 {
     var iter = std.unicode.Utf8Iterator{
         .bytes = bytes[offset..],
         .i = 0,
@@ -41,11 +41,11 @@ pub fn nextCharacter(bytes: []const u8, offset: u16, count: u32) u16 {
         } else break;
     }
 
-    return @intCast(u16, iter.i);
+    return @intCast(u32, iter.i);
 }
 
-pub fn prevCharacter(bytes: []const u8, offset: u16, count: u32) u16 {
-    var i: u16 = offset;
+pub fn prevCharacter(bytes: []const u8, offset: u32, count: u32) u32 {
+    var i: u32 = offset;
     for (0..count) |_| {
         while (i > 0) {
             const len = prevCodepoint(bytes, i);
@@ -79,10 +79,10 @@ pub const Delimiters = struct {
 };
 
 pub const Range = struct {
-    start: u16,
-    end: u16,
+    start: u32,
+    end: u32,
 
-    pub inline fn len(range: Range) u16 {
+    pub inline fn len(range: Range) u32 {
         return range.end - range.start;
     }
 };
@@ -127,7 +127,7 @@ pub const Motion = union(enum(u8)) {
         long,
     };
 
-    pub fn do(motion: Motion, bytes: []const u8, pos: u16, count: u32) Range {
+    pub fn do(motion: Motion, bytes: []const u8, pos: u32, count: u32) Range {
         return switch (motion) {
             .normal_word_start_next => .{
                 .start = pos,
@@ -171,11 +171,11 @@ pub const Motion = union(enum(u8)) {
             },
             .line => .{
                 .start = 0,
-                .end = @intCast(u16, bytes.len),
+                .end = @intCast(u32, bytes.len),
             },
             .eol => .{
                 .start = pos,
-                .end = @intCast(u16, bytes.len),
+                .end = @intCast(u32, bytes.len),
             },
             .bol => .{
                 .start = 0,
@@ -232,9 +232,9 @@ pub const Motion = union(enum(u8)) {
     fn nextWordStart(
         bytes: []const u8,
         comptime word_type: WordType,
-        start_pos: u16,
+        start_pos: u32,
         count: u32,
-    ) u16 {
+    ) u32 {
         const boundary = wordBoundaryFn(word_type);
         var pos = start_pos;
 
@@ -262,9 +262,9 @@ pub const Motion = union(enum(u8)) {
     fn prevWordStart(
         bytes: []const u8,
         comptime word_type: WordType,
-        start_pos: u16,
+        start_pos: u32,
         count: u32,
-    ) u16 {
+    ) u32 {
         if (bytes.len == 0) return 0;
 
         const boundary = wordBoundaryFn(word_type);
@@ -298,9 +298,9 @@ pub const Motion = union(enum(u8)) {
     fn nextWordEnd(
         bytes: []const u8,
         comptime word_type: WordType,
-        start_pos: u16,
+        start_pos: u32,
         count: u32,
-    ) u16 {
+    ) u32 {
         if (bytes.len == 0) return 0;
 
         const boundary = wordBoundaryFn(word_type);
@@ -333,12 +333,12 @@ pub const Motion = union(enum(u8)) {
     fn prevWordEnd(
         bytes: []const u8,
         comptime word_type: WordType,
-        start_pos: u16,
+        start_pos: u32,
         count: u32,
-    ) u16 {
+    ) u32 {
         if (bytes.len == 0) return 0;
 
-        const len = @intCast(u16, bytes.len);
+        const len = @intCast(u32, bytes.len);
         if (start_pos >= bytes.len)
             return prevWordEnd(bytes, word_type, len - prevCharacter(bytes, len, 1), count - 1);
 
@@ -363,12 +363,12 @@ pub const Motion = union(enum(u8)) {
         return pos;
     }
 
-    fn insideWord(bytes: []const u8, comptime word_type: WordType, pos: u16) Range {
+    fn insideWord(bytes: []const u8, comptime word_type: WordType, pos: u32) Range {
         if (bytes.len == 0) return .{ .start = 0, .end = 0 };
 
         var iter = std.mem.reverseIterator(bytes[0..pos]);
-        var start: u16 = pos;
-        var end: u16 = pos;
+        var start: u32 = pos;
+        var end: u32 = pos;
 
         const boundary = wordBoundaryFn(word_type);
 
@@ -398,7 +398,7 @@ pub const Motion = union(enum(u8)) {
         };
     }
 
-    fn aroundWord(bytes: []const u8, comptime word_type: WordType, pos: u16) Range {
+    fn aroundWord(bytes: []const u8, comptime word_type: WordType, pos: u32) Range {
         if (bytes.len == 0) return .{ .start = 0, .end = 0 };
 
         var iter = std.mem.reverseIterator(bytes[0..pos]);
@@ -447,7 +447,7 @@ pub const Motion = union(enum(u8)) {
         bytes: []const u8,
         left_cp: u21,
         right_cp: u21,
-        pos: u16,
+        pos: u32,
     ) Range {
         const err_ret = Range{
             .start = pos,
@@ -463,7 +463,7 @@ pub const Motion = union(enum(u8)) {
         return insideDelimiters(bytes, left, right, pos);
     }
 
-    fn insideDelimiters(bytes: []const u8, left: []const u8, right: []const u8, pos: u16) Range {
+    fn insideDelimiters(bytes: []const u8, left: []const u8, right: []const u8, pos: u32) Range {
         if (bytes.len == 0) return .{ .start = 0, .end = 0 };
 
         var ret = aroundDelimiters(bytes, left, right, pos);
@@ -477,7 +477,7 @@ pub const Motion = union(enum(u8)) {
         bytes: []const u8,
         left_cp: u21,
         right_cp: u21,
-        pos: u16,
+        pos: u32,
     ) Range {
         const err_ret = Range{
             .start = pos,
@@ -497,7 +497,7 @@ pub const Motion = union(enum(u8)) {
         bytes: []const u8,
         left: []const u8,
         right: []const u8,
-        pos: u16,
+        pos: u32,
     ) Range {
         if (bytes.len == 0) return .{ .start = 0, .end = 0 };
         assert(pos < bytes.len);
@@ -526,7 +526,7 @@ pub const Motion = union(enum(u8)) {
         while (j < bytes.len) : (j += 1) {
             if (std.mem.startsWith(u8, bytes[j..], right)) {
                 if (depth == 0) {
-                    j += @intCast(u16, right.len);
+                    j += @intCast(u32, right.len);
                     break;
                 }
                 depth -= 1;
@@ -546,7 +546,7 @@ pub const Motion = union(enum(u8)) {
         };
     }
 
-    fn insideSingleDelimiterCp(bytes: []const u8, delim_cp: u21, pos: u16) Range {
+    fn insideSingleDelimiterCp(bytes: []const u8, delim_cp: u21, pos: u32) Range {
         var buf: [4]u8 = undefined;
         const len = utf8Encode(delim_cp, &buf) catch return .{
             .start = pos,
@@ -555,7 +555,7 @@ pub const Motion = union(enum(u8)) {
         return insideSingleDelimiter(bytes, buf[0..len], pos);
     }
 
-    fn insideSingleDelimiter(bytes: []const u8, delim: []const u8, pos: u16) Range {
+    fn insideSingleDelimiter(bytes: []const u8, delim: []const u8, pos: u32) Range {
         if (bytes.len == 0) return .{ .start = 0, .end = 0 };
 
         var ret = aroundSingleDelimiter(bytes, delim, pos);
@@ -568,7 +568,7 @@ pub const Motion = union(enum(u8)) {
     fn aroundSingleDelimiterCp(
         bytes: []const u8,
         delim_cp: u21,
-        pos: u16,
+        pos: u32,
     ) Range {
         var buf: [4]u8 = undefined;
         const len = utf8Encode(delim_cp, &buf) catch return .{
@@ -581,53 +581,53 @@ pub const Motion = union(enum(u8)) {
     fn aroundSingleDelimiter(
         bytes: []const u8,
         delim: []const u8,
-        pos: u16,
+        pos: u32,
     ) Range {
-        const len = @intCast(u16, delim.len);
+        const len = @intCast(u32, delim.len);
         if (std.mem.startsWith(u8, bytes[pos..], delim)) {
             const start = std.mem.lastIndexOf(u8, bytes[0..pos], delim) orelse pos;
             const end = std.mem.indexOf(u8, bytes[pos + len ..], delim) orelse pos;
 
             return .{
-                .start = @intCast(u16, start),
-                .end = len + @intCast(u16, end),
+                .start = @intCast(u32, start),
+                .end = len + @intCast(u32, end),
             };
         } else {
             const start = std.mem.lastIndexOf(u8, bytes[0..pos], delim) orelse pos;
             const end = if (std.mem.indexOf(u8, bytes[pos..], delim)) |x| pos + x else pos;
             if (start == end) return .{ .start = pos, .end = pos };
             return .{
-                .start = @intCast(u16, start),
-                .end = len + @intCast(u16, end),
+                .start = @intCast(u32, start),
+                .end = len + @intCast(u32, end),
             };
         }
     }
 
-    fn toForwardsCp(bytes: []const u8, cp: u21, pos: u16, count: u32) ?u16 {
+    fn toForwardsCp(bytes: []const u8, cp: u21, pos: u32, count: u32) ?u32 {
         var buf: [4]u8 = undefined;
         const len = utf8Encode(cp, &buf) catch 1;
         return toForwards(bytes, buf[0..len], pos, count);
     }
 
-    fn toBackwardsCp(bytes: []const u8, cp: u21, pos: u16, count: u32) ?u16 {
+    fn toBackwardsCp(bytes: []const u8, cp: u21, pos: u32, count: u32) ?u32 {
         var buf: [4]u8 = undefined;
         const len = utf8Encode(cp, &buf) catch 1;
         return toBackwards(bytes, buf[0..len], pos, count);
     }
 
-    fn untilForwardsCp(bytes: []const u8, cp: u21, pos: u16, count: u32) ?u16 {
+    fn untilForwardsCp(bytes: []const u8, cp: u21, pos: u32, count: u32) ?u32 {
         var buf: [4]u8 = undefined;
         const len = utf8Encode(cp, &buf) catch 1;
         return untilForwards(bytes, buf[0..len], pos, count);
     }
 
-    fn untilBackwardsCp(bytes: []const u8, cp: u21, pos: u16, count: u32) ?u16 {
+    fn untilBackwardsCp(bytes: []const u8, cp: u21, pos: u32, count: u32) ?u32 {
         var buf: [4]u8 = undefined;
         const len = utf8Encode(cp, &buf) catch 1;
         return untilBackwards(bytes, buf[0..len], pos, count);
     }
 
-    fn toForwards(bytes: []const u8, needle: []const u8, pos: u16, count: u32) ?u16 {
+    fn toForwards(bytes: []const u8, needle: []const u8, pos: u32, count: u32) ?u32 {
         if (pos >= bytes.len or count == 0) return pos;
 
         const first = 1 + (std.mem.indexOf(u8, bytes[pos + 1 ..], needle) orelse return null);
@@ -638,10 +638,10 @@ pub const Motion = union(enum(u8)) {
             p += 1 + (std.mem.indexOf(u8, bytes[p + 1 ..], needle) orelse break);
         }
 
-        return @intCast(u16, p);
+        return @intCast(u32, p);
     }
 
-    fn toBackwards(bytes: []const u8, needle: []const u8, pos: u16, count: u32) ?u16 {
+    fn toBackwards(bytes: []const u8, needle: []const u8, pos: u32, count: u32) ?u32 {
         assert(pos <= bytes.len);
         if (count == 0) return pos;
 
@@ -651,15 +651,15 @@ pub const Motion = union(enum(u8)) {
             p = std.mem.lastIndexOf(u8, bytes[0..p], needle) orelse break;
         }
 
-        return @intCast(u16, p);
+        return @intCast(u32, p);
     }
 
-    fn untilForwards(bytes: []const u8, needle: []const u8, pos: u16, count: u32) ?u16 {
+    fn untilForwards(bytes: []const u8, needle: []const u8, pos: u32, count: u32) ?u32 {
         const ret = toForwards(bytes, needle, pos, count) orelse return null;
         return ret - prevCharacter(bytes, ret, 1);
     }
 
-    fn untilBackwards(bytes: []const u8, needle: []const u8, pos: u16, count: u32) ?u16 {
+    fn untilBackwards(bytes: []const u8, needle: []const u8, pos: u32, count: u32) ?u32 {
         const ret = toBackwards(bytes, needle, pos, count) orelse return null;
         return ret + nextCharacter(bytes, ret, 1);
     }
@@ -678,9 +678,9 @@ pub const Motion = union(enum(u8)) {
 
 fn testMotion(
     text: []const u8,
-    start: u16,
-    start_pos: u16,
-    end_pos: u16,
+    start: u32,
+    start_pos: u32,
+    end_pos: u32,
     motion: Motion,
     count: u32,
 ) !void {
