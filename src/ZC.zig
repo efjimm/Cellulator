@@ -1371,7 +1371,7 @@ pub fn clampScreenToCursorX(self: *Self) void {
         if (x < self.screen_pos.x) return;
 
         const col = self.sheet.getColumn(x);
-        w += @min(self.tui.term.width - self.leftReservedColumns(), col.width);
+        w += @min(self.tui.term.width -| self.leftReservedColumns(), col.width);
 
         if (w > self.tui.term.width) break;
         if (x == 0) return;
