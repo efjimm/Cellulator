@@ -10,6 +10,16 @@ const assert = std.debug.assert;
 
 const Parser = @This();
 
+current_token: Tokenizer.Token,
+
+tokenizer: Tokenizer,
+nodes: NodeList,
+
+/// Total length of all string literals parsed
+strings_len: u32 = 0,
+
+allocator: Allocator,
+
 pub const String = struct {
     start: u32,
     end: u32,
@@ -77,16 +87,6 @@ pub const Node = union(enum) {
     string_literal: String,
 };
 
-current_token: Tokenizer.Token,
-
-tokenizer: Tokenizer,
-nodes: NodeList,
-
-/// Total length of all string literals parsed
-strings_len: u32 = 0,
-
-allocator: Allocator,
-
 const log = std.log.scoped(.parser);
 
 const InitOptions = struct {
@@ -151,7 +151,7 @@ fn parseLabel(parser: *Parser) ParseError!u32 {
 }
 
 /// StringExpression <- PrimaryStringExpression ('#' PrimaryStringExpression)*
-fn parseStringExpression(parser: *Parser) ParseError!u32 {
+pub fn parseStringExpression(parser: *Parser) ParseError!u32 {
     var index = try parser.parsePrimaryStringExpression();
 
     while (parser.eatToken(.hash)) |_| {
@@ -367,7 +367,6 @@ fn parseCellName(parser: *Parser) !u32 {
     const token = try parser.expectToken(.cell_name);
     const text = token.text(parser.source());
 
-    // TODO: check bounds
     const pos = Position.fromAddress(text) catch return error.InvalidCellAddress;
 
     return parser.addNode(.{
@@ -405,4 +404,143 @@ fn nextToken(parser: *Parser) Tokenizer.Token {
     const ret = parser.current_token;
     parser.current_token = parser.tokenizer.next() orelse Tokenizer.eofToken();
     return ret;
+}
+
+test {
+    const t = std.testing;
+    const testParser = struct {
+        fn func(bytes: []const u8, node_tags: []const std.meta.Tag(Node)) !void {
+            var parser = Parser.init(t.allocator, .{ .bytes = bytes }, .{});
+            defer parser.deinit();
+            try parser.parse();
+            for (node_tags, parser.nodes.items(.tags)) |expected, actual| {
+                t.expectEqual(expected, actual) catch |err| {
+                    for (parser.nodes.items(.tags)) |tag| {
+                        std.debug.print("{s}\n", .{@tagName(tag)});
+                    }
+                    return err;
+                };
+            }
+        }
+    }.func;
+    const testParseError = struct {
+        fn func(bytes: []const u8, err: ?anyerror) !void {
+            var parser = Parser.init(t.allocator, .{ .bytes = bytes }, .{});
+            defer parser.deinit();
+            if (err) |e| {
+                try t.expectError(e, parser.parse());
+            } else {
+                try parser.parse();
+            }
+        }
+    }.func;
+
+    try testParser("let a0 = 5", &.{ .cell, .number, .assignment });
+    try testParser("let a0 = 5.0 + +5.0", &.{ .cell, .number, .number, .add, .assignment });
+    try testParser("let a0 = 5.0 + -5.0", &.{ .cell, .number, .number, .add, .assignment });
+    try testParser("let a0 = 5.0 - +5.0", &.{ .cell, .number, .number, .sub, .assignment });
+    try testParser("let a0 = 5.0 - -5.0", &.{ .cell, .number, .number, .sub, .assignment });
+    try testParser("let b0 = 0.0 + 1.123", &.{ .cell, .number, .number, .add, .assignment });
+    try testParser("let xxx50000 = 000000 - 11111122222223333333444444", &.{ .cell, .number, .number, .sub, .assignment });
+    try testParser("let c30 = 123_123.231 * 2", &.{ .cell, .number, .number, .mul, .assignment });
+    try testParser("let crxp65535 = 123_123.321 / 123_123.321", &.{ .cell, .number, .number, .div, .assignment });
+
+    try testParser("let a0 = 3 - 1 * 2", &.{ .cell, .number, .number, .number, .mul, .sub, .assignment });
+    try testParser("let a0 = 1 / 2 + 3", &.{ .cell, .number, .number, .div, .number, .add, .assignment });
+    try testParser("let a0 = 1 - (3 + 5)", &.{ .cell, .number, .number, .number, .add, .sub, .assignment });
+    try testParser("let a0 = (1 + 2) - (2 + 1)", &.{ .cell, .number, .number, .add, .number, .number, .add, .sub, .assignment });
+    try testParser("let a0 = 2 / (1 - (1 + 3))", &.{ .cell, .number, .number, .number, .number, .add, .sub, .div, .assignment });
+
+    try testParser("label a0 = 'this is epic' # ' and nice'", &.{ .cell, .string_literal, .string_literal, .concat, .label });
+
+    try testParseError("unga bunga", error.UnexpectedToken);
+    try testParseError("let", error.UnexpectedToken);
+    try testParseError("let a0 = ", error.UnexpectedToken);
+    try testParseError("a0 = 5", error.UnexpectedToken);
+    try testParseError("let a0 = ", error.UnexpectedToken);
+    try testParseError("let a0 = 'string!'", error.UnexpectedToken);
+    try testParseError("let a0 = 1 # 1", error.UnexpectedToken);
+    try testParseError("let a0 = 1 # 'string'", error.UnexpectedToken);
+    try testParseError("let a0 = 'strings' # 'string'", error.UnexpectedToken);
+    try testParseError("let a0 = (5", error.UnexpectedToken);
+    try testParseError("let a0 = 5)", error.UnexpectedToken);
+    try testParseError("let a0 = 5 + ", error.UnexpectedToken);
+    try testParseError("let a0 = ++ 5", error.UnexpectedToken);
+    try testParseError("let a0 = 5 - ", error.UnexpectedToken);
+    try testParseError("let a0 = -- 5", error.UnexpectedToken);
+
+    try testParseError("label", error.UnexpectedToken);
+    try testParseError("label a0", error.UnexpectedToken);
+    try testParseError("label a0 =", error.UnexpectedToken);
+    try testParseError("label a0 = 5", error.UnexpectedToken);
+    try testParseError("label a0 = 'string'", null);
+    try testParseError("label a0 = 'string' + 'string'", error.UnexpectedToken);
+    try testParseError("label a0 = 'string' - 'string'", error.UnexpectedToken);
+    try testParseError("label a0 = 'string' * 'string'", error.UnexpectedToken);
+    try testParseError("label a0 = 'string' / 'string'", error.UnexpectedToken);
+    try testParseError("label a0 = 'string' % 'string'", error.UnexpectedToken);
+    try testParseError("label a0 = 'string' # 'string'", null);
+    try testParseError("label a0 = 'string' 5", error.UnexpectedToken);
+    try testParseError("label a0 = 'string' 'string'", error.UnexpectedToken);
+
+    try testParseError("let crxp0 = 5", null);
+    try testParseError("let crxx0 = 5", error.InvalidCellAddress);
+    try testParseError("label crxp0 = 'string'", null);
+    try testParseError("label crxx0 = 'string'", error.InvalidCellAddress);
+}
+
+test "Node contents" {
+    const t = std.testing;
+    const testNodes = struct {
+        fn func(bytes: []const u8, nodes: []const Node) !void {
+            var parser = Parser.init(t.allocator, .{ .bytes = bytes }, .{});
+            defer parser.deinit();
+
+            try parser.parse();
+            const slice = parser.nodes.slice();
+            for (nodes, slice.items(.tags), slice.items(.data)) |expected, tag, data| {
+                const actual = switch (tag) {
+                    inline else => |t_| @unionInit(Node, @tagName(t_), @field(data, @tagName(t_))),
+                };
+                try t.expectEqual(expected, actual);
+            }
+        }
+    }.func;
+
+    try testNodes(
+        "let b30 = 5 * (3 - 2) / (2 + 1)",
+        &.{
+            .{ .cell = .{ .x = 1, .y = 30 } },
+            .{ .number = 5.0 },
+            .{ .number = 3.0 },
+            .{ .number = 2.0 },
+            .{ .sub = .{ .lhs = 2, .rhs = 3 } },
+            .{ .mul = .{ .lhs = 1, .rhs = 4 } },
+            .{ .number = 2.0 },
+            .{ .number = 1.0 },
+            .{ .add = .{ .lhs = 6, .rhs = 7 } },
+            .{ .div = .{ .lhs = 5, .rhs = 8 } },
+            .{ .assignment = .{ .lhs = 0, .rhs = 9 } },
+        },
+    );
+    try testNodes(
+        "label crxp65535 = 'this is epic' # 'nice'",
+        &.{
+            .{ .cell = .{ .x = 65535, .y = 65535 } },
+            .{
+                .string_literal = .{
+                    .start = "label crxp65535 = '".len,
+                    .end = "label crxp65535 = 'this is epic".len,
+                },
+            },
+            .{
+                .string_literal = .{
+                    .start = "label crxp65535 = 'this is epic' # '".len,
+                    .end = "label crxp65535 = 'this is epic' # 'nice".len,
+                },
+            },
+            .{ .concat = .{ .lhs = 1, .rhs = 2 } },
+            .{ .label = .{ .lhs = 0, .rhs = 3 } },
+        },
+    );
 }

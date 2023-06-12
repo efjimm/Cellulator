@@ -139,7 +139,7 @@ pub fn renderStatus(
     try writer.writeAll(zc.input_buf.items);
 
     if (zc.sheet.text_cells.get(zc.cursor)) |cell| {
-        try writer.writeAll(cell.text.items());
+        try writer.print("[{}]", .{cell});
     } else if (zc.sheet.getCell(zc.cursor)) |cell| {
         switch (cell.getValue()) {
             .err => {

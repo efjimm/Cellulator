@@ -152,25 +152,3 @@ pub fn HeaderList(comptime T: type, comptime Size: type) type {
         }
     };
 }
-
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const List = HeaderList(u32, u32);
-
-    var list = try List.create(allocator, 0);
-    defer {
-        list.destroy(allocator);
-    }
-
-    list = try list.appendSlice(allocator, &.{ 0, 1 });
-    list = try list.appendSlice(allocator, &.{ 2, 3, 4 });
-
-    _ = list.swapRemove(2);
-
-    for (list.items()) |elem| {
-        std.debug.print("{d}\n", .{elem});
-    }
-}

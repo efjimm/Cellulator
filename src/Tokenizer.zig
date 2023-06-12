@@ -276,7 +276,7 @@ test "Tokens" {
         .{ "123_123_123", .{ .number, .eof } },
         .{ "=+-*/%,:#", .{ .equals_sign, .plus, .minus, .asterisk, .forward_slash, .percent, .comma, .colon, .hash, .eof } },
         .{ "() aaaaaa a0", .{ .lparen, .rparen, .column_name, .cell_name } },
-        .{ "a = 3", .{ .column_name, .equals_sign, .number, .eof } },
+        .{ "let a = 3", .{ .keyword_let, .column_name, .equals_sign, .number, .eof } },
         .{ "@max(34, 100 + 45, @min(3, 1))", .{ .builtin, .lparen, .number, .comma, .number, .plus, .number, .comma, .builtin, .lparen, .number, .comma, .number, .rparen, .rparen, .eof } },
     };
 
@@ -285,4 +285,23 @@ test "Tokens" {
     }
 }
 
-test "Token text range" {}
+test "Token text range" {
+    const t = std.testing;
+    var tokenizer = Tokenizer{ .bytes = "label a0 = 'this is epic'" };
+    var token = tokenizer.next().?;
+    try t.expectEqual(Token.Tag.keyword_label, token.tag);
+    try t.expectEqual(@as(u32, 0), token.start);
+    try t.expectEqual(@as(u32, "label".len), token.end);
+    token = tokenizer.next().?;
+    try t.expectEqual(Token.Tag.cell_name, token.tag);
+    try t.expectEqual(@as(u32, "label ".len), token.start);
+    try t.expectEqual(@as(u32, "label a0".len), token.end);
+    token = tokenizer.next().?;
+    try t.expectEqual(Token.Tag.equals_sign, token.tag);
+    try t.expectEqual(@as(u32, "label a0 ".len), token.start);
+    try t.expectEqual(@as(u32, "label a0 =".len), token.end);
+    token = tokenizer.next().?;
+    try t.expectEqual(Token.Tag.single_string_literal, token.tag);
+    try t.expectEqual(@as(u32, "label a0 = '".len), token.start);
+    try t.expectEqual(@as(u32, "label a0 = 'this is epic".len), token.end);
+}

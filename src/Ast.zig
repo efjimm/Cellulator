@@ -114,6 +114,20 @@ pub fn parseExpression(allocator: Allocator, source: []const u8) ParseError!Self
     };
 }
 
+pub fn fromStringExpression(allocator: Allocator, source: []const u8) ParseError!Self {
+    const tokenizer = Tokenizer.init(source);
+
+    var parser = Parser.init(allocator, tokenizer, .{});
+    errdefer parser.deinit();
+
+    _ = try parser.parseStringExpression();
+    _ = try parser.expectToken(.eof);
+
+    return Self{
+        .nodes = parser.nodes,
+    };
+}
+
 pub fn deinit(ast: *Self, allocator: Allocator) void {
     ast.nodes.deinit(allocator);
     // if (ast.strings) |strings| {
@@ -403,6 +417,10 @@ pub const Slice = struct {
                 };
             },
             .cell => {
+                if (@TypeOf(context) == void) return .{
+                    .start = buffer.len,
+                    .end = buffer.len,
+                };
                 const pos = ast.nodes.items(.data)[index].cell;
                 const bytes = try context.evalTextCell(pos);
                 const start = buffer.len;
@@ -839,4 +857,54 @@ test "Splice" {
     ast.splice(ast.rootNode().add.rhs);
     try t.expectApproxEqRel(@as(f64, 5.5), try ast.eval(Context{}), 0.0001);
     try t.expectEqual(@as(usize, 4), ast.nodes.len);
+}
+
+test "StringEval" {
+    const data = .{
+        .{ "'string'", "string" },
+        .{ "'string1' # 'string2'", "string1string2" },
+        .{ "'string1' # 'string2' # 'string3'", "string1string2string3" },
+    };
+    var buf = SizedArrayListUnmanaged(u8, u32){};
+    defer buf.deinit(std.testing.allocator);
+
+    inline for (data) |d| {
+        var ast = try fromStringExpression(std.testing.allocator, d[0]);
+        defer ast.deinit(std.testing.allocator);
+
+        buf.clearRetainingCapacity();
+        switch (@typeInfo(@TypeOf(d[1]))) {
+            .Null => {
+                const res = ast.stringEval(std.testing.allocator, {}, d[0], &buf);
+                try std.testing.expectError(error.NotEvaluable, res);
+            },
+            else => {
+                try ast.stringEval(std.testing.allocator, {}, d[0], &buf);
+
+                try std.testing.expectEqualStrings(d[1], buf.items());
+            },
+        }
+    }
+}
+
+test "DupeStrings" {
+    const t = std.testing;
+    {
+        const source = "label a0 = 'this is epic' # 'nice' # 'string!'";
+        var ast = try fromSource(t.allocator, source);
+        defer ast.deinit(t.allocator);
+
+        const strings = (try ast.dupeStrings(t.allocator, source)).?;
+        defer strings.destroy(t.allocator);
+
+        try t.expectEqualStrings("this is epicnicestring!", strings.items());
+    }
+
+    {
+        const source = "label a0 = b0";
+        var ast = try fromSource(t.allocator, source);
+        defer ast.deinit(t.allocator);
+
+        try t.expect(try ast.dupeStrings(t.allocator, source) == null);
+    }
 }
