@@ -412,7 +412,15 @@ pub fn renderCell(
     pos: Position,
 ) RenderError!u16 {
     const col = zc.sheet.getColumn(pos.x);
-    const width = @min(col.width, rc.term.width - zc.leftReservedColumns());
+    const width = getColWidth: {
+        var width: u16 = 0;
+        for (zc.screen_pos.x..pos.x) |x| {
+            const c = zc.sheet.getColumn(@intCast(u16, x));
+            width += c.width;
+        }
+        const screen_width = rc.term.width - zc.leftReservedColumns();
+        break :getColWidth @min(col.width, screen_width - width);
+    };
 
     var rpw = rc.restrictedPaddingWriter(width);
     const writer = rpw.writer();

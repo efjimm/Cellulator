@@ -440,6 +440,21 @@ pub fn commandHistoryPrev(self: *Self) void {
     self.setCommandCursor(@intCast(u16, self.commandSlice().len));
 }
 
+pub fn commandWrite(self: *Self, bytes: []const u8) Allocator.Error!usize {
+    const list = self.commandList();
+    try list.insertSlice(self.allocator, self.command_cursor, bytes);
+    self.setCommandCursor(self.command_cursor + @intCast(u16, bytes.len));
+    return bytes.len;
+}
+
+pub fn commandWriter(self: *Self) CommandWriter {
+    return .{
+        .context = self,
+    };
+}
+
+pub const CommandWriter = std.io.Writer(*Self, Allocator.Error, commandWrite);
+
 pub fn doCommandMotion(self: *Self, motion: Motion) void {
     const count = self.getCount();
     const range = motion.do(self.commandSlice(), self.command_cursor, count);
@@ -1303,13 +1318,13 @@ pub fn clampScreenToCursorX(self: *Self) void {
         if (x < self.screen_pos.x) return;
 
         const col = self.sheet.getColumn(x);
-        w += col.width;
+        w += @min(self.tui.term.width - self.leftReservedColumns(), col.width);
 
         if (w > self.tui.term.width) break;
         if (x == 0) return;
     }
 
-    if (x > self.screen_pos.x or (x == self.screen_pos.x and x < self.cursor.x)) {
+    if (x < self.cursor.x and (x >= self.screen_pos.x or x == self.screen_pos.x)) {
         self.screen_pos.x = x +| 1;
         self.tui.update.column_headings = true;
         self.tui.update.cells = true;
