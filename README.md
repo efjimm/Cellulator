@@ -48,36 +48,21 @@ Command normal and command insert mode allow for editing the command buffer and 
 commands. Command operator pending modes perform a specific action on a range of text delimited by
 an inputted motion.
 
-## Expressions
+## Statements / Commands
 
-A cells value can be set in command mode via the syntax `cellname = expression`, where cellname is
-the address of the cell cell, e.g. `a0`, `C52`, `ZZZ100`, and expression is any evaluable
-expression. Number literals, cell references, cell ranges and builtin functions are supported, and
-can be formed into more complex expressions using operators. Addition, subtraction, multiplication,
-division and modulus, unary +/- are all supported operators. Cell ranges are defined as two cell
-identifiers separated by a colon character, e.g. `a0:b3`. Cell ranges can only be used as arguments
-to builtin functions, using them in other contexts will parse but produce an error on evaluation.
+Cellulator differentiates between **statements** and **commands**. They can both be entered via the
+command line. The main difference is that statements can be read from a file - this is how
+Cellulator saves sheet state to disk.
 
-There are a number of builtin functions in Cellulator. All builtin functions take a variadic number
-of arguments, which can include range expressions. All builtin functions must have at least one
-argument. Each builtin may evaluate empty cells differently. The list of builtin functions is as
-follows:
+There are currently 2 types of statements in Cellulator:
 
-- @max
-- @min
-- @sum
-- @prod
-- @avg
+- `let {cell address} = {numerical expression}`
+  - {cell address} is the text address of a cell, e.g. `A0`, `GL3600`
+  - {numerical expression} is any [numerical expression](#numerical-expressions)
+- `label {cell address} = {string expression}`
+  - {string expression} is any [string expression](#string-expressions)
 
-Some examples of cell assignments:
-
-- `a0 = 50`
-- `a30 = 120 * 3 + (3 - 5)`
-- `zzz500 = 2 * @sum(a0:z10, 5, 3, 100, b0:d3)`
-
-## Commands
-
-Program commands can be entered via placing a colon character as the first character of a command.
+Commands can be entered via placing a colon character as the first character of a command.
 Pressing ':' in normal mode will do this automatically. What follows is a list of currently
 implemented commands. Values surrounded in {} are optional.
 
@@ -88,6 +73,102 @@ implemented commands. Values surrounded in {} are optional.
 - `fill (range) (value) {increment}`
   - Fills the given range with value, incrementing by increment each cell. Increment is applied
     left to right, top to bottom. Example: ":fill b1:d12 30 0.2"
+
+## Numerical Expressions
+
+Numerical expressions consist of numeric literals, cell references, cell ranges, builtin functions,
+and numeric operators. They can be used on the right-hand side of the `=` in a `let` statement.
+
+### Numeric literals
+
+Number literals consist of a string of ASCII digit characters (0-9) and underscores, with at most
+one decimal point. Underscores are ignored and are only used for visual separation of digits.
+Underscores are not preserved when assigned to cells.
+
+Examples:
+
+- `1000000`
+- `1_000_000`
+- `1_234_567.000_089`
+
+### Cell References
+
+Cell references evaluate to the value of another cell. The value returned by a cell reference will be
+updated if the expression contained by that cell changes.
+
+Examples:
+
+- `A0`
+- `GP359`
+- `crxp65535` (Last cell in a sheet)
+
+### Cell Ranges
+
+Cell ranges represent all cells in the inclusive square area between two positions. Cell ranges can
+only be used in builtin functions. They are defined as two cell references separated with a colon
+`:` character.
+
+Examples:
+
+- `A0:B0` (Contains 2 cells)
+- `A0:A0` (Contains 1 cell)
+- `D6:E3` (Contains 8 cells)
+
+### Numeric Operators
+
+The following is a list of all operators available for use with numeric literals, cell references
+and builtins:
+
+- unary `+` Positive numeric literal
+- unary `-` Negative numeric literal
+- binary `+` Addition
+- binary `-` Subtraction
+- `*` Multiplication
+- `/` Division
+- `%` Modulo division (remainder)
+- `(` and `)` Grouping operators
+
+### Builtin Functions
+
+Builtin functions perform specific operations on an arbitrary number of arguments. Builtins are
+used in the format `@builtin_name(argument_1, argument_2, argument_3, ...)`. Builtins must have at
+least one argument. Builtins accept numeric literals, cell references, cell ranges and other
+builtins as arguments.
+
+The following is a list of all currently implemented builtin functions:
+
+- `@sum` Returns the sum of its arguments
+- `@mul` Returns the product of its arguments
+- `@avg` Returns the average of its arguments
+- `@min` Returns the smallest argument
+- `@max` Returns the largest argument
+
+## String Expressions
+
+String expressions consist of string literals, cell references, and string operators. There are
+currently no builtin functions that operate on strings. String expressions can be used on the
+right hand side of the `=` in a `label` statement.
+
+### String Literals
+
+String literals consist of arbitrary text surrounded by single or double quotes. There is
+currently no way to escape quotes inside of quotes.
+
+Examples:
+
+- 'This is a string'
+- 'Double "quotes" inside of single quotes'
+- "Single 'quotes' inside of double quotes"
+
+### String Operators
+
+The following is a list of all currently available string operators:
+
+- `#` Concatenates the strings on the left and right
+  - Examples:
+    - `'This is a string' # ' that has been concatenated'`
+    - `'1: ' # A0`
+    - `A0 # B0`
 
 ## Keybinds
 
@@ -103,8 +184,10 @@ will repeat the following motion that many times. This does not currently work f
 - `h`, `Left` Move cursor left
 - `l`, `Right` Move cursor right
 - `:` Enter command insert mode
-- `=` Enter command insert mode, with text set to `cellname = `, where cellname is the cell under the
-  cursor
+- `=` Enter command insert mode, with text set to `let cellname = `, where cellname is the cell
+  under the cursor
+- `\` Enter command insert mode, with text set to `label cellname = `, where cellname is the cell
+  under the cursor.
 - `dd`, `x` Delete the cell under the cursor
 - `Esc` Dismiss status message
 - `0` Move cursor to the first populated cell on the current row
@@ -208,5 +291,5 @@ Performs the given operation on the text delimited by the next motion
 ## Miscellaneous Notes
 
 Cellulator does not require any heap allocation for running the TUI, handling input, handling
-commands or saving to a file. This means that Cellulator *should* continue to function on OOM and
-allow for saving the current file, though this is relatively untested.
+commands (not statements) or saving to a file. This means that Cellulator *should* continue to
+function on OOM and allow for saving the current file, though this is relatively untested.
