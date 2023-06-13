@@ -247,7 +247,7 @@ pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!bool {
             errdefer sheet.freeUndoAst(.text, t.index);
             const text = sheet.undo_text_asts.get(t.index);
             try sheet.setTextCell(t.pos, text.strings, text.ast, opts);
-            sheet.undo_asts.destroy(t.index);
+            sheet.undo_text_asts.destroy(t.index);
         },
         .delete_cell => |pos| try sheet.deleteCell(.number, pos, opts),
         .delete_text_cell => |pos| try sheet.deleteCell(.text, pos, opts),
@@ -319,6 +319,7 @@ pub fn setColWidth(
         },
         opts,
     );
+    sheet.endUndoGroup();
 }
 
 pub fn incWidth(
@@ -339,7 +340,8 @@ pub fn decWidth(
     opts: UndoOpts,
 ) Allocator.Error!void {
     if (sheet.columns.getPtr(column_index)) |col| {
-        try sheet.setColWidth(col, column_index, col.width -| n, opts);
+        const new_width = @max(col.width -| n, 1);
+        try sheet.setColWidth(col, column_index, new_width, opts);
     }
 }
 
@@ -1057,6 +1059,33 @@ pub const Column = struct {
 
 pub fn getColumn(sheet: Sheet, index: u16) Column {
     return sheet.columns.get(index) orelse Column{};
+}
+
+pub fn widthNeededForColumn(sheet: Sheet, column_index: u16, precision: u16, max_width: u16) u16 {
+    var width: u16 = Column.default_width;
+
+    for (sheet.text_cells.keys(), sheet.text_cells.values()) |k, v| {
+        if (k.x != column_index) continue;
+        const w = utils.strWidth(v.text.items(), max_width);
+        if (w > width) {
+            width = w;
+            if (width >= max_width) return width;
+        }
+    }
+
+    var buf: std.BoundedArray(u8, 512) = .{};
+    const writer = buf.writer();
+    for (sheet.cells.keys(), sheet.cells.values()) |k, v| {
+        if (k.x != column_index) continue;
+        writer.print("{d:.[1]}", .{ v.num, precision }) catch unreachable;
+        // Numbers are all ASCII, so 1 byte = 1 column
+        if (@intCast(u16, buf.len) > width) {
+            width = @intCast(u16, buf.len);
+            if (width >= max_width) return width;
+        }
+    }
+
+    return width;
 }
 
 test "Sheet basics" {

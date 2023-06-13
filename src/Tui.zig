@@ -1,5 +1,6 @@
 const std = @import("std");
 const spoon = @import("spoon");
+const utils = @import("utils.zig");
 const ZC = @import("ZC.zig");
 const Sheet = @import("Sheet.zig");
 const wcWidth = @import("wcwidth").wcWidth;
@@ -350,8 +351,8 @@ pub fn renderCursor(
 
     // Render the cells and headings at the current cursor position with a specific colour.
     try rc.moveCursorTo(pos.y, pos.x);
+    _ = try renderCursorCell(rc, zc, zc.cursor);
     try rc.setStyle(.{ .fg = .black, .bg = .blue });
-    _ = try renderCell(rc, zc, zc.cursor);
 
     const col = zc.sheet.getColumn(zc.cursor.x);
     const width = @min(col.width, rc.term.width - left);
@@ -394,11 +395,7 @@ pub fn renderCells(
             const pos = Position{ .y = @intCast(u16, y), .x = @intCast(u16, x) };
             switch (zc.mode) {
                 .visual, .select => {
-                    if (pos.hash() == zc.cursor.hash()) {
-                        try rc.setStyle(.{ .fg = .black, .bg = .yellow });
-                        w += try renderCell(rc, zc, pos);
-                        try rc.setStyle(.{});
-                    } else if (pos.intersects(zc.anchor, zc.cursor)) {
+                    if (pos.hash() == zc.cursor.hash() or pos.intersects(zc.anchor, zc.cursor)) {
                         w += try renderCursorCell(rc, zc, pos);
                     } else {
                         w += try renderCell(rc, zc, pos);
@@ -426,7 +423,12 @@ pub fn renderCell(
     zc: *ZC,
     pos: Position,
 ) RenderError!u16 {
-    const col = zc.sheet.getColumn(pos.x);
+    const col = zc.sheet.columns.get(pos.x) orelse {
+        const width = Sheet.Column.default_width;
+        try rc.buffer.writer().writeByteNTimes(' ', width);
+        return width;
+    };
+
     const width = getColWidth: {
         var width: u16 = 0;
         for (zc.screen_pos.x..pos.x) |x| {
@@ -441,24 +443,25 @@ pub fn renderCell(
     const writer = rpw.writer();
 
     if (zc.sheet.text_cells.get(pos)) |cell| {
-        if (pos.hash() == zc.cursor.hash()) {
-            try writer.print("{s: ^[1]}", .{ cell.text.items(), width });
-        } else {
+        const text = cell.text.items();
+        const text_width = utils.strWidth(text, width);
+        const left_pad = (width - text_width) / 2;
+        if (pos.hash() != zc.cursor.hash()) {
             try rc.setStyle(.{ .fg = .green });
-            try writer.print("{s: ^[1]}", .{ cell.text.items(), width });
+            try writer.writeByteNTimes(' ', left_pad);
+            try writer.print("{s}", .{text});
+            try rpw.pad();
             try rc.setStyle(.{});
+        } else {
+            try writer.writeByteNTimes(' ', left_pad);
+            try writer.print("{s}", .{text});
+            try rpw.pad();
         }
     } else if (zc.sheet.getCell(pos)) |cell| {
         switch (cell.getValue()) {
             .none => {},
             .err => {
-                if (pos.hash() != zc.cursor.hash()) {
-                    try rc.setStyle(.{ .fg = .red });
-                    try writer.print("{s: >[1]}", .{ "ERROR", width });
-                    try rc.setStyle(.{});
-                } else {
-                    try writer.print("{s: >[1]}", .{ "ERROR", width });
-                }
+                try writer.print("{s: >[1]}", .{ "ERROR", width });
             },
             .num => |num| {
                 try writer.print("{d: >[1].[2]}", .{
@@ -466,10 +469,11 @@ pub fn renderCell(
                 });
             },
         }
+        try rpw.pad();
     } else {
         try writer.print("{s: >[1]}", .{ "", width });
+        try rpw.pad();
     }
-    try rpw.pad();
     return width;
 }
 

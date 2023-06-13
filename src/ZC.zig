@@ -672,7 +672,7 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
             const writer = self.commandWriter();
             try writer.writeByte(':');
         },
-        .fit_text => {},
+        .fit_text => try self.cursorExpandWidth(),
         .enter_visual_mode => self.setMode(.visual),
         .enter_normal_mode => {},
         .dismiss_count_or_status_message => {
@@ -686,10 +686,14 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
         .undo => {
             try self.sheet.undo();
             self.tui.update.cells = true;
+            self.tui.update.column_headings = true;
+            self.tui.update.row_numbers = true;
         },
         .redo => {
             try self.sheet.redo();
             self.tui.update.cells = true;
+            self.tui.update.column_headings = true;
+            self.tui.update.row_numbers = true;
         },
         .cell_cursor_up => self.cursorUp(),
         .cell_cursor_down => self.cursorDown(),
@@ -1437,6 +1441,17 @@ pub inline fn cursorDecWidth(self: *Self) Allocator.Error!void {
     self.resetCount();
 }
 
+pub fn cursorExpandWidth(self: *Self) Allocator.Error!void {
+    const col = self.sheet.columns.getPtr(self.cursor.x) orelse return;
+
+    const max_width = self.tui.term.width - self.leftReservedColumns();
+    const width_needed = self.sheet.widthNeededForColumn(self.cursor.x, col.precision, max_width);
+    try self.sheet.setColWidth(col, self.cursor.x, width_needed, .{});
+    self.clampScreenToCursorX();
+    self.tui.update.cells = true;
+    self.tui.update.column_headings = true;
+}
+
 pub fn newAst(self: *Self) Ast {
     return self.asts.popOrNull() orelse Ast{};
 }
@@ -1454,8 +1469,14 @@ pub fn delAstAssumeCapacity(self: *Self, ast: Ast) void {
 }
 
 pub fn cursorToFirstCell(self: *Self) void {
-    const positions = self.sheet.cells.keys();
-    for (positions) |pos| {
+    for (self.sheet.cells.keys()) |pos| {
+        if (pos.y < self.cursor.y) continue;
+
+        if (pos.y == self.cursor.y)
+            self.setCursor(pos);
+        break;
+    }
+    for (self.sheet.text_cells.keys()) |pos| {
         if (pos.y < self.cursor.y) continue;
 
         if (pos.y == self.cursor.y)
@@ -1465,12 +1486,12 @@ pub fn cursorToFirstCell(self: *Self) void {
 }
 
 pub fn cursorToLastCell(self: *Self) void {
-    const positions = self.sheet.cells.keys();
-
-    if (positions.len == 0) return;
-
     var new_pos = self.cursor;
-    for (positions) |pos| {
+    for (self.sheet.cells.keys()) |pos| {
+        if (pos.y > self.cursor.y) break;
+        new_pos = pos;
+    }
+    for (self.sheet.text_cells.keys()) |pos| {
         if (pos.y > self.cursor.y) break;
         new_pos = pos;
     }
@@ -1478,28 +1499,45 @@ pub fn cursorToLastCell(self: *Self) void {
 }
 
 pub fn cursorToFirstCellInColumn(self: *Self) void {
-    const positions = self.sheet.cells.keys();
-    if (positions.len == 0) return;
-
-    for (positions) |pos| {
+    const first_cell: ?Position = for (self.sheet.cells.keys()) |pos| {
         if (pos.x == self.cursor.x) {
-            self.setCursor(pos);
+            break pos;
+        }
+    } else null;
+
+    for (self.sheet.text_cells.keys()) |pos| {
+        if (pos.x == self.cursor.x) {
+            if (first_cell) |f| {
+                const p = if (f.y < pos.y) f else pos;
+                self.setCursor(p);
+            } else {
+                self.setCursor(pos);
+            }
             break;
         }
-    }
+    } else if (first_cell) |f| self.setCursor(f);
 }
 
 pub fn cursorToLastCellInColumn(self: *Self) void {
-    const positions = self.sheet.cells.keys();
-    if (positions.len == 0) return;
+    var iter = std.mem.reverseIterator(self.sheet.cells.keys());
+    const first_cell: ?Position = while (iter.next()) |pos| {
+        if (pos.x == self.cursor.x) {
+            break pos;
+        }
+    } else null;
 
-    var iter = std.mem.reverseIterator(positions);
+    iter = std.mem.reverseIterator(self.sheet.text_cells.keys());
     while (iter.next()) |pos| {
         if (pos.x == self.cursor.x) {
-            self.setCursor(pos);
+            if (first_cell) |f| {
+                const p = if (f.y > pos.y) f else pos;
+                self.setCursor(p);
+            } else {
+                self.setCursor(pos);
+            }
             break;
         }
-    }
+    } else if (first_cell) |f| self.setCursor(f);
 }
 
 pub fn cursorGotoRow(self: *Self) void {

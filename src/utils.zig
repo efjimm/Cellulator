@@ -1,8 +1,22 @@
 const std = @import("std");
 const Position = @import("Sheet.zig").Position;
+const wcWidth = @import("wcwidth").wcWidth;
 
 const mem = std.mem;
 const assert = std.debug.assert;
+
+pub fn strWidth(bytes: []const u8, max: u16) u16 {
+    var width: u16 = 0;
+    var cp_iter = std.unicode.Utf8Iterator{
+        .bytes = bytes,
+        .i = 0,
+    };
+    while (cp_iter.nextCodepoint()) |cp| {
+        width += wcWidth(cp);
+        if (width >= max) break;
+    }
+    return width;
+}
 
 pub fn packDoubleCp(cp1: u21, cp2: u21) [7]u8 {
     var buf: [7]u8 align(4) = undefined;
