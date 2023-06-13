@@ -229,9 +229,11 @@ pub const Slice = struct {
                 try writer.print("\"{s}\"", .{strings[str.start..str.end]});
             },
             .concat => |b| {
+                try writer.writeByte('(');
                 try ast.printFrom(b.lhs, writer, strings);
                 try writer.writeAll(" # ");
                 try ast.printFrom(b.rhs, writer, strings);
+                try writer.writeByte(')');
             },
             .assignment => |b| {
                 try writer.writeAll("let ");
@@ -246,29 +248,39 @@ pub const Slice = struct {
                 try ast.printFrom(b.rhs, writer, strings);
             },
             .add => |b| {
+                try writer.writeByte('(');
                 try ast.printFrom(b.lhs, writer, strings);
                 try writer.writeAll(" + ");
                 try ast.printFrom(b.rhs, writer, strings);
+                try writer.writeByte(')');
             },
             .sub => |b| {
+                try writer.writeByte('(');
                 try ast.printFrom(b.lhs, writer, strings);
                 try writer.writeAll(" - ");
                 try ast.printFrom(b.rhs, writer, strings);
+                try writer.writeByte(')');
             },
             .mul => |b| {
+                try writer.writeByte('(');
                 try ast.printFrom(b.lhs, writer, strings);
                 try writer.writeAll(" * ");
                 try ast.printFrom(b.rhs, writer, strings);
+                try writer.writeByte(')');
             },
             .div => |b| {
+                try writer.writeByte('(');
                 try ast.printFrom(b.lhs, writer, strings);
                 try writer.writeAll(" / ");
                 try ast.printFrom(b.rhs, writer, strings);
+                try writer.writeByte(')');
             },
             .mod => |b| {
+                try writer.writeByte('(');
                 try ast.printFrom(b.lhs, writer, strings);
                 try writer.writeAll(" % ");
                 try ast.printFrom(b.rhs, writer, strings);
+                try writer.writeByte(')');
             },
             .range => |b| {
                 try ast.printFrom(b.lhs, writer, strings);
