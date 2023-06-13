@@ -362,7 +362,7 @@ pub const Slice = struct {
                 switch (b.tag) {
                     inline else => |tag| try writer.print("@{s}(", .{@tagName(tag)}),
                 }
-                var iter = ast.argIterator(b.first_arg, index);
+                var iter = ast.argIteratorForwards(b.first_arg, index);
                 if (iter.next()) |arg_index| {
                     try ast.printFromIndex(arg_index, writer, strings);
                 }
@@ -434,6 +434,46 @@ pub const Slice = struct {
             .ast = ast,
             .first_arg = start,
             .index = end,
+        };
+    }
+
+    /// Iterates over expressions forwards. Only use when the ordering is required.
+    pub const ArgIteratorForwards = struct {
+        ast: *const Slice,
+        end: u32,
+        index: u32,
+        backwards_iter: ArgIterator,
+        buffer: std.BoundedArray(u32, 32) = .{},
+
+        pub fn next(iter: *ArgIteratorForwards) ?u32 {
+            if (iter.index >= iter.end) return null;
+            const ret = iter.index;
+
+            if (iter.buffer.len == 0) {
+                const first_item = iter.backwards_iter.next() orelse {
+                    iter.index = iter.end;
+                    return ret;
+                };
+
+                iter.buffer.appendAssumeCapacity(first_item);
+
+                for (1..iter.buffer.capacity()) |_| {
+                    const item = iter.backwards_iter.next() orelse break;
+                    iter.buffer.appendAssumeCapacity(item);
+                }
+            }
+            iter.index = iter.buffer.pop();
+
+            return ret;
+        }
+    };
+
+    pub fn argIteratorForwards(ast: *const Slice, start: u32, end: u32) ArgIteratorForwards {
+        return ArgIteratorForwards{
+            .ast = ast,
+            .end = end,
+            .index = start,
+            .backwards_iter = ast.argIterator(start + 1, end),
         };
     }
 
@@ -1044,6 +1084,24 @@ test "Print" {
         .{ "1 / (2 / 3)", "1 / (2 / 3)" },
         .{ "1 / 2 % 3", "1 / 2 % 3" },
         .{ "1 / (2 % 3)", "1 / (2 % 3)" },
+
+        .{ "1 % 2 + 3", "1 % 2 + 3" },
+        .{ "1 % (2 + 3)", "1 % (2 + 3)" },
+        .{ "1 % 2 - 3", "1 % 2 - 3" },
+        .{ "1 % (2 - 3)", "1 % (2 - 3)" },
+        .{ "1 % 2 * 3", "1 % 2 * 3" },
+        .{ "1 % (2 * 3)", "1 % (2 * 3)" },
+        .{ "1 % 2 / 3", "1 % 2 / 3" },
+        .{ "1 % (2 / 3)", "1 % (2 / 3)" },
+        .{ "1 % 2 % 3", "1 % 2 % 3" },
+        .{ "1 % (2 % 3)", "1 % (2 % 3)" },
+
+        .{ "A0:B0", "A0:B0" },
+        .{ "@sum(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)", "@sum(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)" },
+        .{ "@prod(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)", "@prod(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)" },
+        .{ "@avg(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)", "@avg(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)" },
+        .{ "@min(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)", "@min(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)" },
+        .{ "@max(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)", "@max(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)" },
     };
 
     inline for (data) |d| try testPrint(d[0], d[1]);
