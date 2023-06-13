@@ -35,6 +35,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const fast_tests = b.option(bool, "fast-tests", "Skip slow tests") orelse false;
+    const opts = b.addOptions();
+    opts.addOption(bool, "fast_tests", fast_tests);
+    tests.addOptions("compile_opts", opts);
+
     b.installArtifact(tests);
 
     tests.addModule("spoon", spoon);

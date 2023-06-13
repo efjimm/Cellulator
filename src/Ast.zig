@@ -99,7 +99,7 @@ pub fn fromSource(allocator: Allocator, source: []const u8) ParseError!Self {
     return ast;
 }
 
-pub fn parseExpression(allocator: Allocator, source: []const u8) ParseError!Self {
+pub fn fromExpression(allocator: Allocator, source: []const u8) ParseError!Self {
     const tokenizer = Tokenizer.init(source);
 
     var parser = Parser.init(allocator, tokenizer, .{});
@@ -211,9 +211,28 @@ pub const Slice = struct {
         ast.nodes.len = new_len;
     }
 
-    pub fn printFrom(ast: Slice, index: u32, writer: anytype, strings: []const u8) !void {
+    pub inline fn printFromIndex(
+        ast: Slice,
+        index: u32,
+        writer: anytype,
+        strings: []const u8,
+    ) @TypeOf(writer).Error!void {
         const node = ast.nodes.get(index);
+        return ast.printFromNode(index, node, writer, strings);
+    }
 
+    pub fn printFromNode(
+        ast: Slice,
+        index: u32,
+        node: Node,
+        writer: anytype,
+        strings: []const u8,
+    ) @TypeOf(writer).Error!void {
+        // On the left-hand side, expressions involving operators with lower precedence need
+        // parentheses.
+
+        // On the right-hand side, expressions involving operators with lower precedence, or
+        // non-commutative operators with the same precedence need to be surrounded by parentheses.
         switch (node) {
             .number => |n| try writer.print("{d}", .{n}),
             .column => |col| try Position.writeColumnAddress(col, writer),
@@ -223,63 +242,120 @@ pub const Slice = struct {
                 try writer.print("\"{s}\"", .{strings[str.start..str.end]});
             },
             .concat => |b| {
-                try writer.writeByte('(');
-                try ast.printFrom(b.lhs, writer, strings);
+                try ast.printFromIndex(b.lhs, writer, strings);
                 try writer.writeAll(" # ");
-                try ast.printFrom(b.rhs, writer, strings);
-                try writer.writeByte(')');
+                try ast.printFromIndex(b.rhs, writer, strings);
             },
             .assignment => |b| {
                 try writer.writeAll("let ");
-                try ast.printFrom(b.lhs, writer, strings);
+                try ast.printFromIndex(b.lhs, writer, strings);
                 try writer.writeAll(" = ");
-                try ast.printFrom(b.rhs, writer, strings);
+                try ast.printFromIndex(b.rhs, writer, strings);
             },
             .label => |b| {
                 try writer.writeAll("label ");
-                try ast.printFrom(b.lhs, writer, strings);
+                try ast.printFromIndex(b.lhs, writer, strings);
                 try writer.writeAll(" = ");
-                try ast.printFrom(b.rhs, writer, strings);
+                try ast.printFromIndex(b.rhs, writer, strings);
             },
             .add => |b| {
-                try writer.writeByte('(');
-                try ast.printFrom(b.lhs, writer, strings);
+                try ast.printFromIndex(b.lhs, writer, strings);
                 try writer.writeAll(" + ");
-                try ast.printFrom(b.rhs, writer, strings);
-                try writer.writeByte(')');
+                const rhs = ast.nodes.get(b.rhs);
+                switch (rhs) {
+                    .sub => {
+                        try writer.writeByte('(');
+                        try ast.printFromNode(b.rhs, rhs, writer, strings);
+                        try writer.writeByte(')');
+                    },
+                    else => {
+                        try ast.printFromNode(b.rhs, rhs, writer, strings);
+                    },
+                }
             },
             .sub => |b| {
-                try writer.writeByte('(');
-                try ast.printFrom(b.lhs, writer, strings);
+                try ast.printFromIndex(b.lhs, writer, strings);
                 try writer.writeAll(" - ");
-                try ast.printFrom(b.rhs, writer, strings);
-                try writer.writeByte(')');
+
+                const rhs = ast.nodes.get(b.rhs);
+                switch (rhs) {
+                    .add, .sub => {
+                        try writer.writeByte('(');
+                        try ast.printFromNode(b.rhs, rhs, writer, strings);
+                        try writer.writeByte(')');
+                    },
+                    else => {
+                        try ast.printFromNode(b.rhs, rhs, writer, strings);
+                    },
+                }
             },
             .mul => |b| {
-                try writer.writeByte('(');
-                try ast.printFrom(b.lhs, writer, strings);
+                const lhs = ast.nodes.get(b.lhs);
+                switch (lhs) {
+                    .add, .sub => {
+                        try writer.writeByte('(');
+                        try ast.printFromNode(b.lhs, lhs, writer, strings);
+                        try writer.writeByte(')');
+                    },
+                    else => try ast.printFromNode(b.lhs, lhs, writer, strings),
+                }
                 try writer.writeAll(" * ");
-                try ast.printFrom(b.rhs, writer, strings);
-                try writer.writeByte(')');
+                const rhs = ast.nodes.get(b.rhs);
+                switch (rhs) {
+                    .add, .sub, .div, .mod => {
+                        try writer.writeByte('(');
+                        try ast.printFromNode(b.rhs, rhs, writer, strings);
+                        try writer.writeByte(')');
+                    },
+                    else => try ast.printFromNode(b.rhs, rhs, writer, strings),
+                }
             },
             .div => |b| {
-                try writer.writeByte('(');
-                try ast.printFrom(b.lhs, writer, strings);
+                const lhs = ast.nodes.get(b.lhs);
+                switch (lhs) {
+                    .add, .sub => {
+                        try writer.writeByte('(');
+                        try ast.printFromNode(b.lhs, lhs, writer, strings);
+                        try writer.writeByte(')');
+                    },
+                    else => try ast.printFromNode(b.lhs, lhs, writer, strings),
+                }
                 try writer.writeAll(" / ");
-                try ast.printFrom(b.rhs, writer, strings);
-                try writer.writeByte(')');
+                const rhs = ast.nodes.get(b.rhs);
+                switch (rhs) {
+                    .add, .sub, .mul, .div, .mod => {
+                        try writer.writeByte('(');
+                        try ast.printFromNode(b.rhs, rhs, writer, strings);
+                        try writer.writeByte(')');
+                    },
+                    else => try ast.printFromNode(b.rhs, rhs, writer, strings),
+                }
             },
             .mod => |b| {
-                try writer.writeByte('(');
-                try ast.printFrom(b.lhs, writer, strings);
+                const lhs = ast.nodes.get(b.lhs);
+                switch (lhs) {
+                    .add, .sub => {
+                        try writer.writeByte('(');
+                        try ast.printFromNode(b.lhs, lhs, writer, strings);
+                        try writer.writeByte(')');
+                    },
+                    else => try ast.printFromNode(b.lhs, lhs, writer, strings),
+                }
                 try writer.writeAll(" % ");
-                try ast.printFrom(b.rhs, writer, strings);
-                try writer.writeByte(')');
+                const rhs = ast.nodes.get(b.rhs);
+                switch (rhs) {
+                    .add, .sub, .mul, .div, .mod => {
+                        try writer.writeByte('(');
+                        try ast.printFromNode(b.rhs, rhs, writer, strings);
+                        try writer.writeByte(')');
+                    },
+                    else => try ast.printFromNode(b.rhs, rhs, writer, strings),
+                }
             },
             .range => |b| {
-                try ast.printFrom(b.lhs, writer, strings);
+                try ast.printFromIndex(b.lhs, writer, strings);
                 try writer.writeByte(':');
-                try ast.printFrom(b.rhs, writer, strings);
+                try ast.printFromIndex(b.rhs, writer, strings);
             },
 
             .builtin => |b| {
@@ -288,11 +364,11 @@ pub const Slice = struct {
                 }
                 var iter = ast.argIterator(b.first_arg, index);
                 if (iter.next()) |arg_index| {
-                    try ast.printFrom(arg_index, writer, strings);
+                    try ast.printFromIndex(arg_index, writer, strings);
                 }
                 while (iter.next()) |arg_index| {
                     try writer.writeAll(", ");
-                    try ast.printFrom(arg_index, writer, strings);
+                    try ast.printFromIndex(arg_index, writer, strings);
                 }
                 try writer.writeByte(')');
             },
@@ -647,7 +723,7 @@ pub fn toSlice(ast: Self) Slice {
 
 pub fn print(ast: Self, writer: anytype, strings: []const u8) @TypeOf(writer).Error!void {
     const slice = ast.toSlice();
-    return slice.printFrom(slice.rootNodeIndex(), writer, strings);
+    return slice.printFromIndex(slice.rootNodeIndex(), writer, strings);
 }
 
 /// The order in which nodes are evaluated.
@@ -720,7 +796,7 @@ test "Parse and Eval Expression" {
 
     const testExpr = struct {
         fn func(expected: Error!f64, expr: []const u8) !void {
-            var ast = parseExpression(t.allocator, expr) catch |err| {
+            var ast = fromExpression(t.allocator, expr) catch |err| {
                 return if (err != expected) err else {};
             };
             defer ast.deinit(t.allocator);
@@ -772,12 +848,12 @@ test "Functions on Ranges" {
             var sheet = Sheet.init(t.allocator);
             defer sheet.deinit();
 
-            try sheet.setCell(.{ .x = 0, .y = 0 }, try Self.parseExpression(t.allocator, "0"), .{});
-            try sheet.setCell(.{ .x = 1, .y = 0 }, try Self.parseExpression(t.allocator, "100"), .{});
-            try sheet.setCell(.{ .x = 0, .y = 1 }, try Self.parseExpression(t.allocator, "500"), .{});
-            try sheet.setCell(.{ .x = 1, .y = 1 }, try Self.parseExpression(t.allocator, "333.33"), .{});
+            try sheet.setCell(.{ .x = 0, .y = 0 }, try Self.fromExpression(t.allocator, "0"), .{});
+            try sheet.setCell(.{ .x = 1, .y = 0 }, try Self.fromExpression(t.allocator, "100"), .{});
+            try sheet.setCell(.{ .x = 0, .y = 1 }, try Self.fromExpression(t.allocator, "500"), .{});
+            try sheet.setCell(.{ .x = 1, .y = 1 }, try Self.fromExpression(t.allocator, "333.33"), .{});
 
-            var ast = try parseExpression(t.allocator, expr);
+            var ast = try fromExpression(t.allocator, expr);
             defer ast.deinit(t.allocator);
 
             try sheet.update(.number);
@@ -908,4 +984,67 @@ test "DupeStrings" {
 
         try t.expect(try ast.dupeStrings(t.allocator, source) == null);
     }
+}
+
+test "Print" {
+    const t = std.testing;
+
+    const testPrint = struct {
+        fn func(expr: []const u8, expected: []const u8) !void {
+            var ast = try fromExpression(t.allocator, expr);
+            defer ast.deinit(t.allocator);
+
+            var buf = std.BoundedArray(u8, 4096){};
+            try ast.print(buf.writer(), expr);
+            try t.expectEqualStrings(expected, buf.constSlice());
+        }
+    }.func;
+
+    const data = .{
+        .{ "1 + 2 + 3", "1 + 2 + 3" },
+        .{ "1 + (2 + 3)", "1 + 2 + 3" },
+        .{ "1 + 2 - 3", "1 + 2 - 3" },
+        .{ "1 + (2 - 3)", "1 + (2 - 3)" },
+        .{ "1 + 2 * 3", "1 + 2 * 3" },
+        .{ "1 + (2 * 3)", "1 + 2 * 3" },
+        .{ "1 + 2 / 3", "1 + 2 / 3" },
+        .{ "1 + (2 / 3)", "1 + 2 / 3" },
+        .{ "1 + 2 % 3", "1 + 2 % 3" },
+        .{ "1 + (2 % 3)", "1 + 2 % 3" },
+
+        .{ "1 - 2 + 3", "1 - 2 + 3" },
+        .{ "1 - (2 + 3)", "1 - (2 + 3)" },
+        .{ "1 - 2 - 3", "1 - 2 - 3" },
+        .{ "1 - (2 - 3)", "1 - (2 - 3)" },
+        .{ "1 - 2 * 3", "1 - 2 * 3" },
+        .{ "1 - (2 * 3)", "1 - 2 * 3" },
+        .{ "1 - 2 / 3", "1 - 2 / 3" },
+        .{ "1 - (2 / 3)", "1 - 2 / 3" },
+        .{ "1 - 2 % 3", "1 - 2 % 3" },
+        .{ "1 - (2 % 3)", "1 - 2 % 3" },
+
+        .{ "1 * 2 + 3", "1 * 2 + 3" },
+        .{ "1 * (2 + 3)", "1 * (2 + 3)" },
+        .{ "1 * 2 - 3", "1 * 2 - 3" },
+        .{ "1 * (2 - 3)", "1 * (2 - 3)" },
+        .{ "1 * 2 * 3", "1 * 2 * 3" },
+        .{ "1 * (2 * 3)", "1 * 2 * 3" },
+        .{ "1 * 2 / 3", "1 * 2 / 3" },
+        .{ "1 * (2 / 3)", "1 * (2 / 3)" },
+        .{ "1 * 2 % 3", "1 * 2 % 3" },
+        .{ "1 * (2 % 3)", "1 * (2 % 3)" },
+
+        .{ "1 / 2 + 3", "1 / 2 + 3" },
+        .{ "1 / (2 + 3)", "1 / (2 + 3)" },
+        .{ "1 / 2 - 3", "1 / 2 - 3" },
+        .{ "1 / (2 - 3)", "1 / (2 - 3)" },
+        .{ "1 / 2 * 3", "1 / 2 * 3" },
+        .{ "1 / (2 * 3)", "1 / (2 * 3)" },
+        .{ "1 / 2 / 3", "1 / 2 / 3" },
+        .{ "1 / (2 / 3)", "1 / (2 / 3)" },
+        .{ "1 / 2 % 3", "1 / 2 % 3" },
+        .{ "1 / (2 % 3)", "1 / (2 % 3)" },
+    };
+
+    inline for (data) |d| try testPrint(d[0], d[1]);
 }
