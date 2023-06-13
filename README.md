@@ -178,7 +178,9 @@ will repeat the following motion that many times. This does not currently work f
 
 ###  Normal Mode
 
-- `Return`, `C-m`, `C-j` Submit the current text as a command
+- `1-9` Set count
+- `0` Set count if count is not zero, otherwise move cursor to the first populated cell on the
+  current row
 - `j`, `Down` Move cursor down
 - `k`, `Up` Move cursor up
 - `h`, `Left` Move cursor left
@@ -190,8 +192,9 @@ will repeat the following motion that many times. This does not currently work f
   under the cursor.
 - `dd`, `x` Delete the cell under the cursor
 - `Esc` Dismiss status message
-- `0` Move cursor to the first populated cell on the current row
 - `$` Move cursor to the last populated cell on the current row
+- `gc` Move cursor to the count column
+- `gr` Move cursor to the count row
 - `gg` Move cursor to the first cell in the current column
 - `G` Move cursor to the last cell in the current column
 - `w` Move cursor to the next populated cell
@@ -209,10 +212,10 @@ will repeat the following motion that many times. This does not currently work f
 - `Esc`, `C-[` Enter normal mode
 - `d`, `x` Delete the cells in the given range
 - `o` Swap cursor and anchor
-- `Alt-j` Move selection down
-- `Alt-k` Move selection up
-- `Alt-h` Move selection left
-- `Alt-l` Move selection right
+- `Alt-j` Move selection down count times
+- `Alt-k` Move selection up count times
+- `Alt-h` Move selection left count times
+- `Alt-l` Move selection right count times
 
 ### Visual Select Mode
 
@@ -234,14 +237,19 @@ will repeat the following motion that many times. This does not currently work f
 - `C-w` Delete the word before the cursor
 - `C-u` Delete all text in the command buffer
 - `C-v` Enter visual select mode
+- `C-p`, `<Up>` History prev
+- `C-n`, `<Down>` History next
 
 ### Command Normal Mode
 
 - `Esc` Leaves command mode without submitting command
-- `h`, `Left` Move cursor left
-- `l`, `Right` Move cursor right
-- `k`, `Up` Previous command
-- `j`, `Down` Next command
+- `1-9` Set count
+- `0` Set count if count is not zero, otherwise move cursor to the first populated cell on the
+  current row
+- `h`, `Left` Move cursor left count times
+- `l`, `Right` Move cursor right count times
+- `k`, `Up` Previous command count times
+- `j`, `Down` Next command count times
 - `i` Enter command insert mode
 - `I` Enter command insert mode and move to the beginning of the line
 - `a` Enter command insert mode and move one character to the right
@@ -253,16 +261,17 @@ will repeat the following motion that many times. This does not currently work f
 - `c` Enter operator pending mode, with change (delete and enter insert mode) as the operator action
 - `D` Deletes all text at and after the cursor
 - `C` Deletes all text at and after the cursor, and enters command insert mode
-- `w` Moves cursor to the start of the next word
-- `W` Moves cursor to the start of the next WORD
-- `b` Moves cursor to the start of the previous word
-- `B` Moves cursor to the start of the previous WORD
-- `e` Moves cursor to the end of the next word
-- `E` Moves cursor to the end of the next WORD
-- `M-e` Moves cursor to the end of the previous word
-- `M-E` Moves cursor to the end of the previous WORD
-- `0`, `Home` Move cursor to the beginning of the line
+- `w` Moves cursor to the start of the next word count times
+- `W` Moves cursor to the start of the next WORD count times
+- `b` Moves cursor to the start of the previous word count times
+- `B` Moves cursor to the start of the previous WORD count times
+- `e` Moves cursor to the end of the next word count times
+- `E` Moves cursor to the end of the next WORD count times
+- `M-e` Moves cursor to the end of the previous word count times
+- `M-E` Moves cursor to the end of the previous WORD count times
 - `$`, `End` Move cursor to the end of the line
+- `k`, `<Up>` History prev
+- `j`, `<Down>` History next
 
 ### Command Operator Pending Mode
 

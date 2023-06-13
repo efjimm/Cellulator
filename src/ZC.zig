@@ -699,6 +699,8 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
         .cell_cursor_row_last => self.cursorToLastCellInColumn(),
         .cell_cursor_col_first => self.cursorToFirstCell(),
         .cell_cursor_col_last => self.cursorToLastCell(),
+        .goto_col => self.cursorGotoCol(),
+        .goto_row => self.cursorGotoRow(),
 
         .delete_cell => self.deleteCell() catch |err| switch (err) {
             error.OutOfMemory => self.setStatusMessage(.err, "Out of memory!", .{}),
@@ -1500,6 +1502,18 @@ pub fn cursorToLastCellInColumn(self: *Self) void {
     }
 }
 
+pub fn cursorGotoRow(self: *Self) void {
+    const count = @intCast(u16, @min(std.math.maxInt(u16), self.count));
+    self.resetCount();
+    self.setCursor(.{ .x = self.cursor.x, .y = count });
+}
+
+pub fn cursorGotoCol(self: *Self) void {
+    const count = @intCast(u16, @min(std.math.maxInt(u16), self.count));
+    self.resetCount();
+    self.setCursor(.{ .x = count, .y = self.cursor.y });
+}
+
 pub fn parseInput(bytes: []const u8, writer: anytype) @TypeOf(writer).Error!void {
     var iter = spoon.inputParser(bytes);
 
@@ -1570,6 +1584,8 @@ pub const Action = union(enum) {
     cell_cursor_row_last,
     cell_cursor_col_first,
     cell_cursor_col_last,
+    goto_row,
+    goto_col,
 
     delete_cell,
     next_populated_cell,
@@ -1829,6 +1845,8 @@ const outer_keys = [_]KeyMaps{
             .{ "l", .cell_cursor_right },
             .{ "w", .next_populated_cell },
             .{ "b", .prev_populated_cell },
+            .{ "gc", .goto_col },
+            .{ "gr", .goto_row },
             .{ "gg", .cell_cursor_row_first },
             .{ "G", .cell_cursor_row_last },
             .{ "$", .cell_cursor_col_last },
