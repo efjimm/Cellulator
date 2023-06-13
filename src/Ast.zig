@@ -378,11 +378,31 @@ pub const Slice = struct {
         return switch (node) {
             .number => |n| n,
             .cell => |pos| try context.evalCell(pos) orelse 0,
-            .add => |op| (try ast.evalNode(op.lhs, context) + try ast.evalNode(op.rhs, context)),
-            .sub => |op| (try ast.evalNode(op.lhs, context) - try ast.evalNode(op.rhs, context)),
-            .mul => |op| (try ast.evalNode(op.lhs, context) * try ast.evalNode(op.rhs, context)),
-            .div => |op| (try ast.evalNode(op.lhs, context) / try ast.evalNode(op.rhs, context)),
-            .mod => |op| @rem(try ast.evalNode(op.lhs, context), try ast.evalNode(op.rhs, context)),
+            .add => |op| {
+                const rhs = try ast.evalNode(op.rhs, context);
+                const lhs = try ast.evalNode(op.lhs, context);
+                return lhs + rhs;
+            },
+            .sub => |op| {
+                const rhs = try ast.evalNode(op.rhs, context);
+                const lhs = try ast.evalNode(op.lhs, context);
+                return lhs - rhs;
+            },
+            .mul => |op| {
+                const rhs = try ast.evalNode(op.rhs, context);
+                const lhs = try ast.evalNode(op.lhs, context);
+                return lhs * rhs;
+            },
+            .div => |op| {
+                const rhs = try ast.evalNode(op.rhs, context);
+                const lhs = try ast.evalNode(op.lhs, context);
+                return lhs / rhs;
+            },
+            .mod => |op| {
+                const rhs = try ast.evalNode(op.rhs, context);
+                const lhs = try ast.evalNode(op.lhs, context);
+                return @rem(lhs, rhs);
+            },
             .builtin => |b| ast.evalBuiltin(b, context),
             .concat,
             .string_literal,
