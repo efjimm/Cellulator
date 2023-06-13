@@ -32,7 +32,7 @@ pub const BinaryOperator = struct {
 
 pub const Builtin = struct {
     tag: Tag,
-    args: u32,
+    first_arg: u32,
 
     const Tag = enum {
         sum,
@@ -55,15 +55,6 @@ const builtins = std.ComptimeStringMap(Builtin.Tag, .{
     .{ "min", .min },
 });
 
-pub const ArgList = packed struct(u64) {
-    start: u32,
-    end: u32,
-
-    pub fn count(args: ArgList) u32 {
-        return args.end - args.start;
-    }
-};
-
 pub const ParseError = error{
     UnexpectedToken,
     InvalidCellAddress,
@@ -82,7 +73,6 @@ pub const Node = union(enum) {
     div: BinaryOperator,
     mod: BinaryOperator,
     builtin: Builtin,
-    arg_list: ArgList,
     range: BinaryOperator,
     string_literal: String,
 };
@@ -318,12 +308,21 @@ fn parseFunction(parser: *Parser) !u32 {
     const identifier = token.text(parser.source());
     const builtin = builtins.get(identifier) orelse return error.UnexpectedToken;
 
-    const args = try parser.parseArgList();
+    const args_start = switch (builtin) {
+        // These builtins require at least one argument
+        .sum,
+        .max,
+        .prod,
+        .avg,
+        .min,
+        => try parser.parseArgList(),
+    };
     _ = try parser.expectToken(.rparen);
+
     return parser.addNode(.{
         .builtin = .{
             .tag = builtin,
-            .args = args,
+            .first_arg = args_start,
         },
     });
 }
@@ -331,18 +330,12 @@ fn parseFunction(parser: *Parser) !u32 {
 /// ArgList <- Expression (',' Expression)*
 fn parseArgList(parser: *Parser) !u32 {
     const start = try parser.parseExpression();
-    var end = start + 1;
 
     while (parser.eatToken(.comma)) |_| {
-        end = 1 + try parser.parseExpression();
+        _ = try parser.parseExpression();
     }
 
-    return parser.addNode(.{
-        .arg_list = .{
-            .start = start,
-            .end = end,
-        },
-    });
+    return start;
 }
 
 /// Number <- ('+' / '-')? ('0'-'9')+

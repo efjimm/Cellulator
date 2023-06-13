@@ -12,7 +12,6 @@ const SizedArrayListUnmanaged = @import("sized_array_list.zig").SizedArrayListUn
 
 const Tokenizer = @import("Tokenizer.zig");
 const Parser = @import("Parser.zig");
-const ArgList = Parser.ArgList;
 const BinaryOperator = Parser.BinaryOperator;
 const Builtin = Parser.Builtin;
 
@@ -174,8 +173,7 @@ pub const Slice = struct {
             .mod,
             .range,
             => |b| ast.leftMostChild(b.lhs),
-            .builtin => |b| ast.leftMostChild(b.args),
-            .arg_list => |args| ast.leftMostChild(args.start),
+            .builtin => |b| ast.leftMostChild(b.first_arg),
         };
     }
 
@@ -203,11 +201,7 @@ pub const Slice = struct {
                     b.rhs -= first_node;
                 },
                 .builtin => |*b| {
-                    b.args -= first_node;
-                },
-                .arg_list => |*b| {
-                    b.start -= first_node;
-                    b.end -= first_node;
+                    b.first_arg -= first_node;
                 },
                 .string_literal, .number, .column, .cell => {},
             }
@@ -292,16 +286,15 @@ pub const Slice = struct {
                 switch (b.tag) {
                     inline else => |tag| try writer.print("@{s}(", .{@tagName(tag)}),
                 }
-                try ast.printFrom(b.args, writer, strings);
-                try writer.writeByte(')');
-            },
-
-            .arg_list => |args| {
-                try ast.printFrom(args.start, writer, strings);
-                for (args.start + 1..args.end) |i| {
-                    try writer.writeAll(", ");
-                    try ast.printFrom(@intCast(u32, i), writer, strings);
+                var iter = ast.argIterator(b.first_arg, index);
+                if (iter.next()) |arg_index| {
+                    try ast.printFrom(arg_index, writer, strings);
                 }
+                while (iter.next()) |arg_index| {
+                    try writer.writeAll(", ");
+                    try ast.printFrom(arg_index, writer, strings);
+                }
+                try writer.writeByte(')');
             },
         }
     }
@@ -334,11 +327,7 @@ pub const Slice = struct {
                 if (!try context.evalCell(index)) return false;
             },
             .builtin => |b| {
-                if (!try ast.traverseFrom(b.args, order, context)) return false;
-            },
-            .arg_list => |args| {
-                var iter = ast.argIterator(args);
-
+                var iter = ast.argIterator(b.first_arg, index);
                 if (order != .last and !try context.evalCell(index)) return false;
                 while (iter.next()) |arg| {
                     if (!try ast.traverseFrom(arg, order, context)) return false;
@@ -350,25 +339,25 @@ pub const Slice = struct {
         return true;
     }
 
-    /// Iterates over the arguments in an ArgList backwards
+    /// Iterates over expressions backwards
     pub const ArgIterator = struct {
         ast: *const Slice,
-        args: ArgList,
+        first_arg: u32,
         index: u32,
 
         pub fn next(iter: *ArgIterator) ?u32 {
-            if (iter.index <= iter.args.start) return null;
+            if (iter.index <= iter.first_arg) return null;
             const ret = iter.index - 1;
             iter.index = iter.ast.leftMostChild(ret);
             return ret;
         }
     };
 
-    pub fn argIterator(ast: *const Slice, args: ArgList) ArgIterator {
+    pub fn argIterator(ast: *const Slice, start: u32, end: u32) ArgIterator {
         return ArgIterator{
             .ast = ast,
-            .args = args,
-            .index = args.end,
+            .first_arg = start,
+            .index = end,
         };
     }
 
@@ -403,14 +392,13 @@ pub const Slice = struct {
                 const lhs = try ast.evalNode(op.lhs, context);
                 return @rem(lhs, rhs);
             },
-            .builtin => |b| ast.evalBuiltin(b, context),
+            .builtin => |b| ast.evalBuiltin(index, b, context),
             .concat,
             .string_literal,
             .range,
             .column,
             .assignment,
             .label,
-            .arg_list,
             => EvalError.NotEvaluable,
         };
     }
@@ -474,24 +462,22 @@ pub const Slice = struct {
             .column,
             .assignment,
             .label,
-            .arg_list,
             => return EvalError.NotEvaluable,
         }
     }
 
-    fn evalBuiltin(ast: Slice, builtin: Builtin, context: anytype) !f64 {
-        const args = ast.nodes.items(.data)[builtin.args].arg_list;
+    fn evalBuiltin(ast: Slice, builtin_index: u32, builtin: Builtin, context: anytype) !f64 {
         return switch (builtin.tag) {
-            .sum => try ast.evalSum(args, context),
-            .prod => try ast.evalProd(args, context),
-            .avg => try ast.evalAvg(args, context),
-            .max => try ast.evalMax(args, context),
-            .min => try ast.evalMin(args, context),
+            .sum => try ast.evalSum(builtin.first_arg, builtin_index, context),
+            .prod => try ast.evalProd(builtin.first_arg, builtin_index, context),
+            .avg => try ast.evalAvg(builtin.first_arg, builtin_index, context),
+            .max => try ast.evalMax(builtin.first_arg, builtin_index, context),
+            .min => try ast.evalMin(builtin.first_arg, builtin_index, context),
         };
     }
 
-    pub fn evalSum(ast: Slice, args: ArgList, context: anytype) !f64 {
-        var iter = ast.argIterator(args);
+    pub fn evalSum(ast: Slice, start: u32, end: u32, context: anytype) !f64 {
+        var iter = ast.argIterator(start, end);
 
         var total: f64 = 0;
         while (iter.next()) |i| {
@@ -517,8 +503,8 @@ pub const Slice = struct {
         return total;
     }
 
-    pub fn evalProd(ast: Slice, args: ArgList, context: anytype) !f64 {
-        var iter = ast.argIterator(args);
+    pub fn evalProd(ast: Slice, start: u32, end: u32, context: anytype) !f64 {
+        var iter = ast.argIterator(start, end);
         var total: f64 = 1;
 
         while (iter.next()) |i| {
@@ -544,8 +530,8 @@ pub const Slice = struct {
         return total;
     }
 
-    pub fn evalAvg(ast: Slice, args: ArgList, context: anytype) !f64 {
-        var iter = ast.argIterator(args);
+    pub fn evalAvg(ast: Slice, start: u32, end: u32, context: anytype) !f64 {
+        var iter = ast.argIterator(start, end);
         var total: f64 = 0;
         var total_items: u32 = 0;
 
@@ -567,8 +553,8 @@ pub const Slice = struct {
         return total / @intToFloat(f64, total_items);
     }
 
-    pub fn evalMax(ast: Slice, args: ArgList, context: anytype) !f64 {
-        var iter = ast.argIterator(args);
+    pub fn evalMax(ast: Slice, start: u32, end: u32, context: anytype) !f64 {
+        var iter = ast.argIterator(start, end);
         var max: ?f64 = null;
 
         while (iter.next()) |i| {
@@ -599,8 +585,8 @@ pub const Slice = struct {
         return max;
     }
 
-    pub fn evalMin(ast: Slice, args: ArgList, context: anytype) !f64 {
-        var iter = ast.argIterator(args);
+    pub fn evalMin(ast: Slice, start: u32, end: u32, context: anytype) !f64 {
+        var iter = ast.argIterator(start, end);
         var min: ?f64 = null;
 
         while (iter.next()) |i| {
@@ -685,25 +671,8 @@ pub fn traverse(ast: Self, order: TraverseOrder, context: anytype) !bool {
 }
 
 pub fn leftMostChild(ast: Self, index: u32) u32 {
-    assert(index < ast.nodes.len);
-
-    const node = ast.nodes.get(index);
-
-    return switch (node) {
-        .string_literal, .number, .column, .cell => index,
-        .label,
-        .assignment,
-        .concat,
-        .add,
-        .sub,
-        .mul,
-        .div,
-        .mod,
-        .range,
-        => |b| ast.leftMostChild(b.lhs),
-        .builtin => |b| ast.leftMostChild(b.args),
-        .arg_list => |args| ast.leftMostChild(args.start),
-    };
+    const slice = ast.toSlice();
+    return slice.leftMostChild(index);
 }
 
 pub const EvalError = error{
@@ -884,11 +853,11 @@ test "Splice" {
 
     ast.splice(ast.rootNode().assignment.rhs);
     try t.expectApproxEqRel(@as(f64, 308), try ast.eval(Context{}), 0.0001);
-    try t.expectEqual(@as(usize, 12), ast.nodes.len);
+    try t.expectEqual(@as(usize, 11), ast.nodes.len);
 
     ast.splice(ast.rootNode().add.rhs);
     try t.expectApproxEqRel(@as(f64, 5.5), try ast.eval(Context{}), 0.0001);
-    try t.expectEqual(@as(usize, 4), ast.nodes.len);
+    try t.expectEqual(@as(usize, 3), ast.nodes.len);
 }
 
 test "StringEval" {
