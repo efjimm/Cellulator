@@ -736,24 +736,19 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
     }
 }
 
-fn getAnchor(self: *Self) *Position {
-    return &self.anchor;
-}
-
 fn doVisualMode(self: *Self, action: Action) Allocator.Error!void {
     assert(self.mode == .visual or self.mode == .select);
     switch (action) {
         .enter_normal_mode => self.setMode(.normal),
         .swap_anchor => {
-            const anchor = self.getAnchor();
-            const temp = anchor.*;
-            anchor.* = self.cursor;
+            const temp = self.anchor;
+            self.anchor = self.cursor;
             self.setCursor(temp);
         },
 
         .select_cancel => self.setMode(.command_insert),
         .select_submit => {
-            self.setMode(.command_insert);
+            defer self.setMode(.command_insert);
             const writer = self.commandWriter();
 
             const tl = Position.topLeft(self.cursor, self.anchor);
@@ -1248,15 +1243,14 @@ pub fn cursorRight(self: *Self) void {
 
 pub fn selectionUp(self: *Self) void {
     assert(self.mode == .visual or self.mode == .select);
-    const anchor = self.getAnchor();
     const count = self.getCountU16();
-    if (anchor.y < self.cursor.y) {
-        const len = self.cursor.y - anchor.y;
+    if (self.anchor.y < self.cursor.y) {
+        const len = self.cursor.y - self.anchor.y;
         self.setCursor(.{ .y = @max(self.cursor.y -| count, len), .x = self.cursor.x });
-        anchor.y -|= count;
+        self.anchor.y -|= count;
     } else {
-        const len = anchor.y - self.cursor.y;
-        anchor.y = @max(anchor.y -| count, len);
+        const len = self.anchor.y - self.cursor.y;
+        self.anchor.y = @max(self.anchor.y -| count, len);
         self.setCursor(.{ .y = self.cursor.y -| count, .x = self.cursor.x });
     }
     self.resetCount();
@@ -1264,32 +1258,30 @@ pub fn selectionUp(self: *Self) void {
 
 pub fn selectionDown(self: *Self) void {
     assert(self.mode == .visual or self.mode == .select);
-    const anchor = self.getAnchor();
     const count = self.getCountU16();
 
-    if (anchor.y < self.cursor.y) {
-        const len = self.cursor.y - anchor.y;
+    if (self.anchor.y < self.cursor.y) {
+        const len = self.cursor.y - self.anchor.y;
         self.setCursor(.{ .y = self.cursor.y +| count, .x = self.cursor.x });
-        anchor.y = @min(anchor.y +| count, std.math.maxInt(u16) - len);
+        self.anchor.y = @min(self.anchor.y +| count, std.math.maxInt(u16) - len);
     } else {
-        const len = anchor.y - self.cursor.y;
+        const len = self.anchor.y - self.cursor.y;
         self.setCursor(.{ .y = @min(self.cursor.y +| count, std.math.maxInt(u16) - len), .x = self.cursor.x });
-        anchor.y +|= count;
+        self.anchor.y +|= count;
     }
     self.resetCount();
 }
 
 pub fn selectionLeft(self: *Self) void {
     assert(self.mode == .visual or self.mode == .select);
-    const anchor = self.getAnchor();
     const count = self.getCountU16();
-    if (anchor.x < self.cursor.x) {
-        const len = self.cursor.x - anchor.x;
+    if (self.anchor.x < self.cursor.x) {
+        const len = self.cursor.x - self.anchor.x;
         self.setCursor(.{ .x = @max(self.cursor.x -| count, len), .y = self.cursor.y });
-        anchor.x -|= count;
+        self.anchor.x -|= count;
     } else {
-        const len = anchor.x - self.cursor.x;
-        anchor.x = @max(anchor.x -| count, len);
+        const len = self.anchor.x - self.cursor.x;
+        self.anchor.x = @max(self.anchor.x -| count, len);
         self.setCursor(.{ .x = self.cursor.x -| count, .y = self.cursor.y });
     }
     self.resetCount();
@@ -1297,17 +1289,16 @@ pub fn selectionLeft(self: *Self) void {
 
 pub fn selectionRight(self: *Self) void {
     assert(self.mode == .visual or self.mode == .select);
-    const anchor = self.getAnchor();
     const count = self.getCountU16();
 
-    if (anchor.x < self.cursor.x) {
-        const len = self.cursor.x - anchor.x;
+    if (self.anchor.x < self.cursor.x) {
+        const len = self.cursor.x - self.anchor.x;
         self.setCursor(.{ .x = self.cursor.x +| count, .y = self.cursor.y });
-        anchor.x = @min(anchor.x +| count, std.math.maxInt(u16) - len);
+        self.anchor.x = @min(self.anchor.x +| count, std.math.maxInt(u16) - len);
     } else {
-        const len = anchor.x - self.cursor.x;
+        const len = self.anchor.x - self.cursor.x;
         self.setCursor(.{ .x = @min(self.cursor.x +| count, std.math.maxInt(u16) - len), .y = self.cursor.y });
-        anchor.x +|= count;
+        self.anchor.x +|= count;
     }
     self.resetCount();
 }
@@ -2614,7 +2605,7 @@ test "Motions visual mode" {
     zc.setMode(.visual);
     try t.expectEqual(Mode.visual, zc.mode);
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
-    try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.anchor);
 
     // cell_cursor_right
     try zc.doVisualMode(.cell_cursor_right);
@@ -2807,51 +2798,51 @@ test "Motions visual mode" {
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.prev_populated_cell);
     try t.expectEqual(try Position.fromAddress("B0"), zc.cursor);
-    try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.anchor);
 
     // swap_anchor
     try zc.doVisualMode(.swap_anchor);
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
-    try t.expectEqual(Position.fromAddress("B0"), zc.getAnchor().*);
+    try t.expectEqual(Position.fromAddress("B0"), zc.anchor);
 
     zc.setCursor(.{ .x = max, .y = max });
     try zc.doVisualMode(.swap_anchor);
-    try t.expectEqual(Position{ .x = max, .y = max }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = max, .y = max }, zc.anchor);
     try t.expectEqual(Position.fromAddress("B0"), zc.cursor);
 
     zc.setCursor(.{ .x = max - 10, .y = max - 10 });
     try zc.doVisualMode(.swap_anchor);
-    try t.expectEqual(Position{ .x = max - 10, .y = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = max - 10, .y = max - 10 }, zc.anchor);
     try t.expectEqual(Position{ .x = max, .y = max }, zc.cursor);
 
     // visual_move_left
     try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = max - 1, .y = max }, zc.cursor);
-    try t.expectEqual(Position{ .x = max - 11, .y = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = max - 11, .y = max - 10 }, zc.anchor);
     try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = max - 2, .y = max }, zc.cursor);
-    try t.expectEqual(Position{ .x = max - 12, .y = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = max - 12, .y = max - 10 }, zc.anchor);
     try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = max - 3, .y = max }, zc.cursor);
-    try t.expectEqual(Position{ .x = max - 13, .y = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = max - 13, .y = max - 10 }, zc.anchor);
 
     // with counts
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = max - 12, .y = max }, zc.cursor);
-    try t.expectEqual(Position{ .x = max - 22, .y = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = max - 22, .y = max - 10 }, zc.anchor);
     try zc.doVisualMode(.{ .count = 1 });
     try zc.doVisualMode(.{ .count = 0 });
     try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = max - 22, .y = max }, zc.cursor);
-    try t.expectEqual(Position{ .x = max - 32, .y = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = max - 32, .y = max - 10 }, zc.anchor);
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = max - 10021, .y = max }, zc.cursor);
-    try t.expectEqual(Position{ .x = max - 10031, .y = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = max - 10031, .y = max - 10 }, zc.anchor);
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
@@ -2859,41 +2850,41 @@ test "Motions visual mode" {
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = 10, .y = max }, zc.cursor);
-    try t.expectEqual(Position{ .x = 0, .y = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = 0, .y = max - 10 }, zc.anchor);
     try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = 10, .y = max }, zc.cursor);
-    try t.expectEqual(Position{ .x = 0, .y = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = 0, .y = max - 10 }, zc.anchor);
 
     // visual_move_right
     zc.setCursor(.{ .x = 0, .y = 0 });
-    zc.getAnchor().* = .{ .x = 10, .y = 10 };
+    zc.anchor = .{ .x = 10, .y = 10 };
     try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = 1, .y = 0 }, zc.cursor);
-    try t.expectEqual(Position{ .x = 11, .y = 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = 11, .y = 10 }, zc.anchor);
     try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = 2, .y = 0 }, zc.cursor);
-    try t.expectEqual(Position{ .x = 12, .y = 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = 12, .y = 10 }, zc.anchor);
     try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = 3, .y = 0 }, zc.cursor);
-    try t.expectEqual(Position{ .x = 13, .y = 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = 13, .y = 10 }, zc.anchor);
 
     // with counts
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = 12, .y = 0 }, zc.cursor);
-    try t.expectEqual(Position{ .x = 22, .y = 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = 22, .y = 10 }, zc.anchor);
     try zc.doVisualMode(.{ .count = 1 });
     try zc.doVisualMode(.{ .count = 0 });
     try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = 22, .y = 0 }, zc.cursor);
-    try t.expectEqual(Position{ .x = 32, .y = 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = 32, .y = 10 }, zc.anchor);
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = 10021, .y = 0 }, zc.cursor);
-    try t.expectEqual(Position{ .x = 10031, .y = 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = 10031, .y = 10 }, zc.anchor);
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
@@ -2901,41 +2892,41 @@ test "Motions visual mode" {
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = max - 10, .y = 0 }, zc.cursor);
-    try t.expectEqual(Position{ .x = max, .y = 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = max, .y = 10 }, zc.anchor);
     try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = max - 10, .y = 0 }, zc.cursor);
-    try t.expectEqual(Position{ .x = max, .y = 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .x = max, .y = 10 }, zc.anchor);
 
     // visual_move_up
     zc.setCursor(.{ .x = max, .y = max });
-    zc.getAnchor().* = .{ .x = max - 10, .y = max - 10 };
+    zc.anchor = .{ .x = max - 10, .y = max - 10 };
     try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = max - 1, .x = max }, zc.cursor);
-    try t.expectEqual(Position{ .y = max - 11, .x = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .y = max - 11, .x = max - 10 }, zc.anchor);
     try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = max - 2, .x = max }, zc.cursor);
-    try t.expectEqual(Position{ .y = max - 12, .x = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .y = max - 12, .x = max - 10 }, zc.anchor);
     try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = max - 3, .x = max }, zc.cursor);
-    try t.expectEqual(Position{ .y = max - 13, .x = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .y = max - 13, .x = max - 10 }, zc.anchor);
 
     // with counts
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = max - 12, .x = max }, zc.cursor);
-    try t.expectEqual(Position{ .y = max - 22, .x = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .y = max - 22, .x = max - 10 }, zc.anchor);
     try zc.doVisualMode(.{ .count = 1 });
     try zc.doVisualMode(.{ .count = 0 });
     try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = max - 22, .x = max }, zc.cursor);
-    try t.expectEqual(Position{ .y = max - 32, .x = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .y = max - 32, .x = max - 10 }, zc.anchor);
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = max - 10021, .x = max }, zc.cursor);
-    try t.expectEqual(Position{ .y = max - 10031, .x = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .y = max - 10031, .x = max - 10 }, zc.anchor);
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
@@ -2943,41 +2934,41 @@ test "Motions visual mode" {
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = 10, .x = max }, zc.cursor);
-    try t.expectEqual(Position{ .y = 0, .x = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .y = 0, .x = max - 10 }, zc.anchor);
     try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = 10, .x = max }, zc.cursor);
-    try t.expectEqual(Position{ .y = 0, .x = max - 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .y = 0, .x = max - 10 }, zc.anchor);
 
     // visual_move_down
     zc.setCursor(.{ .y = 0, .x = 0 });
-    zc.getAnchor().* = .{ .y = 10, .x = 10 };
+    zc.anchor = .{ .y = 10, .x = 10 };
     try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = 1, .x = 0 }, zc.cursor);
-    try t.expectEqual(Position{ .y = 11, .x = 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .y = 11, .x = 10 }, zc.anchor);
     try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = 2, .x = 0 }, zc.cursor);
-    try t.expectEqual(Position{ .y = 12, .x = 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .y = 12, .x = 10 }, zc.anchor);
     try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = 3, .x = 0 }, zc.cursor);
-    try t.expectEqual(Position{ .y = 13, .x = 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .y = 13, .x = 10 }, zc.anchor);
 
     // with counts
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = 12, .x = 0 }, zc.cursor);
-    try t.expectEqual(Position{ .y = 22, .x = 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .y = 22, .x = 10 }, zc.anchor);
     try zc.doVisualMode(.{ .count = 1 });
     try zc.doVisualMode(.{ .count = 0 });
     try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = 22, .x = 0 }, zc.cursor);
-    try t.expectEqual(Position{ .y = 32, .x = 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .y = 32, .x = 10 }, zc.anchor);
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = 10021, .x = 0 }, zc.cursor);
-    try t.expectEqual(Position{ .y = 10031, .x = 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .y = 10031, .x = 10 }, zc.anchor);
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.{ .count = 9 });
@@ -2985,10 +2976,10 @@ test "Motions visual mode" {
     try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = max - 10, .x = 0 }, zc.cursor);
-    try t.expectEqual(Position{ .y = max, .x = 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .y = max, .x = 10 }, zc.anchor);
     try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = max - 10, .x = 0 }, zc.cursor);
-    try t.expectEqual(Position{ .y = max, .x = 10 }, zc.getAnchor().*);
+    try t.expectEqual(Position{ .y = max, .x = 10 }, zc.anchor);
 }
 
 test "Command history" {
