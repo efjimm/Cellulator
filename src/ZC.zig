@@ -256,6 +256,10 @@ fn setMode(self: *Self, new_mode: Mode) void {
     self.prev_mode = self.mode;
     self.anchor = self.cursor;
     self.mode = new_mode;
+
+    if (new_mode.isCommandMode()) {
+        self.clampCommandCursor();
+    }
 }
 
 const GetActionResult = union(enum) {
@@ -355,8 +359,8 @@ pub inline fn doCommandNormalMotion(self: *Self, range: text.Range) void {
 
 fn clampCommandCursor(self: *Self) void {
     const slice = self.commandSlice();
-    const len = @intCast(u16, slice.len);
-    const end = len - text.prevCharacter(slice, len, @boolToInt(self.mode == .normal));
+    const len = @intCast(u32, slice.len);
+    const end = len - text.prevCharacter(slice, len, @boolToInt(self.mode == .command_normal));
 
     if (self.command_cursor > end)
         self.setCommandCursor(end);
