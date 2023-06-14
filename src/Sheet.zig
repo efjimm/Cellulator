@@ -375,6 +375,7 @@ pub fn setColPrecision(
         },
         opts,
     );
+    sheet.endUndoGroup();
 }
 
 pub fn incPrecision(
