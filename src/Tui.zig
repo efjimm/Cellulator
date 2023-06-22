@@ -167,18 +167,38 @@ pub fn renderCommandLine(
     const writer = rpw.writer();
 
     if (zc.mode.isCommandMode()) {
-        const slice = zc.commandSlice()[zc.command_screen_pos..];
-        try writer.writeAll(slice);
+        const buf = zc.commandBuf();
+
+        var i = zc.command_screen_pos;
+        while (i < buf.len and !rpw.finished) : (i += 1) {
+            try writer.writeByte(buf.get(i));
+        }
 
         const cursor_pos = blk: {
             var pos: u16 = 0;
+            const len = @min(
+                buf.gap_start - zc.command_screen_pos,
+                zc.command_cursor - zc.command_screen_pos,
+            );
+
             var iter = std.unicode.Utf8Iterator{
-                .bytes = slice[0 .. zc.command_cursor - zc.command_screen_pos],
+                .bytes = buf.left()[0..len],
                 .i = 0,
             };
 
             while (iter.nextCodepoint()) |cp| {
                 pos += wcWidth(cp);
+            }
+
+            if (zc.command_cursor >= buf.gap_start) {
+                iter = .{
+                    .bytes = buf.right()[0 .. (zc.command_cursor - zc.command_screen_pos) - len],
+                    .i = 0,
+                };
+
+                while (iter.nextCodepoint()) |cp| {
+                    pos += wcWidth(cp);
+                }
             }
 
             break :blk pos;

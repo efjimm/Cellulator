@@ -1,10 +1,13 @@
 const std = @import("std");
 const utils = @import("utils.zig");
 const spoon = @import("spoon");
+const GapBuffer = @import("GapBuffer.zig");
+const CodepointBuilder = utils.CodepointBuilder;
 const wcWidth = @import("wcwidth").wcWidth;
 const inputParser = spoon.inputParser;
 const isWhitespace = std.ascii.isWhitespace;
-const utf8Encode = std.unicode.utf8Encode;
+const unicode = std.unicode;
+const utf8Encode = unicode.utf8Encode;
 
 const assert = std.debug.assert;
 const log = std.log.scoped(.text_input);
@@ -13,46 +16,47 @@ pub fn isContinuation(c: u8) bool {
     return c & 0xC0 == 0x80;
 }
 
-pub fn nextCodepoint(bytes: []const u8, offset: u32) u32 {
-    return std.unicode.utf8ByteSequenceLength(bytes[offset]) catch unreachable;
+pub fn nextCodepoint(buf: GapBuffer, offset: u32) u32 {
+    return unicode.utf8ByteSequenceLength(buf.get(offset)) catch unreachable;
 }
 
-pub fn prevCodepoint(bytes: []const u8, offset: u32) u32 {
-    if (offset == 0) return 0;
-
-    var iter = std.mem.reverseIterator(bytes[0..offset]);
-    while (iter.next()) |c| {
-        if (!isContinuation(c)) break;
+pub fn prevCodepoint(buf: GapBuffer, offset: u32) u32 {
+    assert(offset <= buf.len);
+    var i = offset;
+    while (i > 0) {
+        i -= 1;
+        if (!isContinuation(buf.get(i))) break;
     }
-    return offset - @intCast(u32, iter.index);
+    return offset - i;
 }
 
 // TODO: package & use libgrapheme for these
 //       waiting for https://github.com/ziglang/zig/issues/14719 to be fixed before this happens
-pub fn nextCharacter(bytes: []const u8, offset: u32, count: u32) u32 {
-    var iter = std.unicode.Utf8Iterator{
-        .bytes = bytes[offset..],
-        .i = 0,
-    };
-
+pub fn nextCharacter(buf: GapBuffer, offset: u32, count: u32) u32 {
+    var i = offset;
     for (0..count) |_| {
-        while (iter.nextCodepoint()) |cp| {
-            if (wcWidth(cp) != 0) break;
+        while (i < buf.len) : (i += 1) {
+            var builder = CodepointBuilder{};
+            var j = i;
+            while (builder.appendByte(buf.get(j))) : (j += 1) {}
+            i += builder.desired_len;
+            if (wcWidth(builder.codepoint()) != 0) break;
         } else break;
     }
 
-    return @intCast(u32, iter.i);
+    return i - offset;
 }
 
-pub fn prevCharacter(bytes: []const u8, offset: u32, count: u32) u32 {
-    var i: u32 = offset;
+pub fn prevCharacter(buf: GapBuffer, offset: u32, count: u32) u32 {
+    var i = offset;
     for (0..count) |_| {
         while (i > 0) {
-            const len = prevCodepoint(bytes, i);
+            const len = prevCodepoint(buf, i);
             i -= len;
 
-            const cp = std.unicode.utf8Decode(bytes[i .. i + len]) catch continue;
-            if (wcWidth(cp) != 0) break;
+            var builder = CodepointBuilder{};
+            for (i..i + len) |j| _ = builder.appendByte(buf.get(@intCast(u32, j)));
+            if (wcWidth(builder.codepoint()) != 0) break;
         } else break;
     }
 
@@ -62,14 +66,14 @@ pub fn prevCharacter(bytes: []const u8, offset: u32, count: u32) u32 {
 pub fn sliceToCp(slice: []const u8) [4]u8 {
     assert(slice.len > 0);
     var buf: [4]u8 = undefined;
-    const len = std.unicode.utf8ByteSequenceLength(slice[0]) catch 1;
+    const len = unicode.utf8ByteSequenceLength(slice[0]) catch 1;
     @memcpy(buf[0..len], slice[0..len]);
     return buf;
 }
 
 /// Converts a UTF-8 codepoint array to a slice
 pub fn cpToSlice(array: *const [4]u8) []const u8 {
-    const len = std.unicode.utf8ByteSequenceLength(array[0]) catch 1;
+    const len = unicode.utf8ByteSequenceLength(array[0]) catch 1;
     return array[0..len];
 }
 
@@ -127,102 +131,102 @@ pub const Motion = union(enum(u8)) {
         long,
     };
 
-    pub fn do(motion: Motion, bytes: []const u8, pos: u32, count: u32) Range {
+    pub fn do(motion: Motion, buf: GapBuffer, pos: u32, count: u32) Range {
         return switch (motion) {
             .normal_word_start_next => .{
                 .start = pos,
-                .end = nextWordStart(bytes, .normal, pos, count),
+                .end = nextWordStart(buf, .normal, pos, count),
             },
             .normal_word_start_prev => .{
-                .start = prevWordStart(bytes, .normal, pos, count),
+                .start = prevWordStart(buf, .normal, pos, count),
                 .end = pos,
             },
             .normal_word_end_next => .{
                 .start = pos,
-                .end = nextWordEnd(bytes, .normal, pos, count),
+                .end = nextWordEnd(buf, .normal, pos, count),
             },
             .normal_word_end_prev => .{
-                .start = prevWordEnd(bytes, .normal, pos, count),
+                .start = prevWordEnd(buf, .normal, pos, count),
                 .end = pos,
             },
             .long_word_start_next => .{
                 .start = pos,
-                .end = nextWordStart(bytes, .long, pos, count),
+                .end = nextWordStart(buf, .long, pos, count),
             },
             .long_word_start_prev => .{
-                .start = prevWordStart(bytes, .long, pos, count),
+                .start = prevWordStart(buf, .long, pos, count),
                 .end = pos,
             },
             .long_word_end_next => .{
                 .start = pos,
-                .end = nextWordEnd(bytes, .long, pos, count),
+                .end = nextWordEnd(buf, .long, pos, count),
             },
             .long_word_end_prev => .{
-                .start = prevWordEnd(bytes, .long, pos, count),
+                .start = prevWordEnd(buf, .long, pos, count),
                 .end = pos,
             },
             .char_next => .{
                 .start = pos,
-                .end = pos + nextCharacter(bytes, pos, count),
+                .end = pos + nextCharacter(buf, pos, count),
             },
             .char_prev => .{
-                .start = pos - prevCharacter(bytes, pos, count),
+                .start = pos - prevCharacter(buf, pos, count),
                 .end = pos,
             },
             .line => .{
                 .start = 0,
-                .end = @intCast(u32, bytes.len),
+                .end = buf.len,
             },
             .eol => .{
                 .start = pos,
-                .end = @intCast(u32, bytes.len),
+                .end = buf.len,
             },
             .bol => .{
                 .start = 0,
                 .end = pos,
             },
-            .normal_word_inside => insideWord(bytes, .normal, pos),
-            .long_word_inside => insideWord(bytes, .long, pos),
+            .normal_word_inside => insideWord(buf, .normal, pos),
+            .long_word_inside => insideWord(buf, .long, pos),
 
-            .normal_word_around => aroundWord(bytes, .normal, pos),
-            .long_word_around => aroundWord(bytes, .long, pos),
+            .normal_word_around => aroundWord(buf, .normal, pos),
+            .long_word_around => aroundWord(buf, .long, pos),
 
-            .inside_delimiters => |d| insideDelimitersCp(bytes, d.left, d.right, pos),
-            .around_delimiters => |d| aroundDelimitersCp(bytes, d.left, d.right, pos),
-            .inside_single_delimiter => |cp| insideSingleDelimiterCp(bytes, cp, pos),
-            .around_single_delimiter => |cp| aroundSingleDelimiterCp(bytes, cp, pos),
+            .inside_delimiters => |d| insideDelimitersCp(buf, d.left, d.right, pos),
+            .around_delimiters => |d| aroundDelimitersCp(buf, d.left, d.right, pos),
+            .inside_single_delimiter => |cp| insideDelimitersCp(buf, cp, cp, pos),
+            .around_single_delimiter => |cp| aroundDelimitersCp(buf, cp, cp, pos),
 
             .to_forwards => |cp| .{
                 .start = pos,
-                .end = toForwardsCp(bytes, cp, pos, count) orelse pos,
+                .end = toForwardsCp(buf, cp, pos, count) orelse pos,
             },
             .to_backwards => |cp| .{
-                .start = toBackwardsCp(bytes, cp, pos, count) orelse pos,
+                .start = toBackwardsCp(buf, cp, pos, count) orelse pos,
                 .end = pos,
             },
             .until_forwards => |cp| .{
                 .start = pos,
-                .end = untilForwardsCp(bytes, cp, pos +| 1, count) orelse pos,
+                .end = untilForwardsCp(buf, cp, pos +| 1, count) orelse pos,
             },
             .until_backwards => |cp| .{
-                .start = untilBackwardsCp(bytes, cp, pos -| 1, count) orelse pos,
+                .start = untilBackwardsCp(buf, cp, pos -| 1, count) orelse pos,
                 .end = pos,
             },
 
             .to_forwards_utf8 => |needle| .{
                 .start = pos,
-                .end = toForwards(bytes, needle, pos, count) orelse pos,
+                .end = toForwards(buf, needle, pos, count) orelse pos,
             },
             .to_backwards_utf8 => |needle| .{
-                .start = toBackwards(bytes, needle, pos, count) orelse pos,
+                .start = toBackwards(buf, needle, pos, count) orelse pos,
                 .end = pos,
             },
             .until_forwards_utf8 => |needle| .{
                 .start = pos,
-                .end = untilForwards(bytes, needle, pos +| 1, count) orelse pos,
+                .end = untilForwards(buf, needle, pos +| 1, count) orelse pos,
             },
             .until_backwards_utf8 => |needle| .{
-                .start = untilBackwards(bytes, needle, pos -| 1, count) orelse pos,
+                .start = untilBackwards(buf, needle, pos -| 1, count) orelse pos,
                 .end = pos,
             },
         };
@@ -230,7 +234,7 @@ pub const Motion = union(enum(u8)) {
 
     /// Returns the byte position of the next word
     fn nextWordStart(
-        bytes: []const u8,
+        buf: GapBuffer,
         comptime word_type: WordType,
         start_pos: u32,
         count: u32,
@@ -239,20 +243,20 @@ pub const Motion = union(enum(u8)) {
         var pos = start_pos;
 
         for (0..count) |_| {
-            if (pos >= bytes.len) break;
+            if (pos >= buf.len) break;
 
-            if (boundary(bytes[pos])) {
-                while (pos < bytes.len) : (pos += nextCharacter(bytes, pos, 1)) {
-                    if (!boundary(bytes[pos]) or isWhitespace(bytes[pos])) break;
+            if (boundary(buf.get(pos))) {
+                while (pos < buf.len) : (pos += nextCharacter(buf, pos, 1)) {
+                    if (!boundary(buf.get(pos)) or isWhitespace(buf.get(pos))) break;
                 }
             } else {
-                while (pos < bytes.len) : (pos += nextCharacter(bytes, pos, 1)) {
-                    if (boundary(bytes[pos])) break;
+                while (pos < buf.len) : (pos += nextCharacter(buf, pos, 1)) {
+                    if (boundary(buf.get(pos))) break;
                 }
             }
 
-            while (pos < bytes.len) : (pos += nextCharacter(bytes, pos, 1)) {
-                if (!isWhitespace(bytes[pos])) break;
+            while (pos < buf.len) : (pos += nextCharacter(buf, pos, 1)) {
+                if (!isWhitespace(buf.get(pos))) break;
             }
         }
 
@@ -260,33 +264,33 @@ pub const Motion = union(enum(u8)) {
     }
 
     fn prevWordStart(
-        bytes: []const u8,
+        buf: GapBuffer,
         comptime word_type: WordType,
         start_pos: u32,
         count: u32,
     ) u32 {
-        if (bytes.len == 0) return 0;
+        if (buf.len == 0) return 0;
 
         const boundary = wordBoundaryFn(word_type);
         var pos = start_pos;
 
         for (0..count) |_| {
             while (pos > 0) {
-                pos -= prevCharacter(bytes, pos, 1);
-                if (!isWhitespace(bytes[pos])) break;
+                pos -= prevCharacter(buf, pos, 1);
+                if (!isWhitespace(buf.get(pos))) break;
             } else break;
 
             var p = pos;
-            if (boundary(bytes[p])) {
+            if (boundary(buf.get(p))) {
                 while (p > 0) {
-                    p -= prevCharacter(bytes, p, 1);
-                    if (!boundary(bytes[p]) or isWhitespace(bytes[p])) break;
+                    p -= prevCharacter(buf, p, 1);
+                    if (!boundary(buf.get(p)) or isWhitespace(buf.get(p))) break;
                     pos = p;
                 }
             } else {
                 while (p > 0) {
-                    p -= prevCharacter(bytes, p, 1);
-                    if (boundary(bytes[p])) break;
+                    p -= prevCharacter(buf, p, 1);
+                    if (boundary(buf.get(p))) break;
                     pos = p;
                 }
             }
@@ -296,32 +300,32 @@ pub const Motion = union(enum(u8)) {
     }
 
     fn nextWordEnd(
-        bytes: []const u8,
+        buf: GapBuffer,
         comptime word_type: WordType,
         start_pos: u32,
         count: u32,
     ) u32 {
-        if (bytes.len == 0) return 0;
+        if (buf.len == 0) return 0;
 
         const boundary = wordBoundaryFn(word_type);
         var pos = start_pos;
 
         for (0..count) |_| {
-            pos += nextCodepoint(bytes, pos);
-            while (pos < bytes.len and isWhitespace(bytes[pos])) {
-                pos += nextCodepoint(bytes, pos);
+            pos += nextCodepoint(buf, pos);
+            while (pos < buf.len and isWhitespace(buf.get(pos))) {
+                pos += nextCodepoint(buf, pos);
             }
-            if (pos == bytes.len) return pos;
+            if (pos == buf.len) return pos;
 
             var p = pos;
-            if (boundary(bytes[pos])) {
-                while (p < bytes.len) : (p += nextCharacter(bytes, p, 1)) {
-                    if (!boundary(bytes[p]) or isWhitespace(bytes[p])) break;
+            if (boundary(buf.get(pos))) {
+                while (p < buf.len) : (p += nextCharacter(buf, p, 1)) {
+                    if (!boundary(buf.get(p)) or isWhitespace(buf.get(p))) break;
                     pos = p;
                 }
             } else {
-                while (p < bytes.len) : (p += nextCharacter(bytes, p, 1)) {
-                    if (boundary(bytes[p])) break;
+                while (p < buf.len) : (p += nextCharacter(buf, p, 1)) {
+                    if (boundary(buf.get(p))) break;
                     pos = p;
                 }
             }
@@ -331,53 +335,57 @@ pub const Motion = union(enum(u8)) {
     }
 
     fn prevWordEnd(
-        bytes: []const u8,
+        buf: GapBuffer,
         comptime word_type: WordType,
         start_pos: u32,
         count: u32,
     ) u32 {
-        if (bytes.len == 0) return 0;
+        if (buf.len == 0) return 0;
 
-        const len = @intCast(u32, bytes.len);
-        if (start_pos >= bytes.len)
-            return prevWordEnd(bytes, word_type, len - prevCharacter(bytes, len, 1), count - 1);
+        if (start_pos >= buf.len)
+            return prevWordEnd(buf, word_type, buf.len - prevCharacter(buf, buf.len, 1), count - 1);
 
         const boundary = wordBoundaryFn(word_type);
         var pos = start_pos;
 
         for (0..count) |_| {
-            if (boundary(bytes[pos])) {
-                while (pos > 0 and boundary(bytes[pos]) and !isWhitespace(bytes[pos])) {
-                    pos -= prevCodepoint(bytes, pos);
+            if (boundary(buf.get(pos))) {
+                while (pos > 0 and boundary(buf.get(pos)) and !isWhitespace(buf.get(pos))) {
+                    pos -= prevCodepoint(buf, pos);
                 }
             } else {
-                while (pos > 0 and !boundary(bytes[pos])) {
-                    pos -= prevCodepoint(bytes, pos);
+                while (pos > 0 and !boundary(buf.get(pos))) {
+                    pos -= prevCodepoint(buf, pos);
                 }
             }
-            while (pos > 0 and isWhitespace(bytes[pos])) {
-                pos -= prevCodepoint(bytes, pos);
+            while (pos > 0 and isWhitespace(buf.get(pos))) {
+                pos -= prevCodepoint(buf, pos);
             }
         }
 
         return pos;
     }
 
-    fn insideWord(bytes: []const u8, comptime word_type: WordType, pos: u32) Range {
-        if (bytes.len == 0) return .{ .start = 0, .end = 0 };
+    fn insideWord(buf: GapBuffer, comptime word_type: WordType, pos: u32) Range {
+        if (buf.len == 0) return .{ .start = 0, .end = 0 };
 
-        var iter = std.mem.reverseIterator(bytes[0..pos]);
+        var iter = buf.reverseIterator();
+        iter.index = pos;
         var start: u32 = pos;
         var end: u32 = pos;
 
         const boundary = wordBoundaryFn(word_type);
 
-        if (!boundary(bytes[pos])) {
+        if (!boundary(buf.get(pos))) {
             while (iter.next()) |c| : (start -= 1) {
                 if (boundary(c)) break;
             }
 
-            for (bytes[pos..]) |c| {
+            var forward_iter = GapBuffer.Iterator{
+                .buf = buf,
+                .index = pos,
+            };
+            while (forward_iter.next()) |c| {
                 if (boundary(c)) break;
                 end += 1;
             }
@@ -386,7 +394,11 @@ pub const Motion = union(enum(u8)) {
                 if (!boundary(c)) break;
             }
 
-            for (bytes[pos..]) |c| {
+            var forward_iter = GapBuffer.Iterator{
+                .buf = buf,
+                .index = pos,
+            };
+            while (forward_iter.next()) |c| {
                 if (!boundary(c)) break;
                 end += 1;
             }
@@ -398,26 +410,34 @@ pub const Motion = union(enum(u8)) {
         };
     }
 
-    fn aroundWord(bytes: []const u8, comptime word_type: WordType, pos: u32) Range {
-        if (bytes.len == 0) return .{ .start = 0, .end = 0 };
+    fn aroundWord(buf: GapBuffer, comptime word_type: WordType, pos: u32) Range {
+        if (buf.len == 0) return .{ .start = 0, .end = 0 };
 
-        var iter = std.mem.reverseIterator(bytes[0..pos]);
+        var iter = GapBuffer.ReverseIterator{
+            .buf = buf,
+            .index = pos,
+        };
         var start = pos;
         var end = pos;
 
         const boundary = wordBoundaryFn(word_type);
 
-        if (!boundary(bytes[pos])) {
+        if (!boundary(buf.get(pos))) {
             while (iter.next()) |c| : (start -= 1) {
                 if (boundary(c)) break;
             }
 
-            for (bytes[pos..]) |c| {
+            var forward_iter = GapBuffer.Iterator{
+                .buf = buf,
+                .index = pos,
+            };
+            while (forward_iter.next()) |c| {
                 if (boundary(c)) break;
                 end += 1;
             }
 
-            for (bytes[end..]) |c| {
+            forward_iter.index = end;
+            while (forward_iter.next()) |c| {
                 if (!isWhitespace(c)) break;
                 end += 1;
             }
@@ -426,12 +446,17 @@ pub const Motion = union(enum(u8)) {
                 if (!boundary(c)) break;
             }
 
-            for (bytes[pos..]) |c| {
+            var forward_iter = GapBuffer.Iterator{
+                .buf = buf,
+                .index = pos,
+            };
+            while (forward_iter.next()) |c| {
                 if (!boundary(c)) break;
                 end += 1;
             }
 
-            for (bytes[end..]) |c| {
+            forward_iter.index = end;
+            while (forward_iter.next()) |c| {
                 if (isWhitespace(c)) break;
                 end += 1;
             }
@@ -444,7 +469,7 @@ pub const Motion = union(enum(u8)) {
     }
 
     fn insideDelimitersCp(
-        bytes: []const u8,
+        buf: GapBuffer,
         left_cp: u21,
         right_cp: u21,
         pos: u32,
@@ -453,28 +478,28 @@ pub const Motion = union(enum(u8)) {
             .start = pos,
             .end = pos,
         };
-        var buf: [8]u8 = undefined;
-        const left_len = utf8Encode(left_cp, &buf) catch return err_ret;
-        const left = buf[0..left_len];
+        var b: [8]u8 = undefined;
+        const left_len = utf8Encode(left_cp, &b) catch return err_ret;
+        const left = b[0..left_len];
 
-        const right_len = utf8Encode(right_cp, buf[4..]) catch return err_ret;
-        const right = buf[4 .. 4 + right_len];
+        const right_len = utf8Encode(right_cp, b[4..]) catch return err_ret;
+        const right = b[4 .. 4 + right_len];
 
-        return insideDelimiters(bytes, left, right, pos);
+        return insideDelimiters(buf, left, right, pos);
     }
 
-    fn insideDelimiters(bytes: []const u8, left: []const u8, right: []const u8, pos: u32) Range {
-        if (bytes.len == 0) return .{ .start = 0, .end = 0 };
+    fn insideDelimiters(buf: GapBuffer, left: []const u8, right: []const u8, pos: u32) Range {
+        if (buf.len == 0) return .{ .start = 0, .end = 0 };
 
-        var ret = aroundDelimiters(bytes, left, right, pos);
+        var ret = aroundDelimiters(buf, left, right, pos);
         if (ret.start == ret.end) return ret;
-        ret.start += nextCodepoint(bytes, ret.start);
-        ret.end -= prevCodepoint(bytes, ret.end);
+        ret.start += nextCodepoint(buf, ret.start);
+        ret.end -= prevCodepoint(buf, ret.end);
         return ret;
     }
 
     fn aroundDelimitersCp(
-        bytes: []const u8,
+        buf: GapBuffer,
         left_cp: u21,
         right_cp: u21,
         pos: u32,
@@ -483,34 +508,34 @@ pub const Motion = union(enum(u8)) {
             .start = pos,
             .end = pos,
         };
-        var buf: [8]u8 = undefined;
-        const left_len = utf8Encode(left_cp, &buf) catch return err_ret;
-        const left = buf[0..left_len];
+        var b: [8]u8 = undefined;
+        const left_len = utf8Encode(left_cp, &b) catch return err_ret;
+        const left = b[0..left_len];
 
-        const right_len = utf8Encode(right_cp, buf[4..]) catch return err_ret;
-        const right = buf[4 .. 4 + right_len];
-        return aroundDelimiters(bytes, left, right, pos);
+        const right_len = utf8Encode(right_cp, b[4..]) catch return err_ret;
+        const right = b[4 .. 4 + right_len];
+        return aroundDelimiters(buf, left, right, pos);
     }
 
     // TODO: this is pretty inefficient
     fn aroundDelimiters(
-        bytes: []const u8,
+        buf: GapBuffer,
         left: []const u8,
         right: []const u8,
         pos: u32,
     ) Range {
-        if (bytes.len == 0) return .{ .start = 0, .end = 0 };
-        assert(pos < bytes.len);
-        assert((std.unicode.utf8ByteSequenceLength(left[0]) catch unreachable) == left.len);
-        assert((std.unicode.utf8ByteSequenceLength(right[0]) catch unreachable) == right.len);
+        if (buf.len == 0) return .{ .start = 0, .end = 0 };
+        assert(pos < buf.len);
+        assert((unicode.utf8ByteSequenceLength(left[0]) catch unreachable) == left.len);
+        assert((unicode.utf8ByteSequenceLength(right[0]) catch unreachable) == right.len);
 
         var i = pos;
-        var depth: i32 = if (std.mem.startsWith(u8, bytes[pos..], right)) -1 else 0;
+        var depth: i32 = if (buf.containsAt(pos, right)) -1 else 0;
         while (true) : (i -= 1) {
-            if (std.mem.startsWith(u8, bytes[i..], left)) {
+            if (buf.containsAt(i, left)) {
                 if (depth == 0) break;
                 depth -= 1;
-            } else if (std.mem.startsWith(u8, bytes[i..], right)) {
+            } else if (buf.containsAt(i, right)) {
                 depth += 1;
             }
 
@@ -521,16 +546,16 @@ pub const Motion = union(enum(u8)) {
         }
 
         var j = pos;
-        depth = if (std.mem.startsWith(u8, bytes[pos..], left)) -1 else 0;
+        depth = if (buf.containsAt(pos, left)) -1 else 0;
 
-        while (j < bytes.len) : (j += 1) {
-            if (std.mem.startsWith(u8, bytes[j..], right)) {
+        while (j < buf.len) : (j += 1) {
+            if (buf.containsAt(j, right)) {
                 if (depth == 0) {
                     j += @intCast(u32, right.len);
                     break;
                 }
                 depth -= 1;
-            } else if (std.mem.startsWith(u8, bytes[j..], left)) {
+            } else if (buf.containsAt(j, left)) {
                 depth += 1;
             }
         } else return .{
@@ -546,122 +571,65 @@ pub const Motion = union(enum(u8)) {
         };
     }
 
-    fn insideSingleDelimiterCp(bytes: []const u8, delim_cp: u21, pos: u32) Range {
-        var buf: [4]u8 = undefined;
-        const len = utf8Encode(delim_cp, &buf) catch return .{
-            .start = pos,
-            .end = pos,
-        };
-        return insideSingleDelimiter(bytes, buf[0..len], pos);
+    fn toForwardsCp(buf: GapBuffer, cp: u21, pos: u32, count: u32) ?u32 {
+        var b: [4]u8 = undefined;
+        const len = utf8Encode(cp, &b) catch 1;
+        return toForwards(buf, b[0..len], pos, count);
     }
 
-    fn insideSingleDelimiter(bytes: []const u8, delim: []const u8, pos: u32) Range {
-        if (bytes.len == 0) return .{ .start = 0, .end = 0 };
-
-        var ret = aroundSingleDelimiter(bytes, delim, pos);
-        if (ret.start == ret.end) return ret;
-        ret.start += nextCodepoint(bytes, ret.start);
-        ret.end -= prevCodepoint(bytes, ret.end);
-        return ret;
+    fn toBackwardsCp(buf: GapBuffer, cp: u21, pos: u32, count: u32) ?u32 {
+        var b: [4]u8 = undefined;
+        const len = utf8Encode(cp, &b) catch 1;
+        return toBackwards(buf, b[0..len], pos, count);
     }
 
-    fn aroundSingleDelimiterCp(
-        bytes: []const u8,
-        delim_cp: u21,
-        pos: u32,
-    ) Range {
-        var buf: [4]u8 = undefined;
-        const len = utf8Encode(delim_cp, &buf) catch return .{
-            .start = pos,
-            .end = pos,
-        };
-        return aroundSingleDelimiter(bytes, buf[0..len], pos);
+    fn untilForwardsCp(buf: GapBuffer, cp: u21, pos: u32, count: u32) ?u32 {
+        var b: [4]u8 = undefined;
+        const len = utf8Encode(cp, &b) catch 1;
+        return untilForwards(buf, b[0..len], pos, count);
     }
 
-    fn aroundSingleDelimiter(
-        bytes: []const u8,
-        delim: []const u8,
-        pos: u32,
-    ) Range {
-        const len = @intCast(u32, delim.len);
-        if (std.mem.startsWith(u8, bytes[pos..], delim)) {
-            const start = std.mem.lastIndexOf(u8, bytes[0..pos], delim) orelse pos;
-            const end = std.mem.indexOf(u8, bytes[pos + len ..], delim) orelse pos;
-
-            return .{
-                .start = @intCast(u32, start),
-                .end = len + @intCast(u32, end),
-            };
-        } else {
-            const start = std.mem.lastIndexOf(u8, bytes[0..pos], delim) orelse pos;
-            const end = if (std.mem.indexOf(u8, bytes[pos..], delim)) |x| pos + x else pos;
-            if (start == end) return .{ .start = pos, .end = pos };
-            return .{
-                .start = @intCast(u32, start),
-                .end = len + @intCast(u32, end),
-            };
-        }
+    fn untilBackwardsCp(buf: GapBuffer, cp: u21, pos: u32, count: u32) ?u32 {
+        var b: [4]u8 = undefined;
+        const len = utf8Encode(cp, &b) catch 1;
+        return untilBackwards(buf, b[0..len], pos, count);
     }
 
-    fn toForwardsCp(bytes: []const u8, cp: u21, pos: u32, count: u32) ?u32 {
-        var buf: [4]u8 = undefined;
-        const len = utf8Encode(cp, &buf) catch 1;
-        return toForwards(bytes, buf[0..len], pos, count);
-    }
+    fn toForwards(buf: GapBuffer, needle: []const u8, pos: u32, count: u32) ?u32 {
+        if (pos >= buf.len or count == 0) return pos;
 
-    fn toBackwardsCp(bytes: []const u8, cp: u21, pos: u32, count: u32) ?u32 {
-        var buf: [4]u8 = undefined;
-        const len = utf8Encode(cp, &buf) catch 1;
-        return toBackwards(bytes, buf[0..len], pos, count);
-    }
-
-    fn untilForwardsCp(bytes: []const u8, cp: u21, pos: u32, count: u32) ?u32 {
-        var buf: [4]u8 = undefined;
-        const len = utf8Encode(cp, &buf) catch 1;
-        return untilForwards(bytes, buf[0..len], pos, count);
-    }
-
-    fn untilBackwardsCp(bytes: []const u8, cp: u21, pos: u32, count: u32) ?u32 {
-        var buf: [4]u8 = undefined;
-        const len = utf8Encode(cp, &buf) catch 1;
-        return untilBackwards(bytes, buf[0..len], pos, count);
-    }
-
-    fn toForwards(bytes: []const u8, needle: []const u8, pos: u32, count: u32) ?u32 {
-        if (pos >= bytes.len or count == 0) return pos;
-
-        const first = 1 + (std.mem.indexOf(u8, bytes[pos + 1 ..], needle) orelse return null);
+        const first = 1 + (buf.indexOfPos(pos + 1, needle) orelse return null) - (pos + 1);
         var p = pos + first;
 
         for (1..count) |_| {
-            if (p >= bytes.len) break;
-            p += 1 + (std.mem.indexOf(u8, bytes[p + 1 ..], needle) orelse break);
+            if (p >= buf.len) break;
+            p += 1 + (buf.indexOfPos(p + 1, needle) orelse break) - (p + 1);
         }
 
         return @intCast(u32, p);
     }
 
-    fn toBackwards(bytes: []const u8, needle: []const u8, pos: u32, count: u32) ?u32 {
-        assert(pos <= bytes.len);
+    fn toBackwards(buf: GapBuffer, needle: []const u8, pos: u32, count: u32) ?u32 {
+        assert(pos <= buf.len);
         if (count == 0) return pos;
 
-        var p = std.mem.lastIndexOf(u8, bytes[0..pos], needle) orelse return null;
+        var p = (buf.lastIndexOfPos(pos, needle) orelse return null);
 
         for (1..count) |_| {
-            p = std.mem.lastIndexOf(u8, bytes[0..p], needle) orelse break;
+            p = (buf.lastIndexOfPos(p, needle) orelse break);
         }
 
-        return @intCast(u32, p);
+        return p;
     }
 
-    fn untilForwards(bytes: []const u8, needle: []const u8, pos: u32, count: u32) ?u32 {
-        const ret = toForwards(bytes, needle, pos, count) orelse return null;
-        return ret - prevCharacter(bytes, ret, 1);
+    fn untilForwards(buf: GapBuffer, needle: []const u8, pos: u32, count: u32) ?u32 {
+        const ret = toForwards(buf, needle, pos, count) orelse return null;
+        return ret - prevCharacter(buf, ret, 1);
     }
 
-    fn untilBackwards(bytes: []const u8, needle: []const u8, pos: u32, count: u32) ?u32 {
-        const ret = toBackwards(bytes, needle, pos, count) orelse return null;
-        return ret + nextCharacter(bytes, ret, 1);
+    fn untilBackwards(buf: GapBuffer, needle: []const u8, pos: u32, count: u32) ?u32 {
+        const ret = toBackwards(buf, needle, pos, count) orelse return null;
+        return ret + nextCharacter(buf, ret, 1);
     }
 
     fn wordBoundaryFn(comptime word_type: WordType) (fn (u8) bool) {
@@ -684,7 +652,12 @@ fn testMotion(
     motion: Motion,
     count: u32,
 ) !void {
-    const range = motion.do(text, start, count);
+    var buf = GapBuffer{};
+    defer buf.deinit(std.testing.allocator);
+
+    try buf.appendSlice(std.testing.allocator, text);
+
+    const range = motion.do(buf, start, count);
     try std.testing.expectEqual(start_pos, range.start);
     try std.testing.expectEqual(end_pos, range.end);
 }

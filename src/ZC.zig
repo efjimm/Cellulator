@@ -9,6 +9,7 @@ const text = @import("text.zig");
 const Motion = text.Motion;
 const wcWidth = @import("wcwidth").wcWidth;
 const SizedArrayListUnmanaged = @import("sized_array_list.zig").SizedArrayListUnmanaged;
+const GapBuffer = @import("GapBuffer.zig");
 
 const Position = Sheet.Position;
 const Allocator = std.mem.Allocator;
@@ -58,8 +59,7 @@ status_message: std.BoundedArray(u8, 256) = .{},
 
 const INPUT_BUF_LEN = 256;
 
-const CommandBuf = SizedArrayListUnmanaged(u8, u32);
-const CommandHist = std.ArrayListUnmanaged(CommandBuf);
+const CommandHist = std.ArrayListUnmanaged(GapBuffer);
 
 pub const status_line = 0;
 pub const input_line = 1;
@@ -358,9 +358,8 @@ pub inline fn doCommandNormalMotion(self: *Self, range: text.Range) void {
 }
 
 fn clampCommandCursor(self: *Self) void {
-    const slice = self.commandSlice();
-    const len = @intCast(u32, slice.len);
-    const end = len - text.prevCharacter(slice, len, @boolToInt(self.mode == .command_normal));
+    const buf = self.commandBufPtr();
+    const end = buf.len - text.prevCharacter(buf.*, buf.len, @boolToInt(self.mode == .command_normal));
 
     if (self.command_cursor > end)
         self.setCommandCursor(end);
@@ -372,22 +371,24 @@ fn clampScreenToCommandCursor(self: *Self) void {
         return;
     }
 
-    const slice = self.commandSlice();
+    const buf = self.commandBuf();
     var x: u32 = self.command_cursor;
     // Reserve either the width of the character under the cursor, or 1 column if none.
-    var w: u16 = if (self.command_cursor < slice.len) blk: {
-        const len = std.unicode.utf8ByteSequenceLength(slice[x]) catch unreachable;
-        const cp = std.unicode.utf8Decode(slice[x .. x + len]) catch unreachable;
-        break :blk wcWidth(cp);
+    var w: u16 = if (self.command_cursor < buf.len) blk: {
+        var builder = utils.CodepointBuilder{};
+        var i: u32 = 0;
+        while (builder.appendByte(buf.get(x + i))) : (i += 1) {}
+        break :blk wcWidth(builder.codepoint());
     } else 1;
 
     while (true) {
         const prev = x;
-        x -= text.prevCodepoint(slice, x);
+        x -= text.prevCodepoint(buf, prev);
         if (prev == x or x < self.screen_pos.x) break;
 
-        const cp = std.unicode.utf8Decode(slice[x..prev]) catch unreachable;
-        w += wcWidth(cp);
+        var builder = utils.CodepointBuilder{ .desired_len = @intCast(u3, prev - x) };
+        for (0..builder.desired_len) |i| _ = builder.appendByte(buf.get(x + @intCast(u32, i)));
+        w += wcWidth(builder.codepoint());
 
         if (w > self.tui.term.width) {
             if (prev > self.command_screen_pos) self.command_screen_pos = prev;
@@ -425,7 +426,7 @@ pub fn submitCommand(self: *Self) !void {
 
 pub fn resetCommandBuf(self: *Self) void {
     self.current_command = self.command_history.items.len - 1;
-    self.commandList().len = 0;
+    self.commandBufPtr().clearRetainingCapacity();
     self.setCommandCursor(0);
 }
 
@@ -434,7 +435,12 @@ pub fn commandSlice(self: *Self) []const u8 {
     return self.command_history.items[self.current_command].items();
 }
 
-pub fn commandList(self: *Self) *CommandBuf {
+pub fn commandBuf(self: Self) GapBuffer {
+    assert(self.current_command <= self.command_history.items.len);
+    return self.command_history.items[self.current_command];
+}
+
+pub fn commandBufPtr(self: *Self) *GapBuffer {
     assert(self.current_command <= self.command_history.items.len);
     return &self.command_history.items[self.current_command];
 }
@@ -442,19 +448,20 @@ pub fn commandList(self: *Self) *CommandBuf {
 pub fn commandHistoryNext(self: *Self) void {
     if (self.current_command < self.command_history.items.len - 1) {
         self.current_command += 1;
-        self.setCommandCursor(@intCast(u16, self.commandSlice().len));
+        self.setCommandCursor(self.commandBufPtr().len);
     }
 }
 
 pub fn commandHistoryPrev(self: *Self) void {
     self.current_command -|= 1;
-    self.setCommandCursor(@intCast(u16, self.commandSlice().len));
+    self.setCommandCursor(self.commandBufPtr().len);
 }
 
 pub fn commandWrite(self: *Self, bytes: []const u8) Allocator.Error!usize {
-    const list = self.commandList();
+    const list = self.commandBufPtr();
     try list.insertSlice(self.allocator, self.command_cursor, bytes);
-    self.setCommandCursor(self.command_cursor + @intCast(u16, bytes.len));
+    self.setCommandCursor(self.command_cursor + @intCast(u32, bytes.len));
+    log.debug("Total command length: {d}", .{list.len});
     return bytes.len;
 }
 
@@ -471,7 +478,7 @@ pub fn doCommandMotion(self: *Self, motion: Motion) void {
     switch (self.mode) {
         .normal, .visual, .select => unreachable,
         .command_normal, .command_insert => {
-            const range = motion.do(self.commandSlice(), self.command_cursor, count);
+            const range = motion.do(self.commandBuf(), self.command_cursor, count);
             self.doCommandNormalMotion(range);
         },
         .command_change => {
@@ -480,7 +487,7 @@ pub fn doCommandMotion(self: *Self, motion: Motion) void {
                 .long_word_start_next => .long_word_end_next,
                 else => motion,
             };
-            const range = m.do(self.commandSlice(), self.command_cursor, count);
+            const range = m.do(self.commandBuf(), self.command_cursor, count);
 
             if (range.start != range.end) {
                 // We want the 'end' part of the range to be inclusive for some motions and
@@ -496,18 +503,18 @@ pub fn doCommandMotion(self: *Self, motion: Motion) void {
                     .until_forwards_utf8,
                     .until_backwards,
                     .until_backwards_utf8,
-                    => text.nextCharacter(self.commandSlice(), range.end, 1),
+                    => text.nextCharacter(self.commandBuf(), range.end, 1),
                     else => 0,
                 };
 
                 assert(end >= range.start);
-                self.commandList().replaceRange(self.allocator, range.start, end - range.start, &.{}) catch unreachable;
+                self.commandBufPtr().replaceRange(self.allocator, range.start, end - range.start, &.{}) catch unreachable;
                 self.setCommandCursor(range.start);
             }
             self.setMode(.command_insert);
         },
         .command_delete => {
-            const range = motion.do(self.commandSlice(), self.command_cursor, count);
+            const range = motion.do(self.commandBuf(), self.command_cursor, count);
             if (range.start != range.end) {
                 const end = range.end + switch (motion) {
                     .normal_word_end_next,
@@ -520,10 +527,10 @@ pub fn doCommandMotion(self: *Self, motion: Motion) void {
                     .until_forwards_utf8,
                     .until_backwards,
                     .until_backwards_utf8,
-                    => text.nextCharacter(self.commandSlice(), range.end, 1),
+                    => text.nextCharacter(self.commandBuf(), range.end, 1),
                     else => 0,
                 };
-                self.commandList().replaceRange(self.allocator, range.start, end - range.start, &.{}) catch unreachable;
+                self.commandBufPtr().replaceRange(self.allocator, range.start, end - range.start, &.{}) catch unreachable;
                 self.setCommandCursor(range.start);
             }
             self.setMode(.command_normal);
@@ -562,17 +569,17 @@ pub fn doCommandNormalMode(self: *Self, action: CommandAction) !void {
         .operator_delete => self.setMode(.command_delete),
         .operator_change => self.setMode(.command_change),
         inline .delete_char, .change_char => |_, a| {
-            const len = text.nextCharacter(self.commandSlice(), self.command_cursor, 1);
-            try self.commandList().replaceRange(self.allocator, self.command_cursor, len, &.{});
+            const len = text.nextCharacter(self.commandBuf(), self.command_cursor, 1);
+            try self.commandBufPtr().replaceRange(self.allocator, self.command_cursor, len, &.{});
             if (a == .change_char) self.setMode(.command_insert);
             self.clampCommandCursor();
         },
         .change_to_eol => {
-            self.commandList().len = self.command_cursor;
+            self.commandBufPtr().shrinkRetainingCapacity(self.command_cursor);
             self.setMode(.command_insert);
         },
         .delete_to_eol => {
-            self.commandList().len = self.command_cursor;
+            self.commandBufPtr().shrinkRetainingCapacity(self.command_cursor);
         },
         .change_line => {
             self.resetCommandBuf();
@@ -607,8 +614,13 @@ fn doCommandInsertMode(self: *Self, action: CommandAction, keys: []const u8) !vo
         .history_next => self.commandHistoryNext(),
         .history_prev => self.commandHistoryPrev(),
         .backspace => {
-            self.setMode(.command_change);
-            self.doCommandMotion(.char_prev);
+            const buf = self.commandBufPtr();
+            buf.setGap(self.command_cursor);
+            const len = text.prevCharacter(buf.*, buf.gap_start, 1);
+            buf.gap_start -= len;
+            buf.gap_len += len;
+            buf.len -= len;
+            self.setCommandCursor(self.command_cursor - len);
         },
         .submit_command => self.submitCommand(),
         .enter_normal_mode => self.setMode(.command_normal),

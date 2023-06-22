@@ -77,4 +77,5 @@ comptime {
     std.testing.refAllDecls(@import("Ast.zig"));
     std.testing.refAllDecls(ZC);
     std.testing.refAllDecls(@import("utils.zig"));
+    std.testing.refAllDecls(@import("GapBuffer.zig"));
 }

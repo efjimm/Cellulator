@@ -2,8 +2,34 @@ const std = @import("std");
 const Position = @import("Sheet.zig").Position;
 const wcWidth = @import("wcwidth").wcWidth;
 
+const unicode = std.unicode;
 const mem = std.mem;
 const assert = std.debug.assert;
+
+pub const CodepointBuilder = struct {
+    buf: [4]u8 = undefined,
+    desired_len: u3 = 0,
+    len: u3 = 0,
+
+    pub fn appendByte(builder: *CodepointBuilder, byte: u8) bool {
+        if (builder.desired_len == 0) {
+            builder.desired_len = unicode.utf8ByteSequenceLength(byte) catch unreachable;
+        }
+        assert(builder.len + 1 <= builder.desired_len);
+        builder.buf[builder.len] = byte;
+        builder.len += 1;
+        return !(builder.len == builder.desired_len);
+    }
+
+    pub fn slice(builder: *const CodepointBuilder) []const u8 {
+        assert(builder.len == builder.desired_len);
+        return builder.buf[0..builder.len];
+    }
+
+    pub fn codepoint(builder: CodepointBuilder) u21 {
+        return unicode.utf8Decode(builder.slice()) catch unreachable;
+    }
+};
 
 pub fn strWidth(bytes: []const u8, max: u16) u16 {
     var width: u16 = 0;
