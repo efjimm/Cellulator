@@ -666,7 +666,7 @@ pub const Slice = struct {
             }
         }
 
-        return total / @intToFloat(f64, total_items);
+        return total / @floatFromInt(f64, total_items);
     }
 
     pub fn evalMax(ast: Slice, start: u32, end: u32, context: anytype) !f64 {

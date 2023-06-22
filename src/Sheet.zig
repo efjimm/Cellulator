@@ -624,7 +624,7 @@ pub fn update(sheet: *Sheet, comptime cell_type: CellType) Allocator.Error!void 
             blk: {
                 const now = std.time.Instant.now() catch unreachable;
                 const elapsed = now.since(begin);
-                break :blk @intToFloat(f64, elapsed) / std.time.ns_per_s;
+                break :blk @floatFromInt(f64, elapsed) / std.time.ns_per_s;
             },
         });
     }
@@ -1350,7 +1350,7 @@ fn testCellEvaluation(allocator: Allocator) !void {
     const begin = try std.time.Instant.now();
     try sheet.update(.number);
     const elapsed_time = (try std.time.Instant.now()).since(begin);
-    try t.expect(@intToFloat(f64, elapsed_time) / std.time.ns_per_ms < 10);
+    try t.expect(@floatFromInt(f64, elapsed_time) / std.time.ns_per_ms < 10);
 
     // Test values of cells
     const testCell = struct {

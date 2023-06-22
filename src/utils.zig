@@ -98,7 +98,7 @@ pub const WordIterator = struct {
             return null;
 
         const str = mem.trimLeft(u8, self.string[self.index..], &std.ascii.whitespace);
-        self.index = @ptrToInt(str.ptr) - @ptrToInt(self.string.ptr);
+        self.index = @intFromPtr(str.ptr) - @intFromPtr(self.string.ptr);
 
         if (str.len == 0)
             return null;

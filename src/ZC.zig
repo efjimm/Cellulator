@@ -359,7 +359,7 @@ pub inline fn doCommandNormalMotion(self: *Self, range: text.Range) void {
 
 fn clampCommandCursor(self: *Self) void {
     const buf = self.commandBufPtr();
-    const end = buf.len - text.prevCharacter(buf.*, buf.len, @boolToInt(self.mode == .command_normal));
+    const end = buf.len - text.prevCharacter(buf.*, buf.len, @intFromBool(self.mode == .command_normal));
 
     if (self.command_cursor > end)
         self.setCommandCursor(end);
@@ -1729,11 +1729,11 @@ pub const CommandAction = union(enum(u6)) {
     none,
 
     pub fn isMotion(action: CommandAction) bool {
-        return @enumToInt(action) <= 24;
+        return @intFromEnum(action) <= 24;
     }
 
     pub fn isMotionTag(tag: std.meta.Tag(CommandAction)) bool {
-        return @enumToInt(tag) <= 24;
+        return @intFromEnum(tag) <= 24;
     }
 
     // Cursed function that converts a CommandAction to a Motion.
@@ -1742,7 +1742,7 @@ pub const CommandAction = union(enum(u6)) {
             inline .motion_around_delimiters, .motion_inside_delimiters => |buf, action_tag| {
                 const b align(4) = buf; // `buf` is not aligned for some reason, so copy it
                 const cps align(4) = utils.unpackDoubleCp(&b);
-                const tag = @intToEnum(std.meta.Tag(Motion), @enumToInt(action_tag));
+                const tag = @enumFromInt(std.meta.Tag(Motion), @intFromEnum(action_tag));
                 return @unionInit(Motion, @tagName(tag), .{
                     .left = cps[0],
                     .right = cps[1],
@@ -1752,11 +1752,11 @@ pub const CommandAction = union(enum(u6)) {
         }
 
         @setEvalBranchQuota(2000);
-        const tag = @intToEnum(std.meta.Tag(Motion), @enumToInt(action));
+        const tag = @enumFromInt(std.meta.Tag(Motion), @intFromEnum(action));
         switch (action) {
             inline else => |payload, action_tag| switch (tag) {
                 inline else => |t| {
-                    if (comptime (@enumToInt(t) == @enumToInt(action_tag) and
+                    if (comptime (@intFromEnum(t) == @intFromEnum(action_tag) and
                         isMotionTag(action_tag) and
                         action_tag != .motion_inside_delimiters and
                         action_tag != .motion_around_delimiters))
