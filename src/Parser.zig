@@ -187,7 +187,7 @@ fn parseStringLiteral(parser: *Parser) ParseError!u32 {
 }
 
 fn addString(parser: *Parser, bytes: []const u8) ParseError!String {
-    const len = @intCast(u32, bytes.len);
+    const len: u32 = @intCast(bytes.len);
     if (parser.strings) |strings| {
         const start = strings.len;
         parser.strings = try strings.appendSlice(parser.allocator, bytes);
@@ -368,7 +368,7 @@ fn parseCellName(parser: *Parser) !u32 {
 }
 
 fn addNode(parser: *Parser, data: Node) Allocator.Error!u32 {
-    const ret = @intCast(u32, parser.nodes.len);
+    const ret: u32 = @intCast(parser.nodes.len);
     try parser.nodes.append(parser.allocator, data);
     return ret;
 }

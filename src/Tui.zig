@@ -288,12 +288,12 @@ pub fn renderRowNumbers(self: Self, rc: *RenderContext, zc: *ZC) RenderError!voi
     try rc.buffer.writer().writeByteNTimes(' ', width);
 
     for (ZC.content_line..self.term.height, zc.screen_pos.y..) |screen_line, sheet_line| {
-        try rc.moveCursorTo(@intCast(u16, screen_line), 0);
+        try rc.moveCursorTo(@intCast(screen_line), 0);
 
         var rpw = rc.restrictedPaddingWriter(width);
         const writer = rpw.writer();
 
-        if (zc.isSelectedRow(@intCast(u16, sheet_line))) {
+        if (zc.isSelectedRow(@intCast(sheet_line))) {
             try rc.setStyle(.{ .fg = .black, .bg = .blue });
 
             try writer.print("{d: ^[1]}", .{ sheet_line, width });
@@ -328,7 +328,7 @@ pub fn renderCursor(
             .x = blk: {
                 var x: u16 = left;
                 for (zc.screen_pos.x..zc.prev_cursor.x) |i| {
-                    const col = zc.sheet.getColumn(@intCast(u16, i));
+                    const col = zc.sheet.getColumn(@intCast(i));
                     x += col.width;
                 }
                 break :blk x;
@@ -362,7 +362,7 @@ pub fn renderCursor(
 
             var x: u16 = left;
             for (zc.screen_pos.x..zc.cursor.x) |i| {
-                const col = zc.sheet.getColumn(@intCast(u16, i));
+                const col = zc.sheet.getColumn(@intCast(i));
                 x += col.width;
             }
             break :blk x;
@@ -408,11 +408,11 @@ pub fn renderCells(
     try rc.setStyle(.{});
 
     for (ZC.content_line..self.term.height, zc.screen_pos.y..) |line, y| {
-        try rc.moveCursorTo(@intCast(u16, line), reserved_cols);
+        try rc.moveCursorTo(@intCast(line), reserved_cols);
 
         var w: u16 = reserved_cols;
         for (zc.screen_pos.x..@as(usize, std.math.maxInt(u16)) + 1) |x| {
-            const pos = Position{ .y = @intCast(u16, y), .x = @intCast(u16, x) };
+            const pos = Position{ .y = @intCast(y), .x = @intCast(x) };
             switch (zc.mode) {
                 .visual, .select => {
                     if (pos.hash() == zc.cursor.hash() or pos.intersects(zc.anchor, zc.cursor)) {
@@ -452,7 +452,7 @@ pub fn renderCell(
     const width = getColWidth: {
         var width: u16 = 0;
         for (zc.screen_pos.x..pos.x) |x| {
-            const c = zc.sheet.getColumn(@intCast(u16, x));
+            const c = zc.sheet.getColumn(@intCast(x));
             width += c.width;
         }
         const screen_width = rc.term.width - zc.leftReservedColumns();

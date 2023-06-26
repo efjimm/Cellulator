@@ -130,7 +130,7 @@ pub fn CritBitMap(
                 const inode = node.inode;
                 const direction: u1 = if (inode.byte < bytes.len) blk: {
                     top = node;
-                    break :blk @intCast(u1, (bytes[inode.byte] >> inode.bit) & 1);
+                    break :blk @intCast((bytes[inode.byte] >> inode.bit) & 1);
                 } else 0;
 
                 node = &inode.child[direction];
@@ -186,14 +186,14 @@ pub fn CritBitMap(
 
             const diff_bit: u3 = blk: {
                 const diff: u8 = closest_bytes[diff_byte] ^ bytes[diff_byte];
-                break :blk 7 - @intCast(u3, @clz(diff));
+                break :blk 7 - @as(u3, @intCast(@clz(diff)));
             };
 
-            const new_dir: u1 = @intCast(u1, (bytes[diff_byte] >> diff_bit) & 1);
+            const new_dir: u1 = @intCast((bytes[diff_byte] >> diff_bit) & 1);
 
             const new_node = try allocator.create(INode);
             new_node.* = .{
-                .byte = @intCast(u32, diff_byte),
+                .byte = @intCast(diff_byte),
                 .bit = diff_bit,
                 .child = undefined,
                 .tags = undefined,
@@ -214,7 +214,7 @@ pub fn CritBitMap(
                 if (inode.byte == diff_byte and inode.bit < diff_bit) break;
 
                 const direction: u1 = if (inode.byte < bytes.len)
-                    @intCast(u1, (bytes[inode.byte] >> inode.bit) & 1)
+                    @intCast((bytes[inode.byte] >> inode.bit) & 1)
                 else
                     0;
                 node = &inode.child[direction];
@@ -260,7 +260,7 @@ pub fn CritBitMap(
 
         inline fn getDirection(bytes: []const u8, inode: INode) u1 {
             return if (inode.byte < bytes.len)
-                @intCast(u1, (bytes[inode.byte] >> inode.bit) & 1)
+                @intCast((bytes[inode.byte] >> inode.bit) & 1)
             else
                 0;
         }

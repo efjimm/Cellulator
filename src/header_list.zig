@@ -14,12 +14,12 @@ pub fn HeaderList(comptime T: type, comptime Size: type) type {
         capacity: Size = 0,
 
         pub fn items(list: *List) []align(alignment) T {
-            const ptr = @ptrCast([*]align(alignment) u8, list);
-            return @ptrCast([*]align(alignment) T, ptr + @sizeOf(List))[0..list.len];
+            const ptr: [*]align(alignment) u8 = @ptrCast(list);
+            return @as([*]align(alignment) T, @ptrCast(ptr + @sizeOf(List)))[0..list.len];
         }
 
         pub fn allocatedSlice(list: *List) []align(alignment) u8 {
-            const ptr = @ptrCast([*]align(alignment) u8, list);
+            const ptr: [*]align(alignment) u8 = @ptrCast(list);
             return ptr[0 .. @sizeOf(List) + @as(usize, list.capacity) * @sizeOf(T)];
         }
 
@@ -31,7 +31,7 @@ pub fn HeaderList(comptime T: type, comptime Size: type) type {
             const size = @sizeOf(List) + @sizeOf(T) * initial_capacity;
             const bytes = try allocator.alignedAlloc(u8, alignment, size);
 
-            const list = @ptrCast(*List, bytes);
+            const list: *List = @ptrCast(bytes);
             list.* = .{
                 .capacity = initial_capacity,
             };
@@ -68,7 +68,7 @@ pub fn HeaderList(comptime T: type, comptime Size: type) type {
 
             const old_bytes = list.allocatedSlice();
             const new_bytes = try allocator.realloc(old_bytes, @sizeOf(List) + @sizeOf(T) * new_capacity);
-            const l = @ptrCast(*List, new_bytes);
+            const l: *List = @ptrCast(new_bytes);
             l.capacity = new_capacity;
             return l;
         }
@@ -102,7 +102,7 @@ pub fn HeaderList(comptime T: type, comptime Size: type) type {
             allocator: Allocator,
             slice: []const T,
         ) Allocator.Error!*List {
-            const l = try list.ensureUnusedCapacity(allocator, @intCast(Size, slice.len));
+            const l = try list.ensureUnusedCapacity(allocator, @intCast(slice.len));
             for (slice) |item| {
                 l.appendAssumeCapacity(item);
             }

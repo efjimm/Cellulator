@@ -145,7 +145,7 @@ pub const Slice = struct {
     }
 
     pub fn rootNodeIndex(ast: Slice) u32 {
-        return @intCast(u32, ast.nodes.len) - 1;
+        return @as(u32, @intCast(ast.nodes.len)) - 1;
     }
 
     pub fn rootTag(ast: Slice) u32 {
@@ -185,7 +185,7 @@ pub const Slice = struct {
         const new_len = new_root + 1 - first_node;
 
         for (0..new_len, first_node..new_root + 1) |i, j| {
-            var n = ast.nodes.get(@intCast(u32, j));
+            var n = ast.nodes.get(@intCast(j));
             switch (n) {
                 .assignment,
                 .label,
@@ -205,7 +205,7 @@ pub const Slice = struct {
                 },
                 .string_literal, .number, .column, .cell => {},
             }
-            ast.nodes.set(@intCast(u32, i), n);
+            ast.nodes.set(@intCast(i), n);
         }
 
         ast.nodes.len = new_len;
@@ -613,7 +613,7 @@ pub const Slice = struct {
         var total: f64 = 0;
         for (start.y..end.y + @as(u32, 1)) |y| {
             for (start.x..end.x + @as(u32, 1)) |x| {
-                total += try context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse 0;
+                total += try context.evalCell(.{ .x = @intCast(x), .y = @intCast(y) }) orelse 0;
             }
         }
         return total;
@@ -640,7 +640,7 @@ pub const Slice = struct {
         var total: f64 = 1;
         for (start.y..end.y + @as(u32, 1)) |y| {
             for (start.x..end.x + @as(u32, 1)) |x| {
-                total *= try context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse continue;
+                total *= try context.evalCell(.{ .x = @intCast(x), .y = @intCast(y) }) orelse continue;
             }
         }
         return total;
@@ -666,7 +666,7 @@ pub const Slice = struct {
             }
         }
 
-        return total / @floatFromInt(f64, total_items);
+        return total / @as(f64, @floatFromInt(total_items));
     }
 
     pub fn evalMax(ast: Slice, start: u32, end: u32, context: anytype) !f64 {
@@ -693,7 +693,7 @@ pub const Slice = struct {
         var max: ?f64 = null;
         for (start.y..end.y + @as(u32, 1)) |y| {
             for (start.x..end.x + @as(u32, 1)) |x| {
-                const res = try context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse continue;
+                const res = try context.evalCell(.{ .x = @intCast(x), .y = @intCast(y) }) orelse continue;
                 if (max == null or res > max.?)
                     max = res;
             }
@@ -725,7 +725,7 @@ pub const Slice = struct {
         var min: ?f64 = null;
         for (start.y..end.y + @as(u32, 1)) |y| {
             for (start.x..end.x + @as(u32, 1)) |x| {
-                const res = try context.evalCell(.{ .x = @intCast(u16, x), .y = @intCast(u16, y) }) orelse continue;
+                const res = try context.evalCell(.{ .x = @intCast(x), .y = @intCast(y) }) orelse continue;
                 if (min == null or res < min.?)
                     min = res;
             }
@@ -739,7 +739,7 @@ pub fn rootNode(ast: Self) Node {
 }
 
 pub fn rootNodeIndex(ast: Self) u32 {
-    return @intCast(u32, ast.nodes.len) - 1;
+    return @as(u32, @intCast(ast.nodes.len)) - 1;
 }
 
 pub fn rootTag(ast: Self) std.meta.Tag(Node) {
@@ -845,7 +845,7 @@ test "Parse and Eval Expression" {
             const val = try expected;
             std.testing.expectApproxEqRel(val, res, 0.0001) catch |err| {
                 for (0..ast.nodes.len) |i| {
-                    const u = ast.nodes.get(@intCast(u32, i));
+                    const u = ast.nodes.get(@intCast(i));
                     std.debug.print("{}\n", .{u});
                 }
                 return err;

@@ -47,7 +47,7 @@ pub fn insertAtGap(self: *Self, item: u8) void {
 }
 
 pub fn insertSliceAtGap(self: *Self, slice: []const u8) void {
-    const len = @intCast(u32, slice.len);
+    const len: u32 = @intCast(slice.len);
     assert(self.gap_len >= len);
     for (slice) |item| {
         self.insertAtGap(item);
@@ -75,7 +75,7 @@ pub fn insertSlice(
 ) Allocator.Error!void {
     assert(n <= self.len);
     self.setGap(n);
-    try self.ensureUnusedCapacity(allocator, @intCast(u32, slice.len));
+    try self.ensureUnusedCapacity(allocator, @intCast(slice.len));
     self.insertSliceAtGap(slice);
 }
 
@@ -102,7 +102,7 @@ pub fn appendAssumeCapacity(self: *Self, item: u8) void {
 
 pub fn appendSlice(self: *Self, allocator: Allocator, slice: []const u8) Allocator.Error!void {
     self.setGap(self.len);
-    try self.ensureUnusedCapacity(allocator, @intCast(u32, slice.len));
+    try self.ensureUnusedCapacity(allocator, @intCast(slice.len));
     self.insertSliceAtGap(slice);
 }
 
@@ -183,7 +183,7 @@ pub fn replaceRange(
     }
     self.gap_len += len;
     self.len -= len;
-    try self.ensureUnusedCapacity(allocator, @intCast(u32, new_items.len));
+    try self.ensureUnusedCapacity(allocator, @intCast(new_items.len));
     self.insertSliceAtGap(new_items);
 }
 
@@ -263,7 +263,7 @@ pub fn reverseIterator(self: Self) ReverseIterator {
 }
 
 pub fn containsAt(self: Self, pos: u32, needle: []const u8) bool {
-    const len = @intCast(u32, needle.len);
+    const len: u32 = @intCast(needle.len);
     if (self.len - pos < len) return false;
 
     var i: u32 = 0;
@@ -274,7 +274,7 @@ pub fn containsAt(self: Self, pos: u32, needle: []const u8) bool {
 
 pub fn indexOfPos(self: Self, pos: u32, needle: []const u8) ?u32 {
     assert(pos < self.len);
-    const len = @intCast(u32, needle.len);
+    const len: u32 = @intCast(needle.len);
     if (self.len - pos < len) return null;
 
     var i: u32 = pos;
@@ -289,7 +289,7 @@ pub fn indexOfPos(self: Self, pos: u32, needle: []const u8) ?u32 {
 }
 
 pub fn lastIndexOfPos(self: Self, pos: u32, needle: []const u8) ?u32 {
-    const len = @intCast(u32, needle.len);
+    const len: u32 = @intCast(needle.len);
     if (len > self.len or pos == 0) return null;
     if (len == 0) return self.len;
 

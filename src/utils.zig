@@ -54,8 +54,8 @@ pub fn packDoubleCp(cp1: u21, cp2: u21) [7]u8 {
 
 pub fn unpackDoubleCp(buf: []align(4) const u8) struct { u21, u21 } {
     return .{
-        @ptrCast(*const u21, buf[0..3]).*,
-        @ptrCast(*const u21, buf[4..7]).*,
+        @as(*const u21, @ptrCast(buf[0..3])).*,
+        @as(*const u21, @ptrCast(buf[4..7])).*,
     };
 }
 

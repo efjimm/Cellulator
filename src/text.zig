@@ -55,7 +55,7 @@ pub fn prevCharacter(buf: GapBuffer, offset: u32, count: u32) u32 {
             i -= len;
 
             var builder = CodepointBuilder{};
-            for (i..i + len) |j| _ = builder.appendByte(buf.get(@intCast(u32, j)));
+            for (i..i + len) |j| _ = builder.appendByte(buf.get(@intCast(j)));
             if (wcWidth(builder.codepoint()) != 0) break;
         } else break;
     }
@@ -551,7 +551,7 @@ pub const Motion = union(enum(u8)) {
         while (j < buf.len) : (j += 1) {
             if (buf.containsAt(j, right)) {
                 if (depth == 0) {
-                    j += @intCast(u32, right.len);
+                    j += @intCast(right.len);
                     break;
                 }
                 depth -= 1;
@@ -606,7 +606,7 @@ pub const Motion = union(enum(u8)) {
             p += 1 + (buf.indexOfPos(p + 1, needle) orelse break) - (p + 1);
         }
 
-        return @intCast(u32, p);
+        return @intCast(p);
     }
 
     fn toBackwards(buf: GapBuffer, needle: []const u8, pos: u32, count: u32) ?u32 {

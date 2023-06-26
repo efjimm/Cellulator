@@ -94,7 +94,7 @@ pub fn SizedArrayListUnmanaged(comptime T: type, comptime Size: type) type {
             self: *Self,
             slice: []const T,
         ) void {
-            const len = @intCast(Size, slice.len);
+            const len: Size = @intCast(slice.len);
             assert(self.capacity - self.len >= len);
             @memcpy(self.unusedSlice().ptr, slice);
             self.len += len;
@@ -105,7 +105,7 @@ pub fn SizedArrayListUnmanaged(comptime T: type, comptime Size: type) type {
             allocator: Allocator,
             slice: []const T,
         ) Allocator.Error!void {
-            const len = @intCast(Size, slice.len);
+            const len: Size = @intCast(slice.len);
             try self.ensureUnusedCapacity(allocator, len);
             self.appendSliceAssumeCapacity(slice);
         }
@@ -120,7 +120,7 @@ pub fn SizedArrayListUnmanaged(comptime T: type, comptime Size: type) type {
             i: Size,
             slice: []const T,
         ) Allocator.Error!void {
-            const len = @intCast(Size, slice.len);
+            const len: Size = @intCast(slice.len);
             try self.ensureUnusedCapacity(allocator, len);
             self.len += len;
 
@@ -154,7 +154,7 @@ pub fn SizedArrayListUnmanaged(comptime T: type, comptime Size: type) type {
                     self.items()[after_subrange..][i] = item;
                 }
 
-                self.len -= len - @intCast(Size, new_items.len);
+                self.len -= len - @as(Size, @intCast(new_items.len));
             }
         }
     };

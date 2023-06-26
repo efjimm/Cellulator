@@ -33,7 +33,7 @@ pub fn ArrayMemoryPool(comptime T: type, comptime Index: type) type {
                 @memcpy(new_memory[0..pool.len], old_memory);
                 allocator.free(old_memory);
                 pool.ptr = new_memory.ptr;
-                pool.capacity = @intCast(Index, new_memory.len);
+                pool.capacity = @intCast(new_memory.len);
             }
         }
 

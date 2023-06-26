@@ -386,8 +386,8 @@ fn clampScreenToCommandCursor(self: *Self) void {
         x -= text.prevCodepoint(buf, prev);
         if (prev == x or x < self.screen_pos.x) break;
 
-        var builder = utils.CodepointBuilder{ .desired_len = @intCast(u3, prev - x) };
-        for (0..builder.desired_len) |i| _ = builder.appendByte(buf.get(x + @intCast(u32, i)));
+        var builder = utils.CodepointBuilder{ .desired_len = @intCast(prev - x) };
+        for (0..builder.desired_len) |i| _ = builder.appendByte(buf.get(x + @as(u3, @intCast(i))));
         w += wcWidth(builder.codepoint());
 
         if (w > self.tui.term.width) {
@@ -460,7 +460,7 @@ pub fn commandHistoryPrev(self: *Self) void {
 pub fn commandWrite(self: *Self, bytes: []const u8) Allocator.Error!usize {
     const list = self.commandBufPtr();
     try list.insertSlice(self.allocator, self.command_cursor, bytes);
-    self.setCommandCursor(self.command_cursor + @intCast(u32, bytes.len));
+    self.setCommandCursor(self.command_cursor + @as(u32, @intCast(bytes.len)));
     log.debug("Total command length: {d}", .{list.len});
     return bytes.len;
 }
@@ -922,7 +922,7 @@ pub fn getCount(self: Self) u32 {
 }
 
 pub fn getCountU16(self: Self) u16 {
-    return @intCast(u16, @min(std.math.maxInt(u16), self.getCount()));
+    return @intCast(@min(std.math.maxInt(u16), self.getCount()));
 }
 
 pub fn resetCount(self: *Self) void {
@@ -1029,7 +1029,7 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
                     errdefer ast.deinit(self.allocator);
 
                     try self.sheet.setCell(
-                        .{ .y = @intCast(u16, y), .x = @intCast(u16, x) },
+                        .{ .y = @intCast(y), .x = @intCast(x) },
                         ast,
                         .{},
                     );
@@ -1413,13 +1413,13 @@ pub fn decPrecision(self: *Self, column: u16, count: u8) Allocator.Error!void {
 }
 
 pub inline fn cursorIncPrecision(self: *Self) Allocator.Error!void {
-    const count = @intCast(u8, @min(std.math.maxInt(u8), self.getCount()));
+    const count: u8 = @intCast(@min(std.math.maxInt(u8), self.getCount()));
     try self.incPrecision(self.cursor.x, count);
     self.resetCount();
 }
 
 pub inline fn cursorDecPrecision(self: *Self) Allocator.Error!void {
-    const count = @intCast(u8, @min(std.math.maxInt(u8), self.getCount()));
+    const count: u8 = @intCast(@min(std.math.maxInt(u8), self.getCount()));
     try self.decPrecision(self.cursor.x, count);
     self.resetCount();
 }
@@ -1437,13 +1437,13 @@ pub fn decWidth(self: *Self, column: u16, n: u8) Allocator.Error!void {
 }
 
 pub inline fn cursorIncWidth(self: *Self) Allocator.Error!void {
-    const count = @intCast(u8, @min(std.math.maxInt(u8), self.getCount()));
+    const count: u8 = @intCast(@min(std.math.maxInt(u8), self.getCount()));
     try self.incWidth(self.cursor.x, count);
     self.resetCount();
 }
 
 pub inline fn cursorDecWidth(self: *Self) Allocator.Error!void {
-    const count = @intCast(u8, @min(std.math.maxInt(u8), self.getCount()));
+    const count: u8 = @intCast(@min(std.math.maxInt(u8), self.getCount()));
     try self.decWidth(self.cursor.x, count);
     self.resetCount();
 }
@@ -1548,13 +1548,13 @@ pub fn cursorToLastCellInColumn(self: *Self) void {
 }
 
 pub fn cursorGotoRow(self: *Self) void {
-    const count = @intCast(u16, @min(std.math.maxInt(u16), self.count));
+    const count: u16 = @intCast(@min(std.math.maxInt(u16), self.count));
     self.resetCount();
     self.setCursor(.{ .x = self.cursor.x, .y = count });
 }
 
 pub fn cursorGotoCol(self: *Self) void {
-    const count = @intCast(u16, @min(std.math.maxInt(u16), self.count));
+    const count: u16 = @intCast(@min(std.math.maxInt(u16), self.count));
     self.resetCount();
     self.setCursor(.{ .x = count, .y = self.cursor.y });
 }
@@ -1742,7 +1742,7 @@ pub const CommandAction = union(enum(u6)) {
             inline .motion_around_delimiters, .motion_inside_delimiters => |buf, action_tag| {
                 const b align(4) = buf; // `buf` is not aligned for some reason, so copy it
                 const cps align(4) = utils.unpackDoubleCp(&b);
-                const tag = @enumFromInt(std.meta.Tag(Motion), @intFromEnum(action_tag));
+                const tag: std.meta.Tag(Motion) = @enumFromInt(@intFromEnum(action_tag));
                 return @unionInit(Motion, @tagName(tag), .{
                     .left = cps[0],
                     .right = cps[1],
@@ -1752,7 +1752,7 @@ pub const CommandAction = union(enum(u6)) {
         }
 
         @setEvalBranchQuota(2000);
-        const tag = @enumFromInt(std.meta.Tag(Motion), @intFromEnum(action));
+        const tag: std.meta.Tag(Motion) = @enumFromInt(@intFromEnum(action));
         switch (action) {
             inline else => |payload, action_tag| switch (tag) {
                 inline else => |t| {

@@ -401,11 +401,11 @@ pub fn decPrecision(
 }
 
 pub fn cellCount(sheet: *Sheet) u32 {
-    return @intCast(u32, sheet.cells.entries.len);
+    return @intCast(sheet.cells.entries.len);
 }
 
 pub fn colCount(sheet: *Sheet) u32 {
-    return @intCast(u32, sheet.columns.entries.len);
+    return @intCast(sheet.columns.entries.len);
 }
 
 /// Allocates enough space for `new_capacity` cells
@@ -624,7 +624,7 @@ pub fn update(sheet: *Sheet, comptime cell_type: CellType) Allocator.Error!void 
             blk: {
                 const now = std.time.Instant.now() catch unreachable;
                 const elapsed = now.since(begin);
-                break :blk @floatFromInt(f64, elapsed) / std.time.ns_per_s;
+                break :blk @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_s;
             },
         });
     }
@@ -640,7 +640,7 @@ fn rebuildSortedNodeList(
         .number => &sheet.cells,
         .text => &sheet.text_cells,
     };
-    const node_count = @intCast(u32, cells.entries.len);
+    const node_count: u32 = @intCast(cells.entries.len);
 
     // Topologically sorted set of cell positions
     sheet.visited_nodes.clearRetainingCapacity();
@@ -774,7 +774,7 @@ pub const Position = struct {
     /// writer.
     pub fn writeColumnAddress(index: u16, writer: anytype) @TypeOf(writer).Error!void {
         if (index < 26) {
-            try writer.writeByte('A' + @intCast(u8, index));
+            try writer.writeByte('A' + @as(u8, @intCast(index)));
             return;
         }
 
@@ -786,7 +786,7 @@ pub const Position = struct {
         var i = @as(u32, index) + 1;
         while (i > 0) : (i /= 26) {
             i -= 1;
-            const r = @intCast(u8, i % 26);
+            const r: u8 = @intCast(i % 26);
             bufwriter.writeByte('A' + r) catch unreachable;
         }
 
@@ -798,7 +798,7 @@ pub const Position = struct {
     pub fn columnAddressBuf(index: u16, buf: []u8) []u8 {
         if (index < 26) {
             std.debug.assert(buf.len >= 1);
-            buf[0] = 'A' + @intCast(u8, index);
+            buf[0] = 'A' + @as(u8, @intCast(index));
             return buf[0..1];
         }
 
@@ -808,7 +808,7 @@ pub const Position = struct {
         var i = @as(u32, index) + 1;
         while (i > 0) : (i /= 26) {
             i -= 1;
-            const r = @intCast(u8, i % 26);
+            const r: u8 = @intCast(i % 26);
             writer.writeByte('A' + r) catch break;
         }
 
@@ -832,7 +832,7 @@ pub const Position = struct {
             ret = ret *| 26 +| (std.ascii.toUpper(c) - 'A' + 1);
         }
 
-        return if (ret > @as(u32, MAX) + 1) error.Overflow else @intCast(u16, ret - 1);
+        return if (ret > @as(u32, MAX) + 1) error.Overflow else @intCast(ret - 1);
     }
 
     pub fn fromAddress(address: []const u8) FromAddressError!Position {
@@ -1080,8 +1080,9 @@ pub fn widthNeededForColumn(sheet: Sheet, column_index: u16, precision: u16, max
         if (k.x != column_index) continue;
         writer.print("{d:.[1]}", .{ v.num, precision }) catch unreachable;
         // Numbers are all ASCII, so 1 byte = 1 column
-        if (@intCast(u16, buf.len) > width) {
-            width = @intCast(u16, buf.len);
+        const len: u16 = @intCast(buf.len);
+        if (len > width) {
+            width = len;
             if (width >= max_width) return width;
         }
     }
@@ -1350,7 +1351,7 @@ fn testCellEvaluation(allocator: Allocator) !void {
     const begin = try std.time.Instant.now();
     try sheet.update(.number);
     const elapsed_time = (try std.time.Instant.now()).since(begin);
-    try t.expect(@floatFromInt(f64, elapsed_time) / std.time.ns_per_ms < 10);
+    try t.expect(@as(f64, @floatFromInt(elapsed_time)) / std.time.ns_per_ms < 10);
 
     // Test values of cells
     const testCell = struct {
