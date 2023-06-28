@@ -170,9 +170,10 @@ pub fn renderCommandLine(
         const buf = zc.commandBuf();
 
         var i = zc.command_screen_pos;
-        while (i < buf.len and !rpw.finished) : (i += 1) {
-            try writer.writeByte(buf.get(i));
+        if (i < buf.gap_start) {
+            try writer.writeAll(buf.left()[i..]);
         }
+        try writer.writeAll(buf.right());
 
         const cursor_pos = blk: {
             var pos: u16 = 0;
