@@ -9,7 +9,7 @@ pub fn createKeymaps(allocator: Allocator) !struct {
     sheet_keys: KeyMap(Action, MapType),
     command_keys: KeyMap(CommandAction, CommandMapType),
 } {
-    var sheet_keymaps = try KeyMap(Action, MapType).init(outer_keys, allocator);
+    var sheet_keymaps = try KeyMap(Action, MapType).init(sheet_keys, allocator);
     errdefer sheet_keymaps.deinit(allocator);
 
     var command_keymaps = try KeyMap(CommandAction, CommandMapType).init(command_keys, allocator);
@@ -78,6 +78,8 @@ pub const Action = union(enum) {
     enter_normal_mode,
     enter_visual_mode,
     enter_command_mode,
+    edit_cell,
+    edit_label,
     dismiss_count_or_status_message,
 
     undo,
@@ -334,7 +336,7 @@ const KeyMaps = struct {
     },
 };
 
-const outer_keys = [_]KeyMaps{
+const sheet_keys = [_]KeyMaps{
     .{
         .type = .common_keys,
         .parents = &.{},
@@ -392,6 +394,8 @@ const outer_keys = [_]KeyMaps{
             .{ "f", .increase_precision },
             .{ "F", .decrease_precision },
             .{ "=", .assign_cell },
+            .{ "e", .edit_cell },
+            .{ "E", .edit_label },
             .{ "dd", .delete_cell },
             .{ ":", .enter_command_mode },
             .{ "v", .enter_visual_mode },

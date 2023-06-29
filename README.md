@@ -190,6 +190,8 @@ will repeat the following motion that many times. This does not currently work f
   under the cursor
 - `\` Enter command insert mode, with text set to `label cellname = `, where cellname is the cell
   under the cursor.
+- `e` Edit cell numeric expression
+- `E` Edit cell label expression
 - `dd`, `x` Delete the cell under the cursor
 - `Esc` Dismiss status message
 - `$` Move cursor to the last populated cell on the current row

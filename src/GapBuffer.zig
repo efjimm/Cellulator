@@ -17,7 +17,6 @@ pub fn deinit(self: *Self, allocator: Allocator) void {
 pub fn setGap(self: *Self, new_pos: u32) void {
     if (new_pos == self.gap_start) return;
     assert(new_pos <= self.len);
-    std.log.debug("Moving gap", .{});
     if (new_pos < self.gap_start) {
         const src = self.ptr[new_pos..self.gap_start];
         const dest = self.ptr[new_pos + self.gap_len .. self.gap_start + self.gap_len];

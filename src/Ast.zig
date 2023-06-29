@@ -818,8 +818,6 @@ pub fn stringEval(
 ) !void {
     buffer.clearRetainingCapacity();
 
-    std.log.debug("Have strings '{s}'", .{strings});
-
     const slice = ast.toSlice();
     _ = try slice.stringEvalNode(allocator, slice.rootNodeIndex(), context, strings, buffer);
 }

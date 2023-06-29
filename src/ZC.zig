@@ -476,7 +476,6 @@ pub fn commandWrite(self: *Self, bytes: []const u8) Allocator.Error!usize {
     const list = self.commandBufPtr();
     try list.insertSlice(self.allocator, self.command_cursor, bytes);
     self.setCommandCursor(self.command_cursor + @as(u32, @intCast(bytes.len)));
-    log.debug("Total command length: {d}", .{list.len});
     return bytes.len;
 }
 
@@ -702,6 +701,22 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
             self.setMode(.command_insert);
             const writer = self.commandWriter();
             try writer.writeByte(':');
+        },
+        .edit_cell => {
+            self.setMode(.command_insert);
+            const writer = self.commandWriter();
+            try writer.print("let {} = ", .{self.cursor});
+            if (self.sheet.cells.get(self.cursor)) |cell| {
+                try writer.print("{}", .{cell});
+            }
+        },
+        .edit_label => {
+            self.setMode(.command_insert);
+            const writer = self.commandWriter();
+            try writer.print("label {} = ", .{self.cursor});
+            if (self.sheet.text_cells.get(self.cursor)) |cell| {
+                try writer.print("{}", .{cell});
+            }
         },
         .fit_text => try self.cursorExpandWidth(),
         .enter_visual_mode => self.setMode(.visual),
