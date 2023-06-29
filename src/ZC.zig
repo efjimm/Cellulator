@@ -334,6 +334,8 @@ fn handleInput(self: *Self) !void {
             error.InvalidCommand => self.setStatusMessage(.err, "Invalid command", .{}),
             error.OutOfMemory => self.setStatusMessage(.err, "Out of memory!", .{}),
             error.UnexpectedToken => self.setStatusMessage(.err, "Unexpected token", .{}),
+            error.StringBuiltinInNumericContext => self.setStatusMessage(.err, "String builtin used in numeric context", .{}),
+            error.NumericBuiltinInStringContext => self.setStatusMessage(.err, "Numeric builtin used in string context", .{}),
             error.InvalidSyntax => self.setStatusMessage(.err, "Invalid syntax", .{}),
         },
         .prefix => return,
@@ -1165,7 +1167,11 @@ pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
 
         var ast = self.newAst();
         ast.parse(self.allocator, line) catch |err| switch (err) {
-            error.UnexpectedToken, error.InvalidCellAddress => continue,
+            error.UnexpectedToken,
+            error.InvalidCellAddress,
+            error.StringBuiltinInNumericContext,
+            error.NumericBuiltinInStringContext,
+            => continue,
             error.OutOfMemory => return error.OutOfMemory,
         };
         errdefer self.asts.appendAssumeCapacity(ast);

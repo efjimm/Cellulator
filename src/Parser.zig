@@ -40,6 +40,8 @@ pub const Builtin = struct {
         avg,
         max,
         min,
+        upper,
+        lower,
     };
 
     comptime {
@@ -53,11 +55,15 @@ const builtins = std.ComptimeStringMap(Builtin.Tag, .{
     .{ "avg", .avg },
     .{ "max", .max },
     .{ "min", .min },
+    .{ "upper", .upper },
+    .{ "lower", .lower },
 });
 
 pub const ParseError = error{
     UnexpectedToken,
     InvalidCellAddress,
+    NumericBuiltinInStringContext,
+    StringBuiltinInNumericContext,
 } || Allocator.Error;
 
 pub const Node = union(enum) {
@@ -158,9 +164,10 @@ pub fn parseStringExpression(parser: *Parser) ParseError!u32 {
     return index;
 }
 
-/// PrimaryStringExpression <- StringLiteral / CellName
+/// PrimaryStringExpression <- StringLiteral / CellName / Builtin
 fn parsePrimaryStringExpression(parser: *Parser) ParseError!u32 {
     return switch (parser.current_token.tag) {
+        .builtin => parser.parseFunction(.string),
         .cell_name => parser.parseCellName(),
         .single_string_literal,
         .double_string_literal,
@@ -279,7 +286,7 @@ fn parsePrimaryExpr(parser: *Parser) !u32 {
             _ = try parser.expectToken(.rparen);
             return ret;
         },
-        .builtin => parser.parseFunction(),
+        .builtin => parser.parseFunction(.numeric),
         else => error.UnexpectedToken,
     };
 }
@@ -301,7 +308,7 @@ fn parseRange(parser: *Parser) !u32 {
 }
 
 /// Builtin <- builtin '(' ArgList? ')'
-fn parseFunction(parser: *Parser) !u32 {
+fn parseFunction(parser: *Parser, comptime context: enum { numeric, string }) !u32 {
     const token = try parser.expectToken(.builtin);
     _ = try parser.expectToken(.lparen);
 
@@ -309,13 +316,23 @@ fn parseFunction(parser: *Parser) !u32 {
     const builtin = builtins.get(identifier) orelse return error.UnexpectedToken;
 
     const args_start = switch (builtin) {
+        // These builtins take only one argument
+        .upper,
+        .lower,
+        => blk: {
+            if (context == .numeric) return error.StringBuiltinInNumericContext;
+            break :blk try parser.parseStringExpression();
+        },
         // These builtins require at least one argument
         .sum,
         .max,
         .prod,
         .avg,
         .min,
-        => try parser.parseArgList(),
+        => blk: {
+            if (context == .string) return error.NumericBuiltinInStringContext;
+            break :blk try parser.parseArgList();
+        },
     };
     _ = try parser.expectToken(.rparen);
 

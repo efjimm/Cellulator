@@ -567,13 +567,51 @@ pub const Slice = struct {
                     .end = end,
                 };
             },
+            .builtin => {
+                const b = ast.nodes.items(.data)[index].builtin;
+                switch (b.tag) {
+                    .upper => {
+                        assert(b.first_arg == index - 1); // Only takes one argument
+                        const range = try ast.stringEvalNode(
+                            allocator,
+                            b.first_arg,
+                            context,
+                            strings,
+                            buffer,
+                        );
+                        for (buffer.items()[range.start..range.end]) |*c| {
+                            c.* = std.ascii.toUpper(c.*);
+                        }
+                        return range;
+                    },
+                    .lower => {
+                        assert(b.first_arg == index - 1); // Only takes one argument
+                        const range = try ast.stringEvalNode(
+                            allocator,
+                            b.first_arg,
+                            context,
+                            strings,
+                            buffer,
+                        );
+                        for (buffer.items()[range.start..range.end]) |*c| {
+                            c.* = std.ascii.toLower(c.*);
+                        }
+                        return range;
+                    },
+                    .sum,
+                    .prod,
+                    .avg,
+                    .max,
+                    .min,
+                    => return error.NotEvaluable,
+                }
+            },
             .number,
             .add,
             .sub,
             .mul,
             .div,
             .mod,
-            .builtin,
             .range,
             .column,
             .assignment,
@@ -589,6 +627,7 @@ pub const Slice = struct {
             .avg => try ast.evalAvg(builtin.first_arg, builtin_index, context),
             .max => try ast.evalMax(builtin.first_arg, builtin_index, context),
             .min => try ast.evalMin(builtin.first_arg, builtin_index, context),
+            .upper, .lower => unreachable, // Attempted to numeric eval string builtin
         };
     }
 
