@@ -453,15 +453,23 @@ pub fn commandBufPtr(self: *Self) *GapBuffer {
 }
 
 pub fn commandHistoryNext(self: *Self) void {
-    if (self.current_command < self.command_history.items.len - 1) {
+    const count = self.getCount();
+    const end = @min(count, self.command_history.items.len - 1 - self.current_command);
+    for (0..end) |_| {
         self.current_command += 1;
         self.setCommandCursor(self.commandBufPtr().len);
     }
+    self.resetCount();
 }
 
 pub fn commandHistoryPrev(self: *Self) void {
-    self.current_command -|= 1;
-    self.setCommandCursor(self.commandBufPtr().len);
+    const count = self.getCount();
+    const end = @min(count, self.current_command);
+    for (0..end) |_| {
+        self.current_command -|= 1;
+        self.setCommandCursor(self.commandBufPtr().len);
+    }
+    self.resetCount();
 }
 
 pub fn commandWrite(self: *Self, bytes: []const u8) Allocator.Error!usize {
@@ -1209,23 +1217,25 @@ pub fn writeFile(sheet: *Sheet, opts: WriteFileOptions) !void {
 }
 
 pub fn undo(self: *Self) Allocator.Error!void {
+    defer self.resetCount();
+    self.tui.update.cells = true;
+    self.tui.update.column_headings = true;
+    self.tui.update.row_numbers = true;
+
     for (0..self.getCount()) |_| {
         try self.sheet.undo();
     }
-    self.resetCount();
-    self.tui.update.cells = true;
-    self.tui.update.column_headings = true;
-    self.tui.update.row_numbers = true;
 }
 
 pub fn redo(self: *Self) Allocator.Error!void {
-    for (0..self.getCount()) |_| {
-        try self.sheet.redo();
-    }
-    self.resetCount();
+    defer self.resetCount();
     self.tui.update.cells = true;
     self.tui.update.column_headings = true;
     self.tui.update.row_numbers = true;
+
+    for (0..self.getCount()) |_| {
+        try self.sheet.redo();
+    }
 }
 
 pub fn deleteCell(self: *Self) Allocator.Error!void {
