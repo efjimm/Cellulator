@@ -143,12 +143,6 @@ pub fn init(allocator: Allocator, options: InitOptions) !Self {
 
     if (options.ui) {
         try tui.term.uncook(.{});
-        var rc = try tui.term.getRenderContext(128);
-        for (0..tui.term.height) |i| {
-            try rc.moveCursorTo(@intCast(i), 0);
-            try rc.clearToEol();
-        }
-        try rc.done();
     }
 
     var ret = Self{
