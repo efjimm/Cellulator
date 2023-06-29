@@ -11,6 +11,13 @@ const wcWidth = @import("wcwidth").wcWidth;
 const SizedArrayListUnmanaged = @import("sized_array_list.zig").SizedArrayListUnmanaged;
 const GapBuffer = @import("GapBuffer.zig");
 
+const input = @import("input.zig");
+const Action = input.Action;
+const CommandAction = input.CommandAction;
+const KeyMap = input.KeyMap;
+const MapType = input.MapType;
+const CommandMapType = input.CommandMapType;
+
 const Position = Sheet.Position;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -125,11 +132,11 @@ pub fn init(allocator: Allocator, options: InitOptions) !Self {
     var ast_list = try std.ArrayListUnmanaged(Ast).initCapacity(allocator, 8);
     errdefer ast_list.deinit(allocator);
 
-    var keymaps = try KeyMap(Action, MapType).init(outer_keys, allocator);
-    errdefer keymaps.deinit(allocator);
-
-    var command_keymaps = try KeyMap(CommandAction, CommandMapType).init(command_keys, allocator);
-    errdefer command_keymaps.deinit(allocator);
+    var keys = try input.createKeymaps(allocator);
+    errdefer {
+        keys.sheet_keys.deinit(allocator);
+        keys.command_keys.deinit(allocator);
+    }
 
     var tui = try Tui.init();
     errdefer tui.deinit();
@@ -143,8 +150,8 @@ pub fn init(allocator: Allocator, options: InitOptions) !Self {
         .tui = tui,
         .allocator = allocator,
         .asts = ast_list,
-        .keymaps = keymaps,
-        .command_keymaps = command_keymaps,
+        .keymaps = keys.sheet_keys,
+        .command_keymaps = keys.command_keys,
         .input_buf_sfa = std.heap.stackFallback(INPUT_BUF_LEN, allocator),
         .command_history = try CommandHist.initCapacity(allocator, 32),
     };
@@ -186,7 +193,7 @@ pub fn resetInputBuf(self: *Self) void {
     self.input_buf_sfa.fixed_buffer_allocator.reset();
 }
 
-pub fn inputBufSlice(self: *Self) ![:0]const u8 {
+pub fn inputBufSlice(self: *Self) Allocator.Error![:0]const u8 {
     const len = self.input_buf.items.len;
     try self.input_buf.append(self.allocator, 0);
     self.input_buf.items.len = len;
@@ -234,7 +241,7 @@ pub fn updateTextCells(self: *Self) Allocator.Error!void {
     return self.sheet.update(.text);
 }
 
-fn setMode(self: *Self, new_mode: Mode) void {
+pub fn setMode(self: *Self, new_mode: Mode) void {
     switch (self.mode) {
         .normal => {},
         .visual, .select => {
@@ -269,7 +276,7 @@ const GetActionResult = union(enum) {
     not_found,
 };
 
-fn getAction(self: Self, input: [:0]const u8) GetActionResult {
+fn getAction(self: Self, bytes: [:0]const u8) GetActionResult {
     if (self.mode.isCommandMode()) {
         const keymap_type: CommandMapType = switch (self.mode) {
             .command_normal => .normal,
@@ -283,7 +290,7 @@ fn getAction(self: Self, input: [:0]const u8) GetActionResult {
             else => unreachable,
         };
 
-        return switch (self.command_keymaps.get(keymap_type, input)) {
+        return switch (self.command_keymaps.get(keymap_type, bytes)) {
             .value => |action| .{ .command = action },
             .prefix => .prefix,
             .not_found => .not_found,
@@ -297,7 +304,7 @@ fn getAction(self: Self, input: [:0]const u8) GetActionResult {
         else => unreachable,
     };
 
-    return switch (self.keymaps.get(keymap_type, input)) {
+    return switch (self.keymaps.get(keymap_type, bytes)) {
         .value => |action| .{ .normal = action },
         .prefix => .prefix,
         .not_found => .not_found,
@@ -309,10 +316,10 @@ fn handleInput(self: *Self) !void {
     const slice = try self.tui.term.readInput(&buf);
 
     const writer = self.input_buf.writer(self.allocator);
-    try parseInput(slice, writer);
+    try input.parse(slice, writer);
 
-    const input = try self.inputBufSlice();
-    const res = self.getAction(input);
+    const bytes = try self.inputBufSlice();
+    const res = self.getAction(bytes);
     switch (res) {
         .normal => |action| switch (self.mode) {
             .normal => try self.doNormalMode(action),
@@ -332,7 +339,7 @@ fn handleInput(self: *Self) !void {
         .prefix => return,
         .not_found => {
             if (self.mode.isCommandMode()) {
-                try self.doCommandMode(.none, input);
+                try self.doCommandMode(.none, bytes);
             }
         },
     }
@@ -1559,848 +1566,7 @@ pub fn cursorGotoCol(self: *Self) void {
     self.setCursor(.{ .x = count, .y = self.cursor.y });
 }
 
-pub fn parseInput(bytes: []const u8, writer: anytype) @TypeOf(writer).Error!void {
-    var iter = spoon.inputParser(bytes);
-
-    while (iter.next()) |in| {
-        var special = false;
-        if (in.mod_ctrl and in.mod_alt) {
-            special = true;
-            try writer.writeAll("<C-M-");
-        } else if (in.mod_ctrl) {
-            special = true;
-            try writer.writeAll("<C-");
-        } else if (in.mod_alt) {
-            special = true;
-            try writer.writeAll("<M-");
-        }
-
-        switch (in.content) {
-            .escape => try writer.writeAll("<Escape>"),
-            .arrow_up => try writer.writeAll("<Up>"),
-            .arrow_down => try writer.writeAll("<Down>"),
-            .arrow_left => try writer.writeAll("<Left>"),
-            .arrow_right => try writer.writeAll("<Right>"),
-            .home => try writer.writeAll("<Home>"),
-            .end => try writer.writeAll("<End>"),
-            .begin => try writer.writeAll("<Begin>"),
-            .page_up => try writer.writeAll("<PageUp>"),
-            .page_down => try writer.writeAll("<PageDown>"),
-            .delete => try writer.writeAll("<Delete>"),
-            .insert => try writer.writeAll("<Insert>"),
-            .print => try writer.writeAll("<Print>"),
-            .scroll_lock => try writer.writeAll("<Scroll>"),
-            .pause => try writer.writeAll("<Pause>"),
-            .function => |function| try writer.print("<F{d}>", .{function}),
-            .codepoint => |cp| switch (cp) {
-                '<' => try writer.writeAll("<<"),
-                '\n', '\r' => try writer.writeAll("<Return>"),
-                127 => try writer.writeAll("<Delete>"),
-                0...'\n' - 1, '\n' + 1...'\r' - 1, '\r' + 1...31 => {},
-                else => {
-                    var buf: [4]u8 = undefined;
-                    const len = std.unicode.utf8Encode(cp, &buf) catch continue;
-                    try writer.writeAll(buf[0..len]);
-                },
-            },
-            .mouse, .unknown => {},
-        }
-
-        if (special) {
-            try writer.writeByte('>');
-        }
-    }
-}
-
-pub const Action = union(enum) {
-    enter_normal_mode,
-    enter_visual_mode,
-    enter_command_mode,
-    dismiss_count_or_status_message,
-
-    undo,
-    redo,
-
-    cell_cursor_up,
-    cell_cursor_down,
-    cell_cursor_left,
-    cell_cursor_right,
-    cell_cursor_row_first,
-    cell_cursor_row_last,
-    cell_cursor_col_first,
-    cell_cursor_col_last,
-    goto_row,
-    goto_col,
-
-    delete_cell,
-    next_populated_cell,
-    prev_populated_cell,
-    increase_precision,
-    decrease_precision,
-    increase_width,
-    decrease_width,
-    assign_cell,
-    assign_label,
-    fit_text,
-
-    visual_move_left,
-    visual_move_right,
-    visual_move_up,
-    visual_move_down,
-    select_submit,
-    select_cancel,
-
-    zero,
-    count: u4,
-
-    // Visual mode only
-    swap_anchor,
-};
-
-pub const CommandAction = union(enum(u6)) {
-    submit_command = 26,
-    enter_normal_mode,
-
-    enter_select_mode,
-
-    enter_insert_mode,
-    enter_insert_mode_after,
-    enter_insert_mode_at_eol,
-    enter_insert_mode_at_bol,
-
-    history_next,
-    history_prev,
-
-    backspace,
-    delete_char,
-    change_to_eol,
-    delete_to_eol,
-    change_char,
-    change_line,
-    backwards_delete_word,
-
-    operator_delete,
-    operator_change,
-
-    operator_to_forwards,
-    operator_until_forwards,
-    operator_to_backwards,
-    operator_until_backwards,
-
-    zero,
-    count: u4,
-
-    // Motion tagged union duplicated to reduce memory usage
-    motion_normal_word_inside = 0,
-    motion_long_word_inside = 1,
-    motion_normal_word_around = 2,
-    motion_long_word_around = 3,
-
-    /// Absolutely cursed - these fields store two UCS codepoints. This is done to save one byte.
-    /// Storing them as two UTF-8 codepoints would require 8 bytes. Storing them as two u21 values
-    /// would cause each one to get padded to 4 bytes, using 8 bytes total.
-    motion_inside_delimiters: [7]u8 align(4) = 4,
-    motion_around_delimiters: [7]u8 align(4) = 5,
-
-    motion_inside_single_delimiter: u21 = 6,
-    motion_around_single_delimiter: u21 = 7,
-    motion_to_forwards: u21 = 8,
-    motion_to_backwards: u21 = 9,
-    motion_until_forwards: u21 = 10,
-    motion_until_backwards: u21 = 11,
-
-    motion_normal_word_start_next = 12,
-    motion_normal_word_start_prev = 13,
-    motion_normal_word_end_next = 14,
-    motion_normal_word_end_prev = 15,
-    motion_long_word_start_next = 16,
-    motion_long_word_start_prev = 17,
-    motion_long_word_end_next = 18,
-    motion_long_word_end_prev = 19,
-    motion_char_next = 20,
-    motion_char_prev = 21,
-    motion_line = 22,
-    motion_eol = 23,
-    motion_bol = 24,
-
-    /// Any inputs that aren't a mapping get passed as this. Its usage depends on the mode. For
-    /// example, in insert mode the inputted text is passed along with this action if it does
-    /// not correspond to another action.
-    none,
-
-    pub fn isMotion(action: CommandAction) bool {
-        return @intFromEnum(action) <= 24;
-    }
-
-    pub fn isMotionTag(tag: std.meta.Tag(CommandAction)) bool {
-        return @intFromEnum(tag) <= 24;
-    }
-
-    // Cursed function that converts a CommandAction to a Motion.
-    pub fn toMotion(action: CommandAction) Motion {
-        switch (action) {
-            inline .motion_around_delimiters, .motion_inside_delimiters => |buf, action_tag| {
-                const b align(4) = buf; // `buf` is not aligned for some reason, so copy it
-                const cps align(4) = utils.unpackDoubleCp(&b);
-                const tag: std.meta.Tag(Motion) = @enumFromInt(@intFromEnum(action_tag));
-                return @unionInit(Motion, @tagName(tag), .{
-                    .left = cps[0],
-                    .right = cps[1],
-                });
-            },
-            else => {},
-        }
-
-        @setEvalBranchQuota(2000);
-        const tag: std.meta.Tag(Motion) = @enumFromInt(@intFromEnum(action));
-        switch (action) {
-            inline else => |payload, action_tag| switch (tag) {
-                inline else => |t| {
-                    if (comptime (@intFromEnum(t) == @intFromEnum(action_tag) and
-                        isMotionTag(action_tag) and
-                        action_tag != .motion_inside_delimiters and
-                        action_tag != .motion_around_delimiters))
-                    {
-                        return @unionInit(Motion, @tagName(t), payload);
-                    }
-                },
-            },
-        }
-        unreachable;
-    }
-};
-
-pub const MapType = enum {
-    normal,
-    visual,
-    select,
-
-    visual_motions,
-    common_motions,
-    common_keys,
-};
-
-pub const CommandMapType = enum {
-    normal,
-    insert,
-    operator_pending,
-    to,
-    non_insert_keys,
-    common_keys,
-};
-
-pub fn KeyMap(comptime A: type, comptime M: type) type {
-    return struct {
-        const CritMap = critbit.CritBitMap([*:0]const u8, A, critbit.StringContextZ);
-        pub const Map = struct {
-            keys: CritMap,
-            parents: []const M,
-        };
-
-        maps: std.EnumArray(M, Map),
-
-        pub fn init(default: anytype, allocator: Allocator) !@This() {
-            var maps = std.EnumArray(M, Map).initFill(.{
-                .keys = CritMap.init(),
-                .parents = &.{},
-            });
-            errdefer for (&maps.values) |*v| v.keys.deinit(allocator);
-
-            for (default) |map| {
-                var m = CritMap.init();
-                errdefer m.deinit(allocator);
-
-                for (map.keys) |mapping| {
-                    try m.put(allocator, mapping[0], mapping[1]);
-                }
-
-                maps.set(map.type, .{
-                    .keys = m,
-                    .parents = map.parents,
-                });
-            }
-            return .{
-                .maps = maps,
-            };
-        }
-
-        /// Returns the action associated with the given input, or `null` if not found. Looks
-        /// recursively through parent maps if not found.
-        pub fn get(self: @This(), mode: M, input: [*:0]const u8) CritMap.GetResult {
-            var state: CritMap.GetResult = .not_found;
-            const map = self.maps.getPtrConst(mode);
-            switch (map.keys.get(input)) {
-                .value => |v| return .{ .value = v },
-                .prefix => state = .prefix,
-                .not_found => {},
-            }
-
-            return for (map.parents) |parent_mode| {
-                switch (self.get(parent_mode, input)) {
-                    .value => |v| return .{ .value = v },
-                    .prefix => state = .prefix,
-                    .not_found => {},
-                }
-            } else state;
-        }
-
-        pub fn contains(self: @This(), mode: M, input: [*:0]const u8) bool {
-            const map = self.maps.getPtrConst(mode);
-            if (map.keys.contains(input)) return true;
-            for (map.parents) |parent_mode| {
-                const parent = self.maps.getPtrConst(parent_mode);
-                if (parent.keys.contains(input)) return true;
-            }
-            return false;
-        }
-
-        pub fn deinit(self: *@This(), allocator: Allocator) void {
-            for (&self.maps.values) |*v| {
-                v.keys.deinit(allocator);
-            }
-            self.* = undefined;
-        }
-    };
-}
-
-const KeyMaps = struct {
-    type: MapType,
-    parents: []const MapType,
-    keys: []const struct {
-        [*:0]const u8,
-        Action,
-    },
-};
-
-const outer_keys = [_]KeyMaps{
-    .{
-        .type = .common_keys,
-        .parents = &.{},
-        .keys = &.{
-            .{ "x", .delete_cell },
-        },
-    },
-    .{
-        .type = .common_motions,
-        .parents = &.{},
-        .keys = &.{
-            .{ "j", .cell_cursor_down },
-            .{ "k", .cell_cursor_up },
-            .{ "h", .cell_cursor_left },
-            .{ "l", .cell_cursor_right },
-            .{ "w", .next_populated_cell },
-            .{ "b", .prev_populated_cell },
-            .{ "gc", .goto_col },
-            .{ "gr", .goto_row },
-            .{ "gg", .cell_cursor_row_first },
-            .{ "G", .cell_cursor_row_last },
-            .{ "$", .cell_cursor_col_last },
-            .{ "0", .zero }, // Could be motion or count
-            .{ "1", .{ .count = 1 } },
-            .{ "2", .{ .count = 2 } },
-            .{ "3", .{ .count = 3 } },
-            .{ "4", .{ .count = 4 } },
-            .{ "5", .{ .count = 5 } },
-            .{ "6", .{ .count = 6 } },
-            .{ "7", .{ .count = 7 } },
-            .{ "8", .{ .count = 8 } },
-            .{ "9", .{ .count = 9 } },
-        },
-    },
-    .{
-        .type = .visual_motions,
-        .parents = &.{},
-        .keys = &.{
-            .{ "<M-h>", .visual_move_left },
-            .{ "<M-l>", .visual_move_right },
-            .{ "<M-k>", .visual_move_up },
-            .{ "<M-j>", .visual_move_down },
-        },
-    },
-    .{
-        .type = .normal,
-        .parents = &.{.common_motions},
-        .keys = &.{
-            .{ "<C-[>", .dismiss_count_or_status_message },
-            .{ "<Escape>", .dismiss_count_or_status_message },
-            .{ "\\", .assign_label },
-            .{ "aa", .fit_text },
-            .{ "+", .increase_width },
-            .{ "-", .decrease_width },
-            .{ "f", .increase_precision },
-            .{ "F", .decrease_precision },
-            .{ "=", .assign_cell },
-            .{ "dd", .delete_cell },
-            .{ ":", .enter_command_mode },
-            .{ "v", .enter_visual_mode },
-            .{ "u", .undo },
-            .{ "U", .redo },
-        },
-    },
-    .{
-        .type = .visual,
-        .parents = &.{ .common_motions, .visual_motions },
-        .keys = &.{
-            .{ "<C-[>", .enter_normal_mode },
-            .{ "<Escape>", .enter_normal_mode },
-            .{ "o", .swap_anchor },
-            .{ "d", .delete_cell },
-        },
-    },
-    .{
-        .type = .select,
-        .parents = &.{ .common_motions, .visual_motions },
-        .keys = &.{
-            .{ "<C-[>", .select_cancel },
-            .{ "<Escape>", .select_cancel },
-            .{ "o", .swap_anchor },
-            .{ "<Return>", .select_submit },
-            .{ "<C-j>", .select_submit },
-            .{ "<C-m>", .select_submit },
-        },
-    },
-};
-
-const CommandKeyMaps = struct {
-    type: CommandMapType,
-    parents: []const CommandMapType,
-    keys: []const struct {
-        [*:0]const u8,
-        CommandAction,
-    },
-};
-
-const command_keys = [_]CommandKeyMaps{
-    .{
-        .type = .common_keys,
-        .parents = &.{},
-        .keys = &.{
-            .{ "<C-m>", .submit_command },
-            .{ "<C-j>", .submit_command },
-            .{ "<Return>", .submit_command },
-            .{ "<Home>", .motion_bol },
-            .{ "<End>", .motion_eol },
-            .{ "<Left>", .motion_char_prev },
-            .{ "<Right>", .motion_char_next },
-            .{ "<C-[>", .enter_normal_mode },
-            .{ "<Escape>", .enter_normal_mode },
-        },
-    },
-    .{
-        .type = .non_insert_keys,
-        .parents = &.{},
-        .keys = &.{
-            .{ "1", .{ .count = 1 } },
-            .{ "2", .{ .count = 2 } },
-            .{ "3", .{ .count = 3 } },
-            .{ "4", .{ .count = 4 } },
-            .{ "5", .{ .count = 5 } },
-            .{ "6", .{ .count = 6 } },
-            .{ "7", .{ .count = 7 } },
-            .{ "8", .{ .count = 8 } },
-            .{ "9", .{ .count = 9 } },
-            .{ "f", .operator_to_forwards },
-            .{ "F", .operator_to_backwards },
-            .{ "t", .operator_until_forwards },
-            .{ "T", .operator_until_backwards },
-            .{ "h", .motion_char_prev },
-            .{ "l", .motion_char_next },
-            .{ "0", .zero },
-            .{ "$", .motion_eol },
-            .{ "w", .motion_normal_word_start_next },
-            .{ "W", .motion_long_word_start_next },
-            .{ "e", .motion_normal_word_end_next },
-            .{ "E", .motion_long_word_end_next },
-            .{ "b", .motion_normal_word_start_prev },
-            .{ "B", .motion_long_word_start_prev },
-            .{ "<M-e>", .motion_normal_word_end_prev },
-            .{ "<M-E>", .motion_long_word_end_prev },
-        },
-    },
-    .{
-        .type = .normal,
-        .parents = &.{ .common_keys, .non_insert_keys },
-        .keys = &.{
-            .{ "k", .history_prev },
-            .{ "j", .history_next },
-            .{ "<Up>", .history_prev },
-            .{ "<Down>", .history_next },
-            .{ "x", .delete_char },
-            .{ "d", .operator_delete },
-            .{ "D", .delete_to_eol },
-            .{ "c", .operator_change },
-            .{ "C", .change_to_eol },
-            .{ "s", .change_char },
-            .{ "S", .change_line },
-            .{ "i", .enter_insert_mode },
-            .{ "I", .enter_insert_mode_at_bol },
-            .{ "a", .enter_insert_mode_after },
-            .{ "A", .enter_insert_mode_at_eol },
-        },
-    },
-    .{
-        .type = .insert,
-        .parents = &.{.common_keys},
-        .keys = &.{
-            .{ "<C-p>", .history_prev },
-            .{ "<C-n>", .history_next },
-            .{ "<Up>", .history_prev },
-            .{ "<Down>", .history_next },
-            .{ "<C-h>", .backspace },
-            .{ "<Delete>", .backspace },
-            .{ "<C-u>", .change_line },
-            .{ "<C-v>", .enter_select_mode },
-            .{ "<C-a>", .motion_bol },
-            .{ "<C-e>", .motion_eol },
-            .{ "<C-b>", .motion_char_prev },
-            .{ "<C-f>", .motion_char_next },
-            .{ "<C-w>", .backwards_delete_word },
-        },
-    },
-    .{
-        .type = .operator_pending,
-        .parents = &.{ .common_keys, .non_insert_keys },
-        .keys = &.{
-            .{ "d", .operator_delete },
-            .{ "c", .operator_change },
-            .{ "aw", .motion_normal_word_around },
-            .{ "aW", .motion_long_word_around },
-            .{ "iw", .motion_normal_word_inside },
-            .{ "iW", .motion_long_word_inside },
-            .{ "a(", .{ .motion_around_delimiters = utils.packDoubleCp('(', ')') } },
-            .{ "i(", .{ .motion_inside_delimiters = utils.packDoubleCp('(', ')') } },
-            .{ "a)", .{ .motion_around_delimiters = utils.packDoubleCp('(', ')') } },
-            .{ "i)", .{ .motion_inside_delimiters = utils.packDoubleCp('(', ')') } },
-            .{ "a[", .{ .motion_around_delimiters = utils.packDoubleCp('[', ']') } },
-            .{ "i[", .{ .motion_inside_delimiters = utils.packDoubleCp('[', ']') } },
-            .{ "a]", .{ .motion_around_delimiters = utils.packDoubleCp('[', ']') } },
-            .{ "i]", .{ .motion_inside_delimiters = utils.packDoubleCp('[', ']') } },
-            .{ "i{", .{ .motion_inside_delimiters = utils.packDoubleCp('{', '}') } },
-            .{ "a{", .{ .motion_around_delimiters = utils.packDoubleCp('{', '}') } },
-            .{ "i}", .{ .motion_inside_delimiters = utils.packDoubleCp('{', '}') } },
-            .{ "a}", .{ .motion_around_delimiters = utils.packDoubleCp('{', '}') } },
-            .{ "i<<", .{ .motion_inside_delimiters = utils.packDoubleCp('<', '>') } },
-            .{ "a<<", .{ .motion_around_delimiters = utils.packDoubleCp('<', '>') } },
-            .{ "i>", .{ .motion_inside_delimiters = utils.packDoubleCp('<', '>') } },
-            .{ "a>", .{ .motion_around_delimiters = utils.packDoubleCp('<', '>') } },
-            .{ "i\"", .{ .motion_inside_single_delimiter = '"' } },
-            .{ "a\"", .{ .motion_around_single_delimiter = '"' } },
-            .{ "i'", .{ .motion_inside_single_delimiter = '\'' } },
-            .{ "a'", .{ .motion_around_single_delimiter = '\'' } },
-            .{ "i`", .{ .motion_inside_single_delimiter = '`' } },
-            .{ "a`", .{ .motion_around_single_delimiter = '`' } },
-        },
-    },
-    .{
-        .type = .to,
-        .parents = &.{.common_keys},
-        .keys = &.{},
-    },
-};
-
-// TODO: move these to a separate file
-
-test "Normal mode keys" {
-    const t = std.testing;
-
-    var zc = try Self.init(t.allocator, .{ .ui = false });
-    defer zc.deinit();
-
-    try t.expectEqual(Mode.normal, zc.mode);
-
-    try t.expectEqual(Action.cell_cursor_down, zc.getAction("j").normal);
-    try t.expectEqual(Action.cell_cursor_up, zc.getAction("k").normal);
-    try t.expectEqual(Action.cell_cursor_left, zc.getAction("h").normal);
-    try t.expectEqual(Action.cell_cursor_right, zc.getAction("l").normal);
-    try t.expectEqual(Action.next_populated_cell, zc.getAction("w").normal);
-    try t.expectEqual(Action.prev_populated_cell, zc.getAction("b").normal);
-    try t.expectEqual(Action.cell_cursor_row_first, zc.getAction("gg").normal);
-    try t.expectEqual(Action.cell_cursor_row_last, zc.getAction("G").normal);
-    try t.expectEqual(Action.cell_cursor_col_last, zc.getAction("$").normal);
-    try t.expectEqual(Action.zero, zc.getAction("0").normal);
-    try t.expectEqual(Action{ .count = 1 }, zc.getAction("1").normal);
-    try t.expectEqual(Action{ .count = 2 }, zc.getAction("2").normal);
-    try t.expectEqual(Action{ .count = 3 }, zc.getAction("3").normal);
-    try t.expectEqual(Action{ .count = 4 }, zc.getAction("4").normal);
-    try t.expectEqual(Action{ .count = 5 }, zc.getAction("5").normal);
-    try t.expectEqual(Action{ .count = 6 }, zc.getAction("6").normal);
-    try t.expectEqual(Action{ .count = 7 }, zc.getAction("7").normal);
-    try t.expectEqual(Action{ .count = 8 }, zc.getAction("8").normal);
-    try t.expectEqual(Action{ .count = 9 }, zc.getAction("9").normal);
-
-    try t.expectEqual(Action.dismiss_count_or_status_message, zc.getAction("<C-[>").normal);
-    try t.expectEqual(Action.dismiss_count_or_status_message, zc.getAction("<Escape>").normal);
-    try t.expectEqual(Action.increase_width, zc.getAction("+").normal);
-    try t.expectEqual(Action.decrease_width, zc.getAction("-").normal);
-    try t.expectEqual(Action.increase_precision, zc.getAction("f").normal);
-    try t.expectEqual(Action.decrease_precision, zc.getAction("F").normal);
-    try t.expectEqual(Action.assign_cell, zc.getAction("=").normal);
-    try t.expectEqual(Action.delete_cell, zc.getAction("dd").normal);
-    try t.expectEqual(Action.enter_command_mode, zc.getAction(":").normal);
-    try t.expectEqual(Action.enter_visual_mode, zc.getAction("v").normal);
-}
-
-test "Visual mode keys" {
-    const t = std.testing;
-
-    var zc = try Self.init(t.allocator, .{ .ui = false });
-    defer zc.deinit();
-
-    zc.setMode(.visual);
-    try t.expectEqual(Mode.visual, zc.mode);
-
-    try t.expectEqual(Action.enter_normal_mode, zc.getAction("<C-[>").normal);
-    try t.expectEqual(Action.enter_normal_mode, zc.getAction("<Escape>").normal);
-    try t.expectEqual(Action.swap_anchor, zc.getAction("o").normal);
-    try t.expectEqual(Action.delete_cell, zc.getAction("d").normal);
-
-    try t.expectEqual(Action.cell_cursor_down, zc.getAction("j").normal);
-    try t.expectEqual(Action.cell_cursor_up, zc.getAction("k").normal);
-    try t.expectEqual(Action.cell_cursor_left, zc.getAction("h").normal);
-    try t.expectEqual(Action.cell_cursor_right, zc.getAction("l").normal);
-    try t.expectEqual(Action.next_populated_cell, zc.getAction("w").normal);
-    try t.expectEqual(Action.prev_populated_cell, zc.getAction("b").normal);
-    try t.expectEqual(Action.cell_cursor_row_first, zc.getAction("gg").normal);
-    try t.expectEqual(Action.cell_cursor_row_last, zc.getAction("G").normal);
-    try t.expectEqual(Action.cell_cursor_col_last, zc.getAction("$").normal);
-    try t.expectEqual(Action.zero, zc.getAction("0").normal);
-    try t.expectEqual(Action{ .count = 1 }, zc.getAction("1").normal);
-    try t.expectEqual(Action{ .count = 2 }, zc.getAction("2").normal);
-    try t.expectEqual(Action{ .count = 3 }, zc.getAction("3").normal);
-    try t.expectEqual(Action{ .count = 4 }, zc.getAction("4").normal);
-    try t.expectEqual(Action{ .count = 5 }, zc.getAction("5").normal);
-    try t.expectEqual(Action{ .count = 6 }, zc.getAction("6").normal);
-    try t.expectEqual(Action{ .count = 7 }, zc.getAction("7").normal);
-    try t.expectEqual(Action{ .count = 8 }, zc.getAction("8").normal);
-    try t.expectEqual(Action{ .count = 9 }, zc.getAction("9").normal);
-}
-
-test "Select mode keys" {
-    const t = std.testing;
-
-    var zc = try Self.init(t.allocator, .{ .ui = false });
-    defer zc.deinit();
-
-    zc.setMode(.select);
-    try t.expectEqual(Mode.select, zc.mode);
-
-    try t.expectEqual(Action.select_cancel, zc.getAction("<C-[>").normal);
-    try t.expectEqual(Action.select_cancel, zc.getAction("<Escape>").normal);
-    try t.expectEqual(Action.swap_anchor, zc.getAction("o").normal);
-    try t.expectEqual(Action.select_submit, zc.getAction("<Return>").normal);
-    try t.expectEqual(Action.select_submit, zc.getAction("<C-j>").normal);
-    try t.expectEqual(Action.select_submit, zc.getAction("<C-m>").normal);
-
-    try t.expectEqual(Action.cell_cursor_down, zc.getAction("j").normal);
-    try t.expectEqual(Action.cell_cursor_up, zc.getAction("k").normal);
-    try t.expectEqual(Action.cell_cursor_left, zc.getAction("h").normal);
-    try t.expectEqual(Action.cell_cursor_right, zc.getAction("l").normal);
-    try t.expectEqual(Action.next_populated_cell, zc.getAction("w").normal);
-    try t.expectEqual(Action.prev_populated_cell, zc.getAction("b").normal);
-    try t.expectEqual(Action.cell_cursor_row_first, zc.getAction("gg").normal);
-    try t.expectEqual(Action.cell_cursor_row_last, zc.getAction("G").normal);
-    try t.expectEqual(Action.cell_cursor_col_last, zc.getAction("$").normal);
-    try t.expectEqual(Action.zero, zc.getAction("0").normal);
-    try t.expectEqual(Action{ .count = 1 }, zc.getAction("1").normal);
-    try t.expectEqual(Action{ .count = 2 }, zc.getAction("2").normal);
-    try t.expectEqual(Action{ .count = 3 }, zc.getAction("3").normal);
-    try t.expectEqual(Action{ .count = 4 }, zc.getAction("4").normal);
-    try t.expectEqual(Action{ .count = 5 }, zc.getAction("5").normal);
-    try t.expectEqual(Action{ .count = 6 }, zc.getAction("6").normal);
-    try t.expectEqual(Action{ .count = 7 }, zc.getAction("7").normal);
-    try t.expectEqual(Action{ .count = 8 }, zc.getAction("8").normal);
-    try t.expectEqual(Action{ .count = 9 }, zc.getAction("9").normal);
-}
-
-test "Command normal mode keys" {
-    const t = std.testing;
-
-    var zc = try Self.init(t.allocator, .{ .ui = false });
-    defer zc.deinit();
-
-    zc.setMode(.command_normal);
-
-    try t.expectEqual(CommandAction.delete_char, zc.getAction("x").command);
-    try t.expectEqual(CommandAction.operator_delete, zc.getAction("d").command);
-    try t.expectEqual(CommandAction.delete_to_eol, zc.getAction("D").command);
-    try t.expectEqual(CommandAction.operator_change, zc.getAction("c").command);
-    try t.expectEqual(CommandAction.change_to_eol, zc.getAction("C").command);
-    try t.expectEqual(CommandAction.change_char, zc.getAction("s").command);
-    try t.expectEqual(CommandAction.change_line, zc.getAction("S").command);
-
-    try t.expectEqual(CommandAction.enter_insert_mode, zc.getAction("i").command);
-    try t.expectEqual(CommandAction.enter_insert_mode_at_bol, zc.getAction("I").command);
-    try t.expectEqual(CommandAction.enter_insert_mode_after, zc.getAction("a").command);
-    try t.expectEqual(CommandAction.enter_insert_mode_at_eol, zc.getAction("A").command);
-
-    try t.expectEqual(CommandAction.submit_command, zc.getAction("<C-m>").command);
-    try t.expectEqual(CommandAction.submit_command, zc.getAction("<C-j>").command);
-    try t.expectEqual(CommandAction.submit_command, zc.getAction("<Return>").command);
-
-    try t.expectEqual(CommandAction.motion_bol, zc.getAction("<Home>").command);
-    try t.expectEqual(CommandAction.motion_eol, zc.getAction("<End>").command);
-    try t.expectEqual(CommandAction.motion_char_prev, zc.getAction("<Left>").command);
-    try t.expectEqual(CommandAction.motion_char_next, zc.getAction("<Right>").command);
-
-    try t.expectEqual(CommandAction.enter_normal_mode, zc.getAction("<C-[>").command);
-    try t.expectEqual(CommandAction.enter_normal_mode, zc.getAction("<Escape>").command);
-
-    try t.expectEqual(CommandAction{ .count = 1 }, zc.getAction("1").command);
-    try t.expectEqual(CommandAction{ .count = 2 }, zc.getAction("2").command);
-    try t.expectEqual(CommandAction{ .count = 3 }, zc.getAction("3").command);
-    try t.expectEqual(CommandAction{ .count = 4 }, zc.getAction("4").command);
-    try t.expectEqual(CommandAction{ .count = 5 }, zc.getAction("5").command);
-    try t.expectEqual(CommandAction{ .count = 6 }, zc.getAction("6").command);
-    try t.expectEqual(CommandAction{ .count = 7 }, zc.getAction("7").command);
-    try t.expectEqual(CommandAction{ .count = 8 }, zc.getAction("8").command);
-    try t.expectEqual(CommandAction{ .count = 9 }, zc.getAction("9").command);
-
-    try t.expectEqual(CommandAction.operator_to_forwards, zc.getAction("f").command);
-    try t.expectEqual(CommandAction.operator_to_backwards, zc.getAction("F").command);
-    try t.expectEqual(CommandAction.operator_until_forwards, zc.getAction("t").command);
-    try t.expectEqual(CommandAction.operator_until_backwards, zc.getAction("T").command);
-    try t.expectEqual(CommandAction.motion_char_prev, zc.getAction("h").command);
-    try t.expectEqual(CommandAction.motion_char_next, zc.getAction("l").command);
-    try t.expectEqual(CommandAction.zero, zc.getAction("0").command);
-    try t.expectEqual(CommandAction.motion_eol, zc.getAction("$").command);
-    try t.expectEqual(CommandAction.motion_normal_word_start_next, zc.getAction("w").command);
-    try t.expectEqual(CommandAction.motion_long_word_start_next, zc.getAction("W").command);
-    try t.expectEqual(CommandAction.motion_normal_word_end_next, zc.getAction("e").command);
-    try t.expectEqual(CommandAction.motion_long_word_end_next, zc.getAction("E").command);
-    try t.expectEqual(CommandAction.motion_normal_word_start_prev, zc.getAction("b").command);
-    try t.expectEqual(CommandAction.motion_long_word_start_prev, zc.getAction("B").command);
-    try t.expectEqual(CommandAction.motion_normal_word_end_prev, zc.getAction("<M-e>").command);
-    try t.expectEqual(CommandAction.motion_long_word_end_prev, zc.getAction("<M-E>").command);
-}
-
-test "Command insert keys" {
-    const t = std.testing;
-
-    var zc = try Self.init(t.allocator, .{ .ui = false });
-    defer zc.deinit();
-
-    zc.setMode(.command_insert);
-
-    try t.expectEqual(Mode.command_insert, zc.mode);
-    try t.expectEqual(CommandAction.submit_command, zc.getAction("<C-m>").command);
-    try t.expectEqual(CommandAction.submit_command, zc.getAction("<C-j>").command);
-    try t.expectEqual(CommandAction.submit_command, zc.getAction("<Return>").command);
-
-    try t.expectEqual(CommandAction.motion_bol, zc.getAction("<Home>").command);
-    try t.expectEqual(CommandAction.motion_eol, zc.getAction("<End>").command);
-    try t.expectEqual(CommandAction.motion_char_prev, zc.getAction("<Left>").command);
-    try t.expectEqual(CommandAction.motion_char_next, zc.getAction("<Right>").command);
-
-    try t.expectEqual(CommandAction.enter_normal_mode, zc.getAction("<C-[>").command);
-    try t.expectEqual(CommandAction.enter_normal_mode, zc.getAction("<Escape>").command);
-
-    try t.expectEqual(GetActionResult.not_found, zc.getAction("q"));
-}
-
-test "Command operator pending keys" {
-    const t = std.testing;
-
-    var zc = try Self.init(t.allocator, .{ .ui = false });
-    defer zc.deinit();
-
-    zc.setMode(.command_delete);
-
-    try t.expectEqual(CommandAction.submit_command, zc.getAction("<C-m>").command);
-    try t.expectEqual(CommandAction.submit_command, zc.getAction("<C-j>").command);
-    try t.expectEqual(CommandAction.submit_command, zc.getAction("<Return>").command);
-
-    try t.expectEqual(CommandAction.enter_normal_mode, zc.getAction("<C-[>").command);
-    try t.expectEqual(CommandAction.enter_normal_mode, zc.getAction("<Escape>").command);
-
-    try t.expectEqual(CommandAction.operator_delete, zc.getAction("d").command);
-    try t.expectEqual(CommandAction.operator_change, zc.getAction("c").command);
-
-    try t.expectEqual(CommandAction{ .count = 1 }, zc.getAction("1").command);
-    try t.expectEqual(CommandAction{ .count = 2 }, zc.getAction("2").command);
-    try t.expectEqual(CommandAction{ .count = 3 }, zc.getAction("3").command);
-    try t.expectEqual(CommandAction{ .count = 4 }, zc.getAction("4").command);
-    try t.expectEqual(CommandAction{ .count = 5 }, zc.getAction("5").command);
-    try t.expectEqual(CommandAction{ .count = 6 }, zc.getAction("6").command);
-    try t.expectEqual(CommandAction{ .count = 7 }, zc.getAction("7").command);
-    try t.expectEqual(CommandAction{ .count = 8 }, zc.getAction("8").command);
-    try t.expectEqual(CommandAction{ .count = 9 }, zc.getAction("9").command);
-
-    try t.expectEqual(CommandAction.operator_to_forwards, zc.getAction("f").command);
-    try t.expectEqual(CommandAction.operator_to_backwards, zc.getAction("F").command);
-    try t.expectEqual(CommandAction.operator_until_forwards, zc.getAction("t").command);
-    try t.expectEqual(CommandAction.operator_until_backwards, zc.getAction("T").command);
-    try t.expectEqual(CommandAction.motion_char_prev, zc.getAction("h").command);
-    try t.expectEqual(CommandAction.motion_char_next, zc.getAction("l").command);
-    try t.expectEqual(CommandAction.zero, zc.getAction("0").command);
-    try t.expectEqual(CommandAction.motion_eol, zc.getAction("$").command);
-    try t.expectEqual(CommandAction.motion_normal_word_start_next, zc.getAction("w").command);
-    try t.expectEqual(CommandAction.motion_long_word_start_next, zc.getAction("W").command);
-    try t.expectEqual(CommandAction.motion_normal_word_end_next, zc.getAction("e").command);
-    try t.expectEqual(CommandAction.motion_long_word_end_next, zc.getAction("E").command);
-    try t.expectEqual(CommandAction.motion_normal_word_start_prev, zc.getAction("b").command);
-    try t.expectEqual(CommandAction.motion_long_word_start_prev, zc.getAction("B").command);
-    try t.expectEqual(CommandAction.motion_normal_word_end_prev, zc.getAction("<M-e>").command);
-    try t.expectEqual(CommandAction.motion_long_word_end_prev, zc.getAction("<M-E>").command);
-    try t.expectEqual(CommandAction.operator_delete, zc.getAction("d").command);
-    try t.expectEqual(CommandAction.operator_change, zc.getAction("c").command);
-
-    try t.expectEqual(CommandAction.motion_normal_word_around, zc.getAction("aw").command);
-    try t.expectEqual(CommandAction.motion_long_word_around, zc.getAction("aW").command);
-    try t.expectEqual(CommandAction.motion_normal_word_inside, zc.getAction("iw").command);
-    try t.expectEqual(CommandAction.motion_long_word_inside, zc.getAction("iW").command);
-
-    try t.expectEqual(CommandAction{ .motion_around_delimiters = utils.packDoubleCp('(', ')') }, zc.getAction("a(").command);
-    try t.expectEqual(CommandAction{ .motion_inside_delimiters = utils.packDoubleCp('(', ')') }, zc.getAction("i(").command);
-    try t.expectEqual(CommandAction{ .motion_around_delimiters = utils.packDoubleCp('(', ')') }, zc.getAction("a)").command);
-    try t.expectEqual(CommandAction{ .motion_inside_delimiters = utils.packDoubleCp('(', ')') }, zc.getAction("i)").command);
-
-    try t.expectEqual(CommandAction{ .motion_around_delimiters = utils.packDoubleCp('[', ']') }, zc.getAction("a[").command);
-    try t.expectEqual(CommandAction{ .motion_inside_delimiters = utils.packDoubleCp('[', ']') }, zc.getAction("i[").command);
-    try t.expectEqual(CommandAction{ .motion_around_delimiters = utils.packDoubleCp('[', ']') }, zc.getAction("a]").command);
-    try t.expectEqual(CommandAction{ .motion_inside_delimiters = utils.packDoubleCp('[', ']') }, zc.getAction("i]").command);
-
-    try t.expectEqual(CommandAction{ .motion_inside_delimiters = utils.packDoubleCp('{', '}') }, zc.getAction("i{").command);
-    try t.expectEqual(CommandAction{ .motion_around_delimiters = utils.packDoubleCp('{', '}') }, zc.getAction("a{").command);
-    try t.expectEqual(CommandAction{ .motion_inside_delimiters = utils.packDoubleCp('{', '}') }, zc.getAction("i}").command);
-    try t.expectEqual(CommandAction{ .motion_around_delimiters = utils.packDoubleCp('{', '}') }, zc.getAction("a}").command);
-
-    try t.expectEqual(CommandAction{ .motion_inside_delimiters = utils.packDoubleCp('<', '>') }, zc.getAction("i<<").command);
-    try t.expectEqual(CommandAction{ .motion_around_delimiters = utils.packDoubleCp('<', '>') }, zc.getAction("a<<").command);
-    try t.expectEqual(CommandAction{ .motion_inside_delimiters = utils.packDoubleCp('<', '>') }, zc.getAction("i>").command);
-    try t.expectEqual(CommandAction{ .motion_around_delimiters = utils.packDoubleCp('<', '>') }, zc.getAction("a>").command);
-
-    try t.expectEqual(CommandAction{ .motion_inside_single_delimiter = '"' }, zc.getAction("i\"").command);
-    try t.expectEqual(CommandAction{ .motion_around_single_delimiter = '"' }, zc.getAction("a\"").command);
-
-    try t.expectEqual(CommandAction{ .motion_inside_single_delimiter = '\'' }, zc.getAction("i'").command);
-    try t.expectEqual(CommandAction{ .motion_around_single_delimiter = '\'' }, zc.getAction("a'").command);
-
-    try t.expectEqual(CommandAction{ .motion_inside_single_delimiter = '`' }, zc.getAction("i`").command);
-    try t.expectEqual(CommandAction{ .motion_around_single_delimiter = '`' }, zc.getAction("a`").command);
-}
-
-test "Command to keys" {
-    const t = std.testing;
-
-    var zc = try Self.init(t.allocator, .{ .ui = false });
-    defer zc.deinit();
-
-    zc.setMode(.command_to_forwards);
-
-    try t.expectEqual(CommandAction.submit_command, zc.getAction("<C-m>").command);
-    try t.expectEqual(CommandAction.submit_command, zc.getAction("<C-j>").command);
-    try t.expectEqual(CommandAction.submit_command, zc.getAction("<Return>").command);
-
-    try t.expectEqual(CommandAction.motion_bol, zc.getAction("<Home>").command);
-    try t.expectEqual(CommandAction.motion_eol, zc.getAction("<End>").command);
-    try t.expectEqual(CommandAction.motion_char_prev, zc.getAction("<Left>").command);
-    try t.expectEqual(CommandAction.motion_char_next, zc.getAction("<Right>").command);
-
-    try t.expectEqual(CommandAction.enter_normal_mode, zc.getAction("<C-[>").command);
-    try t.expectEqual(CommandAction.enter_normal_mode, zc.getAction("<Escape>").command);
-}
-
-test "Outer mode counts" {
+test "Sheet mode counts" {
     const t = std.testing;
     var zc = try Self.init(t.allocator, .{ .ui = false });
     defer zc.deinit();
