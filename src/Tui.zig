@@ -66,12 +66,12 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
     }
 
     var rc = try self.term.getRenderContext(8192);
-    try rc.hideCursor();
+    rc.hideCursor() catch unreachable;
 
     if (self.term.width < 15 or self.term.height < 5) {
-        try rc.clear();
-        try rc.moveCursorTo(0, 0);
-        try rc.writeAllWrapping("Terminal too small");
+        rc.clear() catch unreachable;
+        rc.moveCursorTo(0, 0) catch unreachable;
+        rc.writeAllWrapping("Terminal too small") catch unreachable;
         try rc.done();
         return;
     }
@@ -99,7 +99,7 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
         self.update.command = false;
     }
 
-    try rc.setStyle(.{});
+    try rc.setStyle(.{ .fg = .white, .bg = .black });
 
     try rc.done();
 }
@@ -117,42 +117,57 @@ pub fn renderStatus(
 
     const filepath = zc.sheet.getFilePath();
     if (filepath.len > 0) {
-        writer.writeByte('[') catch unreachable;
-        rc.setStyle(.{ .fg = .green }) catch unreachable;
+        try rc.setStyle(.{ .fg = .green, .bg = .black, .attrs = .{ .underline = true } });
         try writer.writeAll(filepath);
-        try rc.setStyle(.{});
-        try writer.writeAll("] ");
+        try rc.setStyle(.{ .fg = .white, .bg = .black });
     } else {
-        writer.writeAll("[no file] ") catch unreachable;
+        try rc.setStyle(.{ .fg = .white, .bg = .black });
+        writer.writeAll("<no file>") catch unreachable;
     }
 
     if (zc.sheet.has_changes) {
-        try writer.writeAll("[+] ");
+        try writer.writeAll(" [+]");
     }
 
-    try zc.cursor.writeCellAddress(writer);
-    try writer.print(" {} ", .{zc.mode});
+    try writer.print(" {}", .{zc.cursor});
+    try writer.print(" {}", .{zc.mode});
 
     if (zc.count != 0) {
-        try writer.print("{d} ", .{zc.getCount()});
+        try rc.setStyle(.{ .fg = .green, .bg = .black, .attrs = .{ .bold = true } });
+        try writer.print(" {d}{s}", .{ zc.getCount(), zc.input_buf.items });
+        try rc.setStyle(.{ .fg = .white, .bg = .black });
+    } else if (zc.input_buf.items.len > 0) {
+        try rc.setStyle(.{ .fg = .green, .bg = .black, .attrs = .{ .bold = true } });
+        try writer.print(" {s}", .{zc.input_buf.items});
+        try rc.setStyle(.{ .fg = .white, .bg = .black });
     }
 
-    try writer.writeAll(zc.input_buf.items);
-
-    if (zc.sheet.text_cells.get(zc.cursor)) |cell| {
-        try writer.print("[{}]", .{cell});
-    } else if (zc.sheet.getCell(zc.cursor)) |cell| {
+    try writer.writeAll(" [");
+    if (zc.sheet.getCell(zc.cursor)) |cell| {
         switch (cell.getValue()) {
             .err => {
-                try writer.writeByte('[');
-                try rc.setStyle(.{ .fg = .red });
+                try rc.setStyle(.{ .fg = .red, .bg = .black });
                 try writer.print("{}", .{cell});
-                try rc.setStyle(.{});
-                try writer.writeByte(']');
             },
-            else => try writer.print("[{}]", .{cell}),
+            else => {
+                try rc.setStyle(.{ .fg = .cyan, .bg = .black });
+                try writer.print("{}", .{cell});
+            },
         }
+
+        if (zc.sheet.text_cells.get(zc.cursor)) |text_cell| {
+            try rc.setStyle(.{ .fg = .white, .bg = .black });
+            try writer.writeAll(" | ");
+            try rc.setStyle(.{ .fg = .green, .bg = .black });
+            try writer.print("{}", .{text_cell});
+        }
+        try rc.setStyle(.{ .fg = .white, .bg = .black });
+    } else if (zc.sheet.text_cells.get(zc.cursor)) |cell| {
+        try rc.setStyle(.{ .fg = .green, .bg = .black });
+        try writer.print("{}", .{cell});
+        try rc.setStyle(.{ .fg = .white, .bg = .black });
     }
+    try writer.writeByte(']');
 
     try rpw.pad();
 }
@@ -165,6 +180,7 @@ pub fn renderCommandLine(
     try rc.clearToEol();
     var rpw = rc.restrictedPaddingWriter(rc.term.width);
     const writer = rpw.writer();
+    try rc.setStyle(.{ .fg = .white, .bg = .black });
 
     if (zc.mode.isCommandMode()) {
         const buf = zc.commandBuf();
@@ -223,19 +239,19 @@ pub fn renderCommandLine(
     } else if (zc.status_message.len > 0) {
         switch (zc.status_message_type) {
             .info => {
-                try rc.setStyle(.{ .fg = .magenta });
+                try rc.setStyle(.{ .fg = .magenta, .bg = .black });
                 try writer.writeAll("Info: ");
             },
             .warn => {
-                try rc.setStyle(.{ .fg = .yellow });
+                try rc.setStyle(.{ .fg = .yellow, .bg = .black });
                 try writer.writeAll("Warning: ");
             },
             .err => {
-                try rc.setStyle(.{ .fg = .red });
+                try rc.setStyle(.{ .fg = .red, .bg = .black });
                 try writer.writeAll("Error: ");
             },
         }
-        try rc.setStyle(.{});
+        try rc.setStyle(.{ .fg = .white, .bg = .black });
         try writer.writeAll(zc.status_message.slice());
         try rpw.finish();
     }
@@ -255,7 +271,7 @@ pub fn renderColumnHeadings(
     var x = zc.screen_pos.x;
     var w = reserved_cols;
 
-    try rc.setStyle(.{ .fg = .blue });
+    try rc.setStyle(.{ .fg = .blue, .bg = .black });
 
     while (w < self.term.width) : (x += 1) {
         const width = @min(self.term.width - reserved_cols, zc.sheet.getColumn(x).width);
@@ -278,7 +294,7 @@ pub fn renderColumnHeadings(
         w += width;
     }
 
-    try rc.setStyle(.{});
+    try rc.setStyle(.{ .fg = .white, .bg = .black });
 }
 
 pub fn renderRowNumbers(self: Self, rc: *RenderContext, zc: *ZC) RenderError!void {
@@ -336,7 +352,7 @@ pub fn renderCursor(
             },
         };
 
-        try rc.setStyle(.{});
+        try rc.setStyle(.{ .fg = .white, .bg = .black });
 
         try rc.moveCursorTo(prev_pos.y, prev_pos.x);
         _ = try renderCell(rc, zc, zc.prev_cursor);
@@ -385,7 +401,7 @@ pub fn renderCursor(
 
     try rc.moveCursorTo(pos.y, 0);
     try writer.print("{d: ^[1]}", .{ zc.cursor.y, left });
-    try rc.setStyle(.{});
+    try rc.setStyle(.{ .fg = .white, .bg = .black });
 }
 
 pub fn renderCursorCell(
@@ -395,7 +411,7 @@ pub fn renderCursorCell(
 ) RenderError!u16 {
     try rc.setStyle(.{ .fg = .black, .bg = .blue });
     const ret = renderCell(rc, zc, pos);
-    try rc.setStyle(.{});
+    try rc.setStyle(.{ .fg = .white, .bg = .black });
     return ret;
 }
 
@@ -406,7 +422,7 @@ pub fn renderCells(
 ) RenderError!void {
     const reserved_cols = zc.leftReservedColumns();
 
-    try rc.setStyle(.{});
+    try rc.setStyle(.{ .fg = .white, .bg = .black });
 
     for (ZC.content_line..self.term.height, zc.screen_pos.y..) |line, y| {
         try rc.moveCursorTo(@intCast(line), reserved_cols);
@@ -468,11 +484,11 @@ pub fn renderCell(
         const text_width = utils.strWidth(text, width);
         const left_pad = (width - text_width) / 2;
         if (pos.hash() != zc.cursor.hash()) {
-            try rc.setStyle(.{ .fg = .green });
+            try rc.setStyle(.{ .fg = .green, .bg = .black });
             try writer.writeByteNTimes(' ', left_pad);
             try writer.print("{s}", .{text});
             try rpw.pad();
-            try rc.setStyle(.{});
+            try rc.setStyle(.{ .fg = .white, .bg = .black });
         } else {
             try writer.writeByteNTimes(' ', left_pad);
             try writer.print("{s}", .{text});
