@@ -706,18 +706,8 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
             }
         },
 
-        .undo => {
-            try self.sheet.undo();
-            self.tui.update.cells = true;
-            self.tui.update.column_headings = true;
-            self.tui.update.row_numbers = true;
-        },
-        .redo => {
-            try self.sheet.redo();
-            self.tui.update.cells = true;
-            self.tui.update.column_headings = true;
-            self.tui.update.row_numbers = true;
-        },
+        .undo => try self.undo(),
+        .redo => try self.redo(),
         .cell_cursor_up => self.cursorUp(),
         .cell_cursor_down => self.cursorDown(),
         .cell_cursor_left => self.cursorLeft(),
@@ -1216,6 +1206,26 @@ pub fn writeFile(sheet: *Sheet, opts: WriteFileOptions) !void {
     if (opts.filepath) |path| {
         sheet.setFilePath(path);
     }
+}
+
+pub fn undo(self: *Self) Allocator.Error!void {
+    for (0..self.getCount()) |_| {
+        try self.sheet.undo();
+    }
+    self.resetCount();
+    self.tui.update.cells = true;
+    self.tui.update.column_headings = true;
+    self.tui.update.row_numbers = true;
+}
+
+pub fn redo(self: *Self) Allocator.Error!void {
+    for (0..self.getCount()) |_| {
+        try self.sheet.redo();
+    }
+    self.resetCount();
+    self.tui.update.cells = true;
+    self.tui.update.column_headings = true;
+    self.tui.update.row_numbers = true;
 }
 
 pub fn deleteCell(self: *Self) Allocator.Error!void {
