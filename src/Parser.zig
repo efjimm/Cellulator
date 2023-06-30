@@ -472,6 +472,8 @@ test {
     try testParseError("let a0 = 1 # 1", error.UnexpectedToken);
     try testParseError("let a0 = 1 # 'string'", error.UnexpectedToken);
     try testParseError("let a0 = 'strings' # 'string'", error.UnexpectedToken);
+    try testParseError("let a0 = @upper(1)", error.StringBuiltinInNumericContext);
+    try testParseError("let a0 = @lower(1)", error.StringBuiltinInNumericContext);
     try testParseError("let a0 = (5", error.UnexpectedToken);
     try testParseError("let a0 = 5)", error.UnexpectedToken);
     try testParseError("let a0 = 5 + ", error.UnexpectedToken);
@@ -488,7 +490,20 @@ test {
     try testParseError("label a0 = 'string' - 'string'", error.UnexpectedToken);
     try testParseError("label a0 = 'string' * 'string'", error.UnexpectedToken);
     try testParseError("label a0 = 'string' / 'string'", error.UnexpectedToken);
+
     try testParseError("label a0 = 'string' % 'string'", error.UnexpectedToken);
+    try testParseError("label a0 = @upper()", error.UnexpectedToken);
+    try testParseError("label a0 = @lower()", error.UnexpectedToken);
+    try testParseError("label a0 = @upper(a0:b0)", error.UnexpectedToken);
+    try testParseError("label a0 = @lower(a0:b0)", error.UnexpectedToken);
+    try testParseError("label a0 = @upper(a0, b0)", error.UnexpectedToken);
+    try testParseError("label a0 = @lower(a0, b0)", error.UnexpectedToken);
+
+    try testParseError("label a0 = @sum('string1')", error.NumericBuiltinInStringContext);
+    try testParseError("label a0 = @prod('string1')", error.NumericBuiltinInStringContext);
+    try testParseError("label a0 = @avg('string1')", error.NumericBuiltinInStringContext);
+    try testParseError("label a0 = @min('string1')", error.NumericBuiltinInStringContext);
+    try testParseError("label a0 = @max('string1')", error.NumericBuiltinInStringContext);
     try testParseError("label a0 = 'string' # 'string'", null);
     try testParseError("label a0 = 'string' 5", error.UnexpectedToken);
     try testParseError("label a0 = 'string' 'string'", error.UnexpectedToken);

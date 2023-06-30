@@ -603,7 +603,7 @@ pub const Slice = struct {
                     .avg,
                     .max,
                     .min,
-                    => return error.NotEvaluable,
+                    => unreachable, // Should not parse
                 }
             },
             .number,
@@ -616,7 +616,7 @@ pub const Slice = struct {
             .column,
             .assignment,
             .label,
-            => return EvalError.NotEvaluable,
+            => unreachable, // Should not parse
         }
     }
 
@@ -1018,21 +1018,43 @@ test "StringEval" {
         .{ "'string'", "string" },
         .{ "'string1' # 'string2'", "string1string2" },
         .{ "'string1' # 'string2' # 'string3'", "string1string2string3" },
+
+        .{ "@upper('String1')", "STRING1" },
+        .{ "@lower('String1')", "string1" },
+        .{ "@upper('STRING1')", "STRING1" },
+        .{ "@lower('string1')", "string1" },
+        .{ "@upper('StrINg1' # ' ' # 'StRinG2')", "STRING1 STRING2" },
+        .{ "@lower('StrINg1' # ' ' # 'StRinG2')", "string1 string2" },
+        .{ "@upper(@lower('String1'))", "STRING1" },
+        .{ "@lower(@upper('String1'))", "string1" },
+
+        .{ "@upper()", ParseError.UnexpectedToken },
+        .{ "@lower()", ParseError.UnexpectedToken },
+        .{ "@lower('string1', 'string2')", ParseError.UnexpectedToken },
+        .{ "@lower('string1', 'string2')", ParseError.UnexpectedToken },
+        .{ "@upper(a0:b0)", ParseError.UnexpectedToken },
+        .{ "@lower(a0:b0)", ParseError.UnexpectedToken },
     };
     var buf = SizedArrayListUnmanaged(u8, u32){};
     defer buf.deinit(std.testing.allocator);
 
     inline for (data) |d| {
-        var ast = try fromStringExpression(std.testing.allocator, d[0]);
-        defer ast.deinit(std.testing.allocator);
+        switch (@TypeOf(d[1])) {
+            ParseError => {
+                try std.testing.expectError(d[1], fromStringExpression(std.testing.allocator, d[0]));
+            },
+            EvalError => {
+                var ast = try fromStringExpression(std.testing.allocator, d[0]);
+                defer ast.deinit(std.testing.allocator);
 
-        buf.clearRetainingCapacity();
-        switch (@typeInfo(@TypeOf(d[1]))) {
-            .Null => {
-                const res = ast.stringEval(std.testing.allocator, {}, d[0], &buf);
-                try std.testing.expectError(error.NotEvaluable, res);
+                buf.clearRetainingCapacity();
+                try std.testing.expectError(d[1], ast.stringEval(std.testing.allocator, {}, d[0], &buf));
             },
             else => {
+                var ast = try fromStringExpression(std.testing.allocator, d[0]);
+                defer ast.deinit(std.testing.allocator);
+
+                buf.clearRetainingCapacity();
                 try ast.stringEval(std.testing.allocator, {}, d[0], &buf);
 
                 try std.testing.expectEqualStrings(d[1], buf.items());
