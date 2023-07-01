@@ -480,33 +480,50 @@ pub fn renderCell(
     const writer = rpw.writer();
 
     if (zc.sheet.text_cells.get(pos)) |cell| {
-        const text = cell.text.items();
+        const text = cell.string() orelse "ERROR";
         const text_width = utils.strWidth(text, width);
         const left_pad = (width - text_width) / 2;
-        if (pos.hash() != zc.cursor.hash()) {
+        try writer.writeByteNTimes(' ', left_pad);
+        if (cell.isError()) {
+            if (pos.hash() == zc.cursor.hash()) {
+                try writer.writeAll(text);
+                try rpw.pad();
+            } else {
+                try rc.setStyle(.{ .fg = .red, .bg = .black });
+                try writer.writeAll(text);
+                try rpw.pad();
+                try rc.setStyle(.{ .fg = .white, .bg = .black });
+            }
+        } else if (pos.hash() != zc.cursor.hash()) {
             try rc.setStyle(.{ .fg = .green, .bg = .black });
-            try writer.writeByteNTimes(' ', left_pad);
-            try writer.print("{s}", .{text});
+            try writer.writeAll(text);
             try rpw.pad();
             try rc.setStyle(.{ .fg = .white, .bg = .black });
         } else {
-            try writer.writeByteNTimes(' ', left_pad);
-            try writer.print("{s}", .{text});
+            try writer.writeAll(text);
             try rpw.pad();
         }
     } else if (zc.sheet.getCell(pos)) |cell| {
         switch (cell.getValue()) {
             .none => {},
             .err => {
-                try writer.print("{s: >[1]}", .{ "ERROR", width });
+                if (pos.hash() == zc.cursor.hash()) {
+                    try writer.print("{s: >[1]}", .{ "ERROR", width });
+                    try rpw.pad();
+                } else {
+                    try rc.setStyle(.{ .fg = .red, .bg = .black });
+                    try writer.print("{s: >[1]}", .{ "ERROR", width });
+                    try rpw.pad();
+                    try rc.setStyle(.{ .fg = .white, .bg = .black });
+                }
             },
             .num => |num| {
                 try writer.print("{d: >[1].[2]}", .{
                     num, width, col.precision,
                 });
+                try rpw.pad();
             },
         }
-        try rpw.pad();
     } else {
         try writer.print("{s: >[1]}", .{ "", width });
         try rpw.pad();

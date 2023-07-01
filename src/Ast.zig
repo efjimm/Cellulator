@@ -1,9 +1,6 @@
 //! Basic expression parser. Does not attempt error recovery and returns immediately on fatal
 //! errors. Contains a `MultiArrayList` of `Node`s that is sorted in reverse topological order.
 
-// TODO
-// Handle division by zero (seemingly works with @rem but docs say it's ub)
-
 const std = @import("std");
 const Position = @import("Sheet.zig").Position;
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
@@ -855,8 +852,6 @@ pub fn stringEval(
     strings: []const u8,
     buffer: *SizedArrayListUnmanaged(u8, u32),
 ) !void {
-    buffer.clearRetainingCapacity();
-
     const slice = ast.toSlice();
     _ = try slice.stringEvalNode(allocator, slice.rootNodeIndex(), context, strings, buffer);
 }
@@ -908,6 +903,12 @@ test "Parse and Eval Expression" {
     try testExpr(error.NotEvaluable, "a0:a0");
     try testExpr(error.NotEvaluable, "a0:crxo65535");
     try testExpr(error.NotEvaluable, "z10:xxx500");
+
+    // Test NaN
+    var ast = try fromExpression(t.allocator, "0 / 0");
+    defer ast.deinit(t.allocator);
+    const res = try ast.eval(Context{});
+    try std.testing.expect(std.math.isNan(res));
 }
 
 test "Functions on Ranges" {
@@ -918,7 +919,8 @@ test "Functions on Ranges" {
 
         fn evalCell(context: @This(), pos: Position) !?f64 {
             const cell = context.sheet.getCellPtr(pos) orelse return null;
-            return try cell.eval(context.sheet);
+            try cell.eval(context.sheet);
+            return cell.num;
         }
 
         fn testSheetExpr(expected: f64, expr: []const u8) !void {

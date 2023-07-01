@@ -42,9 +42,6 @@ const CellMap = std.ArrayHashMapUnmanaged(Position, Cell, ArrayPositionContext, 
 const TextCellMap = std.ArrayHashMapUnmanaged(Position, TextCell, ArrayPositionContext, false);
 
 /// Used for cell evaluation
-const NodeMap = std.HashMapUnmanaged(Position, NodeMark, PositionContext, 99);
-
-/// Used for cell evaluation
 const NodeMark = enum {
     temporary,
     permanent,
@@ -59,11 +56,6 @@ text_cells: TextCellMap = .{},
 /// Maps column indexes (0 - 65535) to `Column` structs containing info about that column.
 columns: std.AutoArrayHashMapUnmanaged(u16, Column) = .{},
 filepath: std.BoundedArray(u8, std.fs.MAX_PATH_BYTES) = .{},
-
-/// Map containing cells which have already been visited during evaluation.node_list
-visited_nodes: NodeMap = .{},
-/// Cell positions sorted topologically, used for order of evaluation when evaluating all cells.
-sorted_nodes: NodeListUnmanaged = .{},
 
 /// If true, the next call to Sheet.update will re-evaluate all cells in the sheet.
 update_numbers: bool = false,
@@ -139,8 +131,6 @@ pub fn deinit(sheet: *Sheet) void {
     sheet.undo_text_asts.deinit(sheet.allocator);
     sheet.cells.deinit(sheet.allocator);
     sheet.text_cells.deinit(sheet.allocator);
-    sheet.visited_nodes.deinit(sheet.allocator);
-    sheet.sorted_nodes.deinit(sheet.allocator);
     sheet.columns.deinit(sheet.allocator);
     sheet.* = undefined;
 }
@@ -587,9 +577,6 @@ pub fn getCellPtr(sheet: *Sheet, pos: Position) ?*Cell {
     return sheet.cells.getPtr(pos);
 }
 
-/// Re-evaluates all cells in the sheet. Evaluates cells in reverse topological order to ensure
-/// that each cell is only evaluated once. Cell results are cached after they are evaluted
-/// (see Cell.eval)
 pub fn update(sheet: *Sheet, comptime cell_type: CellType) Allocator.Error!void {
     switch (cell_type) {
         .number => if (!sheet.update_numbers) return,
@@ -605,14 +592,9 @@ pub fn update(sheet: *Sheet, comptime cell_type: CellType) Allocator.Error!void 
 
     const begin = (if (builtin.mode == .Debug) std.time.Instant.now() catch unreachable else {});
 
-    try sheet.rebuildSortedNodeList(cell_type);
-
-    for (sheet.sorted_nodes.items) |pos| {
-        const cell = cells.getPtr(pos).?;
-        _ = cell.eval(sheet) catch |err| {
-            if (cell_type != .text or err != error.NotEvaluable) return error.OutOfMemory;
-        };
-    }
+    // Clear the cached values in cells
+    for (cells.values()) |*c| c.setError();
+    for (cells.values()) |*c| try c.eval(sheet);
 
     switch (cell_type) {
         .number => sheet.update_numbers = false,
@@ -631,84 +613,6 @@ pub fn update(sheet: *Sheet, comptime cell_type: CellType) Allocator.Error!void 
 }
 
 const CellType = enum { number, text };
-
-fn rebuildSortedNodeList(
-    sheet: *Sheet,
-    comptime cell_type: CellType,
-) Allocator.Error!void {
-    const cells = switch (cell_type) {
-        .number => &sheet.cells,
-        .text => &sheet.text_cells,
-    };
-    const node_count: u32 = @intCast(cells.entries.len);
-
-    // Topologically sorted set of cell positions
-    sheet.visited_nodes.clearRetainingCapacity();
-    sheet.sorted_nodes.clearRetainingCapacity();
-
-    if (node_count == 0) return;
-
-    try sheet.visited_nodes.ensureTotalCapacity(sheet.allocator, node_count + 1);
-    try sheet.sorted_nodes.ensureTotalCapacity(sheet.allocator, node_count + 1);
-
-    for (cells.keys()) |pos| {
-        if (!sheet.visited_nodes.contains(pos)) {
-            sheet.visit(cell_type, pos, &sheet.visited_nodes, &sheet.sorted_nodes);
-        }
-    }
-}
-
-fn visit(
-    sheet: *const Sheet,
-    comptime cell_type: CellType,
-    node: Position,
-    nodes: *NodeMap,
-    sorted_nodes: *NodeListUnmanaged,
-) void {
-    if (nodes.get(node)) |mark| {
-        switch (mark) {
-            .permanent => return,
-            .temporary => unreachable,
-        }
-    }
-
-    var cell = switch (cell_type) {
-        .number => sheet.cells.get(node),
-        .text => sheet.text_cells.get(node),
-    } orelse return;
-
-    if (cell.isEmpty()) return;
-
-    nodes.putAssumeCapacity(node, .temporary);
-
-    const Context = struct {
-        sheet: *const Sheet,
-        cell: switch (cell_type) {
-            .text => *TextCell,
-            .number => *Cell,
-        },
-        nodes: *NodeMap,
-        sorted_nodes: *NodeListUnmanaged,
-
-        pub fn evalCell(context: @This(), index: u32) !bool {
-            const ast_node = context.cell.ast.nodes.get(index);
-            if (ast_node == .cell and !context.nodes.contains(ast_node.cell)) {
-                context.sheet.visit(cell_type, ast_node.cell, context.nodes, context.sorted_nodes);
-            }
-            return true;
-        }
-    };
-
-    _ = try cell.ast.traverse(.middle, Context{
-        .sheet = sheet,
-        .cell = &cell,
-        .nodes = nodes,
-        .sorted_nodes = sorted_nodes,
-    });
-
-    nodes.putAssumeCapacity(node, .permanent);
-    sorted_nodes.appendAssumeCapacity(node);
-}
 
 pub fn getFilePath(sheet: Sheet) []const u8 {
     return sheet.filepath.slice();
@@ -892,18 +796,36 @@ pub const TextCell = struct {
     // so use an ArrayList for quality of life
     text: SizedArrayListUnmanaged(u8, u32) = .{},
     ast: Ast = .{},
+    has_error: bool = true, // TODO: Encode this data somewhere else to save space
 
     /// Strings required for evaluation, e.g. the contents of string literals.
     strings: ?*HeaderString = null,
 
     pub fn deinit(cell: *TextCell, allocator: Allocator) void {
+        if (cell.isError()) cell.unsetError();
         cell.text.deinit(allocator);
         if (cell.strings) |strings| strings.destroy(allocator);
         cell.ast.deinit(allocator);
         cell.* = .{};
     }
 
-    pub fn eval(cell: *TextCell, sheet: *Sheet) Ast.StringEvalError!void {
+    pub fn isError(cell: TextCell) bool {
+        return cell.has_error;
+    }
+
+    pub fn setError(cell: *TextCell) void {
+        cell.has_error = true;
+    }
+
+    pub fn unsetError(cell: *TextCell) void {
+        cell.has_error = false;
+    }
+
+    pub fn string(cell: TextCell) ?[]const u8 {
+        return if (cell.isError()) null else cell.text.items();
+    }
+
+    pub fn eval(cell: *TextCell, sheet: *Sheet) Allocator.Error!void {
         const Context = struct {
             sheet: *const Sheet,
             visited_cells: Map,
@@ -912,16 +834,18 @@ pub const TextCell = struct {
             const EvalError = error{CyclicalReference} || Ast.StringEvalError;
 
             pub fn evalTextCell(context: *@This(), pos: Position) EvalError![]const u8 {
-                // Check for cyclical references
                 const res = try context.visited_cells.getOrPut(pos);
-                if (res.found_existing) {
-                    log.debug("TEXT CYCLICAL REFERENCE at {}", .{pos});
-                    return error.CyclicalReference;
+                defer _ = context.visited_cells.remove(pos);
+                if (res.found_existing) return error.CyclicalReference;
+
+                const _cell = context.sheet.text_cells.getPtr(pos) orelse return "";
+                if (_cell.isError()) {
+                    _cell.text.clearRetainingCapacity();
+                    const strings = if (_cell.strings) |strings| strings.items() else "";
+                    try _cell.ast.stringEval(context.sheet.allocator, context, strings, &_cell.text);
+                    _cell.unsetError();
                 }
 
-                // All dependencies should have been evaluated before this one and had their
-                // results cached.
-                const _cell = context.sheet.text_cells.get(pos) orelse return "";
                 return _cell.text.items();
             }
         };
@@ -933,13 +857,18 @@ pub const TextCell = struct {
             .visited_cells = Context.Map.init(sfa.get()),
         };
         defer context.visited_cells.deinit();
-        errdefer cell.text.clearRetainingCapacity();
+        errdefer cell.setError();
 
         const strings = if (cell.strings) |strings| strings.items() else "";
+        cell.text.clearRetainingCapacity();
         cell.ast.stringEval(sheet.allocator, &context, strings, &cell.text) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.NotEvaluable, error.CyclicalReference => {},
+            error.NotEvaluable, error.CyclicalReference => {
+                cell.setError();
+                return;
+            },
         };
+        cell.unsetError();
     }
 
     pub fn isEmpty(cell: TextCell) bool {
@@ -958,10 +887,21 @@ pub const TextCell = struct {
 };
 
 pub const Cell = struct {
-    num: f64 = std.math.nan(f64),
+    num: f64 = err,
     ast: Ast = .{},
 
+    /// (NaN payload)[https://anniecherkaev.com/the-secret-life-of-nan] to signify that an error
+    /// has occured during evaluation.
+    const err: f64 = @bitCast(err_bits);
+    const err_bits: u64 = (0x7FF << 52) | 0b1010;
+
     comptime {
+        // Make sure our error value doesn't have the same bit pattern as the NaN values that Zig
+        // uses.
+        assert(err_bits != std.math.nan_u64);
+        assert(err_bits != @as(u64, @bitCast(@as(f64, 0) / @as(f64, 0))));
+        assert(err_bits != @as(u64, @bitCast(-std.math.inf(f64) + std.math.inf(f64))));
+        assert(err_bits != @as(u64, @bitCast(std.math.inf(f64) * @as(f64, 0))));
         assert(@sizeOf(Cell) <= 24);
     }
 
@@ -976,11 +916,20 @@ pub const Cell = struct {
         cell.* = undefined;
     }
 
-    pub inline fn isEmpty(cell: Cell) bool {
+    pub fn isEmpty(cell: Cell) bool {
         return cell.ast.nodes.len == 0;
     }
 
-    pub fn eval(cell: *Cell, sheet: *Sheet) Allocator.Error!f64 {
+    pub fn isError(cell: Cell) bool {
+        const bits: u64 = @bitCast(cell.num);
+        return bits == err_bits;
+    }
+
+    pub fn setError(cell: *Cell) void {
+        cell.num = err;
+    }
+
+    pub fn eval(cell: *Cell, sheet: *Sheet) Allocator.Error!void {
         const Context = struct {
             sheet: *const Sheet,
             visited_cells: Map,
@@ -991,20 +940,18 @@ pub const Cell = struct {
             pub fn evalCell(context: *@This(), pos: Position) EvalError!?f64 {
                 // Check for cyclical references
                 const res = try context.visited_cells.getOrPut(pos);
-                if (res.found_existing) {
-                    log.debug("CYCLICAL REFERENCE at {}", .{pos});
-                    return error.CyclicalReference;
-                }
+                defer _ = context.visited_cells.remove(pos);
+                if (res.found_existing) return error.CyclicalReference;
 
-                const _cell = context.sheet.getCell(pos) orelse return null;
+                const _cell = context.sheet.cells.getPtr(pos) orelse return null;
                 switch (_cell.getValue()) {
                     .num => |num| return num,
-                    else => {},
+                    else => {
+                        errdefer _cell.num = err;
+                        _cell.num = try _cell.ast.eval(context);
+                        return _cell.num;
+                    },
                 }
-
-                const ret = try _cell.ast.eval(context);
-                _ = context.visited_cells.remove(pos);
-                return ret;
             }
         };
 
@@ -1016,15 +963,13 @@ pub const Cell = struct {
         };
         defer context.visited_cells.deinit();
 
-        cell.num = cell.ast.eval(&context) catch |err| switch (err) {
+        cell.num = cell.ast.eval(&context) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.NotEvaluable, error.CyclicalReference => {
-                cell.num = std.math.nan(f64);
-                return 0;
+                cell.num = err;
+                return;
             },
         };
-
-        return cell.num;
     }
 
     pub const Value = union(enum) {
@@ -1035,7 +980,7 @@ pub const Cell = struct {
 
     pub inline fn getValue(cell: Cell) Value {
         if (cell.isEmpty()) return .none;
-        if (std.math.isNan(cell.num)) return .err;
+        if (cell.isError()) return .err;
         return .{ .num = cell.num };
     }
 

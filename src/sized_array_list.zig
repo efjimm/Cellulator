@@ -8,7 +8,7 @@ pub fn SizedArrayListUnmanaged(comptime T: type, comptime Size: type) type {
     if (@typeInfo(Size) != .Int) @compileError("'Size' parameter must be an integer type");
 
     return struct {
-        ptr: [*]T = undefined,
+        ptr: [*]T = @constCast(&[_]T{}).ptr,
         len: Size = 0,
         capacity: Size = 0,
 
