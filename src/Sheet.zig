@@ -1023,6 +1023,7 @@ pub fn widthNeededForColumn(sheet: Sheet, column_index: u16, precision: u16, max
     const writer = buf.writer();
     for (sheet.cells.keys(), sheet.cells.values()) |k, v| {
         if (k.x != column_index) continue;
+        buf.len = 0;
         writer.print("{d:.[1]}", .{ v.num, precision }) catch unreachable;
         // Numbers are all ASCII, so 1 byte = 1 column
         const len: u16 = @intCast(buf.len);
