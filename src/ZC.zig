@@ -1145,10 +1145,14 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
 }
 
 pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
-    const file = try std.fs.cwd().createFile(filepath, .{
-        .read = true,
-        .truncate = false,
-    });
+    const file = std.fs.cwd().openFile(filepath, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            sheet.setFilePath(filepath);
+            sheet.has_changes = false;
+            return;
+        },
+        else => return err,
+    };
     defer file.close();
 
     var buf = std.io.bufferedReader(file.reader());
