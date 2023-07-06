@@ -8,6 +8,8 @@ len: u32 = 0,
 gap_start: u32 = 0,
 gap_len: u32 = 0,
 
+pub const ElementType = u8;
+
 const Self = @This();
 
 pub fn deinit(self: *Self, allocator: Allocator) void {
@@ -167,6 +169,10 @@ pub inline fn getPtr(self: Self, index: u32) u8 {
     return if (index < self.gap_start) &self.ptr[index] else &self.ptr[index + self.gap_len];
 }
 
+pub inline fn length(self: Self) u32 {
+    return self.len;
+}
+
 pub fn replaceRange(
     self: *Self,
     allocator: Allocator,
@@ -210,95 +216,6 @@ pub fn items(self: *Self) []u8 {
     return self.left();
 }
 
-pub const Iterator = struct {
-    buf: Self,
-    index: u32 = 0,
-
-    pub fn next(iter: *Iterator) ?u8 {
-        if (iter.index >= iter.buf.len) return null;
-
-        const index = iter.index;
-        iter.index += 1;
-        return iter.buf.get(index);
-    }
-
-    pub fn nextPtr(iter: *Iterator) ?*u8 {
-        if (iter.index >= iter.buf.len) return null;
-
-        const index = iter.index;
-        iter.index += 1;
-        return iter.buf.getPtr(index);
-    }
-};
-
-pub fn iterator(self: Self) Iterator {
-    return .{
-        .buf = self,
-    };
-}
-
-pub const ReverseIterator = struct {
-    buf: Self,
-    index: u32,
-
-    pub fn next(iter: *ReverseIterator) ?u8 {
-        if (iter.index == 0) return null;
-        iter.index -= 1;
-        return iter.buf.get(iter.index);
-    }
-
-    pub fn nextPtr(iter: *ReverseIterator) ?*u8 {
-        if (iter.index == 0) return null;
-        iter.index -= 1;
-        return iter.buf.getPtr(iter.index);
-    }
-};
-
-pub fn reverseIterator(self: Self) ReverseIterator {
-    return .{
-        .buf = self,
-        .index = self.len,
-    };
-}
-
-pub fn containsAt(self: Self, pos: u32, needle: []const u8) bool {
-    const len: u32 = @intCast(needle.len);
-    if (self.len - pos < len) return false;
-
-    var i: u32 = 0;
-    return while (i < needle.len) : (i += 1) {
-        if (needle[i] != self.get(pos + i)) break false;
-    } else true;
-}
-
-pub fn indexOfPos(self: Self, pos: u32, needle: []const u8) ?u32 {
-    assert(pos < self.len);
-    const len: u32 = @intCast(needle.len);
-    if (self.len - pos < len) return null;
-
-    var i: u32 = pos;
-    while (i <= self.len - len) : (i += 1) {
-        var j: u32 = 0;
-        while (j < len) : (j += 1) {
-            if (self.get(i + j) != needle[j]) break;
-        } else return i;
-    }
-
-    return null;
-}
-
-pub fn lastIndexOfPos(self: Self, pos: u32, needle: []const u8) ?u32 {
-    const len: u32 = @intCast(needle.len);
-    if (len > self.len or pos == 0) return null;
-    if (len == 0) return self.len;
-
-    var i = pos;
-    return while (i > 0) {
-        i -= 1;
-        if (self.containsAt(i, needle)) break i;
-    } else null;
-}
-
 test {
     const t = std.testing;
     var buf = Self{};
@@ -336,46 +253,4 @@ test {
 
     try t.expectEqualStrings("This is epicness and ep", buf.left());
     try t.expectEqualStrings("ic and nice :)", buf.right());
-
-    inline for (0.."This is epicness and epic and nice :)".len) |i| {
-        buf.setGap(i);
-        try t.expectEqual(@as(?u32, 0), buf.indexOfPos(0, "T"));
-        try t.expectEqual(@as(?u32, 0), buf.indexOfPos(0, "Th"));
-        try t.expectEqual(@as(?u32, 0), buf.indexOfPos(0, "Thi"));
-        try t.expectEqual(@as(?u32, 0), buf.indexOfPos(0, "This"));
-        try t.expectEqual(@as(?u32, 0), buf.indexOfPos(0, "This "));
-        try t.expectEqual(@as(?u32, 0), buf.indexOfPos(0, "This i"));
-
-        try t.expectEqual(@as(?u32, 1), buf.indexOfPos(0, "h"));
-        try t.expectEqual(@as(?u32, 1), buf.indexOfPos(0, "hi"));
-        try t.expectEqual(@as(?u32, 1), buf.indexOfPos(0, "his"));
-        try t.expectEqual(@as(?u32, 1), buf.indexOfPos(0, "his "));
-        try t.expectEqual(@as(?u32, 1), buf.indexOfPos(0, "his i"));
-        try t.expectEqual(@as(?u32, "This is ".len), buf.indexOfPos(0, "epic"));
-        try t.expectEqual(@as(?u32, "This is ".len), buf.indexOfPos(8, "epic"));
-        try t.expectEqual(@as(?u32, "This is epicness and ".len), buf.indexOfPos(9, "epic"));
-        try t.expectEqual(@as(?u32, "This is epicness and ".len), buf.indexOfPos(10, "epic"));
-        try t.expectEqual(@as(?u32, "This is epicness and ep".len), buf.indexOfPos(11, "ic"));
-        try t.expectEqual(@as(?u32, null), buf.indexOfPos(0, "erm"));
-    }
-
-    buf.clearRetainingCapacity();
-    try buf.appendSlice(t.allocator, "epic");
-    inline for (0..4) |i| {
-        buf.setGap(i);
-        try t.expectEqual(@as(?u32, null), buf.indexOfPos(0, "any"));
-        try t.expectEqual(@as(?u32, 0), buf.indexOfPos(0, "e"));
-        try t.expectEqual(@as(?u32, 0), buf.indexOfPos(0, "ep"));
-        try t.expectEqual(@as(?u32, 0), buf.indexOfPos(0, "epi"));
-        try t.expectEqual(@as(?u32, 0), buf.indexOfPos(0, "epic"));
-
-        try t.expectEqual(@as(?u32, 1), buf.indexOfPos(0, "p"));
-        try t.expectEqual(@as(?u32, 1), buf.indexOfPos(0, "pi"));
-        try t.expectEqual(@as(?u32, 1), buf.indexOfPos(0, "pic"));
-
-        try t.expectEqual(@as(?u32, 2), buf.indexOfPos(0, "i"));
-        try t.expectEqual(@as(?u32, 2), buf.indexOfPos(0, "ic"));
-
-        try t.expectEqual(@as(?u32, 3), buf.indexOfPos(0, "c"));
-    }
 }

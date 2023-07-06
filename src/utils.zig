@@ -6,6 +6,8 @@ const unicode = std.unicode;
 const mem = std.mem;
 const assert = std.debug.assert;
 
+pub usingnamespace @import("buffer_utils.zig");
+
 pub const CodepointBuilder = struct {
     buf: [4]u8 = undefined,
     desired_len: u3 = 0,

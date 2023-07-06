@@ -183,39 +183,26 @@ pub fn renderCommandLine(
     try rc.setStyle(.{ .fg = .white, .bg = .black });
 
     if (zc.mode.isCommandMode()) {
-        const buf = zc.commandBuf();
+        const left = zc.command.left();
+        const left_len: u32 = @intCast(left.len);
+        const right = zc.command.right();
 
+        // TODO: don't write all of this, only write what fits on screen
         var i = zc.command_screen_pos;
-        if (i < buf.gap_start) {
-            try writer.writeAll(buf.left()[i..]);
+        if (i < left_len) {
+            try writer.writeAll(left[i..]);
         }
-        try writer.writeAll(buf.right());
+        try writer.writeAll(right);
 
         const cursor_pos = blk: {
-            var pos: u16 = 0;
-            const len = @min(
-                buf.gap_start - zc.command_screen_pos,
-                zc.command_cursor - zc.command_screen_pos,
-            );
-
-            var iter = std.unicode.Utf8Iterator{
-                .bytes = buf.left()[0..len],
-                .i = 0,
+            var iter = utils.Utf8Iterator(@TypeOf(zc.command)){
+                .data = zc.command,
+                .index = zc.command_screen_pos,
             };
-
+            var pos: u16 = 0;
             while (iter.nextCodepoint()) |cp| {
+                if (iter.index > zc.command.cursor) break;
                 pos += wcWidth(cp);
-            }
-
-            if (zc.command_cursor >= buf.gap_start) {
-                iter = .{
-                    .bytes = buf.right()[0 .. (zc.command_cursor - zc.command_screen_pos) - len],
-                    .i = 0,
-                };
-
-                while (iter.nextCodepoint()) |cp| {
-                    pos += wcWidth(cp);
-                }
             }
 
             break :blk pos;
