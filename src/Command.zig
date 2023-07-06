@@ -3,8 +3,11 @@ const GapBuffer = @import("GapBuffer.zig");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-/// List of previous commands
-history: std.ArrayListUnmanaged([]const u8) = .{},
+/// List of indices into the history buffer.
+history_indices: std.ArrayListUnmanaged(struct { start_index: usize, len: usize }) = .{},
+
+/// Append-only buffer of text, used for history items.
+history_buf: std.ArrayListUnmanaged(u8) = .{},
 
 /// Byte position of the cursor in the currently selected buffer.
 cursor: u32 = 0,
@@ -25,31 +28,44 @@ const Self = @This();
 pub const ElementType = u8;
 
 pub fn deinit(self: *Self, allocator: Allocator) void {
-    for (self.history.items) |item| allocator.free(item);
-    self.history.deinit(allocator);
+    self.history_buf.deinit(allocator);
+    self.history_indices.deinit(allocator);
     self.buffer.deinit(allocator);
 }
 
 /// Pushes the current command buffer to the history list and returns a slice
 /// of its contents.
 pub fn submit(self: *Self, allocator: Allocator) Allocator.Error![]const u8 {
-    try self.history.ensureUnusedCapacity(allocator, 1);
-    const items = try allocator.dupe(u8, self.buffer.items());
-    self.history.appendAssumeCapacity(items);
+    try self.history_indices.ensureUnusedCapacity(allocator, 1);
+    try self.history_buf.ensureUnusedCapacity(allocator, self.buffer.len);
+
+    const start_index = self.history_buf.items.len;
+    self.history_buf.appendSliceAssumeCapacity(self.buffer.items());
+    self.history_indices.appendAssumeCapacity(.{
+        .start_index = start_index,
+        .len = self.history_buf.items.len - start_index,
+    });
+
     self.resetBuffer();
-    return items;
+    return self.history_buf.items[start_index..self.history_buf.items.len];
+}
+
+pub fn getHistoryItem(self: Self, index: u32) []const u8 {
+    assert(self.cow);
+    const i = self.history_indices.items[index];
+    return self.history_buf.items[i.start_index..][0..i.len];
 }
 
 pub fn resetBuffer(self: *Self) void {
     self.buffer.clearRetainingCapacity();
     self.cursor = 0;
     self.cow = false;
-    self.index = @intCast(self.history.items.len);
+    self.index = @intCast(self.history_indices.items.len);
 }
 
 /// Deep copies the contents of the history item at `index` into the buffer
 fn copyToBuffer(self: *Self, allocator: Allocator, index: u32) Allocator.Error!void {
-    const src = self.history.items[index];
+    const src = self.getHistoryItem(index);
     try self.buffer.ensureTotalCapacity(allocator, @intCast(src.len));
     self.buffer.clearRetainingCapacity();
     self.buffer.appendSliceAssumeCapacity(src);
@@ -60,18 +76,18 @@ pub fn prev(self: *Self, count: u32) void {
     if (self.index > 0) {
         self.index -|= count;
         self.cow = true;
-        self.cursor = @intCast(self.history.items[self.index].len);
+        self.cursor = @intCast(self.history_indices.items[self.index].len);
     }
 }
 
 /// Moves the current command down in the history. Does nothing if at the bottom.
 pub fn next(self: *Self, count: u32) void {
-    if (self.index < self.history.items.len) {
-        self.index = @min(self.index + count, @as(u32, @intCast(self.history.items.len)));
+    if (self.index < self.history_indices.items.len) {
+        self.index = @min(self.index + count, @as(u32, @intCast(self.history_indices.items.len)));
 
         // Set copy-on-write if we are still referencing an existing history item.
-        if (self.index != self.history.items.len) {
-            self.cursor = @intCast(self.history.items[self.index].len);
+        if (self.index != self.history_indices.items.len) {
+            self.cursor = @intCast(self.getHistoryItem(self.index).len);
             self.cow = true;
         } else {
             self.cursor = self.buffer.len;
@@ -121,21 +137,21 @@ pub const WriterContext = struct {
 
 pub fn get(self: Self, index: u32) u8 {
     return if (self.cow)
-        self.history.items[self.index][index]
+        self.getHistoryItem(self.index)[index]
     else
         self.buffer.get(index);
 }
 
 pub fn length(self: Self) u32 {
     return if (self.cow)
-        @intCast(self.history.items[self.index].len)
+        @intCast(self.getHistoryItem(self.index).len)
     else
         self.buffer.len;
 }
 
 pub fn indexOfPos(self: Self, pos: u32, needle: []const u8) ?u32 {
     if (self.cow) {
-        const res = std.mem.indexOfPos(u8, self.history.items[self.index], pos, needle);
+        const res = std.mem.indexOfPos(u8, self.getHistoryItem(self.index), pos, needle);
         if (res) |r| return @intCast(r);
         return null;
     }
@@ -144,7 +160,7 @@ pub fn indexOfPos(self: Self, pos: u32, needle: []const u8) ?u32 {
 
 pub fn lastIndexOfPos(self: Self, pos: u32, needle: []const u8) ?u32 {
     if (self.cow) {
-        const res = std.mem.lastIndexOfLinear(u8, self.history.items[self.index][0..pos], needle);
+        const res = std.mem.lastIndexOfLinear(u8, self.getHistoryItem(self.index)[0..pos], needle);
         if (res) |r| return @intCast(r);
         return null;
     }
@@ -160,7 +176,7 @@ pub fn setCursor(self: *Self, n: u32) void {
 /// want to be able to safely modify `buffer` directly.
 pub fn copyIfNeeded(self: *Self, allocator: Allocator) Allocator.Error!void {
     if (self.cow) {
-        std.log.debug("Copying '{s}' to buffer", .{self.history.items[self.index]});
+        std.log.debug("Copying '{s}' to buffer", .{self.getHistoryItem(self.index)});
         try self.copyToBuffer(allocator, self.index);
         self.cow = false;
     }
@@ -180,7 +196,7 @@ pub fn deleteBackwardsAssumeCopied(self: *Self, n: u32) void {
 
 pub fn left(self: *const Self) []const u8 {
     return if (self.cow)
-        self.history.items[self.index]
+        self.getHistoryItem(self.index)
     else
         self.buffer.left();
 }
@@ -202,13 +218,12 @@ test {
     try w.writeAll("This is epic!");
 
     try t.expectEqualStrings("This is epic!", self.buffer.items());
-    try t.expectEqual(@as(usize, 0), self.history.items.len);
+    try t.expectEqual(@as(usize, 0), self.history_indices.items.len);
     try t.expect(!self.cow);
 
     var str = try self.submit(t.allocator);
     try t.expectEqual(@as(u32, 0), self.buffer.len);
     try t.expectEqualStrings("This is epic!", str);
-    try t.expect(str.ptr == self.history.items[0].ptr);
     try t.expectEqual(@as(u32, 1), self.index);
 
     self.prev(1);

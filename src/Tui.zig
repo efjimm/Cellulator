@@ -191,8 +191,10 @@ pub fn renderCommandLine(
         var i = zc.command_screen_pos;
         if (i < left_len) {
             try writer.writeAll(left[i..]);
+            try writer.writeAll(right);
+        } else {
+            try writer.writeAll(right[i - left.len ..]);
         }
-        try writer.writeAll(right);
 
         const cursor_pos = blk: {
             var iter = utils.Utf8Iterator(@TypeOf(zc.command)){
