@@ -85,10 +85,12 @@ pub const Mode = enum {
     command_insert,
 
     // Operator pending modes
+
     command_change,
     command_delete,
 
     // To
+
     command_to_forwards,
     command_until_forwards,
     command_to_backwards,

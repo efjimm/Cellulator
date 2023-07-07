@@ -18,27 +18,6 @@ const NodeListUnmanaged = std.ArrayListUnmanaged(Position);
 
 const log = std.log.scoped(.sheet);
 
-const ArrayPositionContext = struct {
-    pub fn eql(_: @This(), p1: Position, p2: Position, _: usize) bool {
-        return p1.y == p2.y and p1.x == p2.x;
-    }
-
-    pub fn hash(_: @This(), pos: Position) u32 {
-        return pos.hash();
-    }
-};
-
-/// std.HashMap and std.ArrayHashMap require slightly different contexts.
-const PositionContext = struct {
-    pub fn eql(_: @This(), p1: Position, p2: Position) bool {
-        return p1.y == p2.y and p1.x == p2.x;
-    }
-
-    pub fn hash(_: @This(), pos: Position) u64 {
-        return pos.hash();
-    }
-};
-
 const CellMap = std.ArrayHashMapUnmanaged(Position, Cell, ArrayPositionContext, false);
 const TextCellMap = std.ArrayHashMapUnmanaged(Position, TextCell, ArrayPositionContext, false);
 
@@ -853,7 +832,7 @@ pub const TextCell = struct {
     // so use an ArrayList for quality of life
     text: SizedArrayListUnmanaged(u8, u32) = .{},
     ast: Ast = .{},
-    has_error: bool = true, // TODO: Encode this data somewhere else to save space
+    has_error: bool = true, // TODO: Encode this data somewhere else to save memory
 
     /// Strings required for evaluation, e.g. the contents of string literals.
     strings: ?*HeaderString = null,
@@ -882,36 +861,36 @@ pub const TextCell = struct {
         return if (cell.isError()) null else cell.text.items();
     }
 
-    pub fn eval(cell: *TextCell, sheet: *Sheet) Allocator.Error!void {
-        const Context = struct {
-            sheet: *const Sheet,
-            visited_cells: Map,
+    const EvalContext = struct {
+        sheet: *const Sheet,
+        visited_cells: Map,
 
-            const Map = std.HashMap(Position, void, PositionContext, 80);
-            const EvalError = error{CyclicalReference} || Ast.StringEvalError;
+        const Map = std.HashMap(Position, void, PositionContext, 80);
+        const EvalError = error{CyclicalReference} || Ast.StringEvalError;
 
-            pub fn evalTextCell(context: *@This(), pos: Position) EvalError![]const u8 {
-                const res = try context.visited_cells.getOrPut(pos);
-                defer _ = context.visited_cells.remove(pos);
-                if (res.found_existing) return error.CyclicalReference;
+        pub fn evalTextCell(context: *EvalContext, pos: Position) EvalError![]const u8 {
+            const res = try context.visited_cells.getOrPut(pos);
+            defer _ = context.visited_cells.remove(pos);
+            if (res.found_existing) return error.CyclicalReference;
 
-                const _cell = context.sheet.text_cells.getPtr(pos) orelse return "";
-                if (_cell.isError()) {
-                    _cell.text.clearRetainingCapacity();
-                    const strings = if (_cell.strings) |strings| strings.items() else "";
-                    try _cell.ast.stringEval(context.sheet.allocator, context, strings, &_cell.text);
-                    _cell.unsetError();
-                }
-
-                return _cell.text.items();
+            const cell = context.sheet.text_cells.getPtr(pos) orelse return "";
+            if (cell.isError()) {
+                cell.text.clearRetainingCapacity();
+                const strings = if (cell.strings) |strings| strings.items() else "";
+                try cell.ast.stringEval(context.sheet.allocator, context, strings, &cell.text);
+                cell.unsetError();
             }
-        };
 
+            return cell.text.items();
+        }
+    };
+
+    pub fn eval(cell: *TextCell, sheet: *Sheet) Allocator.Error!void {
         // Only heavily nested cell references will heap allocate
         var sfa = std.heap.stackFallback(4096, sheet.allocator);
-        var context = Context{
+        var context = EvalContext{
             .sheet = sheet,
-            .visited_cells = Context.Map.init(sfa.get()),
+            .visited_cells = EvalContext.Map.init(sfa.get()),
         };
         defer context.visited_cells.deinit();
         errdefer cell.setError();
@@ -926,10 +905,6 @@ pub const TextCell = struct {
             },
         };
         cell.unsetError();
-    }
-
-    pub fn isEmpty(cell: TextCell) bool {
-        return cell.ast.nodes.len == 0;
     }
 
     pub fn format(
@@ -973,10 +948,6 @@ pub const Cell = struct {
         cell.* = undefined;
     }
 
-    pub fn isEmpty(cell: Cell) bool {
-        return cell.ast.nodes.len == 0;
-    }
-
     pub fn isError(cell: Cell) bool {
         const bits: u64 = @bitCast(cell.num);
         return bits == err_bits;
@@ -986,37 +957,36 @@ pub const Cell = struct {
         cell.num = err;
     }
 
+    const EvalContext = struct {
+        sheet: *const Sheet,
+        /// Set containing cell positions that have already been visited during
+        /// an evaluation. Used for detecting cyclical references.
+        visited_cells: Map,
+
+        const Map = std.HashMap(Position, void, PositionContext, 80);
+        const EvalError = error{CyclicalReference} || Ast.EvalError || Allocator.Error;
+
+        pub fn evalCell(context: *EvalContext, pos: Position) EvalError!?f64 {
+            // Check for cyclical references
+            const res = try context.visited_cells.getOrPut(pos);
+            if (res.found_existing) return error.CyclicalReference;
+            defer _ = context.visited_cells.removeByPtr(res.key_ptr);
+
+            const cell = context.sheet.cells.getPtr(pos) orelse return null;
+            return cell.getValue() orelse {
+                errdefer cell.num = err;
+                cell.num = try cell.ast.eval(context);
+                return cell.num;
+            };
+        }
+    };
+
     pub fn eval(cell: *Cell, sheet: *Sheet) Allocator.Error!void {
-        const Context = struct {
-            sheet: *const Sheet,
-            visited_cells: Map,
-
-            const Map = std.HashMap(Position, void, PositionContext, 80);
-            const EvalError = error{CyclicalReference} || Ast.EvalError || Allocator.Error;
-
-            pub fn evalCell(context: *@This(), pos: Position) EvalError!?f64 {
-                // Check for cyclical references
-                const res = try context.visited_cells.getOrPut(pos);
-                defer _ = context.visited_cells.remove(pos);
-                if (res.found_existing) return error.CyclicalReference;
-
-                const _cell = context.sheet.cells.getPtr(pos) orelse return null;
-                switch (_cell.getValue()) {
-                    .num => |num| return num,
-                    else => {
-                        errdefer _cell.num = err;
-                        _cell.num = try _cell.ast.eval(context);
-                        return _cell.num;
-                    },
-                }
-            }
-        };
-
         // Only heavily nested cell references will heap allocate
         var sfa = std.heap.stackFallback(4096, sheet.allocator);
-        var context = Context{
+        var context = EvalContext{
             .sheet = sheet,
-            .visited_cells = Context.Map.init(sfa.get()),
+            .visited_cells = EvalContext.Map.init(sfa.get()),
         };
         defer context.visited_cells.deinit();
 
@@ -1029,16 +999,8 @@ pub const Cell = struct {
         };
     }
 
-    pub const Value = union(enum) {
-        none,
-        err,
-        num: f64,
-    };
-
-    pub inline fn getValue(cell: Cell) Value {
-        if (cell.isEmpty()) return .none;
-        if (cell.isError()) return .err;
-        return .{ .num = cell.num };
+    pub inline fn getValue(cell: Cell) ?f64 {
+        return if (cell.isError()) null else cell.num;
     }
 
     pub fn format(
@@ -1064,7 +1026,12 @@ pub fn getColumn(sheet: Sheet, index: u16) Column {
     return sheet.columns.get(index) orelse Column{};
 }
 
-pub fn widthNeededForColumn(sheet: Sheet, column_index: u16, precision: u16, max_width: u16) u16 {
+pub fn widthNeededForColumn(
+    sheet: Sheet,
+    column_index: u16,
+    precision: u16,
+    max_width: u16,
+) u16 {
     var width: u16 = Column.default_width;
 
     for (sheet.text_cells.keys(), sheet.text_cells.values()) |k, v| {
@@ -1092,6 +1059,29 @@ pub fn widthNeededForColumn(sheet: Sheet, column_index: u16, precision: u16, max
 
     return width;
 }
+
+const ArrayPositionContext = struct {
+    pub fn eql(_: ArrayPositionContext, p1: Position, p2: Position, _: usize) bool {
+        return p1.y == p2.y and p1.x == p2.x;
+    }
+
+    pub fn hash(_: ArrayPositionContext, pos: Position) u32 {
+        return pos.hash();
+    }
+};
+
+/// std.HashMap and std.ArrayHashMap require slightly different contexts.
+const PositionContext = struct {
+    pub fn eql(_: PositionContext, p1: Position, p2: Position) bool {
+        return p1.y == p2.y and p1.x == p2.x;
+    }
+
+    pub fn hash(_: PositionContext, pos: Position) u64 {
+        return pos.hash();
+    }
+};
+
+// Tests //////////////////////////////////////////////////////////////////////////////////////////
 
 test "Sheet basics" {
     const t = std.testing;

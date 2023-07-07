@@ -16,11 +16,9 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 pub const Node = Parser.Node;
-
-const NodeList = MultiArrayList(Node);
 pub const ParseError = Parser.ParseError;
 
-nodes: NodeList = .{},
+nodes: MultiArrayList(Node) = .{},
 
 const Self = @This();
 
@@ -44,10 +42,10 @@ pub fn dupeStrings(
     var nstrings: u32 = 0;
     const len = blk: {
         var len: u32 = 0;
-        for (slice.items(.tags), slice.items(.data)) |tag, data| {
+        for (slice.items(.tags), 0..) |tag, i| {
             switch (tag) {
                 .string_literal => {
-                    const str = data.string_literal;
+                    const str = slice.items(.data)[i].string_literal;
                     len += str.end - str.start;
                     nstrings += 1;
                 },
@@ -133,7 +131,7 @@ pub fn deinit(ast: *Self, allocator: Allocator) void {
 }
 
 pub const Slice = struct {
-    nodes: NodeList.Slice,
+    nodes: MultiArrayList(Node).Slice,
 
     pub fn toAst(ast: *Slice) Self {
         return .{
