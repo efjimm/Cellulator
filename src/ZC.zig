@@ -1020,7 +1020,10 @@ pub fn loadCmd(self: *Self, filepath: []const u8) !void {
     if (filepath.len == 0) return error.EmptyFileName;
 
     self.clearSheet(&self.sheet) catch |err| switch (err) {
-        error.OutOfMemory => self.setStatusMessage(.err, "Out of memory!", .{}),
+        error.OutOfMemory => {
+            self.setStatusMessage(.err, "Out of memory!", .{});
+            return;
+        },
     };
     self.tui.update.cells = true;
 
@@ -1063,7 +1066,6 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
             .delete_text_cell,
             .set_column_width,
             .set_column_precision,
-            .group_end,
             => {},
         }
     }
@@ -1086,7 +1088,6 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
             .delete_text_cell,
             .set_column_width,
             .set_column_precision,
-            .group_end,
             => {},
         }
     }
@@ -1095,6 +1096,7 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
     sheet.redos.len = 0;
     sheet.cells.clearRetainingCapacity();
     sheet.text_cells.clearRetainingCapacity();
+    sheet.undo_end_markers.clearRetainingCapacity();
 }
 
 pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
