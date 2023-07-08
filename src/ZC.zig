@@ -11,6 +11,7 @@ const wcWidth = @import("wcwidth").wcWidth;
 const SizedArrayListUnmanaged = @import("sized_array_list.zig").SizedArrayListUnmanaged;
 const GapBuffer = @import("GapBuffer.zig");
 const Command = @import("Command.zig");
+const Position = @import("Position.zig");
 
 const input = @import("input.zig");
 const Action = input.Action;
@@ -19,7 +20,6 @@ const KeyMap = input.KeyMap;
 const MapType = input.MapType;
 const CommandMapType = input.CommandMapType;
 
-const Position = Sheet.Position;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const log = std.log.scoped(.zc);

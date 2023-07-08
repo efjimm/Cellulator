@@ -3,11 +3,11 @@ const spoon = @import("spoon");
 const utils = @import("utils.zig");
 const ZC = @import("ZC.zig");
 const Sheet = @import("Sheet.zig");
+const Position = @import("Position.zig");
 const wcWidth = @import("wcwidth").wcWidth;
 const assert = std.debug.assert;
 const log = std.log.scoped(.tui);
 
-const Position = Sheet.Position;
 const Term = spoon.Term;
 
 term: Term,

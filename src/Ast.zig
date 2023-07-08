@@ -2,7 +2,7 @@
 //! errors. Contains a `MultiArrayList` of `Node`s that is sorted in reverse topological order.
 
 const std = @import("std");
-const Position = @import("Sheet.zig").Position;
+const Position = @import("Position.zig");
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 const HeaderList = @import("header_list.zig").HeaderList;
 const SizedArrayListUnmanaged = @import("sized_array_list.zig").SizedArrayListUnmanaged;
