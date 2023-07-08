@@ -592,7 +592,10 @@ fn doCommandInsertMode(self: *Self, action: CommandAction, keys: []const u8) !vo
         },
         .history_next => self.commandHistoryNext(),
         .history_prev => self.commandHistoryPrev(),
-        .backspace => try self.command.deleteBackwards(self.allocator, 1),
+        .backspace => {
+            const len = text.prevCharacter(self.command, self.command.cursor, 1);
+            try self.command.deleteBackwards(self.allocator, len);
+        },
         .submit_command => self.submitCommand(),
         .enter_normal_mode => self.setMode(.command_normal),
         .enter_select_mode => self.setMode(.select),
