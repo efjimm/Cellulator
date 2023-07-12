@@ -11,8 +11,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const spoon = b.dependency("spoon", .{}).module("spoon");
-    const wcwidth = b.dependency("wcwidth", .{}).module("wcwidth");
+    const spoon = b.dependency("spoon", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("spoon");
+    const wcwidth = b.dependency("wcwidth", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("wcwidth");
     exe.addModule("spoon", spoon);
     exe.addModule("wcwidth", wcwidth);
 
