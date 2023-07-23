@@ -130,6 +130,34 @@ pub fn deinit(ast: *Self, allocator: Allocator) void {
     ast.* = .{};
 }
 
+fn ContextStringEvalError(comptime Context: type) type {
+    if (Context == void) return StringEvalError;
+
+    const C = if (@typeInfo(Context) == .Pointer)
+        std.meta.Child(Context)
+    else
+        Context;
+
+    const func = @field(C, "evalTextCell");
+    const info = @typeInfo(@TypeOf(func));
+    const ret_info = @typeInfo(info.Fn.return_type.?);
+    return StringEvalError || ret_info.ErrorUnion.error_set;
+}
+
+fn ContextEvalError(comptime Context: type) type {
+    if (Context == void) return EvalError;
+
+    const C = if (@typeInfo(Context) == .Pointer)
+        std.meta.Child(Context)
+    else
+        Context;
+
+    const func = @field(C, "evalCell");
+    const info = @typeInfo(@TypeOf(func));
+    const ret_info = @typeInfo(info.Fn.return_type.?);
+    return EvalError || ret_info.ErrorUnion.error_set;
+}
+
 pub const Slice = struct {
     nodes: MultiArrayList(Node).Slice,
 
@@ -472,7 +500,11 @@ pub const Slice = struct {
         };
     }
 
-    pub fn evalNode(ast: Slice, index: u32, context: anytype) !f64 {
+    pub fn evalNode(
+        ast: Slice,
+        index: u32,
+        context: anytype,
+    ) ContextEvalError(@TypeOf(context))!f64 {
         const node = ast.nodes.get(index);
 
         return switch (node) {
@@ -514,6 +546,11 @@ pub const Slice = struct {
         };
     }
 
+    const BufRange = struct {
+        start: u32,
+        end: u32,
+    };
+
     pub fn stringEvalNode(
         ast: Slice,
         allocator: Allocator,
@@ -521,10 +558,7 @@ pub const Slice = struct {
         context: anytype,
         strings: []const u8,
         buffer: *SizedArrayListUnmanaged(u8, u32),
-    ) !struct {
-        start: u32,
-        end: u32,
-    } {
+    ) ContextStringEvalError(@TypeOf(context))!BufRange {
         const tag = ast.nodes.items(.tags)[index];
         switch (tag) {
             .string_literal => {

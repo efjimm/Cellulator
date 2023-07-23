@@ -73,6 +73,6 @@ pub fn log(
 }
 
 // Reference all tests in other modules
-comptime {
+test {
     std.testing.refAllDeclsRecursive(ZC);
 }
