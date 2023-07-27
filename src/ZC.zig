@@ -1512,7 +1512,7 @@ pub fn cursorToLastCell(self: *Self) void {
     }
     for (self.sheet.text_cells.keys()) |pos| {
         if (pos.y > self.cursor.y) break;
-        new_pos = pos;
+        if (pos.y == new_pos.y and pos.x > new_pos.x) new_pos = pos;
     }
     self.setCursor(new_pos);
 }
