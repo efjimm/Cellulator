@@ -64,6 +64,16 @@ pub fn indexOfPos(t: anytype, pos: u32, needle: []const @TypeOf(t).ElementType) 
     return null;
 }
 
+pub fn indexOfPosScalar(t: anytype, pos: u32, needle: @TypeOf(t).ElementType) ?u32 {
+    const len = t.length();
+    assert(pos < len);
+    var i = pos;
+    return while (i < len) : (i += 1) {
+        if (t.get(i) == needle) break i;
+    } else null;
+}
+
+/// Returns the index of the first instance of `needle` before `pos` in `t`.
 pub fn lastIndexOfPos(t: anytype, pos: u32, needle: []const @TypeOf(t).ElementType) ?u32 {
     const len = t.length();
     const needle_len: u32 = @intCast(needle.len);
@@ -74,6 +84,15 @@ pub fn lastIndexOfPos(t: anytype, pos: u32, needle: []const @TypeOf(t).ElementTy
     return while (i > 0) {
         i -= 1;
         if (containsAt(t, i, needle)) break i;
+    } else null;
+}
+
+pub fn lastIndexOfPosScalar(t: anytype, pos: u32, needle: @TypeOf(t).ElementType) ?u32 {
+    assert(pos <= t.length());
+    var i = pos;
+    return while (i > 0) {
+        i -= 1;
+        if (t.get(i) == needle) break i;
     } else null;
 }
 

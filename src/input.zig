@@ -5,6 +5,8 @@ const Motion = @import("text.zig").Motion;
 const critbit = @import("critbit.zig");
 const inputParser = @import("spoon").inputParser;
 
+const assert = std.debug.assert;
+
 pub fn createKeymaps(allocator: Allocator) !struct {
     sheet_keys: KeyMap(Action, MapType),
     command_keys: KeyMap(CommandAction, CommandMapType),
@@ -121,8 +123,53 @@ pub const Action = union(enum) {
     swap_anchor,
 };
 
+comptime {
+    assert(@sizeOf(CommandAction) <= 8);
+}
+
 pub const CommandAction = union(enum(u6)) {
-    submit_command = 26,
+    // Motion tagged union duplicated to reduce memory usage
+
+    motion_normal_word_inside,
+    motion_long_word_inside,
+    motion_normal_word_around,
+    motion_long_word_around,
+
+    /// Absolutely cursed - these fields store two UCS codepoints. This is done to save one byte.
+    /// Storing them as two UTF-8 codepoints would require 8 bytes. Storing them as two u21 values
+    /// would cause each one to get padded to 4 bytes, using 8 bytes total.
+    motion_inside_delimiters: [7]u8 align(4),
+    motion_around_delimiters: [7]u8 align(4),
+
+    motion_inside_delimiters_scalar: [2]u8,
+    motion_around_delimiters_scalar: [2]u8,
+    motion_inside_single_delimiter_scalar: u8,
+    motion_around_single_delimiter_scalar: u8,
+
+    motion_inside_single_delimiter: u21,
+    motion_around_single_delimiter: u21,
+    motion_to_forwards: u21,
+    motion_to_backwards: u21,
+    motion_until_forwards: u21,
+    motion_until_backwards: u21,
+
+    motion_normal_word_start_next,
+    motion_normal_word_start_prev,
+    motion_normal_word_end_next,
+    motion_normal_word_end_prev,
+    motion_long_word_start_next,
+    motion_long_word_start_prev,
+    motion_long_word_end_next,
+    motion_long_word_end_prev,
+    motion_char_next,
+    motion_char_prev,
+    motion_line,
+    motion_eol,
+    motion_bol,
+
+    // End of duplication
+
+    submit_command,
     enter_normal_mode,
 
     enter_select_mode,
@@ -154,56 +201,25 @@ pub const CommandAction = union(enum(u6)) {
     zero,
     count: u4,
 
-    // Motion tagged union duplicated to reduce memory usage
-    motion_normal_word_inside = 0,
-    motion_long_word_inside = 1,
-    motion_normal_word_around = 2,
-    motion_long_word_around = 3,
-
-    /// Absolutely cursed - these fields store two UCS codepoints. This is done to save one byte.
-    /// Storing them as two UTF-8 codepoints would require 8 bytes. Storing them as two u21 values
-    /// would cause each one to get padded to 4 bytes, using 8 bytes total.
-    motion_inside_delimiters: [7]u8 align(4) = 4,
-    motion_around_delimiters: [7]u8 align(4) = 5,
-
-    motion_inside_single_delimiter: u21 = 6,
-    motion_around_single_delimiter: u21 = 7,
-    motion_to_forwards: u21 = 8,
-    motion_to_backwards: u21 = 9,
-    motion_until_forwards: u21 = 10,
-    motion_until_backwards: u21 = 11,
-
-    motion_normal_word_start_next = 12,
-    motion_normal_word_start_prev = 13,
-    motion_normal_word_end_next = 14,
-    motion_normal_word_end_prev = 15,
-    motion_long_word_start_next = 16,
-    motion_long_word_start_prev = 17,
-    motion_long_word_end_next = 18,
-    motion_long_word_end_prev = 19,
-    motion_char_next = 20,
-    motion_char_prev = 21,
-    motion_line = 22,
-    motion_eol = 23,
-    motion_bol = 24,
-
     /// Any inputs that aren't a mapping get passed as this. Its usage depends on the mode. For
     /// example, in insert mode the inputted text is passed along with this action if it does
     /// not correspond to another action.
     none,
 
     pub fn isMotion(action: CommandAction) bool {
-        return @intFromEnum(action) <= 24;
+        return @intFromEnum(action) <= @intFromEnum(CommandAction.motion_bol);
     }
 
     pub fn isMotionTag(tag: std.meta.Tag(CommandAction)) bool {
-        return @intFromEnum(tag) <= 24;
+        return @intFromEnum(tag) <= @intFromEnum(CommandAction.motion_bol);
     }
 
     // Cursed function that converts a CommandAction to a Motion.
     pub fn toMotion(action: CommandAction) Motion {
         switch (action) {
-            inline .motion_around_delimiters, .motion_inside_delimiters => |buf, action_tag| {
+            inline .motion_around_delimiters,
+            .motion_inside_delimiters,
+            => |buf, action_tag| {
                 const b align(4) = buf; // `buf` is not aligned for some reason, so copy it
                 const cps align(4) = utils.unpackDoubleCp(&b);
                 const tag: std.meta.Tag(Motion) = @enumFromInt(@intFromEnum(action_tag));
@@ -211,6 +227,12 @@ pub const CommandAction = union(enum(u6)) {
                     .left = cps[0],
                     .right = cps[1],
                 });
+            },
+            inline .motion_inside_single_delimiter_scalar,
+            .motion_around_single_delimiter_scalar,
+            => |c, action_tag| {
+                const tag: std.meta.Tag(Motion) = @enumFromInt(@intFromEnum(action_tag));
+                return @unionInit(Motion, @tagName(tag), c);
             },
             else => {},
         }
@@ -223,7 +245,9 @@ pub const CommandAction = union(enum(u6)) {
                     if (comptime (@intFromEnum(t) == @intFromEnum(action_tag) and
                         isMotionTag(action_tag) and
                         action_tag != .motion_inside_delimiters and
-                        action_tag != .motion_around_delimiters))
+                        action_tag != .motion_around_delimiters and
+                        action_tag != .motion_inside_single_delimiter_scalar and
+                        action_tag != .motion_around_single_delimiter_scalar))
                     {
                         return @unionInit(Motion, @tagName(t), payload);
                     }
@@ -533,28 +557,28 @@ const command_keys = [_]CommandKeyMaps{
             .{ "aW", .motion_long_word_around },
             .{ "iw", .motion_normal_word_inside },
             .{ "iW", .motion_long_word_inside },
-            .{ "a(", .{ .motion_around_delimiters = utils.packDoubleCp('(', ')') } },
-            .{ "i(", .{ .motion_inside_delimiters = utils.packDoubleCp('(', ')') } },
-            .{ "a)", .{ .motion_around_delimiters = utils.packDoubleCp('(', ')') } },
-            .{ "i)", .{ .motion_inside_delimiters = utils.packDoubleCp('(', ')') } },
-            .{ "a[", .{ .motion_around_delimiters = utils.packDoubleCp('[', ']') } },
-            .{ "i[", .{ .motion_inside_delimiters = utils.packDoubleCp('[', ']') } },
-            .{ "a]", .{ .motion_around_delimiters = utils.packDoubleCp('[', ']') } },
-            .{ "i]", .{ .motion_inside_delimiters = utils.packDoubleCp('[', ']') } },
-            .{ "i{", .{ .motion_inside_delimiters = utils.packDoubleCp('{', '}') } },
-            .{ "a{", .{ .motion_around_delimiters = utils.packDoubleCp('{', '}') } },
-            .{ "i}", .{ .motion_inside_delimiters = utils.packDoubleCp('{', '}') } },
-            .{ "a}", .{ .motion_around_delimiters = utils.packDoubleCp('{', '}') } },
-            .{ "i<<", .{ .motion_inside_delimiters = utils.packDoubleCp('<', '>') } },
-            .{ "a<<", .{ .motion_around_delimiters = utils.packDoubleCp('<', '>') } },
-            .{ "i>", .{ .motion_inside_delimiters = utils.packDoubleCp('<', '>') } },
-            .{ "a>", .{ .motion_around_delimiters = utils.packDoubleCp('<', '>') } },
-            .{ "i\"", .{ .motion_inside_single_delimiter = '"' } },
-            .{ "a\"", .{ .motion_around_single_delimiter = '"' } },
-            .{ "i'", .{ .motion_inside_single_delimiter = '\'' } },
-            .{ "a'", .{ .motion_around_single_delimiter = '\'' } },
-            .{ "i`", .{ .motion_inside_single_delimiter = '`' } },
-            .{ "a`", .{ .motion_around_single_delimiter = '`' } },
+            .{ "a(", .{ .motion_around_delimiters_scalar = .{ '(', ')' } } },
+            .{ "i(", .{ .motion_inside_delimiters_scalar = .{ '(', ')' } } },
+            .{ "a)", .{ .motion_around_delimiters_scalar = .{ '(', ')' } } },
+            .{ "i)", .{ .motion_inside_delimiters_scalar = .{ '(', ')' } } },
+            .{ "a[", .{ .motion_around_delimiters_scalar = .{ '[', ']' } } },
+            .{ "i[", .{ .motion_inside_delimiters_scalar = .{ '[', ']' } } },
+            .{ "a]", .{ .motion_around_delimiters_scalar = .{ '[', ']' } } },
+            .{ "i]", .{ .motion_inside_delimiters_scalar = .{ '[', ']' } } },
+            .{ "i{", .{ .motion_inside_delimiters_scalar = .{ '{', '}' } } },
+            .{ "a{", .{ .motion_around_delimiters_scalar = .{ '{', '}' } } },
+            .{ "i}", .{ .motion_inside_delimiters_scalar = .{ '{', '}' } } },
+            .{ "a}", .{ .motion_around_delimiters_scalar = .{ '{', '}' } } },
+            .{ "i<<", .{ .motion_inside_delimiters_scalar = .{ '<', '>' } } },
+            .{ "a<<", .{ .motion_around_delimiters_scalar = .{ '<', '>' } } },
+            .{ "i>", .{ .motion_inside_delimiters_scalar = .{ '<', '>' } } },
+            .{ "a>", .{ .motion_around_delimiters_scalar = .{ '<', '>' } } },
+            .{ "i\"", .{ .motion_inside_single_delimiter_scalar = '"' } },
+            .{ "a\"", .{ .motion_around_single_delimiter_scalar = '"' } },
+            .{ "i'", .{ .motion_inside_single_delimiter_scalar = '\'' } },
+            .{ "a'", .{ .motion_around_single_delimiter_scalar = '\'' } },
+            .{ "i`", .{ .motion_inside_single_delimiter_scalar = '`' } },
+            .{ "a`", .{ .motion_around_single_delimiter_scalar = '`' } },
         },
     },
     .{

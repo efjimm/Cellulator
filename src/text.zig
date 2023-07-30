@@ -91,34 +91,38 @@ pub const Range = struct {
 };
 
 pub const Motion = union(enum(u8)) {
-    normal_word_inside = 0,
-    long_word_inside = 1,
-    normal_word_around = 2,
-    long_word_around = 3,
+    normal_word_inside,
+    long_word_inside,
+    normal_word_around,
+    long_word_around,
 
-    inside_delimiters: Delimiters = 4,
-    around_delimiters: Delimiters = 5,
-    inside_single_delimiter: u21 = 6,
-    around_single_delimiter: u21 = 7,
+    inside_delimiters: Delimiters,
+    around_delimiters: Delimiters,
+    inside_delimiters_scalar: [2]u8,
+    around_delimiters_scalar: [2]u8,
+    inside_single_delimiter_scalar: u8,
+    around_single_delimiter_scalar: u8,
+    inside_single_delimiter: u21,
+    around_single_delimiter: u21,
 
-    to_forwards: u21 = 8,
-    to_backwards: u21 = 9,
-    until_forwards: u21 = 10,
-    until_backwards: u21 = 11,
+    to_forwards: u21,
+    to_backwards: u21,
+    until_forwards: u21,
+    until_backwards: u21,
 
-    normal_word_start_next = 12,
-    normal_word_start_prev = 13,
-    normal_word_end_next = 14,
-    normal_word_end_prev = 15,
-    long_word_start_next = 16,
-    long_word_start_prev = 17,
-    long_word_end_next = 18,
-    long_word_end_prev = 19,
-    char_next = 20,
-    char_prev = 21,
-    line = 22,
-    eol = 23,
-    bol = 24,
+    normal_word_start_next,
+    normal_word_start_prev,
+    normal_word_end_next,
+    normal_word_end_prev,
+    long_word_start_next,
+    long_word_start_prev,
+    long_word_end_next,
+    long_word_end_prev,
+    char_next,
+    char_prev,
+    line,
+    eol,
+    bol,
 
     to_forwards_utf8: []const u8,
     to_backwards_utf8: []const u8,
@@ -192,8 +196,12 @@ pub const Motion = union(enum(u8)) {
 
             .inside_delimiters => |d| insideDelimitersCp(buf, d.left, d.right, pos),
             .around_delimiters => |d| aroundDelimitersCp(buf, d.left, d.right, pos),
+            .inside_delimiters_scalar => |c| insideDelimitersScalar(buf, c[0], c[1], pos),
+            .around_delimiters_scalar => |c| aroundDelimitersScalar(buf, c[0], c[1], pos),
             .inside_single_delimiter => |cp| insideDelimitersCp(buf, cp, cp, pos),
             .around_single_delimiter => |cp| aroundDelimitersCp(buf, cp, cp, pos),
+            .inside_single_delimiter_scalar => |c| insideSingleDelimiterScalar(buf, c, pos),
+            .around_single_delimiter_scalar => |c| aroundSingleDelimiterScalar(buf, c, pos),
 
             .to_forwards => |cp| .{
                 .start = pos,
@@ -460,6 +468,97 @@ pub const Motion = union(enum(u8)) {
                 end += 1;
             }
         }
+
+        return .{
+            .start = start,
+            .end = end,
+        };
+    }
+
+    fn insideDelimitersScalar(buf: anytype, left: u8, right: u8, pos: u32) Range {
+        const range = aroundDelimitersScalar(buf, left, right, pos);
+        return if (range.start == range.end)
+            range
+        else
+            .{
+                .start = range.start + nextCodepoint(buf, range.start),
+                .end = range.end - prevCodepoint(buf, range.end),
+            };
+    }
+
+    fn aroundDelimitersScalar(buf: anytype, left: u8, right: u8, pos: u32) Range {
+        const len = buf.length();
+        if (len == 0) return .{ .start = 0, .end = 0 };
+        assert(pos < len);
+
+        const start = blk: {
+            if (buf.get(pos) == left) break :blk pos;
+            var i = pos;
+            var depth: u32 = 0;
+            while (i > 0) {
+                i -= 1;
+                const c = buf.get(i);
+                if (c == left) {
+                    if (depth == 0) break;
+                    depth -= 1;
+                } else if (c == right) {
+                    depth += 1;
+                }
+            } else return .{ .start = pos, .end = pos };
+
+            break :blk i;
+        };
+
+        const end = 1 + blk: {
+            if (buf.get(pos) == right) break :blk pos;
+            var i = pos + 1;
+            var depth: u32 = 0;
+            while (i < len) : (i += 1) {
+                const c = buf.get(i);
+                if (c == right) {
+                    if (depth == 0) break;
+                    depth -= 1;
+                } else if (c == left) {
+                    depth += 1;
+                }
+            } else return .{ .start = pos, .end = pos };
+
+            break :blk i;
+        };
+
+        return .{
+            .start = start,
+            .end = end,
+        };
+    }
+
+    fn insideSingleDelimiterScalar(buf: anytype, delim: u8, pos: u32) Range {
+        const range = aroundSingleDelimiterScalar(buf, delim, pos);
+        return if (range.start == range.end)
+            range
+        else
+            .{
+                .start = range.start + nextCodepoint(buf, range.start),
+                .end = range.end - prevCodepoint(buf, range.end),
+            };
+    }
+
+    fn aroundSingleDelimiterScalar(buf: anytype, delim: u8, pos: u32) Range {
+        const len = buf.length();
+        if (len == 0) return .{ .start = 0, .end = 0 };
+
+        // This is ambiguous
+        if (buf.get(pos) == delim) return .{ .start = pos, .end = pos };
+
+        const start = utils.lastIndexOfPosScalar(buf, pos, delim) orelse return .{
+            .start = pos,
+            .end = pos,
+        };
+
+        const end = 1 + (utils.indexOfPosScalar(buf, pos, delim) orelse return .{
+            .start = pos,
+            .end = pos,
+        });
 
         return .{
             .start = start,
