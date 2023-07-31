@@ -36,7 +36,15 @@ pub fn deinit(self: *Self, allocator: Allocator) void {
 /// Pushes the current command buffer to the history list and returns a slice
 /// of its contents.
 pub fn submit(self: *Self, allocator: Allocator) Allocator.Error![]const u8 {
+    defer self.resetBuffer();
     try self.history_indices.ensureUnusedCapacity(allocator, 1);
+
+    if (self.cow) {
+        const slice = self.history_indices.items[self.index];
+        self.history_indices.appendAssumeCapacity(slice);
+        return self.history_buf.items[slice.start_index..][0..slice.len];
+    }
+
     try self.history_buf.ensureUnusedCapacity(allocator, self.buffer.len);
 
     const start_index = self.history_buf.items.len;
@@ -46,7 +54,6 @@ pub fn submit(self: *Self, allocator: Allocator) Allocator.Error![]const u8 {
         .len = self.history_buf.items.len - start_index,
     });
 
-    self.resetBuffer();
     return self.history_buf.items[start_index..self.history_buf.items.len];
 }
 
