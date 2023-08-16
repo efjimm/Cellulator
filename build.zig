@@ -15,10 +15,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     }).module("spoon");
-    const wcwidth = b.dependency("wcwidth", .{
-        .target = target,
-        .optimize = optimize,
-    }).module("wcwidth");
+    const wcwidth = spoon.dependencies.get("wcwidth").?;
     exe.addModule("spoon", spoon);
     exe.addModule("wcwidth", wcwidth);
 
