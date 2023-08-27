@@ -33,6 +33,17 @@ pub fn parse(ast: *Self, allocator: Allocator, source: []const u8) ParseError!vo
     ast.nodes = parser.nodes;
 }
 
+pub fn parseExpr(ast: *Self, allocator: Allocator, source: []const u8) ParseError!void {
+    ast.nodes.len = 0;
+    const tokenizer = Tokenizer.init(source);
+
+    var parser = Parser.init(allocator, tokenizer, .{ .nodes = ast.nodes });
+    errdefer parser.deinit();
+    _ = try parser.parseExpression();
+
+    ast.nodes = parser.nodes;
+}
+
 pub fn dupeStrings(
     ast: *Self,
     allocator: Allocator,

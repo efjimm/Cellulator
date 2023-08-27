@@ -8,6 +8,13 @@ const assert = std.debug.assert;
 
 pub usingnamespace @import("buffer_utils.zig");
 
+pub fn dupeZ(comptime T: type, buf: anytype) [buf.len:0]T {
+    var ret: [buf.len:0]T = undefined;
+    @memcpy(&ret, &buf);
+    ret[ret.len] = 0;
+    return ret;
+}
+
 pub const CodepointBuilder = struct {
     buf: [4]u8 = undefined,
     desired_len: u3 = 0,

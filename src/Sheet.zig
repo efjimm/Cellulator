@@ -35,7 +35,7 @@ text_cells: TextCellMap = .{},
 
 /// Maps column indexes (0 - 65535) to `Column` structs containing info about that column.
 columns: std.AutoArrayHashMapUnmanaged(u16, Column) = .{},
-filepath: std.BoundedArray(u8, std.fs.MAX_PATH_BYTES) = .{},
+filepath: std.BoundedArray(u8, std.fs.MAX_PATH_BYTES) = .{}, // TODO: Heap allocate this
 
 /// If true, the next call to Sheet.update will re-evaluate all cells in the sheet.
 update_numbers: bool = false,
@@ -651,7 +651,16 @@ pub fn update(sheet: *Sheet, comptime cell_type: CellType) Allocator.Error!void 
 const CellType = enum { number, text };
 
 pub fn getFilePath(sheet: Sheet) []const u8 {
-    return sheet.filepath.slice();
+    return sheet.filepath.constSlice();
+}
+
+// TODO: Allow for renaming sheets.
+
+/// Returns the name of the sheet.
+/// Currently this is the basename of the filepath, with the extension
+/// stripped.
+pub fn getName(sheet: Sheet) []const u8 {
+    return std.fs.path.stem(sheet.getFilePath());
 }
 
 pub fn setFilePath(sheet: *Sheet, filepath: []const u8) void {
@@ -762,7 +771,7 @@ pub const Cell = struct {
     comptime {
         // Make sure our error value doesn't have the same bit pattern as the NaN values that Zig
         // uses.
-        assert(err_bits != std.math.nan_u64);
+        assert(err_bits != @as(u64, @bitCast(std.math.nan(f64))));
         assert(err_bits != @as(u64, @bitCast(@as(f64, 0) / @as(f64, 0))));
         assert(err_bits != @as(u64, @bitCast(-std.math.inf(f64) + std.math.inf(f64))));
         assert(err_bits != @as(u64, @bitCast(std.math.inf(f64) * @as(f64, 0))));

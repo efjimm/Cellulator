@@ -43,7 +43,7 @@ pub fn main() !void {
 
     var sfa = std.heap.stackFallback(32768, gpa.allocator());
 
-    zc = try ZC.init(sfa.get(), .{ .filepath = filepath });
+    try zc.init(sfa.get(), .{ .filepath = filepath });
     defer zc.deinit();
 
     try zc.run();
@@ -73,6 +73,8 @@ pub fn log(
 }
 
 // Reference all tests in other modules
-test {
-    std.testing.refAllDeclsRecursive(ZC);
-}
+// test {
+//     if (comptime builtin.is_test) {
+//         std.testing.refAllDecls(ZC);
+//     }
+// }

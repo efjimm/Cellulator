@@ -12,6 +12,8 @@ const SizedArrayListUnmanaged = @import("sized_array_list.zig").SizedArrayListUn
 const GapBuffer = @import("GapBuffer.zig");
 const Command = @import("Command.zig");
 const Position = @import("Position.zig");
+const lua = @import("lua.zig");
+const Lua = @import("ziglua").Lua;
 
 const input = @import("input.zig");
 const Action = input.Action;
@@ -25,6 +27,8 @@ const assert = std.debug.assert;
 const log = std.log.scoped(.zc);
 
 const Self = @This();
+
+lua: Lua,
 
 running: bool = true,
 
@@ -126,7 +130,13 @@ pub const InitOptions = struct {
     ui: bool = true,
 };
 
-pub fn init(allocator: Allocator, options: InitOptions) !Self {
+/// Initialises via a pointer rather than returning an instance, as we need a
+/// stable pointer to a ZC instance.
+pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
+    errdefer zc.* = undefined;
+
+    zc.allocator = allocator;
+
     var ast_list = try std.ArrayListUnmanaged(Ast).initCapacity(allocator, 8);
     errdefer ast_list.deinit(allocator);
 
@@ -139,12 +149,19 @@ pub fn init(allocator: Allocator, options: InitOptions) !Self {
     var tui = try Tui.init();
     errdefer tui.deinit();
 
-    if (options.ui) {
-        try tui.term.uncook(.{});
-    }
+    if (options.ui) try tui.term.uncook(.{});
 
-    var ret = Self{
-        .sheet = Sheet.init(allocator),
+    var sheet = Sheet.init(allocator);
+    errdefer sheet.deinit();
+
+    try sheet.ensureTotalCapacity(128);
+
+    var lua_state = try lua.init(zc);
+    errdefer lua_state.deinit();
+
+    zc.* = Self{
+        .lua = lua_state,
+        .sheet = sheet,
         .tui = tui,
         .allocator = allocator,
         .asts = ast_list,
@@ -153,15 +170,33 @@ pub fn init(allocator: Allocator, options: InitOptions) !Self {
         .input_buf_sfa = std.heap.stackFallback(INPUT_BUF_LEN, allocator),
     };
 
-    try ret.sheet.ensureTotalCapacity(128);
+    zc.sourceLua() catch |err| log.err("Could not source init.lua: {}", .{err});
+
+    zc.emitEvent("Init", .{});
 
     if (options.filepath) |filepath| {
-        try ret.loadFile(&ret.sheet, filepath);
+        try zc.loadFile(&zc.sheet, filepath);
     }
 
     log.debug("Finished init", .{});
+    zc.emitEvent("Start", .{});
+}
 
-    return ret;
+pub fn sourceLua(self: *Self) !void {
+    var buf: [std.fs.MAX_PATH_BYTES + 1]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const allocator = fba.allocator();
+
+    const paths: []const []const u8 = if (std.os.getenv("XDG_CONFIG_HOME")) |path|
+        &.{ path, "cellulator/init.lua" }
+    else if (std.os.getenv("HOME")) |path|
+        &.{ path, ".config/cellulator/init.lua" }
+    else
+        return error.CouldNotDeterminePath;
+
+    const path = try std.fs.path.joinZ(allocator, paths);
+    log.debug("Sourcing lua file '{s}'", .{path});
+    try self.lua.doFile(path);
 }
 
 pub fn deinit(self: *Self) void {
@@ -169,6 +204,7 @@ pub fn deinit(self: *Self) void {
         ast.deinit(self.allocator);
     }
 
+    self.lua.deinit();
     self.command.deinit(self.allocator);
 
     self.input_buf.deinit(self.allocator);
@@ -179,6 +215,14 @@ pub fn deinit(self: *Self) void {
     self.sheet.deinit();
     self.tui.deinit();
     self.* = undefined;
+}
+
+/// Emits the given event, calling it's dispatcher with `args`.
+pub fn emitEvent(self: *Self, event: [:0]const u8, args: anytype) void {
+    log.debug("Emitting event '{s}' with {d} arguments", .{ event, args.len });
+    lua.emitEvent(&self.lua, event, args) catch |err| {
+        log.err("Lua runtime error: {}", .{err});
+    }; // TODO: notify of Lua errors
 }
 
 pub fn resetInputBuf(self: *Self) void {
@@ -202,12 +246,45 @@ pub fn run(self: *Self) !void {
     }
 }
 
+pub const ChangeCellOpts = struct {
+    emit_event: bool = true,
+    undo_opts: Sheet.UndoOpts = .{},
+};
+
+/// Sets the cell at `pos` to the expression represented by `ast`.
+pub fn setCell(self: *Self, pos: Position, ast: Ast, opts: ChangeCellOpts) !void {
+    try self.sheet.setCell(pos, ast, .{});
+    self.tui.update.cursor = true;
+    self.tui.update.cells = true;
+    if (opts.emit_event)
+        self.emitEvent("SetCell", .{pos});
+}
+
+/// Sets the cell at `pos` to the expression represented by `expr`.
+pub fn setCellString(self: *Self, pos: Position, expr: []const u8, opts: ChangeCellOpts) !void {
+    var ast = self.newAst();
+    errdefer self.delAstAssumeCapacity(ast);
+
+    try ast.parseExpr(self.allocator, expr);
+    try self.setCell(pos, ast, opts);
+}
+
+// TODO: merge this and `deleteCell`
+pub fn deleteCell2(self: *Self, pos: Position, opts: ChangeCellOpts) !void {
+    try self.sheet.deleteCell(.number, pos, opts.undo_opts);
+    self.tui.update.cursor = true;
+    self.tui.update.cells = true;
+    if (opts.emit_event)
+        self.emitEvent("DeleteCell", .{pos});
+}
+
 pub const StatusMessageType = enum {
     info,
     warn,
     err,
 };
 
+// TODO: Use std.log for this, and also output to file in debug mode
 pub fn setStatusMessage(
     self: *Self,
     t: StatusMessageType,
@@ -781,9 +858,17 @@ fn doVisualMode(self: *Self, action: Action) Allocator.Error!void {
     }
 }
 
+// pub fn doStatement(self: *Self, str: []const u8) !void {
+//     const ast = self.newAst();
+//     errdefer self.delAstAssumeCapacity(ast);
+
+//     try ast.parse(self.allocator, str);
+
+// }
+
 const ParseCommandError = Ast.ParseError || RunCommandError;
 
-fn parseCommand(self: *Self, str: []const u8) ParseCommandError!void {
+fn parseCommand(self: *Self, str: []const u8) !void {
     if (str.len == 0) return;
 
     switch (str[0]) {
@@ -801,10 +886,8 @@ fn parseCommand(self: *Self, str: []const u8) ParseCommandError!void {
             const pos = ast.nodes.items(.data)[op.lhs].cell;
             ast.splice(op.rhs);
 
-            try self.sheet.setCell(pos, ast, .{});
+            try self.setCell(pos, ast, .{});
             self.sheet.endUndoGroup();
-            self.tui.update.cursor = true;
-            self.tui.update.cells = true;
         },
         .label => |op| {
             const pos = ast.nodes.items(.data)[op.lhs].cell;
@@ -998,22 +1081,16 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
             };
 
             defer self.sheet.endUndoGroup();
-            self.tui.update.cells = true;
 
+            // TODO: pre-allocate
             var i: f64 = value;
             for (range.tl.y..@as(usize, range.br.y) + 1) |y| {
                 for (range.tl.x..@as(usize, range.br.x) + 1) |x| {
                     var ast = self.newAst();
+                    errdefer self.delAstAssumeCapacity(ast);
 
                     try ast.nodes.append(self.allocator, .{ .number = i });
-                    errdefer ast.deinit(self.allocator);
-
-                    try self.sheet.setCell(
-                        .{ .y = @intCast(y), .x = @intCast(x) },
-                        ast,
-                        .{},
-                    );
-
+                    try self.setCell(.{ .y = @intCast(y), .x = @intCast(x) }, ast, .{});
                     i += increment;
                 }
             }
@@ -1115,6 +1192,9 @@ pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
     };
     defer file.close();
 
+    sheet.setFilePath(filepath);
+    sheet.has_changes = false;
+
     var buf = std.io.bufferedReader(file.reader());
     const reader = buf.reader();
 
@@ -1145,9 +1225,9 @@ pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
         switch (root) {
             .assignment => {
                 const assignment = data[ast.rootNodeIndex()].assignment;
-                const pos = data[assignment.lhs].cell;
+                const pos: Position = data[assignment.lhs].cell;
                 ast.splice(assignment.rhs);
-                try sheet.setCell(pos, ast, .{});
+                try self.setCell(pos, ast, .{});
             },
             .label => {
                 const label = data[ast.rootNodeIndex()].label;
@@ -1164,9 +1244,6 @@ pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
             },
         }
     }
-
-    sheet.setFilePath(filepath);
-    sheet.has_changes = false;
 }
 
 pub const WriteFileOptions = struct {
@@ -1573,7 +1650,8 @@ pub fn cursorGotoCol(self: *Self) void {
 
 test "Sheet mode counts" {
     const t = std.testing;
-    var zc = try Self.init(t.allocator, .{ .ui = false });
+    var zc: Self = undefined;
+    try zc.init(t.allocator, .{ .ui = false });
     defer zc.deinit();
 
     try t.expectEqual(Mode.normal, zc.mode);
@@ -1584,7 +1662,8 @@ test "Motions normal mode" {
     const t = std.testing;
     const max = std.math.maxInt(u16);
 
-    var zc = try Self.init(t.allocator, .{ .ui = false });
+    var zc: Self = undefined;
+    try zc.init(t.allocator, .{ .ui = false });
     defer zc.deinit();
 
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
@@ -1786,7 +1865,8 @@ test "Motions visual mode" {
     const t = std.testing;
     const max = std.math.maxInt(u16);
 
-    var zc = try Self.init(t.allocator, .{ .ui = false });
+    var zc: Self = undefined;
+    try zc.init(t.allocator, .{ .ui = false });
     defer zc.deinit();
 
     zc.setMode(.visual);

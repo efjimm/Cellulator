@@ -16,6 +16,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }).module("spoon");
     const wcwidth = spoon.dependencies.get("wcwidth").?;
+    const ziglua_dep = b.dependency("ziglua", .{
+        .target = target,
+        .optimize = optimize,
+        .version = .lua_54,
+    });
+    exe.addModule("ziglua", ziglua_dep.module("ziglua"));
+    exe.linkLibrary(ziglua_dep.artifact("lua"));
     exe.addModule("spoon", spoon);
     exe.addModule("wcwidth", wcwidth);
 
@@ -45,6 +52,8 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(tests);
 
+    tests.addModule("ziglua", ziglua_dep.module("ziglua"));
+    tests.linkLibrary(ziglua_dep.artifact("lua"));
     tests.addModule("spoon", spoon);
     tests.addModule("wcwidth", wcwidth);
 

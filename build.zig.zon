@@ -10,5 +10,9 @@
             .url = "https://github.com/efjimm/zig-wcwidth/archive/d665dfbbf687900b0a3ed31879bb1e2a7f8b236d.tar.gz",
             .hash = "1220271f362ae1e02e524769a06a68a6cf4fe48218b82cae3823fb09940a537e61b1",
         },
+        .ziglua = .{
+            .url = "https://github.com/natecraddock/ziglua/archive/master.tar.gz",
+            .hash = "1220a6d76924a2336b1c8adaa1c40952806140101ebd0a4f0d9e2978d7ae48874b70",
+        },
     },
 }

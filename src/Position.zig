@@ -1,11 +1,26 @@
+// TODO: Use u32 for coordinates to increase the number of cells
 const std = @import("std");
 const assert = std.debug.assert;
+const Lua = @import("ziglua").Lua;
 
 const Position = @This();
 pub const MAX = std.math.maxInt(u16);
 
 x: u16 = 0,
 y: u16 = 0,
+
+/// Pushes the string representation of `pos` to the stack of the given Lua
+/// state. Also pushes a table containing the `x` and `y` values of `pos`.
+pub fn toLua(pos: Position, state: *Lua) !i32 {
+    try state.checkStack(3);
+    state.createTable(0, 2);
+    state.setMetatableRegistry("position");
+    state.pushInteger(pos.x);
+    state.setField(-2, "x");
+    state.pushInteger(pos.y);
+    state.setField(-2, "y");
+    return 1;
+}
 
 pub fn format(
     pos: Position,

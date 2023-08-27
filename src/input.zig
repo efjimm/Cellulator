@@ -23,6 +23,8 @@ pub fn createKeymaps(allocator: Allocator) !struct {
     };
 }
 
+/// Parses the raw terminal input in `bytes` into a readable format for keybindings, outputting
+/// the results to the given writer.
 pub fn parse(bytes: []const u8, writer: anytype) @TypeOf(writer).Error!void {
     var iter = inputParser(bytes);
 
