@@ -15,8 +15,29 @@ const Builtin = Parser.Builtin;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-pub const Node = Parser.Node;
 pub const ParseError = Parser.ParseError;
+
+pub const String = struct {
+    start: u32,
+    end: u32,
+};
+
+pub const Node = union(enum) {
+    number: f64,
+    column: u16,
+    cell: Position,
+    assignment: BinaryOperator,
+    label: BinaryOperator,
+    concat: BinaryOperator,
+    add: BinaryOperator,
+    sub: BinaryOperator,
+    mul: BinaryOperator,
+    div: BinaryOperator,
+    mod: BinaryOperator,
+    builtin: Builtin,
+    range: BinaryOperator,
+    string_literal: String,
+};
 
 nodes: MultiArrayList(Node) = .{},
 

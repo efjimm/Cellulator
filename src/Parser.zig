@@ -20,10 +20,8 @@ strings_len: u32 = 0,
 
 allocator: Allocator,
 
-pub const String = struct {
-    start: u32,
-    end: u32,
-};
+const String = @import("Ast.zig").String;
+const Node = @import("Ast.zig").Node;
 
 pub const BinaryOperator = struct {
     lhs: u32,
@@ -65,23 +63,6 @@ pub const ParseError = error{
     NumericBuiltinInStringContext,
     StringBuiltinInNumericContext,
 } || Allocator.Error;
-
-pub const Node = union(enum) {
-    number: f64,
-    column: u16,
-    cell: Position,
-    assignment: BinaryOperator,
-    label: BinaryOperator,
-    concat: BinaryOperator,
-    add: BinaryOperator,
-    sub: BinaryOperator,
-    mul: BinaryOperator,
-    div: BinaryOperator,
-    mod: BinaryOperator,
-    builtin: Builtin,
-    range: BinaryOperator,
-    string_literal: String,
-};
 
 const log = std.log.scoped(.parser);
 
