@@ -984,7 +984,7 @@ test "Functions on Ranges" {
         fn evalCell(context: @This(), pos: Position) !?f64 {
             const cell = context.sheet.getCellPtr(pos) orelse return null;
             try cell.eval(context.sheet, undefined);
-            return cell.num;
+            return cell.value.number;
         }
 
         fn testSheetExpr(expected: f64, expr: []const u8) !void {

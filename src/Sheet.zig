@@ -780,28 +780,34 @@ pub fn printTextCell(sheet: Sheet, pos: Position, writer: anytype) !void {
 }
 
 pub const Cell = struct {
-    num: f64 = err,
+    value: Value = .{ .err = error.Generic },
     ast: Ast = .{},
+
+    pub const Value = union(enum) {
+        number: f64,
+        string: [*:0]const u8,
+        err: Error,
+    };
+
+    pub const Error = error{Generic};
 
     /// (NaN payload)[https://anniecherkaev.com/the-secret-life-of-nan] to signify that an error
     /// has occured during evaluation.
-    const err: f64 = @bitCast(err_bits);
-    const err_bits: u64 = (0x7FF << 52) | 0b1010;
+    // const err: f64 = @bitCast(err_bits);
+    // const err_bits: u64 = (0x7FF << 52) | 0b1010;
 
-    comptime {
-        // Make sure our error value doesn't have the same bit pattern as the NaN values that Zig
-        // uses.
-        assert(err_bits != @as(u64, @bitCast(std.math.nan(f64))));
-        assert(err_bits != @as(u64, @bitCast(@as(f64, 0) / @as(f64, 0))));
-        assert(err_bits != @as(u64, @bitCast(-std.math.inf(f64) + std.math.inf(f64))));
-        assert(err_bits != @as(u64, @bitCast(std.math.inf(f64) * @as(f64, 0))));
-        assert(@sizeOf(Cell) <= 24);
-    }
+    // comptime {
+    //     // Make sure our error value doesn't have the same bit pattern as the NaN values that Zig
+    //     // uses.
+    //     assert(err_bits != @as(u64, @bitCast(std.math.nan(f64))));
+    //     assert(err_bits != @as(u64, @bitCast(@as(f64, 0) / @as(f64, 0))));
+    //     assert(err_bits != @as(u64, @bitCast(-std.math.inf(f64) + std.math.inf(f64))));
+    //     assert(err_bits != @as(u64, @bitCast(std.math.inf(f64) * @as(f64, 0))));
+    //     assert(@sizeOf(Cell) <= 24);
+    // }
 
     pub fn fromExpression(allocator: Allocator, expr: []const u8) !Cell {
-        return .{
-            .ast = try Ast.fromExpression(allocator, expr),
-        };
+        return .{ .ast = try Ast.fromExpression(allocator, expr) };
     }
 
     pub fn deinit(cell: *Cell, allocator: Allocator) void {
@@ -810,12 +816,11 @@ pub const Cell = struct {
     }
 
     pub fn isError(cell: Cell) bool {
-        const bits: u64 = @bitCast(cell.num);
-        return bits == err_bits;
+        return cell.value == .err;
     }
 
     pub fn setError(cell: *Cell) void {
-        cell.num = err;
+        cell.value = .{ .err = error.Generic };
     }
 
     const EvalContext = struct {
@@ -835,9 +840,9 @@ pub const Cell = struct {
 
             const cell = context.sheet.cells.getPtr(pos) orelse return null;
             return cell.getValue() orelse {
-                errdefer cell.num = err;
-                cell.num = try cell.ast.eval(context);
-                return cell.num;
+                errdefer cell.setError();
+                cell.value = .{ .number = try cell.ast.eval(context) };
+                return cell.value.number;
             };
         }
     };
@@ -851,17 +856,21 @@ pub const Cell = struct {
         };
         defer context.visited_cells.deinit();
 
-        cell.num = cell.ast.eval(&context) catch |e| switch (e) {
+        const num = cell.ast.eval(&context) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.NotEvaluable, error.CyclicalReference => {
-                cell.num = err;
+                cell.setError();
                 return;
             },
         };
+        cell.value = .{ .number = num };
     }
 
     pub inline fn getValue(cell: Cell) ?f64 {
-        return if (cell.isError()) null else cell.num;
+        return switch (cell.value) {
+            .number => |n| n,
+            else => null,
+        };
     }
 
     pub fn format(
@@ -909,7 +918,7 @@ pub fn widthNeededForColumn(
     for (sheet.cells.keys(), sheet.cells.values()) |k, v| {
         if (k.x != column_index) continue;
         buf.len = 0;
-        writer.print("{d:.[1]}", .{ v.num, precision }) catch unreachable;
+        writer.print("{d:.[1]}", .{ v.value.number, precision }) catch unreachable;
         // Numbers are all ASCII, so 1 byte = 1 column
         const len: u16 = @intCast(buf.len);
         if (len > width) {
