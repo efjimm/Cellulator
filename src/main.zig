@@ -73,8 +73,8 @@ pub fn log(
 }
 
 // Reference all tests in other modules
-// test {
-//     if (comptime builtin.is_test) {
-//         std.testing.refAllDecls(ZC);
-//     }
-// }
+test {
+    if (comptime builtin.is_test) {
+        std.testing.refAllDecls(ZC);
+    }
+}

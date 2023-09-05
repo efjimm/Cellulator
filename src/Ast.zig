@@ -66,10 +66,10 @@ pub fn parseExpr(ast: *Self, allocator: Allocator, source: []const u8) ParseErro
 }
 
 pub fn dupeStrings(
-    ast: *Self,
+    ast: Self,
     allocator: Allocator,
     source: []const u8,
-) Allocator.Error!?*HeaderList(u8, u32) {
+) Allocator.Error![]const u8 {
     const slice = ast.nodes.slice();
     var nstrings: u32 = 0;
     const len = blk: {
@@ -99,10 +99,10 @@ pub fn dupeStrings(
                 else => {},
             };
         }
-        return null;
+        return allocator.alloc(u8, 0);
     }
 
-    const list = try HeaderList(u8, u32).create(allocator, len);
+    var list = try std.ArrayListUnmanaged(u8).initCapacity(allocator, len);
 
     // Append contents of all string literals to the list, and update their `start` and `end`
     // indices to be into this list.
@@ -110,13 +110,13 @@ pub fn dupeStrings(
         .string_literal => {
             const str = &slice.items(.data)[i].string_literal;
             const bytes = source[str.start..str.end];
-            str.start = list.len;
+            str.start = @intCast(list.items.len);
             list.appendSliceAssumeCapacity(bytes);
-            str.end = list.len;
+            str.end = @intCast(list.items.len);
         },
         else => {},
     };
-    return list;
+    return list.toOwnedSlice(allocator);
 }
 
 pub fn fromSource(allocator: Allocator, source: []const u8) ParseError!Self {
@@ -983,7 +983,7 @@ test "Functions on Ranges" {
 
         fn evalCell(context: @This(), pos: Position) !?f64 {
             const cell = context.sheet.getCellPtr(pos) orelse return null;
-            try cell.eval(context.sheet);
+            try cell.eval(context.sheet, undefined);
             return cell.num;
         }
 
@@ -1136,19 +1136,19 @@ test "DupeStrings" {
         var ast = try fromSource(t.allocator, source);
         defer ast.deinit(t.allocator);
 
-        const strings = (try ast.dupeStrings(t.allocator, source)).?;
-        defer strings.destroy(t.allocator);
+        const strings = try ast.dupeStrings(t.allocator, source);
+        defer t.allocator.free(strings);
 
-        try t.expectEqualStrings("this is epicnicestring!", strings.items());
+        try t.expectEqualStrings("this is epicnicestring!", strings);
     }
 
-    {
-        const source = "label a0 = b0";
-        var ast = try fromSource(t.allocator, source);
-        defer ast.deinit(t.allocator);
+    // {
+    //     const source = "label a0 = b0";
+    //     var ast = try fromSource(t.allocator, source);
+    //     defer ast.deinit(t.allocator);
 
-        try t.expect(try ast.dupeStrings(t.allocator, source) == null);
-    }
+    //     try t.expect(try ast.dupeStrings(t.allocator, source) == null);
+    // }
 }
 
 test "Print" {

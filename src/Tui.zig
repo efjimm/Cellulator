@@ -159,9 +159,9 @@ pub fn renderStatus(
             try writer.print("{}", .{text_cell});
         }
         try rc.setStyle(.{ .fg = .white, .bg = .black });
-    } else if (zc.sheet.text_cells.get(zc.cursor)) |cell| {
+    } else if (zc.sheet.text_cells.get(zc.cursor)) |_| {
         try rc.setStyle(.{ .fg = .green, .bg = .black });
-        try writer.print("{}", .{cell});
+        try zc.sheet.printTextCell(zc.cursor, writer);
         try rc.setStyle(.{ .fg = .white, .bg = .black });
     }
     try writer.writeByte(']');

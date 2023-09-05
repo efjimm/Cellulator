@@ -893,9 +893,7 @@ fn parseCommand(self: *Self, str: []const u8) !void {
             const pos = ast.nodes.items(.data)[op.lhs].cell;
             ast.splice(op.rhs);
 
-            const strings = try ast.dupeStrings(self.allocator, str);
-            errdefer if (strings) |s| s.destroy(self.allocator);
-            try self.sheet.setTextCell(pos, strings, ast, .{});
+            try self.sheet.setTextCell(pos, str, ast, .{});
             self.sheet.endUndoGroup();
             self.tui.update.cursor = true;
             self.tui.update.cells = true;
@@ -1127,8 +1125,10 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
     for (sheet.text_cells.values()) |*cell| {
         self.delAstAssumeCapacity(cell.ast);
         cell.text.deinit(self.allocator);
-        if (cell.strings) |strings| strings.destroy(self.allocator);
     }
+
+    var strings_iter = sheet.strings.valueIterator();
+    while (strings_iter.next()) |string_ptr| sheet.allocator.free(string_ptr.*);
 
     const undo_slice = sheet.undos.slice();
     for (undo_slice.items(.tags), 0..) |tag, i| {
@@ -1141,7 +1141,7 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
             .set_text_cell => {
                 const index = undo_slice.items(.data)[i].set_text_cell.index;
                 const t = sheet.undo_text_asts.get(index);
-                if (t.strings) |strings| strings.destroy(self.allocator);
+                sheet.allocator.free(t.strings);
                 self.delAstAssumeCapacity(t.ast);
             },
             .delete_cell,
@@ -1163,7 +1163,7 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
             .set_text_cell => {
                 const index = redo_slice.items(.data)[i].set_text_cell.index;
                 const t = sheet.undo_text_asts.get(index);
-                if (t.strings) |strings| strings.destroy(self.allocator);
+                sheet.allocator.free(t.strings);
                 self.delAstAssumeCapacity(t.ast);
             },
             .delete_cell,
@@ -1179,6 +1179,7 @@ pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
     sheet.cells.clearRetainingCapacity();
     sheet.text_cells.clearRetainingCapacity();
     sheet.undo_end_markers.clearRetainingCapacity();
+    sheet.strings.clearRetainingCapacity();
 }
 
 pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
@@ -1234,10 +1235,7 @@ pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
                 const pos = data[label.lhs].cell;
                 ast.splice(label.rhs);
 
-                const strings = try ast.dupeStrings(self.allocator, line);
-                errdefer if (strings) |s| s.destroy(self.allocator);
-
-                try sheet.setTextCell(pos, strings, ast, .{});
+                try sheet.setTextCell(pos, line, ast, .{});
             },
             else => {
                 self.delAstAssumeCapacity(ast);
@@ -1266,8 +1264,10 @@ pub fn writeFile(sheet: *Sheet, opts: WriteFileOptions) !void {
         try writer.print("let {} = {}\n", .{ pos, cell });
     }
 
-    for (sheet.text_cells.keys(), sheet.text_cells.values()) |pos, cell| {
-        try writer.print("label {} = {}\n", .{ pos, cell });
+    for (sheet.text_cells.keys()) |pos| {
+        try writer.print("label {} = ", .{pos});
+        try sheet.printTextCell(pos, writer);
+        try writer.writeByte('\n');
     }
 
     try buf.flush();
