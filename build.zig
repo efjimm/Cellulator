@@ -50,8 +50,6 @@ pub fn build(b: *std.Build) void {
     opts.addOption(bool, "fast_tests", fast_tests);
     tests.addOptions("compile_opts", opts);
 
-    b.installArtifact(tests);
-
     tests.addModule("ziglua", ziglua_dep.module("ziglua"));
     tests.linkLibrary(ziglua_dep.artifact("lua"));
     tests.addModule("spoon", spoon);
