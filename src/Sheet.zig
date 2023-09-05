@@ -762,21 +762,12 @@ pub const TextCell = struct {
         };
         cell.unsetError();
     }
-
-    pub fn format(
-        _: TextCell,
-        comptime _: []const u8,
-        _: std.fmt.FormatOptions,
-        _: anytype,
-    ) !void {
-        unreachable;
-    }
 };
 
 pub fn printTextCell(sheet: Sheet, pos: Position, writer: anytype) !void {
     const cell = sheet.text_cells.get(pos) orelse return;
     const strings = sheet.strings.get(pos) orelse "";
-    return cell.ast.print(writer, strings);
+    return cell.ast.print(strings, writer);
 }
 
 pub const Cell = struct {
@@ -790,21 +781,6 @@ pub const Cell = struct {
     };
 
     pub const Error = error{Generic};
-
-    /// (NaN payload)[https://anniecherkaev.com/the-secret-life-of-nan] to signify that an error
-    /// has occured during evaluation.
-    // const err: f64 = @bitCast(err_bits);
-    // const err_bits: u64 = (0x7FF << 52) | 0b1010;
-
-    // comptime {
-    //     // Make sure our error value doesn't have the same bit pattern as the NaN values that Zig
-    //     // uses.
-    //     assert(err_bits != @as(u64, @bitCast(std.math.nan(f64))));
-    //     assert(err_bits != @as(u64, @bitCast(@as(f64, 0) / @as(f64, 0))));
-    //     assert(err_bits != @as(u64, @bitCast(-std.math.inf(f64) + std.math.inf(f64))));
-    //     assert(err_bits != @as(u64, @bitCast(std.math.inf(f64) * @as(f64, 0))));
-    //     assert(@sizeOf(Cell) <= 24);
-    // }
 
     pub fn fromExpression(allocator: Allocator, expr: []const u8) !Cell {
         return .{ .ast = try Ast.fromExpression(allocator, expr) };
@@ -872,16 +848,13 @@ pub const Cell = struct {
             else => null,
         };
     }
-
-    pub fn format(
-        cell: Cell,
-        comptime _: []const u8,
-        _: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        return cell.ast.print(writer, "");
-    }
 };
+
+pub fn printCellExpression(sheet: Sheet, pos: Position, writer: anytype) !void {
+    const cell = sheet.cells.get(pos) orelse return;
+    const strings = sheet.strings.get(pos) orelse "";
+    try cell.ast.print(strings, writer);
+}
 
 pub const Column = struct {
     const CellMap = std.AutoArrayHashMapUnmanaged(u16, Cell);

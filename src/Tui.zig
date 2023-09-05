@@ -146,17 +146,17 @@ pub fn renderStatus(
     if (zc.sheet.getCell(zc.cursor)) |cell| {
         if (!cell.isError()) {
             try rc.setStyle(.{ .fg = .cyan, .bg = .black });
-            try writer.print("{}", .{cell});
+            try zc.sheet.printCellExpression(zc.cursor, writer);
         } else {
             try rc.setStyle(.{ .fg = .red, .bg = .black });
-            try writer.print("{}", .{cell});
+            try zc.sheet.printCellExpression(zc.cursor, writer);
         }
 
-        if (zc.sheet.text_cells.get(zc.cursor)) |text_cell| {
+        if (zc.sheet.text_cells.contains(zc.cursor)) {
             try rc.setStyle(.{ .fg = .white, .bg = .black });
             try writer.writeAll(" | ");
             try rc.setStyle(.{ .fg = .green, .bg = .black });
-            try writer.print("{}", .{text_cell});
+            try zc.sheet.printTextCell(zc.cursor, writer);
         }
         try rc.setStyle(.{ .fg = .white, .bg = .black });
     } else if (zc.sheet.text_cells.get(zc.cursor)) |_| {

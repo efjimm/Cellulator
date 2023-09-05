@@ -83,7 +83,6 @@ pub const Action = union(enum) {
     enter_visual_mode,
     enter_command_mode,
     edit_cell,
-    edit_label,
     dismiss_count_or_status_message,
 
     undo,
@@ -421,7 +420,6 @@ const sheet_keys = [_]KeyMaps{
             .{ "F", .decrease_precision },
             .{ "=", .assign_cell },
             .{ "e", .edit_cell },
-            .{ "E", .edit_label },
             .{ "dd", .delete_cell },
             .{ ":", .enter_command_mode },
             .{ "v", .enter_visual_mode },

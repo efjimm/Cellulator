@@ -743,17 +743,7 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
             self.setMode(.command_insert);
             const writer = self.commandWriter();
             try writer.print("let {} = ", .{self.cursor});
-            if (self.sheet.cells.get(self.cursor)) |cell| {
-                try writer.print("{}", .{cell});
-            }
-        },
-        .edit_label => {
-            self.setMode(.command_insert);
-            const writer = self.commandWriter();
-            try writer.print("label {} = ", .{self.cursor});
-            if (self.sheet.text_cells.get(self.cursor)) |cell| {
-                try writer.print("{}", .{cell});
-            }
+            try self.sheet.printCellExpression(self.cursor, writer);
         },
         .fit_text => try self.cursorExpandWidth(),
         .enter_visual_mode => self.setMode(.visual),
@@ -1260,8 +1250,10 @@ pub fn writeFile(sheet: *Sheet, opts: WriteFileOptions) !void {
     var buf = std.io.bufferedWriter(atomic_file.file.writer());
     const writer = buf.writer();
 
-    for (sheet.cells.keys(), sheet.cells.values()) |pos, cell| {
-        try writer.print("let {} = {}\n", .{ pos, cell });
+    for (sheet.cells.keys()) |pos| {
+        try writer.print("let {} = ", .{pos});
+        try sheet.printCellExpression(pos, writer);
+        try writer.writeByte('\n');
     }
 
     for (sheet.text_cells.keys()) |pos| {

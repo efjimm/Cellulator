@@ -861,7 +861,7 @@ pub fn toSlice(ast: Self) Slice {
     };
 }
 
-pub fn print(ast: Self, writer: anytype, strings: []const u8) @TypeOf(writer).Error!void {
+pub fn print(ast: Self, strings: []const u8, writer: anytype) @TypeOf(writer).Error!void {
     const slice = ast.toSlice();
     return slice.printFromIndex(slice.rootNodeIndex(), writer, strings);
 }
@@ -1160,7 +1160,7 @@ test "Print" {
             defer ast.deinit(t.allocator);
 
             var buf = std.BoundedArray(u8, 4096){};
-            try ast.print(buf.writer(), expr);
+            try ast.print(expr, buf.writer());
             try t.expectEqualStrings(expected, buf.constSlice());
         }
     }.func;
