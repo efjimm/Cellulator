@@ -151,6 +151,137 @@ pub fn fromAddress(address: []const u8) FromAddressError!Position {
     };
 }
 
+pub const Range = struct {
+    /// Top left position of the range
+    tl: Position,
+
+    /// Bottom right position of the range
+    br: Position,
+
+    pub fn init(p1: Position, p2: Position) Range {
+        var ret: Range = undefined;
+        if (p1.x < p2.x) {
+            ret.tl.x = p1.x;
+            ret.br.x = p2.x;
+        } else {
+            ret.tl.x = p2.x;
+            ret.br.x = p1.x;
+        }
+
+        if (p1.y < p2.y) {
+            ret.tl.y = p1.y;
+            ret.br.y = p2.y;
+        } else {
+            ret.tl.y = p2.y;
+            ret.br.y = p1.y;
+        }
+
+        return ret;
+    }
+
+    pub fn initSingle(pos: Position) Range {
+        return .{
+            .tl = pos,
+            .br = pos,
+        };
+    }
+
+    pub fn intersects(r1: Range, r2: Range) bool {
+        return r1.tl.x <= r2.br.x and r1.br.x >= r2.tl.x and
+            r1.tl.y <= r2.br.y and r1.br.y >= r2.br.y;
+    }
+
+    /// Removes all positions in `m` from `target`, returning 0-4 new ranges, or `null` if
+    /// `m` does not intersect `target`.
+    pub fn mask(
+        target: Range,
+        m: Range,
+    ) ?std.BoundedArray(Range, 4) {
+        if (!m.intersects(target)) return null;
+
+        var ret: std.BoundedArray(Range, 4) = .{};
+
+        // North
+        if (m.tl.y > target.tl.y) {
+            ret.appendAssumeCapacity(.{
+                .tl = .{ .x = @max(target.tl.x, m.tl.x), .y = target.tl.y },
+                .br = .{ .x = @min(target.br.x, m.br.x), .y = m.tl.y - 1 },
+            });
+        }
+
+        // West
+        if (m.tl.x > target.tl.x) {
+            ret.appendAssumeCapacity(.{
+                .tl = .{ .x = target.tl.x, .y = target.tl.y },
+                .br = .{ .x = m.tl.x - 1, .y = target.br.y },
+            });
+        }
+
+        // South
+        if (m.br.y < target.br.y) {
+            ret.appendAssumeCapacity(.{
+                .tl = .{ .x = @max(target.tl.x, m.tl.x), .y = m.br.y + 1 },
+                .br = .{ .x = @min(target.br.x, m.br.x), .y = target.br.y },
+            });
+        }
+
+        // East
+        if (m.br.x < target.br.x) {
+            ret.appendAssumeCapacity(.{
+                .tl = .{ .x = m.br.x + 1, .y = target.tl.y },
+                .br = .{ .x = target.br.x, .y = target.br.y },
+            });
+        }
+
+        return ret;
+    }
+
+    pub fn format(
+        range: Range,
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        try writer.print("{}:{}", .{ range.tl, range.br });
+    }
+
+    pub const Iterator = struct {
+        range: Range,
+        x: u32,
+        y: u32,
+
+        pub fn next(it: *Iterator) ?Position {
+            if (it.y > it.range.br.y) return null;
+
+            const pos = Position{
+                .x = @intCast(it.x),
+                .y = @intCast(it.y),
+            };
+
+            if (it.x >= it.range.br.x) {
+                it.y += 1;
+                it.x = it.range.tl.x;
+            } else {
+                it.x += 1;
+            }
+            return pos;
+        }
+
+        pub fn reset(it: *Iterator) void {
+            it.x = it.range.tl.x;
+            it.y = it.range.tl.y;
+        }
+    };
+
+    pub fn iterator(range: Range) Iterator {
+        return .{
+            .range = range,
+            .x = range.tl.x,
+            .y = range.tl.y,
+        };
+    }
+};
+
 test hash {
     const tuples = [_]struct { Position, u32 }{
         .{ Position{ .x = 0, .y = 0 }, 0 },

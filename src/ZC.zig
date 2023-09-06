@@ -252,8 +252,14 @@ pub const ChangeCellOpts = struct {
 };
 
 /// Sets the cell at `pos` to the expression represented by `ast`.
-pub fn setCell(self: *Self, pos: Position, ast: Ast, opts: ChangeCellOpts) !void {
-    try self.sheet.setCell(pos, ast, .{});
+pub fn setCell(
+    self: *Self,
+    pos: Position,
+    source: []const u8,
+    ast: Ast,
+    opts: ChangeCellOpts,
+) !void {
+    try self.sheet.setCell(pos, source, ast, .{});
     self.tui.update.cursor = true;
     self.tui.update.cells = true;
     if (opts.emit_event)
@@ -262,16 +268,16 @@ pub fn setCell(self: *Self, pos: Position, ast: Ast, opts: ChangeCellOpts) !void
 
 /// Sets the cell at `pos` to the expression represented by `expr`.
 pub fn setCellString(self: *Self, pos: Position, expr: []const u8, opts: ChangeCellOpts) !void {
-    var ast = self.newAst();
-    errdefer self.delAstAssumeCapacity(ast);
+    var ast = self.createAst();
+    errdefer self.destroyAst(ast);
 
     try ast.parseExpr(self.allocator, expr);
-    try self.setCell(pos, ast, opts);
+    try self.setCell(pos, expr, ast, opts);
 }
 
 // TODO: merge this and `deleteCell`
 pub fn deleteCell2(self: *Self, pos: Position, opts: ChangeCellOpts) !void {
-    try self.sheet.deleteCell(.number, pos, opts.undo_opts);
+    try self.sheet.deleteCell(pos, opts.undo_opts);
     self.tui.update.cursor = true;
     self.tui.update.cells = true;
     if (opts.emit_event)
@@ -304,11 +310,11 @@ pub fn dismissStatusMessage(self: *Self) void {
 }
 
 pub fn updateCells(self: *Self) Allocator.Error!void {
-    return self.sheet.update(.number);
+    return self.sheet.update();
 }
 
 pub fn updateTextCells(self: *Self) Allocator.Error!void {
-    return self.sheet.update(.text);
+    return self.sheet.update();
 }
 
 pub fn setMode(self: *Self, new_mode: Mode) void {
@@ -404,8 +410,6 @@ fn handleInput(self: *Self) !void {
             error.InvalidCommand => self.setStatusMessage(.err, "Invalid command", .{}),
             error.OutOfMemory => self.setStatusMessage(.err, "Out of memory!", .{}),
             error.UnexpectedToken => self.setStatusMessage(.err, "Unexpected token", .{}),
-            error.StringBuiltinInNumericContext => self.setStatusMessage(.err, "String builtin used in numeric context", .{}),
-            error.NumericBuiltinInStringContext => self.setStatusMessage(.err, "Numeric builtin used in string context", .{}),
             error.InvalidSyntax => self.setStatusMessage(.err, "Invalid syntax", .{}),
         },
         .prefix => return,
@@ -764,8 +768,8 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
         .cell_cursor_right => self.cursorRight(),
         .cell_cursor_row_first => self.cursorToFirstCellInColumn(),
         .cell_cursor_row_last => self.cursorToLastCellInColumn(),
-        .cell_cursor_col_first => self.cursorToFirstCell(),
-        .cell_cursor_col_last => self.cursorToLastCell(),
+        .cell_cursor_col_first => self.cursorToFirstCellInRow(),
+        .cell_cursor_col_last => self.cursorToLastCellInRow(),
         .goto_col => self.cursorGotoCol(),
         .goto_row => self.cursorGotoRow(),
 
@@ -782,14 +786,10 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
             self.setMode(.command_insert);
             try self.commandWriter().print("let {} = ", .{self.cursor});
         },
-        .assign_label => {
-            self.setMode(.command_insert);
-            try self.commandWriter().print("label {} = ", .{self.cursor});
-        },
 
         .zero => {
             if (self.count == 0) {
-                self.cursorToFirstCell();
+                self.cursorToFirstCellInRow();
             } else {
                 self.setCount(0);
             }
@@ -826,8 +826,8 @@ fn doVisualMode(self: *Self, action: Action) Allocator.Error!void {
         .cell_cursor_right => self.cursorRight(),
         .cell_cursor_row_first => self.cursorToFirstCellInColumn(),
         .cell_cursor_row_last => self.cursorToLastCellInColumn(),
-        .cell_cursor_col_first => self.cursorToFirstCell(),
-        .cell_cursor_col_last => self.cursorToLastCell(),
+        .cell_cursor_col_first => self.cursorToFirstCellInRow(),
+        .cell_cursor_col_last => self.cursorToLastCellInRow(),
         .next_populated_cell => self.cursorNextPopulatedCell(),
         .prev_populated_cell => self.cursorPrevPopulatedCell(),
 
@@ -848,14 +848,6 @@ fn doVisualMode(self: *Self, action: Action) Allocator.Error!void {
     }
 }
 
-// pub fn doStatement(self: *Self, str: []const u8) !void {
-//     const ast = self.newAst();
-//     errdefer self.delAstAssumeCapacity(ast);
-
-//     try ast.parse(self.allocator, str);
-
-// }
-
 const ParseCommandError = Ast.ParseError || RunCommandError;
 
 fn parseCommand(self: *Self, str: []const u8) !void {
@@ -866,32 +858,16 @@ fn parseCommand(self: *Self, str: []const u8) !void {
         else => {},
     }
 
-    var ast = self.newAst();
-    errdefer self.delAstAssumeCapacity(ast);
+    var ast = self.createAst();
+    errdefer self.destroyAst(ast);
     try ast.parse(self.allocator, str);
 
-    const root = ast.rootNode();
-    switch (root) {
-        .assignment => |op| {
-            const pos = ast.nodes.items(.data)[op.lhs].cell;
-            ast.splice(op.rhs);
+    const op = ast.rootNode().assignment;
+    const pos = ast.nodes.items(.data)[op.lhs].cell;
+    ast.splice(op.rhs);
 
-            try self.setCell(pos, ast, .{});
-            self.sheet.endUndoGroup();
-        },
-        .label => |op| {
-            const pos = ast.nodes.items(.data)[op.lhs].cell;
-            ast.splice(op.rhs);
-
-            try self.sheet.setTextCell(pos, str, ast, .{});
-            self.sheet.endUndoGroup();
-            self.tui.update.cursor = true;
-            self.tui.update.cells = true;
-        },
-        else => {
-            self.delAstAssumeCapacity(ast);
-        },
-    }
+    try self.setCell(pos, str, ast, .{});
+    self.sheet.endUndoGroup();
 }
 
 pub fn isSelectedCell(self: Self, pos: Position) bool {
@@ -1024,7 +1000,7 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
         },
         .quit_force => self.running = false,
         .save, .save_force => { // save
-            writeFile(&self.sheet, .{ .filepath = iter.next() }) catch |err| {
+            self.writeFile(iter.next()) catch |err| {
                 self.setStatusMessage(.warn, "Could not write file: {s}", .{@errorName(err)});
                 return;
             };
@@ -1074,11 +1050,11 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
             var i: f64 = value;
             for (range.tl.y..@as(usize, range.br.y) + 1) |y| {
                 for (range.tl.x..@as(usize, range.br.x) + 1) |x| {
-                    var ast = self.newAst();
-                    errdefer self.delAstAssumeCapacity(ast);
+                    var ast = self.createAst();
+                    errdefer self.destroyAst(ast);
 
                     try ast.nodes.append(self.allocator, .{ .number = i });
-                    try self.setCell(.{ .y = @intCast(y), .x = @intCast(x) }, ast, .{});
+                    try self.setCell(.{ .y = @intCast(y), .x = @intCast(x) }, "", ast, .{});
                     i += increment;
                 }
             }
@@ -1104,170 +1080,17 @@ pub fn loadCmd(self: *Self, filepath: []const u8) !void {
 }
 
 pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
-    const count = self.sheet.cellCount() + self.sheet.text_cells.entries.len +
-        sheet.undos.len + sheet.redos.len;
+    const count = self.sheet.cellCount() + sheet.undos.len + sheet.redos.len;
     try self.asts.ensureUnusedCapacity(self.allocator, count);
-
-    for (sheet.cells.values()) |cell| {
-        self.delAstAssumeCapacity(cell.ast);
-    }
-
-    for (sheet.text_cells.values()) |*cell| {
-        self.delAstAssumeCapacity(cell.ast);
-        cell.text.deinit(self.allocator);
-    }
-
-    var strings_iter = sheet.strings.valueIterator();
-    while (strings_iter.next()) |string_ptr| sheet.allocator.free(string_ptr.*);
-
-    const undo_slice = sheet.undos.slice();
-    for (undo_slice.items(.tags), 0..) |tag, i| {
-        switch (tag) {
-            .set_cell => {
-                const index = undo_slice.items(.data)[i].set_cell.index;
-                const ast = sheet.undo_asts.get(index);
-                self.delAstAssumeCapacity(ast);
-            },
-            .set_text_cell => {
-                const index = undo_slice.items(.data)[i].set_text_cell.index;
-                const t = sheet.undo_text_asts.get(index);
-                sheet.allocator.free(t.strings);
-                self.delAstAssumeCapacity(t.ast);
-            },
-            .delete_cell,
-            .delete_text_cell,
-            .set_column_width,
-            .set_column_precision,
-            => {},
-        }
-    }
-
-    const redo_slice = sheet.redos.slice();
-    for (redo_slice.items(.tags), 0..) |tag, i| {
-        switch (tag) {
-            .set_cell => {
-                const index = redo_slice.items(.data)[i].set_cell.index;
-                const ast = sheet.undo_asts.get(index);
-                self.delAstAssumeCapacity(ast);
-            },
-            .set_text_cell => {
-                const index = redo_slice.items(.data)[i].set_text_cell.index;
-                const t = sheet.undo_text_asts.get(index);
-                sheet.allocator.free(t.strings);
-                self.delAstAssumeCapacity(t.ast);
-            },
-            .delete_cell,
-            .delete_text_cell,
-            .set_column_width,
-            .set_column_precision,
-            => {},
-        }
-    }
-
-    sheet.undos.len = 0;
-    sheet.redos.len = 0;
-    sheet.cells.clearRetainingCapacity();
-    sheet.text_cells.clearRetainingCapacity();
-    sheet.undo_end_markers.clearRetainingCapacity();
-    sheet.strings.clearRetainingCapacity();
+    sheet.clearRetainingCapacity(self);
 }
 
 pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
-    const file = std.fs.cwd().openFile(filepath, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            sheet.setFilePath(filepath);
-            sheet.has_changes = false;
-            return;
-        },
-        else => return err,
-    };
-    defer file.close();
-
-    sheet.setFilePath(filepath);
-    sheet.has_changes = false;
-
-    var buf = std.io.bufferedReader(file.reader());
-    const reader = buf.reader();
-
-    log.debug("Loading file", .{});
-
-    var sfa = std.heap.stackFallback(8192, sheet.allocator);
-    var allocator = sfa.get();
-    defer sheet.endUndoGroup();
-    while (try reader.readUntilDelimiterOrEofAlloc(allocator, '\n', std.math.maxInt(u30))) |line| {
-        defer {
-            allocator.free(line);
-            allocator = sfa.get();
-        }
-
-        var ast = self.newAst();
-        ast.parse(self.allocator, line) catch |err| switch (err) {
-            error.UnexpectedToken,
-            error.InvalidCellAddress,
-            error.StringBuiltinInNumericContext,
-            error.NumericBuiltinInStringContext,
-            => continue,
-            error.OutOfMemory => return error.OutOfMemory,
-        };
-        errdefer self.asts.appendAssumeCapacity(ast);
-
-        const data = ast.nodes.items(.data);
-        const root = ast.rootTag();
-        switch (root) {
-            .assignment => {
-                const assignment = data[ast.rootNodeIndex()].assignment;
-                const pos: Position = data[assignment.lhs].cell;
-                ast.splice(assignment.rhs);
-                try self.setCell(pos, ast, .{});
-            },
-            .label => {
-                const label = data[ast.rootNodeIndex()].label;
-                const pos = data[label.lhs].cell;
-                ast.splice(label.rhs);
-
-                try sheet.setTextCell(pos, line, ast, .{});
-            },
-            else => {
-                self.delAstAssumeCapacity(ast);
-            },
-        }
-    }
+    return sheet.loadFile(self.allocator, filepath, self);
 }
 
-pub const WriteFileOptions = struct {
-    filepath: ?[]const u8 = null,
-};
-
-pub fn writeFile(sheet: *Sheet, opts: WriteFileOptions) !void {
-    const filepath = opts.filepath orelse sheet.filepath.slice();
-    if (filepath.len == 0) {
-        return error.EmptyFileName;
-    }
-
-    var atomic_file = try std.fs.cwd().atomicFile(filepath, .{});
-    defer atomic_file.deinit();
-
-    var buf = std.io.bufferedWriter(atomic_file.file.writer());
-    const writer = buf.writer();
-
-    for (sheet.cells.keys()) |pos| {
-        try writer.print("let {} = ", .{pos});
-        try sheet.printCellExpression(pos, writer);
-        try writer.writeByte('\n');
-    }
-
-    for (sheet.text_cells.keys()) |pos| {
-        try writer.print("label {} = ", .{pos});
-        try sheet.printTextCell(pos, writer);
-        try writer.writeByte('\n');
-    }
-
-    try buf.flush();
-    try atomic_file.finish();
-
-    if (opts.filepath) |path| {
-        sheet.setFilePath(path);
-    }
+pub fn writeFile(self: *Self, filepath: ?[]const u8) !void {
+    return self.sheet.writeFile(.{ .filepath = filepath });
 }
 
 pub fn undo(self: *Self) Allocator.Error!void {
@@ -1293,8 +1116,7 @@ pub fn redo(self: *Self) Allocator.Error!void {
 }
 
 pub fn deleteCell(self: *Self) Allocator.Error!void {
-    try self.sheet.deleteCell(.number, self.cursor, .{});
-    try self.sheet.deleteCell(.text, self.cursor, .{});
+    try self.sheet.deleteCell(self.cursor, .{});
     self.sheet.endUndoGroup();
 
     self.tui.update.cells = true;
@@ -1540,7 +1362,7 @@ pub fn cursorExpandWidth(self: *Self) Allocator.Error!void {
     self.tui.update.column_headings = true;
 }
 
-pub fn newAst(self: *Self) Ast {
+pub fn createAst(self: *Self) Ast {
     return self.asts.popOrNull() orelse Ast{};
 }
 
@@ -1550,82 +1372,30 @@ pub fn delAst(self: *Self, ast: Ast) Allocator.Error!void {
     try self.asts.append(self.allocator, temp);
 }
 
-pub fn delAstAssumeCapacity(self: *Self, ast: Ast) void {
+pub fn destroyAst(self: *Self, ast: Ast) void {
     var temp = ast;
     temp.nodes.len = 0;
     self.asts.appendAssumeCapacity(temp);
 }
 
-pub fn cursorToFirstCell(self: *Self) void {
-    for (self.sheet.cells.keys()) |pos| {
-        if (pos.y < self.cursor.y) continue;
-
-        if (pos.y == self.cursor.y)
-            self.setCursor(pos);
-        break;
-    }
-    for (self.sheet.text_cells.keys()) |pos| {
-        if (pos.y < self.cursor.y) continue;
-
-        if (pos.y == self.cursor.y)
-            self.setCursor(pos);
-        break;
-    }
+pub fn cursorToFirstCellInRow(self: *Self) void {
+    const pos = self.sheet.firstCellInRow(self.cursor.y) orelse return;
+    self.setCursor(pos);
 }
 
-pub fn cursorToLastCell(self: *Self) void {
-    var new_pos = self.cursor;
-    for (self.sheet.cells.keys()) |pos| {
-        if (pos.y > self.cursor.y) break;
-        new_pos = pos;
-    }
-    for (self.sheet.text_cells.keys()) |pos| {
-        if (pos.y > self.cursor.y) break;
-        if (pos.y == new_pos.y and pos.x > new_pos.x) new_pos = pos;
-    }
-    self.setCursor(new_pos);
+pub fn cursorToLastCellInRow(self: *Self) void {
+    const pos = self.sheet.lastCellInRow(self.cursor.y) orelse return;
+    self.setCursor(pos);
 }
 
 pub fn cursorToFirstCellInColumn(self: *Self) void {
-    const first_cell: ?Position = for (self.sheet.cells.keys()) |pos| {
-        if (pos.x == self.cursor.x) {
-            break pos;
-        }
-    } else null;
-
-    for (self.sheet.text_cells.keys()) |pos| {
-        if (pos.x == self.cursor.x) {
-            if (first_cell) |f| {
-                const p = if (f.y < pos.y) f else pos;
-                self.setCursor(p);
-            } else {
-                self.setCursor(pos);
-            }
-            break;
-        }
-    } else if (first_cell) |f| self.setCursor(f);
+    const pos = self.sheet.firstCellInColumn(self.cursor.x) orelse return;
+    self.setCursor(pos);
 }
 
 pub fn cursorToLastCellInColumn(self: *Self) void {
-    var iter = std.mem.reverseIterator(self.sheet.cells.keys());
-    const first_cell: ?Position = while (iter.next()) |pos| {
-        if (pos.x == self.cursor.x) {
-            break pos;
-        }
-    } else null;
-
-    iter = std.mem.reverseIterator(self.sheet.text_cells.keys());
-    while (iter.next()) |pos| {
-        if (pos.x == self.cursor.x) {
-            if (first_cell) |f| {
-                const p = if (f.y > pos.y) f else pos;
-                self.setCursor(p);
-            } else {
-                self.setCursor(pos);
-            }
-            break;
-        }
-    } else if (first_cell) |f| self.setCursor(f);
+    const pos = self.sheet.lastCellInColumn(self.cursor.x) orelse return;
+    self.setCursor(pos);
 }
 
 pub fn cursorGotoRow(self: *Self) void {

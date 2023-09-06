@@ -56,7 +56,6 @@ pub const Token = struct {
         double_string_literal,
 
         keyword_let,
-        keyword_label,
 
         eof,
         unknown,
@@ -64,7 +63,6 @@ pub const Token = struct {
 };
 
 const keywords = std.ComptimeStringMap(Token.Tag, .{
-    .{ "label", .keyword_label },
     .{ "let", .keyword_let },
 });
 
@@ -287,21 +285,21 @@ test "Tokens" {
 
 test "Token text range" {
     const t = std.testing;
-    var tokenizer = Tokenizer{ .bytes = "label a0 = 'this is epic'" };
+    var tokenizer = Tokenizer{ .bytes = "let a0 = 'this is epic'" };
     var token = tokenizer.next().?;
-    try t.expectEqual(Token.Tag.keyword_label, token.tag);
+    try t.expectEqual(Token.Tag.keyword_let, token.tag);
     try t.expectEqual(@as(u32, 0), token.start);
-    try t.expectEqual(@as(u32, "label".len), token.end);
+    try t.expectEqual(@as(u32, "let".len), token.end);
     token = tokenizer.next().?;
     try t.expectEqual(Token.Tag.cell_name, token.tag);
-    try t.expectEqual(@as(u32, "label ".len), token.start);
-    try t.expectEqual(@as(u32, "label a0".len), token.end);
+    try t.expectEqual(@as(u32, "let ".len), token.start);
+    try t.expectEqual(@as(u32, "let a0".len), token.end);
     token = tokenizer.next().?;
     try t.expectEqual(Token.Tag.equals_sign, token.tag);
-    try t.expectEqual(@as(u32, "label a0 ".len), token.start);
-    try t.expectEqual(@as(u32, "label a0 =".len), token.end);
+    try t.expectEqual(@as(u32, "let a0 ".len), token.start);
+    try t.expectEqual(@as(u32, "let a0 =".len), token.end);
     token = tokenizer.next().?;
     try t.expectEqual(Token.Tag.single_string_literal, token.tag);
-    try t.expectEqual(@as(u32, "label a0 = '".len), token.start);
-    try t.expectEqual(@as(u32, "label a0 = 'this is epic".len), token.end);
+    try t.expectEqual(@as(u32, "let a0 = '".len), token.start);
+    try t.expectEqual(@as(u32, "let a0 = 'this is epic".len), token.end);
 }

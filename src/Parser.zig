@@ -60,8 +60,6 @@ const builtins = std.ComptimeStringMap(Builtin.Tag, .{
 pub const ParseError = error{
     UnexpectedToken,
     InvalidCellAddress,
-    NumericBuiltinInStringContext,
-    StringBuiltinInNumericContext,
 } || Allocator.Error;
 
 const log = std.log.scoped(.parser);
@@ -100,60 +98,14 @@ pub fn parse(parser: *Parser) ParseError!void {
     _ = try parser.expectToken(.eof);
 }
 
-/// Statement <- ('let' Assignment) / ('label' Label)
+/// Statement <- 'let' Assignment
 fn parseStatement(parser: *Parser) ParseError!u32 {
     const token = parser.eatTokenMulti(.{
         .keyword_let,
-        .keyword_label,
     }) orelse return error.UnexpectedToken;
     return switch (token.tag) {
         .keyword_let => parser.parseAssignment(),
-        .keyword_label => parser.parseLabel(),
         else => unreachable,
-    };
-}
-
-/// Label <- CellName '=' StringExpression
-fn parseLabel(parser: *Parser) ParseError!u32 {
-    const lhs = try parser.parseCellName();
-    _ = try parser.expectToken(.equals_sign);
-    const rhs = try parser.parseStringExpression();
-
-    return parser.addNode(.{
-        .label = .{
-            .lhs = lhs,
-            .rhs = rhs,
-        },
-    });
-}
-
-/// StringExpression <- PrimaryStringExpression ('#' PrimaryStringExpression)*
-pub fn parseStringExpression(parser: *Parser) ParseError!u32 {
-    var index = try parser.parsePrimaryStringExpression();
-
-    while (parser.eatToken(.hash)) |_| {
-        const node = Node{
-            .concat = .{
-                .lhs = index,
-                .rhs = try parser.parsePrimaryStringExpression(),
-            },
-        };
-
-        index = try parser.addNode(node);
-    }
-
-    return index;
-}
-
-/// PrimaryStringExpression <- StringLiteral / CellName / Builtin
-fn parsePrimaryStringExpression(parser: *Parser) ParseError!u32 {
-    return switch (parser.current_token.tag) {
-        .builtin => parser.parseFunction(.string),
-        .cell_name => parser.parseCellName(),
-        .single_string_literal,
-        .double_string_literal,
-        => parser.parseStringLiteral(),
-        else => error.UnexpectedToken,
     };
 }
 
@@ -211,11 +163,11 @@ pub fn parseExpression(parser: *Parser) ParseError!u32 {
     return parser.parseAddExpr();
 }
 
-/// AddExpr <- MulExpr (('+' / '-') MulExpr)*
+/// AddExpr <- MulExpr (('+' / '-' / '#') MulExpr)*
 fn parseAddExpr(parser: *Parser) !u32 {
     var index = try parser.parseMulExpr();
 
-    while (parser.eatTokenMulti(.{ .plus, .minus })) |token| {
+    while (parser.eatTokenMulti(.{ .plus, .minus, .hash })) |token| {
         const op = BinaryOperator{
             .lhs = index,
             .rhs = try parser.parseMulExpr(),
@@ -224,6 +176,7 @@ fn parseAddExpr(parser: *Parser) !u32 {
         const node: Node = switch (token.tag) {
             .plus => .{ .add = op },
             .minus => .{ .sub = op },
+            .hash => .{ .concat = op },
             else => unreachable,
         };
 
@@ -256,7 +209,7 @@ fn parseMulExpr(parser: *Parser) !u32 {
     return index;
 }
 
-/// PrimaryExpr <- Number / Range / Builtin / '(' Expression ')'
+/// PrimaryExpr <- Number / Range / StsringLiteral / Builtin / '(' Expression ')'
 fn parsePrimaryExpr(parser: *Parser) !u32 {
     return switch (parser.current_token.tag) {
         .minus, .plus, .number => parser.parseNumber(),
@@ -267,7 +220,10 @@ fn parsePrimaryExpr(parser: *Parser) !u32 {
             _ = try parser.expectToken(.rparen);
             return ret;
         },
-        .builtin => parser.parseFunction(.numeric),
+        .builtin => parser.parseFunction(),
+        .single_string_literal,
+        .double_string_literal,
+        => parser.parseStringLiteral(),
         else => error.UnexpectedToken,
     };
 }
@@ -289,7 +245,7 @@ fn parseRange(parser: *Parser) !u32 {
 }
 
 /// Builtin <- builtin '(' ArgList? ')'
-fn parseFunction(parser: *Parser, comptime context: enum { numeric, string }) !u32 {
+fn parseFunction(parser: *Parser) !u32 {
     const token = try parser.expectToken(.builtin);
     _ = try parser.expectToken(.lparen);
 
@@ -300,20 +256,14 @@ fn parseFunction(parser: *Parser, comptime context: enum { numeric, string }) !u
         // These builtins take only one argument
         .upper,
         .lower,
-        => blk: {
-            if (context == .numeric) return error.StringBuiltinInNumericContext;
-            break :blk try parser.parseStringExpression();
-        },
+        => try parser.parseExpression(),
         // These builtins require at least one argument
         .sum,
         .max,
         .prod,
         .avg,
         .min,
-        => blk: {
-            if (context == .string) return error.NumericBuiltinInStringContext;
-            break :blk try parser.parseArgList();
-        },
+        => try parser.parseArgList(),
     };
     _ = try parser.expectToken(.rparen);
 
@@ -442,19 +392,19 @@ test {
     try testParser("let a0 = (1 + 2) - (2 + 1)", &.{ .cell, .number, .number, .add, .number, .number, .add, .sub, .assignment });
     try testParser("let a0 = 2 / (1 - (1 + 3))", &.{ .cell, .number, .number, .number, .number, .add, .sub, .div, .assignment });
 
-    try testParser("label a0 = 'this is epic' # ' and nice'", &.{ .cell, .string_literal, .string_literal, .concat, .label });
+    try testParser("let a0 = 'this is epic' # ' and nice'", &.{ .cell, .string_literal, .string_literal, .concat, .assignment });
 
     try testParseError("unga bunga", error.UnexpectedToken);
     try testParseError("let", error.UnexpectedToken);
     try testParseError("let a0 = ", error.UnexpectedToken);
     try testParseError("a0 = 5", error.UnexpectedToken);
     try testParseError("let a0 = ", error.UnexpectedToken);
-    try testParseError("let a0 = 'string!'", error.UnexpectedToken);
-    try testParseError("let a0 = 1 # 1", error.UnexpectedToken);
-    try testParseError("let a0 = 1 # 'string'", error.UnexpectedToken);
-    try testParseError("let a0 = 'strings' # 'string'", error.UnexpectedToken);
-    try testParseError("let a0 = @upper(1)", error.StringBuiltinInNumericContext);
-    try testParseError("let a0 = @lower(1)", error.StringBuiltinInNumericContext);
+    try testParseError("let a0 = 'string!'", null);
+    try testParseError("let a0 = 1 # 1", null);
+    try testParseError("let a0 = 1 # 'string'", null);
+    try testParseError("let a0 = 'strings' # 'string'", null);
+    try testParseError("let a0 = @upper(1)", null);
+    try testParseError("let a0 = @lower(1)", null);
     try testParseError("let a0 = (5", error.UnexpectedToken);
     try testParseError("let a0 = 5)", error.UnexpectedToken);
     try testParseError("let a0 = 5 + ", error.UnexpectedToken);
@@ -462,37 +412,37 @@ test {
     try testParseError("let a0 = 5 - ", error.UnexpectedToken);
     try testParseError("let a0 = -- 5", error.UnexpectedToken);
 
-    try testParseError("label", error.UnexpectedToken);
-    try testParseError("label a0", error.UnexpectedToken);
-    try testParseError("label a0 =", error.UnexpectedToken);
-    try testParseError("label a0 = 5", error.UnexpectedToken);
-    try testParseError("label a0 = 'string'", null);
-    try testParseError("label a0 = 'string' + 'string'", error.UnexpectedToken);
-    try testParseError("label a0 = 'string' - 'string'", error.UnexpectedToken);
-    try testParseError("label a0 = 'string' * 'string'", error.UnexpectedToken);
-    try testParseError("label a0 = 'string' / 'string'", error.UnexpectedToken);
+    try testParseError("let", error.UnexpectedToken);
+    try testParseError("let a0", error.UnexpectedToken);
+    try testParseError("let a0 =", error.UnexpectedToken);
+    try testParseError("let a0 = 5", null);
+    try testParseError("let a0 = 'string'", null);
+    try testParseError("let a0 = 'string' + 'string'", null); // Parses but does not eval
+    try testParseError("let a0 = 'string' - 'string'", null);
+    try testParseError("let a0 = 'string' * 'string'", null);
+    try testParseError("let a0 = 'string' / 'string'", null);
+    try testParseError("let a0 = 'string' % 'string'", null);
 
-    try testParseError("label a0 = 'string' % 'string'", error.UnexpectedToken);
-    try testParseError("label a0 = @upper()", error.UnexpectedToken);
-    try testParseError("label a0 = @lower()", error.UnexpectedToken);
-    try testParseError("label a0 = @upper(a0:b0)", error.UnexpectedToken);
-    try testParseError("label a0 = @lower(a0:b0)", error.UnexpectedToken);
-    try testParseError("label a0 = @upper(a0, b0)", error.UnexpectedToken);
-    try testParseError("label a0 = @lower(a0, b0)", error.UnexpectedToken);
+    try testParseError("let a0 = @upper()", error.UnexpectedToken);
+    try testParseError("let a0 = @lower()", error.UnexpectedToken);
+    try testParseError("let a0 = @upper(a0:b0)", null);
+    try testParseError("let a0 = @lower(a0:b0)", null);
+    try testParseError("let a0 = @upper(a0, b0)", error.UnexpectedToken); // Should only have one arg
+    try testParseError("let a0 = @lower(a0, b0)", error.UnexpectedToken); // Should only have one arg
 
-    try testParseError("label a0 = @sum('string1')", error.NumericBuiltinInStringContext);
-    try testParseError("label a0 = @prod('string1')", error.NumericBuiltinInStringContext);
-    try testParseError("label a0 = @avg('string1')", error.NumericBuiltinInStringContext);
-    try testParseError("label a0 = @min('string1')", error.NumericBuiltinInStringContext);
-    try testParseError("label a0 = @max('string1')", error.NumericBuiltinInStringContext);
-    try testParseError("label a0 = 'string' # 'string'", null);
-    try testParseError("label a0 = 'string' 5", error.UnexpectedToken);
-    try testParseError("label a0 = 'string' 'string'", error.UnexpectedToken);
+    try testParseError("let a0 = @sum('string1')", null);
+    try testParseError("let a0 = @prod('string1')", null);
+    try testParseError("let a0 = @avg('string1')", null);
+    try testParseError("let a0 = @min('string1')", null);
+    try testParseError("let a0 = @max('string1')", null);
+    try testParseError("let a0 = 'string' # 'string'", null);
+    try testParseError("let a0 = 'string' 5", error.UnexpectedToken);
+    try testParseError("let a0 = 'string' 'string'", error.UnexpectedToken);
 
     try testParseError("let crxp0 = 5", null);
-    try testParseError("let crxx0 = 5", error.InvalidCellAddress);
-    try testParseError("label crxp0 = 'string'", null);
-    try testParseError("label crxx0 = 'string'", error.InvalidCellAddress);
+    try testParseError("let crxq0 = 5", error.InvalidCellAddress);
+    try testParseError("let crxp0 = 'string'", null);
+    try testParseError("let crxq0 = 'string'", error.InvalidCellAddress);
 }
 
 test "Node contents" {
@@ -530,23 +480,23 @@ test "Node contents" {
         },
     );
     try testNodes(
-        "label crxp65535 = 'this is epic' # 'nice'",
+        "let crxp65535 = 'this is epic' # 'nice'",
         &.{
             .{ .cell = .{ .x = 65535, .y = 65535 } },
             .{
                 .string_literal = .{
-                    .start = "label crxp65535 = '".len,
-                    .end = "label crxp65535 = 'this is epic".len,
+                    .start = "let crxp65535 = '".len,
+                    .end = "let crxp65535 = 'this is epic".len,
                 },
             },
             .{
                 .string_literal = .{
-                    .start = "label crxp65535 = 'this is epic' # '".len,
-                    .end = "label crxp65535 = 'this is epic' # 'nice".len,
+                    .start = "let crxp65535 = 'this is epic' # '".len,
+                    .end = "let crxp65535 = 'this is epic' # 'nice".len,
                 },
             },
             .{ .concat = .{ .lhs = 1, .rhs = 2 } },
-            .{ .label = .{ .lhs = 0, .rhs = 3 } },
+            .{ .assignment = .{ .lhs = 0, .rhs = 3 } },
         },
     );
 }

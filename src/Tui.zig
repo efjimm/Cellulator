@@ -146,22 +146,11 @@ pub fn renderStatus(
     if (zc.sheet.getCell(zc.cursor)) |cell| {
         if (!cell.isError()) {
             try rc.setStyle(.{ .fg = .cyan, .bg = .black });
-            try zc.sheet.printCellExpression(zc.cursor, writer);
         } else {
             try rc.setStyle(.{ .fg = .red, .bg = .black });
-            try zc.sheet.printCellExpression(zc.cursor, writer);
         }
+        try zc.sheet.printCellExpression(zc.cursor, writer);
 
-        if (zc.sheet.text_cells.contains(zc.cursor)) {
-            try rc.setStyle(.{ .fg = .white, .bg = .black });
-            try writer.writeAll(" | ");
-            try rc.setStyle(.{ .fg = .green, .bg = .black });
-            try zc.sheet.printTextCell(zc.cursor, writer);
-        }
-        try rc.setStyle(.{ .fg = .white, .bg = .black });
-    } else if (zc.sheet.text_cells.get(zc.cursor)) |_| {
-        try rc.setStyle(.{ .fg = .green, .bg = .black });
-        try zc.sheet.printTextCell(zc.cursor, writer);
         try rc.setStyle(.{ .fg = .white, .bg = .black });
     }
     try writer.writeByte(']');
@@ -465,46 +454,45 @@ pub fn renderCell(
     var rpw = rc.restrictedPaddingWriter(width);
     const writer = rpw.writer();
 
-    if (zc.sheet.text_cells.get(pos)) |cell| {
-        const text = cell.string() orelse "ERROR";
-        const text_width = utils.strWidth(text, width);
-        const left_pad = (width - text_width) / 2;
-        try writer.writeByteNTimes(' ', left_pad);
-        if (cell.isError()) {
-            if (pos.hash() == zc.cursor.hash()) {
-                try writer.writeAll(text);
+    if (zc.sheet.getCell(pos)) |cell| {
+        switch (cell.value) {
+            .number => |num| {
+                try writer.print("{d: >[1].[2]}", .{
+                    num, width, col.precision,
+                });
                 try rpw.pad();
-            } else {
+            },
+            .string => |ptr| {
+                const text = std.mem.span(ptr);
+                const text_width = utils.strWidth(text, width);
+                const left_pad = (width - text_width) / 2;
+                try writer.writeByteNTimes(' ', left_pad);
+                if (cell.isError()) {
+                    if (pos.hash() == zc.cursor.hash()) {
+                        try writer.writeAll(text);
+                        try rpw.pad();
+                    } else {
+                        try rc.setStyle(.{ .fg = .red, .bg = .black });
+                        try writer.writeAll(text);
+                        try rpw.pad();
+                        try rc.setStyle(.{ .fg = .white, .bg = .black });
+                    }
+                } else if (pos.hash() != zc.cursor.hash()) {
+                    try rc.setStyle(.{ .fg = .green, .bg = .black });
+                    try writer.writeAll(text);
+                    try rpw.pad();
+                    try rc.setStyle(.{ .fg = .white, .bg = .black });
+                } else {
+                    try writer.writeAll(text);
+                    try rpw.pad();
+                }
+            },
+            .err => {
                 try rc.setStyle(.{ .fg = .red, .bg = .black });
-                try writer.writeAll(text);
-                try rpw.pad();
-                try rc.setStyle(.{ .fg = .white, .bg = .black });
-            }
-        } else if (pos.hash() != zc.cursor.hash()) {
-            try rc.setStyle(.{ .fg = .green, .bg = .black });
-            try writer.writeAll(text);
-            try rpw.pad();
-            try rc.setStyle(.{ .fg = .white, .bg = .black });
-        } else {
-            try writer.writeAll(text);
-            try rpw.pad();
-        }
-    } else if (zc.sheet.getCell(pos)) |cell| {
-        if (cell.getValue()) |num| {
-            try writer.print("{d: >[1].[2]}", .{
-                num, width, col.precision,
-            });
-            try rpw.pad();
-        } else {
-            if (pos.hash() == zc.cursor.hash()) {
                 try writer.print("{s: >[1]}", .{ "ERROR", width });
                 try rpw.pad();
-            } else {
-                try rc.setStyle(.{ .fg = .red, .bg = .black });
-                try writer.print("{s: >[1]}", .{ "ERROR", width });
-                try rpw.pad();
                 try rc.setStyle(.{ .fg = .white, .bg = .black });
-            }
+            },
         }
     } else {
         try writer.print("{s: >[1]}", .{ "", width });

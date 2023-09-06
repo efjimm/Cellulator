@@ -320,8 +320,6 @@ const metatables = .{
             zc.setCellString(pos, expr_str, .{ .emit_event = false }) catch |err| switch (err) {
                 error.InvalidCellAddress => unreachable,
                 error.UnexpectedToken => state.argError(2, "Unexpected token"),
-                error.NumericBuiltinInStringContext => state.argError(2, "Numeric builtin used in string context"),
-                error.StringBuiltinInNumericContext => state.argError(2, "String builtin used in numeric context"),
                 error.OutOfMemory => return 0, // TODO: Make sure this is handle properly
             };
             return 0;
@@ -352,34 +350,34 @@ const metatables = .{
             return 0;
         }
 
-        pub fn get_cell_number(c_state: ?*lua.LuaState) callconv(.C) c_int {
-            var state = getState(c_state);
+        // pub fn get_cell_number(c_state: ?*lua.LuaState) callconv(.C) c_int {
+        //     var state = getState(c_state);
 
-            const zc: *ZC = state.checkUserdata(*ZC, 1, "zc").*;
-            const pos = checkCellAddress(&state, 2);
+        //     const zc: *ZC = state.checkUserdata(*ZC, 1, "zc").*;
+        //     const pos = checkCellAddress(&state, 2);
 
-            const cell = zc.sheet.cells.get(pos) orelse return 0;
-            const num = cell.getValue() orelse return 0;
-            state.pushNumber(num);
+        //     const cell = zc.sheet.cells.get(pos) orelse return 0;
+        //     const num = cell.getValue() orelse return 0;
+        //     state.pushNumber(num);
 
-            return 1;
-        }
+        //     return 1;
+        // }
 
-        // TODO: Allow selecting sheet
-        pub fn get_cell_text(c_state: ?*lua.LuaState) callconv(.C) c_int {
-            var state = getState(c_state);
+        // // TODO: Allow selecting sheet
+        // pub fn get_cell_text(c_state: ?*lua.LuaState) callconv(.C) c_int {
+        //     var state = getState(c_state);
 
-            const zc: *ZC = state.checkUserdata(*ZC, 1, "zc").*;
-            state.checkType(2, .table);
-            _ = state.getIndex(2, 1);
-            const pos = checkCellAddress(&state, -1);
+        //     const zc: *ZC = state.checkUserdata(*ZC, 1, "zc").*;
+        //     state.checkType(2, .table);
+        //     _ = state.getIndex(2, 1);
+        //     const pos = checkCellAddress(&state, -1);
 
-            const cell = zc.sheet.text_cells.get(pos) orelse return 0;
-            const str = cell.string() orelse return 0;
-            _ = state.pushBytes(str);
+        //     const cell = zc.sheet.text_cells.get(pos) orelse return 0;
+        //     const str = cell.string() orelse return 0;
+        //     _ = state.pushBytes(str);
 
-            return 1;
-        }
+        //     return 1;
+        // }
 
         // TODO
         // pub fn get_cell_expr_number(c_state: ?*lua.LuaState) callconv(.C) c_int {
