@@ -41,9 +41,7 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    var sfa = std.heap.stackFallback(32768, gpa.allocator());
-
-    try zc.init(sfa.get(), .{ .filepath = filepath });
+    try zc.init(gpa.allocator(), .{ .filepath = filepath });
     defer zc.deinit();
 
     try zc.run();

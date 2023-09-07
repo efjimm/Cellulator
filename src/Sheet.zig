@@ -812,10 +812,13 @@ pub const Cell = struct {
     };
 
     pub fn eval(cell: *Cell, sheet: *Sheet, pos: Position) Allocator.Error!void {
+        if (cell.value != .err) return;
+
         // Only heavily nested cell references will heap allocate
+        var sfa = std.heap.stackFallback(4096, sheet.allocator);
         var context = EvalContext{
             .sheet = sheet,
-            .visited_cells = EvalContext.Set.init(sheet.allocator),
+            .visited_cells = EvalContext.Set.init(sfa.get()),
         };
         defer context.visited_cells.deinit();
         errdefer cell.setError(sheet.allocator);
