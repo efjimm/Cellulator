@@ -11,6 +11,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const strip: ?bool = b.option(bool, "strip", "");
+    exe.strip = strip;
+
     const spoon = b.dependency("spoon", .{
         .target = target,
         .optimize = optimize,
