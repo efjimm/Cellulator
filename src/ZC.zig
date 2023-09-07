@@ -8,7 +8,6 @@ const critbit = @import("critbit.zig");
 const text = @import("text.zig");
 const Motion = text.Motion;
 const wcWidth = @import("wcwidth").wcWidth;
-const SizedArrayListUnmanaged = @import("sized_array_list.zig").SizedArrayListUnmanaged;
 const GapBuffer = @import("GapBuffer.zig");
 const Command = @import("Command.zig");
 const Position = @import("Position.zig");

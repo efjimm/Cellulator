@@ -4,8 +4,6 @@
 const std = @import("std");
 const Position = @import("Position.zig");
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
-const HeaderList = @import("header_list.zig").HeaderList;
-const SizedArrayListUnmanaged = @import("sized_array_list.zig").SizedArrayListUnmanaged;
 
 const Tokenizer = @import("Tokenizer.zig");
 const Parser = @import("Parser.zig");
@@ -145,7 +143,7 @@ pub fn fromStringExpression(allocator: Allocator, source: []const u8) ParseError
     var parser = Parser.init(allocator, tokenizer, .{});
     errdefer parser.deinit();
 
-    _ = try parser.parseStringExpression();
+    _ = try parser.parseExpression();
     _ = try parser.expectToken(.eof);
 
     return Self{
@@ -1003,10 +1001,9 @@ test "Functions on Ranges" {
     const Test = struct {
         sheet: *Sheet,
 
-        fn evalCell(context: @This(), pos: Position) !EvalResult {
-            const cell = context.sheet.getCellPtr(pos) orelse return .none;
-            try cell.eval(context.sheet, pos);
-            return .{ .number = cell.value.number };
+        fn evalCell(context: *const @This(), pos: Position) !EvalResult {
+            const ptr: *const Sheet.EvalContext = @ptrCast(context);
+            return Sheet.EvalContext.evalCell(ptr.*, pos);
         }
 
         fn testSheetExpr(expected: f64, expr: []const u8) !void {

@@ -61,5 +61,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
 
     const test_exe_step = b.step("test-exe", "Build test executable");
-    test_exe_step.dependOn(b.getInstallStep());
+    const install_step = b.addInstallArtifact(tests, .{});
+    test_exe_step.dependOn(&install_step.step);
 }

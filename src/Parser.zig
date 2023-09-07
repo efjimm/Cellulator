@@ -1,7 +1,6 @@
 const std = @import("std");
 const Position = @import("Position.zig");
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
-const HeaderList = @import("header_list.zig").HeaderList;
 const Tokenizer = @import("Tokenizer.zig");
 
 const Allocator = std.mem.Allocator;
@@ -124,24 +123,6 @@ fn parseStringLiteral(parser: *Parser) ParseError!u32 {
             .end = token.end,
         },
     });
-}
-
-fn addString(parser: *Parser, bytes: []const u8) ParseError!String {
-    const len: u32 = @intCast(bytes.len);
-    if (parser.strings) |strings| {
-        const start = strings.len;
-        parser.strings = try strings.appendSlice(parser.allocator, bytes);
-        return .{
-            .start = start,
-            .len = len,
-        };
-    } else {
-        parser.strings = try HeaderList(u8, u32).create(parser.allocator, len);
-        return .{
-            .start = 0,
-            .len = len,
-        };
-    }
 }
 
 /// Assignment <- CellName '=' Expression
