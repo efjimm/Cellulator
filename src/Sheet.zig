@@ -1073,6 +1073,8 @@ pub const EvalContext = struct {
 
             // Evaluate
             const res = try cell.ast.eval(context.sheet.allocator, strings, context);
+            if (cell.value == .string)
+                context.sheet.allocator.free(std.mem.span(cell.value.string));
             cell.value = switch (res) {
                 .none => .{ .number = 0 },
                 .string => |str| .{ .string = str.ptr },
