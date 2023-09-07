@@ -25,9 +25,6 @@ const NodeMark = enum {
     permanent,
 };
 
-visited_cells: CellSet = .{},
-dirty_cells: CellSet = .{},
-
 /// List of cells that need to be re-evaluated.
 queued_cells: std.ArrayListUnmanaged(Position) = .{},
 
@@ -126,8 +123,6 @@ pub fn deinit(sheet: *Sheet) void {
     sheet.clearAndFreeUndos(.undo);
     sheet.clearAndFreeUndos(.redo);
 
-    sheet.visited_cells.deinit(sheet.allocator);
-    sheet.dirty_cells.deinit(sheet.allocator);
     sheet.queued_cells.deinit(sheet.allocator);
     sheet.undo_end_markers.deinit(sheet.allocator);
     sheet.undos.deinit(sheet.allocator);
@@ -139,9 +134,6 @@ pub fn deinit(sheet: *Sheet) void {
 }
 
 pub fn clearRetainingCapacity(sheet: *Sheet, context: anytype) void {
-    sheet.dirty_cells.clearRetainingCapacity();
-    sheet.visited_cells.clearRetainingCapacity();
-
     for (sheet.cells.values()) |cell| context.destroyAst(cell.ast);
 
     var strings_iter = sheet.strings.valueIterator();
@@ -814,7 +806,7 @@ pub fn insertCell(
         }
         errdefer _ = sheet.strings.remove(pos);
         try sheet.addExpressionDependents(Range.initSingle(pos), cell.ast);
-        sheet.queued_cells.appendAssumeCapacity(pos);
+        sheet.enqueueUpdate(pos) catch unreachable;
         return;
     }
 
@@ -849,7 +841,7 @@ pub fn insertCell(
     }
 
     try sheet.addExpressionDependents(range, cell.ast);
-    sheet.queued_cells.appendAssumeCapacity(pos);
+    sheet.enqueueUpdate(pos) catch unreachable;
     if (old_cell.value == .string) {
         sheet.allocator.free(std.mem.span(old_cell.value.string));
     }
@@ -876,6 +868,7 @@ pub fn deleteCell(
     // TODO: re-use string buffer
     cell.setError(sheet.allocator);
     _ = sheet.cells.orderedRemove(pos);
+    try sheet.enqueueUpdate(pos);
 
     const strings = if (sheet.strings.fetchRemove(pos)) |kv|
         kv.value
@@ -928,18 +921,21 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
     log.debug("Updating cells...", .{});
     const begin = (if (builtin.mode == .Debug) std.time.Instant.now() catch unreachable else {});
 
-    defer {
-        sheet.queued_cells.clearRetainingCapacity();
-        sheet.dirty_cells.clearRetainingCapacity();
-    }
+    defer sheet.queued_cells.clearRetainingCapacity();
 
     log.debug("Marking dirty", .{});
-    try sheet.markDirty();
-
-    // All dirty cells are reachable from the cells in queued_cells
     for (sheet.queued_cells.items) |pos| {
-        // log.debug("Evaluating {}", .{pos});
-        try sheet.eval(pos);
+        sheet.markDirty(pos);
+    }
+
+    const context = EvalContext{ .sheet = sheet };
+    // All dirty cells are reachable from the cells in queued_cells
+    while (sheet.queued_cells.popOrNull()) |pos| {
+        // try sheet.eval(pos);
+        _ = context.evalCell(pos) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {},
+        };
     }
 
     if (builtin.mode == .Debug) {
@@ -956,37 +952,26 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
 /// Marks the cell at `pos` as needing to be updated.
 pub fn enqueueUpdate(
     sheet: *Sheet,
-    allocator: Allocator,
     pos: Position,
 ) Allocator.Error!void {
-    try sheet.queued_cells.append(allocator, pos);
+    try sheet.queued_cells.append(sheet.allocator, pos);
+    const cell = sheet.cells.getPtr(pos) orelse return;
+    cell.state = .enqueued;
 }
 
-/// Marks all queued cells and their dependents as dirty.
-fn markDirty(sheet: *Sheet) Allocator.Error!void {
-    try sheet.dirty_cells.ensureUnusedCapacity(sheet.allocator, @intCast(sheet.queued_cells.items.len));
-
-    defer sheet.visited_cells.clearRetainingCapacity();
-
-    for (sheet.queued_cells.items) |pos| {
-        try sheet.traverseDirty(pos);
-        sheet.visited_cells.clearRetainingCapacity();
-    }
-}
-
-/// Marks the cell at `pos` and all of its dependents as dirty, recursively.
-fn traverseDirty(
+/// Marks all of the dependents of `pos` as dirty.
+fn markDirty(
     sheet: *Sheet,
     pos: Position,
-) Allocator.Error!void {
-    const res = try sheet.dirty_cells.getOrPut(sheet.allocator, pos);
-    if (res.found_existing) return;
-
-    if (sheet.dependents.get(pos)) |list| {
-        for (list.items) |range| {
-            var iter = range.iterator();
-            while (iter.next()) |p| {
-                try sheet.traverseDirty(p);
+) void {
+    const list = sheet.dependents.get(pos) orelse return;
+    for (list.items) |range| {
+        var iter = range.iterator();
+        while (iter.next()) |p| {
+            const cell = sheet.cells.getPtr(p) orelse continue;
+            if (cell.state != .dirty) {
+                cell.state = .dirty;
+                sheet.markDirty(p);
             }
         }
     }
@@ -1013,6 +998,12 @@ pub fn setFilePath(sheet: *Sheet, filepath: []const u8) void {
 pub const Cell = struct {
     value: Value = .{ .err = error.NotEvaluable },
     ast: Ast = .{},
+    state: enum {
+        up_to_date,
+        dirty,
+        enqueued,
+        computing,
+    } = .up_to_date,
 
     pub const Value = union(enum) {
         number: f64,
@@ -1054,32 +1045,52 @@ pub const Cell = struct {
 pub const EvalContext = struct {
     sheet: *Sheet,
 
+    fn queueDependents(context: EvalContext, pos: Position) Allocator.Error!void {
+        const list = context.sheet.dependents.get(pos) orelse return;
+        for (list.items) |range| {
+            var iter = range.iterator();
+            while (iter.next()) |p| {
+                const c = context.sheet.cells.getPtr(p) orelse continue;
+                if (c.state == .dirty) {
+                    c.state = .enqueued;
+                    try context.sheet.queued_cells.append(context.sheet.allocator, p);
+                }
+            }
+        }
+    }
+
     /// Evaluates a cell and all of its dependencies.
     pub fn evalCell(context: EvalContext, pos: Position) Ast.EvalError!Ast.EvalResult {
-        const cell = context.sheet.cells.getPtr(pos) orelse return .none;
+        const cell = context.sheet.cells.getPtr(pos) orelse {
+            try context.queueDependents(pos);
+            return .none;
+        };
 
-        // Re-evaluate cell if it is dirty
-        if (context.sheet.dirty_cells.contains(pos)) {
-            _ = context.sheet.dirty_cells.remove(pos);
-            errdefer |err| cell.value = .{ .err = err };
+        switch (cell.state) {
+            .up_to_date => {},
+            .computing => return error.CyclicalReference,
+            .enqueued, .dirty => {
+                cell.state = .computing;
 
-            // Check for cyclical reference
-            const r = try context.sheet.visited_cells.getOrPut(context.sheet.allocator, pos);
-            if (r.found_existing) return error.CyclicalReference;
-            defer _ = context.sheet.visited_cells.remove(pos);
+                // Get strings
+                const strings = context.sheet.strings.get(pos) orelse "";
 
-            // Get strings
-            const strings = context.sheet.strings.get(pos) orelse "";
+                // Evaluate
+                const res = cell.ast.eval(context.sheet.allocator, strings, context) catch |err| {
+                    cell.value = .{ .err = err };
+                    return err;
+                };
+                if (cell.value == .string)
+                    context.sheet.allocator.free(std.mem.span(cell.value.string));
+                cell.value = switch (res) {
+                    .none => .{ .number = 0 },
+                    .string => |str| .{ .string = str.ptr },
+                    .number => |n| .{ .number = n },
+                };
+                cell.state = .up_to_date;
 
-            // Evaluate
-            const res = try cell.ast.eval(context.sheet.allocator, strings, context);
-            if (cell.value == .string)
-                context.sheet.allocator.free(std.mem.span(cell.value.string));
-            cell.value = switch (res) {
-                .none => .{ .number = 0 },
-                .string => |str| .{ .string = str.ptr },
-                .number => |n| .{ .number = n },
-            };
+                try context.queueDependents(pos);
+            },
         }
 
         return switch (cell.value) {
@@ -1091,27 +1102,24 @@ pub const EvalContext = struct {
 };
 
 /// Evaluates a cell and all of it's dependencies, followed by all of it's dependents.
-pub fn eval(sheet: *Sheet, pos: Position) Allocator.Error!void {
-    if (!sheet.dirty_cells.contains(pos)) return;
+// pub fn eval(sheet: *Sheet, pos: Position) Allocator.Error!void {
+//     const context = EvalContext{
+//         .sheet = sheet,
+//     };
 
-    log.debug("Evaluating {}", .{pos});
-    const context = EvalContext{
-        .sheet = sheet,
-    };
+//     _ = context.evalCell(pos) catch |err| switch (err) {
+//         error.OutOfMemory => return error.OutOfMemory,
+//         else => {},
+//     };
 
-    _ = context.evalCell(pos) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => {},
-    };
-
-    const dependents = sheet.dependents.getPtr(pos) orelse return;
-    for (dependents.items) |range| {
-        var iter = range.iterator();
-        while (iter.next()) |p| {
-            try sheet.eval(p);
-        }
-    }
-}
+//     const dependents = sheet.dependents.getPtr(pos) orelse return;
+//     for (dependents.items) |range| {
+//         var iter = range.iterator();
+//         while (iter.next()) |p| {
+//             try sheet.eval(p);
+//         }
+//     }
+// }
 
 pub fn printCellExpression(sheet: Sheet, pos: Position, writer: anytype) !void {
     const cell = sheet.cells.get(pos) orelse return;
