@@ -49,6 +49,13 @@ pub fn bottomRight(pos1: Position, pos2: Position) Position {
     };
 }
 
+pub fn area(pos1: Position, pos2: Position) u32 {
+    const start = topLeft(pos1, pos2);
+    const end = bottomRight(pos1, pos2);
+
+    return (@as(u32, end.x) + 1 - start.x) * (@as(u32, end.y) + 1 - start.y);
+}
+
 pub fn intersects(pos: Position, corner1: Position, corner2: Position) bool {
     const tl = topLeft(corner1, corner2);
     const br = bottomRight(corner1, corner2);
@@ -177,10 +184,6 @@ pub const Range = struct {
             .tl = pos,
             .br = pos,
         };
-    }
-
-    pub fn area(range: Range) u32 {
-        return (@as(u32, range.br.x) + 1 - range.tl.x) * (@as(u32, range.br.y) + 1 - range.br.y);
     }
 
     pub fn intersects(r1: Range, r2: Range) bool {
