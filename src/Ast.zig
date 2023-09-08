@@ -4,6 +4,7 @@
 const std = @import("std");
 const Position = @import("Position.zig");
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
+const Sheet = @import("Sheet.zig");
 
 const Tokenizer = @import("Tokenizer.zig");
 const Parser = @import("Parser.zig");
@@ -613,6 +614,7 @@ pub const EvalError = error{
 
 pub fn EvalContext(comptime Context: type) type {
     return struct {
+        sheet: *const Sheet,
         slice: Slice,
         allocator: Allocator,
         strings: []const u8,
@@ -748,7 +750,7 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var total: f64 = 0;
-            var iter = range.iterator();
+            var iter = self.sheet.rangeIterator(range);
             while (iter.next()) |pos| {
                 const res = try self.context.evalCell(pos);
                 total += try res.toNumber(0);
@@ -781,7 +783,7 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var total: f64 = 1;
-            var iter = range.iterator();
+            var iter = self.sheet.rangeIterator(range);
             while (iter.next()) |pos| {
                 const res = try self.context.evalCell(pos);
                 total *= try res.toNumber(1);
@@ -805,7 +807,7 @@ pub fn EvalContext(comptime Context: type) type {
 
                     const p1 = data[r.lhs].cell;
                     const p2 = data[r.rhs].cell;
-                    total_items += Position.area(p1, p2);
+                    total_items += Position.Range.init(p1, p2).area();
                 } else {
                     const res = try self.eval(i);
                     total += try res.toNumber(0);
@@ -844,7 +846,7 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var max: ?f64 = null;
-            var iter = range.iterator();
+            var iter = self.sheet.rangeIterator(range);
             while (iter.next()) |pos| {
                 const res = try self.context.evalCell(pos);
                 const n = try res.toNumberOrNull() orelse continue;
@@ -882,7 +884,7 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var min: ?f64 = null;
-            var iter = range.iterator();
+            var iter = self.sheet.rangeIterator(range);
             while (iter.next()) |pos| {
                 const res = try self.context.evalCell(pos);
                 const n = try res.toNumberOrNull() orelse continue;
@@ -910,12 +912,14 @@ pub fn eval(
     strings: []const u8,
     /// Instance of a type which has the method `evalCell`,
     /// which evaluates the cell at the given position.
+    sheet: *const Sheet,
     context: anytype,
 ) !DynamicEvalResult {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
     const ctx = EvalContext(@TypeOf(context)){
+        .sheet = sheet,
         .slice = ast.toSlice(),
         .allocator = arena.allocator(),
         .strings = strings,
@@ -996,7 +1000,6 @@ test "Parse and Eval Expression" {
 }
 
 test "Functions on Ranges" {
-    const Sheet = @import("Sheet.zig");
     const t = std.testing;
     const Test = struct {
         sheet: *Sheet,

@@ -356,11 +356,48 @@ fn addRangeDependents(
     dependent_range: Range,
     range: Range,
 ) Allocator.Error!void {
+    try sheet.dependents.ensureUnusedCapacity(sheet.allocator, range.area());
     var iter = range.iterator();
     while (iter.next()) |pos| {
         try sheet.addDependent(dependent_range, pos);
     }
 }
+
+pub fn rangeIterator(sheet: *const Sheet, range: Range) ExtantRangeIterator {
+    return ExtantRangeIterator.init(sheet, range);
+}
+
+/// Fast iterator over all the existing cells in a range. Adding or removing cells from the
+/// underlying sheet invalidates the iterator.
+pub const ExtantRangeIterator = struct {
+    sheet: *const Sheet,
+    range: Range,
+    index: usize,
+
+    pub fn init(sheet: *const Sheet, range: Range) ExtantRangeIterator {
+        const tl = range.tl.hash();
+        const index = for (sheet.cells.keys(), 0..) |pos, i| {
+            if (pos.hash() >= tl) break i;
+        } else sheet.cells.entries.len;
+
+        return .{
+            .sheet = sheet,
+            .range = range,
+            .index = index,
+        };
+    }
+
+    pub fn next(iter: *ExtantRangeIterator) ?Position {
+        if (iter.index >= iter.sheet.cells.entries.len) return null;
+
+        const p = iter.sheet.cells.keys()[iter.index];
+        if (p.hash() > iter.range.br.hash()) return null;
+
+        iter.index += 1;
+
+        return p;
+    }
+};
 
 /// Adds `dependent_range` as a dependent of all cells referenced by `expr`.
 fn addExpressionDependents(
@@ -1076,7 +1113,12 @@ pub const EvalContext = struct {
                 const strings = context.sheet.strings.get(pos) orelse "";
 
                 // Evaluate
-                const res = cell.ast.eval(context.sheet.allocator, strings, context) catch |err| {
+                const res = cell.ast.eval(
+                    context.sheet.allocator,
+                    strings,
+                    context.sheet,
+                    context,
+                ) catch |err| {
                     cell.value = .{ .err = err };
                     return err;
                 };
