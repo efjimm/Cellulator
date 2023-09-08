@@ -54,13 +54,11 @@ Cellulator differentiates between **statements** and **commands**. They can both
 command line. The main difference is that statements can be read from a file - this is how
 Cellulator saves sheet state to disk.
 
-There are currently 2 types of statements in Cellulator:
+There is currently only one type of statement in cellulator:
 
-- `let {cell address} = {numerical expression}`
+- `let {cell address} = {expression}`
   - {cell address} is the text address of a cell, e.g. `A0`, `GL3600`
-  - {numerical expression} is any [numerical expression](#numerical-expressions)
-- `label {cell address} = {string expression}`
-  - {string expression} is any [string expression](#string-expressions)
+  - {expression} is any [expression](#expressions)
 
 Commands can be entered via placing a colon character as the first character of a command.
 Pressing ':' in normal mode will do this automatically. What follows is a list of currently
@@ -74,12 +72,12 @@ implemented commands. Values surrounded in {} are optional.
   - Fills the given range with value, incrementing by increment each cell. Increment is applied
     left to right, top to bottom. Example: ":fill b1:d12 30 0.2"
 
-## Numerical Expressions
+## Expressions
 
-Numerical expressions consist of numeric literals, cell references, cell ranges, builtin functions,
-and numeric operators. They can be used on the right-hand side of the `=` in a `let` statement.
+Expressions consist of number/string literals, cell references, cell ranges, builtin functions,
+and operators. They can be used on the right-hand side of the `=` in a `let` statement.
 
-### Numeric literals
+### Number literals
 
 Number literals consist of a string of ASCII digit characters (0-9) and underscores, with at most
 one decimal point. Underscores are ignored and are only used for visual separation of digits.
@@ -90,6 +88,17 @@ Examples:
 - `1000000`
 - `1_000_000`
 - `1_234_567.000_089`
+
+### String Literals
+
+String literals consist of arbitrary text surrounded by single or double quotes. There is
+currently no way to escape quotes inside of quotes.
+
+Examples:
+
+- 'This is a string'
+- 'Double "quotes" inside of single quotes'
+- "Single 'quotes' inside of double quotes"
 
 ### Cell References
 
@@ -116,8 +125,9 @@ Examples:
 
 ### Numeric Operators
 
-The following is a list of all operators available for use with numeric literals, cell references
-and builtins:
+The following is a list of all operators that return number values. They try to convert non-number
+operands (e.g. strings) to numbers. Strings that cannot be converted to numbers will return an
+InvalidCoercion error.
 
 - unary `+` Positive numeric literal
 - unary `-` Negative numeric literal
@@ -128,47 +138,37 @@ and builtins:
 - `%` Modulo division (remainder)
 - `(` and `)` Grouping operators
 
-### Builtin Functions
-
-Builtin functions perform specific operations on an arbitrary number of arguments. Builtins are
-used in the format `@builtin_name(argument_1, argument_2, argument_3, ...)`. Builtins must have at
-least one argument. Builtins accept numeric literals, cell references, cell ranges and other
-builtins as arguments.
-
-The following is a list of all currently implemented builtin functions:
-
-- `@sum` Returns the sum of its arguments
-- `@mul` Returns the product of its arguments
-- `@avg` Returns the average of its arguments
-- `@min` Returns the smallest argument
-- `@max` Returns the largest argument
-
-## String Expressions
-
-String expressions consist of string literals, cell references, and string operators. There are
-currently no builtin functions that operate on strings. String expressions can be used on the
-right hand side of the `=` in a `label` statement.
-
-### String Literals
-
-String literals consist of arbitrary text surrounded by single or double quotes. There is
-currently no way to escape quotes inside of quotes.
-
-Examples:
-
-- 'This is a string'
-- 'Double "quotes" inside of single quotes'
-- "Single 'quotes' inside of double quotes"
-
 ### String Operators
 
-The following is a list of all currently available string operators:
+The following is a list of operators that return string values. They try to convert non-string
+operands to strings. Converting a number to a string never fails outside of OOM situations.
 
 - `#` Concatenates the strings on the left and right
   - Examples:
     - `'This is a string' # ' that has been concatenated'`
     - `'1: ' # A0`
     - `A0 # B0`
+
+### Builtin Functions
+
+Builtin functions perform specific operations on a number of arguments. Builtins are used in the
+format `@builtin_name(argument_1, argument_2, argument_3, ...)`. Different builtins take and
+return different types and numbers of arguments.
+
+The following builtins take an arbitrary number of arguments and coerce them to numbers. They may
+also take ranges as arguments.
+
+- `@sum` Returns the sum of its arguments
+- `@mul` Returns the product of its arguments
+- `@avg` Returns the average of its arguments.
+- `@min` Returns the smallest argument.
+- `@max` Returns the largest argument.
+
+The following builtins take one argument and coerce it to a string. They may *not* take a range
+as an argument.
+
+- `@upper` Returns the ASCII uppercase version of its argument as a string.
+- `@lower` Returns the ASCII lowercase version of its argument as a string.
 
 ## Keybinds
 
@@ -188,10 +188,7 @@ will repeat the following motion that many times. This does not currently work f
 - `:` Enter command insert mode
 - `=` Enter command insert mode, with text set to `let cellname = `, where cellname is the cell
   under the cursor
-- `\` Enter command insert mode, with text set to `label cellname = `, where cellname is the cell
-  under the cursor.
-- `e` Edit cell numeric expression
-- `E` Edit cell label expression
+- `e` Edit the expression of the current cell
 - `dd`, `x` Delete the cell under the cursor
 - `Esc` Dismiss status message
 - `$` Move cursor to the last populated cell on the current row
@@ -300,8 +297,9 @@ Performs the given operation on the text delimited by the next motion
 - `` i` `` Inside backticks
 - `` a` `` Around backticks
 
-## Miscellaneous Notes
+## Known issues
 
-Cellulator does not require any heap allocation for running the TUI, handling input, handling
-commands (not statements) or saving to a file. This means that Cellulator *should* continue to
-function on OOM and allow for saving the current file, though this is relatively untested.
+Creating a cell containing a large range is very slow, because cellulator has to add dependency
+information to every cell that the range refers to. This is being worked on. The plan is to use
+an R-tree to be able to look up which ranges a cell is referred to by, instead of storing a
+reference to the range in every cell that it refers to.

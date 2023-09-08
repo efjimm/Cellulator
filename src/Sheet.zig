@@ -923,7 +923,7 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
 
     defer sheet.queued_cells.clearRetainingCapacity();
 
-    log.debug("Marking dirty", .{});
+    log.debug("Marking dirty cells", .{});
     for (sheet.queued_cells.items) |pos| {
         sheet.markDirty(pos);
     }
