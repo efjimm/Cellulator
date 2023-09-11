@@ -198,7 +198,7 @@ pub fn loadFile(sheet: *Sheet, ast_allocator: Allocator, filepath: []const u8, c
     defer file.close();
 
     sheet.setFilePath(filepath);
-    sheet.has_changes = false;
+    defer sheet.has_changes = false;
 
     var buf = std.io.bufferedReader(file.reader());
     const reader = buf.reader();
