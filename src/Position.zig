@@ -188,7 +188,7 @@ pub const Range = struct {
 
     pub fn intersects(r1: Range, r2: Range) bool {
         return r1.tl.x <= r2.br.x and r1.br.x >= r2.tl.x and
-            r1.tl.y <= r2.br.y and r1.br.y >= r2.br.y;
+            r1.tl.y <= r2.br.y and r1.br.y >= r2.tl.y;
     }
 
     /// Removes all positions in `m` from `target`, returning 0-4 new ranges, or `null` if
