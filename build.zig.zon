@@ -1,14 +1,19 @@
 .{
     .name = "Cellulator",
     .version = "0.0.1",
+    .paths = .{
+        "src",
+        "build.zig",
+        "build.zig.zon",
+    },
     .dependencies = .{
         .spoon = .{
-            .url = "https://github.com/efjimm/zig-spoon/archive/bd9d2f62b8a05f58af0e27d3c4d2f9d139805562.tar.gz",
-            .hash = "1220b29dbae33a9dd019cc9f6e4a8c722dec892163fd9f21cd45783a52cc35b42928",
+            .url = "https://github.com/efjimm/zig-spoon/archive/master.tar.gz",
+            .hash = "1220a6d9ff1fee1d0cc5925fb942b207b5ff69e8c26d3075cd9647147306a78e67a1",
         },
         .wcwidth = .{
-            .url = "https://github.com/efjimm/zig-wcwidth/archive/d665dfbbf687900b0a3ed31879bb1e2a7f8b236d.tar.gz",
-            .hash = "1220271f362ae1e02e524769a06a68a6cf4fe48218b82cae3823fb09940a537e61b1",
+            .url = "https://github.com/efjimm/zig-wcwidth/archive/master.tar.gz",
+            .hash = "1220e7c2da3e466432510df6a06bfff2539eaa94288c035c6730e2cb5d47750eece1",
         },
         .ziglua = .{
             .url = "https://github.com/natecraddock/ziglua/archive/master.tar.gz",
