@@ -35,6 +35,10 @@ pub fn hash(position: Position) u32 {
     return @as(u32, position.y) * (MAX + 1) + position.x;
 }
 
+pub fn eql(p1: Position, p2: Position) bool {
+    return p1.x == p2.x and p1.y == p2.y;
+}
+
 pub fn topLeft(pos1: Position, pos2: Position) Position {
     return .{
         .x = @min(pos1.x, pos2.x),
@@ -47,6 +51,24 @@ pub fn bottomRight(pos1: Position, pos2: Position) Position {
         .x = @max(pos1.x, pos2.x),
         .y = @max(pos1.y, pos2.y),
     };
+}
+
+pub fn min(p1: Position, p2: Position) Position {
+    return .{
+        .x = @min(p1.x, p2.x),
+        .y = @min(p1.y, p2.y),
+    };
+}
+
+pub fn max(p1: Position, p2: Position) Position {
+    return .{
+        .x = @max(p1.x, p2.x),
+        .y = @max(p1.y, p2.y),
+    };
+}
+
+pub fn anyMatch(p1: Position, p2: Position) bool {
+    return p1.x == p2.x or p1.y == p2.y;
 }
 
 pub fn area(pos1: Position, pos2: Position) u32 {
@@ -152,43 +174,40 @@ pub fn fromAddress(address: []const u8) FromAddressError!Position {
 }
 
 pub const Range = struct {
-    /// Top left position of the range
+    /// Top left
     tl: Position,
-
-    /// Bottom right position of the range
+    /// Bottom right
     br: Position,
 
-    pub fn init(p1: Position, p2: Position) Range {
-        var ret: Range = undefined;
-        if (p1.x < p2.x) {
-            ret.tl.x = p1.x;
-            ret.br.x = p2.x;
-        } else {
-            ret.tl.x = p2.x;
-            ret.br.x = p1.x;
-        }
-
-        if (p1.y < p2.y) {
-            ret.tl.y = p1.y;
-            ret.br.y = p2.y;
-        } else {
-            ret.tl.y = p2.y;
-            ret.br.y = p1.y;
-        }
-
-        return ret;
-    }
-
-    pub fn initSingle(pos: Position) Range {
-        return .{
-            .tl = pos,
-            .br = pos,
+    pub fn init(tl_x: u16, tl_y: u16, br_x: u16, br_y: u16) Range {
+        return Range{
+            .tl = .{ .x = tl_x, .y = tl_y },
+            .br = .{ .x = br_x, .y = br_y },
         };
     }
 
-    pub fn intersects(r1: Range, r2: Range) bool {
-        return r1.tl.x <= r2.br.x and r1.br.x >= r2.tl.x and
-            r1.tl.y <= r2.br.y and r1.br.y >= r2.tl.y;
+    pub fn initSingle(x: u16, y: u16) Range {
+        return Range{
+            .tl = .{ .x = x, .y = y },
+            .br = .{ .x = x, .y = y },
+        };
+    }
+
+    pub fn initPos(tl: Position, br: Position) Range {
+        return .{ .tl = tl, .br = br };
+    }
+
+    pub fn initSinglePos(p: Position) Range {
+        return initPos(p, p);
+    }
+
+    pub fn format(
+        range: Range,
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        try writer.print("[{} -> {}]", .{ range.tl, range.br });
     }
 
     /// Removes all positions in `m` from `target`, returning 0-4 new ranges, or `null` if
@@ -233,16 +252,50 @@ pub const Range = struct {
             });
         }
 
-        return ret;
+        return if (ret.len > 0) ret else null;
     }
 
-    pub fn format(
-        range: Range,
-        comptime _: []const u8,
-        _: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        try writer.print("{}:{}", .{ range.tl, range.br });
+    pub fn eql(r1: Range, r2: Range) bool {
+        return r1.tl.x == r2.tl.x and r1.tl.y == r2.tl.y and
+            r1.br.x == r2.br.x and r1.br.y == r2.br.y;
+    }
+
+    /// Returns true if `r1` contains `r2`.
+    pub fn contains(r1: Range, r2: Range) bool {
+        return r1.tl.x <= r2.tl.x and r1.tl.y <= r2.tl.y and
+            r1.br.x >= r2.br.x and r1.br.y >= r2.br.y;
+    }
+
+    /// Returns true if `r1` intersects `r2`
+    pub fn intersects(r1: Range, r2: Range) bool {
+        return r1.tl.x <= r2.br.x and r1.br.x >= r2.tl.x and
+            r1.tl.y <= r2.br.y and r1.br.y >= r2.tl.y;
+    }
+
+    pub fn initMax() Range {
+        return .{
+            .tl = .{ .x = 0, .y = 0 },
+            .br = .{ .x = std.math.maxInt(u16), .y = std.math.maxInt(u16) },
+        };
+    }
+
+    pub fn merge(r1: Range, r2: Range) Range {
+        return .{
+            .tl = Position.min(r1.tl, r2.tl),
+            .br = Position.max(r1.br, r2.br),
+        };
+    }
+
+    pub fn height(r: Range) u16 {
+        return r.br.y - r.tl.y;
+    }
+
+    pub fn width(r: Range) u16 {
+        return r.br.x - r.tl.x;
+    }
+
+    pub fn area(r: Range) u64 {
+        return @as(u64, r.width()) * r.height();
     }
 
     pub const Iterator = struct {

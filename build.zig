@@ -42,10 +42,13 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the program");
     run_step.dependOn(&run_cmd.step);
 
+    const filter = b.option([]const u8, "test-filter", "Skip tests that do not match filter");
+
     const tests = b.addTest(.{
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
         .optimize = optimize,
+        .filter = filter,
     });
 
     const fast_tests = b.option(bool, "fast-tests", "Skip slow tests") orelse false;

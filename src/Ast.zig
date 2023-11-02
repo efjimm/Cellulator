@@ -611,11 +611,14 @@ pub const EvalError = error{
     NotEvaluable,
 } || Allocator.Error;
 
+const Sheet = @import("Sheet.zig");
+
 pub fn EvalContext(comptime Context: type) type {
     return struct {
         slice: Slice,
         allocator: Allocator,
         strings: []const u8,
+        sheet: *Sheet,
         context: Context,
 
         pub const Error = blk: {
@@ -741,17 +744,20 @@ pub fn EvalContext(comptime Context: type) type {
         /// Converts an ast range to a position range.
         fn toPosRange(self: @This(), r: BinaryOperator) Position.Range {
             const data = self.slice.nodes.items(.data);
-            return Position.Range.init(data[r.lhs].cell, data[r.rhs].cell);
+            return Position.Range.initPos(data[r.lhs].cell, data[r.rhs].cell);
         }
 
         fn sumRange(self: @This(), r: BinaryOperator) !f64 {
             const range = self.toPosRange(r);
 
             var total: f64 = 0;
-            var iter = range.iterator();
-            while (iter.next()) |pos| {
-                const res = try self.context.evalCell(pos);
-                total += try res.toNumber(0);
+            const kvs = try self.sheet.cell_tree.search(self.allocator, range);
+            for (kvs) |kv| {
+                var iter = kv.key.iterator();
+                while (iter.next()) |p| {
+                    const res = try self.context.evalCell(p);
+                    total += try res.toNumber(0);
+                }
             }
 
             return total;
@@ -903,7 +909,7 @@ pub const DynamicEvalResult = union(enum) {
 /// Dynamically typed evaluation of expressions.
 pub fn eval(
     ast: Self,
-    allocator: Allocator,
+    sheet: *Sheet,
     /// Strings required by the expression. String literal nodes contain offsets
     /// into this buffer. If the expression has no string literals then this
     /// argument can be left as "".
@@ -912,10 +918,11 @@ pub fn eval(
     /// which evaluates the cell at the given position.
     context: anytype,
 ) !DynamicEvalResult {
-    var arena = std.heap.ArenaAllocator.init(allocator);
+    var arena = std.heap.ArenaAllocator.init(sheet.allocator);
     defer arena.deinit();
 
     const ctx = EvalContext(@TypeOf(context)){
+        .sheet = sheet,
         .slice = ast.toSlice(),
         .allocator = arena.allocator(),
         .strings = strings,
@@ -928,7 +935,7 @@ pub fn eval(
     return switch (res) {
         .none => .none,
         .number => |n| .{ .number = n },
-        .string => |str| .{ .string = try allocator.dupeZ(u8, str) },
+        .string => |str| .{ .string = try sheet.allocator.dupeZ(u8, str) },
     };
 }
 
@@ -953,7 +960,9 @@ test "Parse and Eval Expression" {
             };
             defer ast.deinit(t.allocator);
 
-            const res = ast.eval(t.allocator, expr, Context{}) catch |err| {
+            var sheet = Sheet.init(t.allocator);
+            defer sheet.deinit();
+            const res = ast.eval(&sheet, expr, Context{}) catch |err| {
                 return if (err != expected) err else {};
             };
             const n = res.number;
@@ -996,7 +1005,6 @@ test "Parse and Eval Expression" {
 }
 
 test "Functions on Ranges" {
-    const Sheet = @import("Sheet.zig");
     const t = std.testing;
     const Test = struct {
         sheet: *Sheet,
@@ -1019,7 +1027,7 @@ test "Functions on Ranges" {
             defer ast.deinit(t.allocator);
 
             try sheet.update();
-            const res = try ast.eval(t.allocator, "", @This(){ .sheet = &sheet });
+            const res = try ast.eval(&sheet, "", @This(){ .sheet = &sheet });
             try std.testing.expectApproxEqRel(expected, res.number, 0.0001);
         }
     };
@@ -1090,11 +1098,13 @@ test "Splice" {
     var ast = try fromSource(allocator, "let a0 = 100 * 3 + 5 / 2 + @avg(1, 10)");
 
     ast.splice(ast.rootNode().assignment.rhs);
-    try t.expectApproxEqRel(@as(f64, 308), (try ast.eval(t.allocator, "", Context{})).number, 0.0001);
+    var sheet = Sheet.init(t.allocator);
+    defer sheet.deinit();
+    try t.expectApproxEqRel(@as(f64, 308), (try ast.eval(&sheet, "", Context{})).number, 0.0001);
     try t.expectEqual(@as(usize, 11), ast.nodes.len);
 
     ast.splice(ast.rootNode().add.rhs);
-    try t.expectApproxEqRel(@as(f64, 5.5), (try ast.eval(t.allocator, "", Context{})).number, 0.0001);
+    try t.expectApproxEqRel(@as(f64, 5.5), (try ast.eval(&sheet, "", Context{})).number, 0.0001);
     try t.expectEqual(@as(usize, 3), ast.nodes.len);
 }
 

@@ -215,7 +215,7 @@ pub fn right(self: *const Self) []const u8 {
         self.buffer.right();
 }
 
-test {
+test "Command" {
     const t = std.testing;
 
     var self = Self{};

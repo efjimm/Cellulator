@@ -328,7 +328,7 @@ fn nextToken(parser: *Parser) Tokenizer.Token {
     return ret;
 }
 
-test {
+test "parser" {
     const t = std.testing;
     const testParser = struct {
         fn func(bytes: []const u8, node_tags: []const std.meta.Tag(Node)) !void {

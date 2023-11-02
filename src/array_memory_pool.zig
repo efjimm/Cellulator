@@ -15,10 +15,10 @@ pub fn ArrayMemoryPool(comptime T: type, comptime Index: type) type {
             value: T,
         };
 
-        first_free: Index = 0,
         ptr: [*]U = undefined,
         len: Index = 0,
         capacity: Index = 0,
+        first_free: Index = 0,
 
         pub fn ensureTotalCapacityPrecise(
             pool: *Pool,
@@ -35,6 +35,14 @@ pub fn ArrayMemoryPool(comptime T: type, comptime Index: type) type {
                 pool.ptr = new_memory.ptr;
                 pool.capacity = @intCast(new_memory.len);
             }
+        }
+
+        pub fn ensureUnusedCapacity(
+            pool: *Pool,
+            allocator: Allocator,
+            n: Index,
+        ) Allocator.Error!void {
+            return pool.ensureTotalCapacity(allocator, pool.len + n);
         }
 
         pub fn ensureTotalCapacity(
@@ -109,7 +117,7 @@ pub fn ArrayMemoryPool(comptime T: type, comptime Index: type) type {
     };
 }
 
-test {
+test "ArrayMemoryPool" {
     const allocator = std.testing.allocator;
     var pool: ArrayMemoryPool([]const u8, u8) = .{};
     defer pool.deinit(std.testing.allocator);

@@ -299,7 +299,7 @@ pub fn CritBitMap(
     };
 }
 
-test {
+test "critbit1" {
     const Map = CritBitMap([]const u8, u32, StringContext);
 
     const t = std.testing;
@@ -344,7 +344,7 @@ test {
     try t.expectEqual(false, map.contains("umm \x05"));
 }
 
-test {
+test "critbit2" {
     const t = std.testing;
     const Map = CritBitMap([]const u8, u32, StringContext);
     var map = Map.init();

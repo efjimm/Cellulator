@@ -176,7 +176,7 @@ pub fn Utf8Iterator(comptime T: type) type {
     };
 }
 
-test {
+test "indexOfPos" {
     const t = std.testing;
     const buf = Slice(u8, true){
         .slice = "This is epic!",

@@ -216,7 +216,7 @@ pub fn items(self: *Self) []u8 {
     return self.left();
 }
 
-test {
+test "GapBuffer" {
     const t = std.testing;
     var buf = Self{};
     defer buf.deinit(t.allocator);

@@ -8,15 +8,18 @@ const ZC = @import("ZC.zig");
 
 const Allocator = std.mem.Allocator;
 
+// TODO: Move this to build.zig
+const use_logfile = builtin.mode == .Debug;
+
 var zc: ZC = undefined;
-var logfile: if (builtin.mode == .Debug) std.fs.File else void = undefined;
+var logfile: if (use_logfile) std.fs.File else void = undefined;
 
 pub fn main() !void {
-    if (builtin.mode == .Debug) {
+    if (use_logfile) {
         logfile = try std.fs.cwd().createFile("log.txt", .{});
     }
     defer {
-        if (builtin.mode == .Debug) {
+        if (use_logfile) {
             logfile.close();
         }
     }
@@ -53,10 +56,10 @@ pub fn panic(msg: []const u8, trace: ?*std.builtin.StackTrace, ret_addr: ?usize)
     std.builtin.default_panic(msg, trace, ret_addr);
 }
 
-pub const std_options = struct {
-    pub const log_level = if (builtin.mode == .Debug) .debug else .info;
-    pub const logFn = if (builtin.mode == .Debug) log else std.log.defaultLog;
-};
+pub const std_options = if (use_logfile) struct {
+    pub const log_level = .debug;
+    pub const logFn = log;
+} else struct {};
 
 pub fn log(
     comptime level: std.log.Level,
@@ -74,5 +77,6 @@ pub fn log(
 test {
     if (comptime builtin.is_test) {
         std.testing.refAllDecls(ZC);
+        std.testing.refAllDecls(@import("tree.zig"));
     }
 }
