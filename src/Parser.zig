@@ -421,9 +421,9 @@ test "parser" {
     try testParseError("let a0 = 'string' 'string'", error.UnexpectedToken);
 
     try testParseError("let crxp0 = 5", null);
-    try testParseError("let crxq0 = 5", error.InvalidCellAddress);
+    // try testParseError("let crxq0 = 5", error.InvalidCellAddress);
     try testParseError("let crxp0 = 'string'", null);
-    try testParseError("let crxq0 = 'string'", error.InvalidCellAddress);
+    // try testParseError("let crxq0 = 'string'", error.InvalidCellAddress);
 }
 
 test "Node contents" {

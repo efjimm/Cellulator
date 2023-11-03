@@ -31,6 +31,8 @@ Run `zig build test -fsummary` to run the tests.
 Cellulator is currently in early development. Expect missing features. If you actually intend on
 using Cellulator, build it in ReleaseSafe mode to catch any latent bugs.
 
+The maximum sheet size is 4,294,967,296 rows by 4,294,967,296 columns.
+
 ## Modes
 
 Cellulator used mode-based input, like in vim. There are multiple modes in Cellulator:

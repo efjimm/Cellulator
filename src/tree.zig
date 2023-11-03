@@ -3,6 +3,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Position = @import("Position.zig");
 const Range = Position.Range;
+const PosInt = Position.Int;
 
 pub fn RTree(comptime V: type, comptime min_children: usize) type {
     return struct {
@@ -429,26 +430,30 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 const maxInt = std.math.maxInt;
                 const minInt = std.math.minInt;
 
-                min_tl: u16 = maxInt(u16),
-                max_tl: u16 = minInt(u16),
+                min_tl: PosInt = maxInt(PosInt),
+                max_tl: PosInt = minInt(PosInt),
 
-                max_br: u16 = minInt(u16),
-                min_br: u16 = maxInt(u16),
+                max_br: PosInt = minInt(PosInt),
+                min_br: PosInt = maxInt(PosInt),
 
                 tl_index: usize = 0,
                 br_index: usize = 0,
 
-                fn farthest(s: DimStats) u16 {
-                    const res = @as(i17, s.max_br) - @as(i17, s.min_tl);
-                    return @intCast(@abs(res));
+                fn farthest(s: DimStats) PosInt {
+                    return if (s.max_br > s.min_tl)
+                        s.max_br - s.min_tl
+                    else
+                        s.min_tl - s.max_br;
                 }
 
-                fn nearest(s: DimStats) u16 {
-                    const res = @as(i17, s.min_br) - @as(i17, s.max_tl);
-                    return @intCast(@abs(res));
+                fn nearest(s: DimStats) PosInt {
+                    return if (s.min_br > s.max_tl)
+                        s.min_br - s.max_tl
+                    else
+                        s.max_tl - s.min_br;
                 }
 
-                fn computeDim(s: *DimStats, lo: u16, hi: u16, i: usize) void {
+                fn computeDim(s: *DimStats, lo: PosInt, hi: PosInt, i: usize) void {
                     s.min_tl = @min(s.min_tl, lo);
                     s.max_br = @max(s.max_br, hi);
 
@@ -476,9 +481,9 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                     }
                 }
 
-                const max = std.math.maxInt(u16);
-                const norm_x = std.math.divTrunc(u16, dx.nearest(), dx.farthest()) catch max;
-                const norm_y = std.math.divTrunc(u16, dy.nearest(), dy.farthest()) catch max;
+                const max = std.math.maxInt(PosInt);
+                const norm_x = std.math.divTrunc(PosInt, dx.nearest(), dx.farthest()) catch max;
+                const norm_y = std.math.divTrunc(PosInt, dy.nearest(), dy.farthest()) catch max;
                 const x, const y = if (norm_x > norm_y)
                     .{ dx.tl_index, dx.br_index }
                 else

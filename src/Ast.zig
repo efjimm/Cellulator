@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const Position = @import("Position.zig");
+const PosInt = Position.Int;
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 
 const Tokenizer = @import("Tokenizer.zig");
@@ -22,7 +23,7 @@ pub const String = struct {
 
 pub const Node = union(enum) {
     number: f64,
-    column: u16,
+    column: PosInt,
     cell: Position,
     assignment: BinaryOperator,
     concat: BinaryOperator,
@@ -802,7 +803,7 @@ pub fn EvalContext(comptime Context: type) type {
 
             var iter = self.slice.argIterator(start, end);
             var total: f64 = 0;
-            var total_items: u32 = 0;
+            var total_items: Position.HashInt = 0;
 
             while (iter.next()) |i| {
                 if (tags[i] == .range) {

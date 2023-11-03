@@ -11,6 +11,7 @@ const wcWidth = @import("wcwidth").wcWidth;
 const GapBuffer = @import("GapBuffer.zig");
 const Command = @import("Command.zig");
 const Position = @import("Position.zig");
+const PosInt = Position.Int;
 const lua = @import("lua.zig");
 const Lua = @import("ziglua").Lua;
 
@@ -504,18 +505,12 @@ const CommandWriter = std.io.Writer(*Self, Allocator.Error, commandWrite);
 
 pub fn submitCommand(self: *Self) !void {
     assert(self.mode.isCommandMode());
-
     self.dismissStatusMessage();
-
-    defer {
-        self.setMode(.normal);
-    }
+    defer self.setMode(.normal);
 
     const slice = try self.command.submit(self.allocator);
-    const res = self.parseCommand(slice);
-    self.commandHistoryNext();
-
-    try res;
+    defer self.commandHistoryNext();
+    try self.parseCommand(slice);
 }
 
 pub fn commandHistoryNext(self: *Self) void {
@@ -876,7 +871,7 @@ pub fn isSelectedCell(self: Self, pos: Position) bool {
     };
 }
 
-pub fn isSelectedCol(self: Self, x: u16) bool {
+pub fn isSelectedCol(self: Self, x: PosInt) bool {
     return switch (self.mode) {
         .visual, .select => {
             const min = @min(self.cursor.x, self.anchor.x);
@@ -887,7 +882,7 @@ pub fn isSelectedCol(self: Self, x: u16) bool {
     };
 }
 
-pub fn isSelectedRow(self: Self, y: u16) bool {
+pub fn isSelectedRow(self: Self, y: PosInt) bool {
     return switch (self.mode) {
         .visual, .select => {
             const min = @min(self.cursor.y, self.anchor.y);
@@ -947,8 +942,8 @@ pub fn getCount(self: Self) u32 {
     return if (self.count == 0) 1 else self.count;
 }
 
-pub fn getCountU16(self: Self) u16 {
-    return @intCast(@min(std.math.maxInt(u16), self.getCount()));
+pub fn getCountPos(self: Self) PosInt {
+    return @intCast(@min(std.math.maxInt(PosInt), self.getCount()));
 }
 
 pub fn resetCount(self: *Self) void {
@@ -1140,28 +1135,28 @@ pub fn setCursor(self: *Self, new_pos: Position) void {
 }
 
 pub fn cursorUp(self: *Self) void {
-    self.setCursor(.{ .y = self.cursor.y -| self.getCountU16(), .x = self.cursor.x });
+    self.setCursor(.{ .y = self.cursor.y -| self.getCountPos(), .x = self.cursor.x });
     self.resetCount();
 }
 
 pub fn cursorDown(self: *Self) void {
-    self.setCursor(.{ .y = self.cursor.y +| self.getCountU16(), .x = self.cursor.x });
+    self.setCursor(.{ .y = self.cursor.y +| self.getCountPos(), .x = self.cursor.x });
     self.resetCount();
 }
 
 pub fn cursorLeft(self: *Self) void {
-    self.setCursor(.{ .y = self.cursor.y, .x = self.cursor.x -| self.getCountU16() });
+    self.setCursor(.{ .y = self.cursor.y, .x = self.cursor.x -| self.getCountPos() });
     self.resetCount();
 }
 
 pub fn cursorRight(self: *Self) void {
-    self.setCursor(.{ .y = self.cursor.y, .x = self.cursor.x +| self.getCountU16() });
+    self.setCursor(.{ .y = self.cursor.y, .x = self.cursor.x +| self.getCountPos() });
     self.resetCount();
 }
 
 pub fn selectionUp(self: *Self) void {
     assert(self.mode == .visual or self.mode == .select);
-    const count = self.getCountU16();
+    const count = self.getCountPos();
     if (self.anchor.y < self.cursor.y) {
         const len = self.cursor.y - self.anchor.y;
         self.setCursor(.{ .y = @max(self.cursor.y -| count, len), .x = self.cursor.x });
@@ -1176,15 +1171,18 @@ pub fn selectionUp(self: *Self) void {
 
 pub fn selectionDown(self: *Self) void {
     assert(self.mode == .visual or self.mode == .select);
-    const count = self.getCountU16();
+    const count = self.getCountPos();
 
     if (self.anchor.y < self.cursor.y) {
         const len = self.cursor.y - self.anchor.y;
         self.setCursor(.{ .y = self.cursor.y +| count, .x = self.cursor.x });
-        self.anchor.y = @min(self.anchor.y +| count, std.math.maxInt(u16) - len);
+        self.anchor.y = @min(self.anchor.y +| count, std.math.maxInt(PosInt) - len);
     } else {
         const len = self.anchor.y - self.cursor.y;
-        self.setCursor(.{ .y = @min(self.cursor.y +| count, std.math.maxInt(u16) - len), .x = self.cursor.x });
+        self.setCursor(.{
+            .y = @min(self.cursor.y +| count, std.math.maxInt(PosInt) - len),
+            .x = self.cursor.x,
+        });
         self.anchor.y +|= count;
     }
     self.resetCount();
@@ -1192,7 +1190,7 @@ pub fn selectionDown(self: *Self) void {
 
 pub fn selectionLeft(self: *Self) void {
     assert(self.mode == .visual or self.mode == .select);
-    const count = self.getCountU16();
+    const count = self.getCountPos();
     if (self.anchor.x < self.cursor.x) {
         const len = self.cursor.x - self.anchor.x;
         self.setCursor(.{ .x = @max(self.cursor.x -| count, len), .y = self.cursor.y });
@@ -1207,15 +1205,18 @@ pub fn selectionLeft(self: *Self) void {
 
 pub fn selectionRight(self: *Self) void {
     assert(self.mode == .visual or self.mode == .select);
-    const count = self.getCountU16();
+    const count = self.getCountPos();
 
     if (self.anchor.x < self.cursor.x) {
         const len = self.cursor.x - self.anchor.x;
         self.setCursor(.{ .x = self.cursor.x +| count, .y = self.cursor.y });
-        self.anchor.x = @min(self.anchor.x +| count, std.math.maxInt(u16) - len);
+        self.anchor.x = @min(self.anchor.x +| count, std.math.maxInt(PosInt) - len);
     } else {
         const len = self.anchor.x - self.cursor.x;
-        self.setCursor(.{ .x = @min(self.cursor.x +| count, std.math.maxInt(u16) - len), .y = self.cursor.y });
+        self.setCursor(.{
+            .x = @min(self.cursor.x +| count, std.math.maxInt(PosInt) - len),
+            .y = self.cursor.y,
+        });
         self.anchor.x +|= count;
     }
     self.resetCount();
@@ -1231,7 +1232,7 @@ pub fn leftReservedColumns(self: Self) u16 {
     if (y == 0)
         return 2;
 
-    return std.math.log10(y) + 2;
+    return @intCast(std.math.log10(y) + 2);
 }
 
 pub fn clampScreenToCursor(self: *Self) void {
@@ -1280,7 +1281,7 @@ pub fn clampScreenToCursorX(self: *Self) void {
     }
 
     var w = self.leftReservedColumns();
-    var x: u16 = self.cursor.x;
+    var x = self.cursor.x;
 
     while (true) : (x -= 1) {
         if (x < self.screen_pos.x) return;
@@ -1299,17 +1300,17 @@ pub fn clampScreenToCursorX(self: *Self) void {
     }
 }
 
-pub fn setPrecision(self: *Self, column: u16, new_precision: u8) Allocator.Error!void {
+pub fn setPrecision(self: *Self, column: PosInt, new_precision: u8) Allocator.Error!void {
     try self.sheet.setPrecision(column, new_precision, .{});
     self.tui.update.cells = true;
 }
 
-pub fn incPrecision(self: *Self, column: u16, count: u8) Allocator.Error!void {
+pub fn incPrecision(self: *Self, column: PosInt, count: u8) Allocator.Error!void {
     try self.sheet.incPrecision(column, count, .{});
     self.tui.update.cells = true;
 }
 
-pub fn decPrecision(self: *Self, column: u16, count: u8) Allocator.Error!void {
+pub fn decPrecision(self: *Self, column: PosInt, count: u8) Allocator.Error!void {
     try self.sheet.decPrecision(column, count, .{});
     self.tui.update.cells = true;
 }
@@ -1326,13 +1327,13 @@ pub inline fn cursorDecPrecision(self: *Self) Allocator.Error!void {
     self.resetCount();
 }
 
-pub fn incWidth(self: *Self, column: u16, n: u8) Allocator.Error!void {
+pub fn incWidth(self: *Self, column: PosInt, n: u8) Allocator.Error!void {
     try self.sheet.incWidth(column, n, .{});
     self.tui.update.cells = true;
     self.tui.update.column_headings = true;
 }
 
-pub fn decWidth(self: *Self, column: u16, n: u8) Allocator.Error!void {
+pub fn decWidth(self: *Self, column: PosInt, n: u8) Allocator.Error!void {
     try self.sheet.decWidth(column, n, .{});
     self.tui.update.cells = true;
     self.tui.update.column_headings = true;
@@ -1398,13 +1399,13 @@ pub fn cursorToLastCellInColumn(self: *Self) void {
 }
 
 pub fn cursorGotoRow(self: *Self) void {
-    const count: u16 = @intCast(@min(std.math.maxInt(u16), self.count));
+    const count: PosInt = @intCast(@min(std.math.maxInt(PosInt), self.count));
     self.resetCount();
     self.setCursor(.{ .x = self.cursor.x, .y = count });
 }
 
 pub fn cursorGotoCol(self: *Self) void {
-    const count: u16 = @intCast(@min(std.math.maxInt(u16), self.count));
+    const count: PosInt = @intCast(@min(std.math.maxInt(PosInt), self.count));
     self.resetCount();
     self.setCursor(.{ .x = count, .y = self.cursor.y });
 }
@@ -1421,7 +1422,7 @@ test "Sheet mode counts" {
 
 test "Motions normal mode" {
     const t = std.testing;
-    const max = std.math.maxInt(u16);
+    const max = std.math.maxInt(PosInt);
 
     var zc: Self = undefined;
     try zc.init(t.allocator, .{ .ui = false });
@@ -1624,7 +1625,7 @@ test "Motions normal mode" {
 
 test "Motions visual mode" {
     const t = std.testing;
-    const max = std.math.maxInt(u16);
+    const max = std.math.maxInt(Position.Int);
 
     var zc: Self = undefined;
     try zc.init(t.allocator, .{ .ui = false });
@@ -1871,11 +1872,9 @@ test "Motions visual mode" {
     try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = max - 10021, .y = max }, zc.cursor);
     try t.expectEqual(Position{ .x = max - 10031, .y = max - 10 }, zc.anchor);
-    try zc.doVisualMode(.{ .count = 9 });
-    try zc.doVisualMode(.{ .count = 9 });
-    try zc.doVisualMode(.{ .count = 9 });
-    try zc.doVisualMode(.{ .count = 9 });
-    try zc.doVisualMode(.{ .count = 9 });
+    for (0..20) |_| {
+        try zc.doVisualMode(.{ .count = 9 });
+    }
     try zc.doVisualMode(.visual_move_left);
     try t.expectEqual(Position{ .x = 10, .y = max }, zc.cursor);
     try t.expectEqual(Position{ .x = 0, .y = max - 10 }, zc.anchor);
@@ -1913,11 +1912,7 @@ test "Motions visual mode" {
     try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = 10021, .y = 0 }, zc.cursor);
     try t.expectEqual(Position{ .x = 10031, .y = 10 }, zc.anchor);
-    try zc.doVisualMode(.{ .count = 9 });
-    try zc.doVisualMode(.{ .count = 9 });
-    try zc.doVisualMode(.{ .count = 9 });
-    try zc.doVisualMode(.{ .count = 9 });
-    try zc.doVisualMode(.{ .count = 9 });
+    for (0..20) |_| try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.visual_move_right);
     try t.expectEqual(Position{ .x = max - 10, .y = 0 }, zc.cursor);
     try t.expectEqual(Position{ .x = max, .y = 10 }, zc.anchor);
@@ -1955,11 +1950,7 @@ test "Motions visual mode" {
     try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = max - 10021, .x = max }, zc.cursor);
     try t.expectEqual(Position{ .y = max - 10031, .x = max - 10 }, zc.anchor);
-    try zc.doVisualMode(.{ .count = 9 });
-    try zc.doVisualMode(.{ .count = 9 });
-    try zc.doVisualMode(.{ .count = 9 });
-    try zc.doVisualMode(.{ .count = 9 });
-    try zc.doVisualMode(.{ .count = 9 });
+    for (0..20) |_| try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.visual_move_up);
     try t.expectEqual(Position{ .y = 10, .x = max }, zc.cursor);
     try t.expectEqual(Position{ .y = 0, .x = max - 10 }, zc.anchor);
@@ -1997,11 +1988,7 @@ test "Motions visual mode" {
     try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = 10021, .x = 0 }, zc.cursor);
     try t.expectEqual(Position{ .y = 10031, .x = 10 }, zc.anchor);
-    try zc.doVisualMode(.{ .count = 9 });
-    try zc.doVisualMode(.{ .count = 9 });
-    try zc.doVisualMode(.{ .count = 9 });
-    try zc.doVisualMode(.{ .count = 9 });
-    try zc.doVisualMode(.{ .count = 9 });
+    for (0..20) |_| try zc.doVisualMode(.{ .count = 9 });
     try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = max - 10, .x = 0 }, zc.cursor);
     try t.expectEqual(Position{ .y = max, .x = 10 }, zc.anchor);

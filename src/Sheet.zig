@@ -4,12 +4,14 @@ const std = @import("std");
 const builtin = @import("builtin");
 const utils = @import("utils.zig");
 const Position = @import("Position.zig");
+const PosInt = Position.Int;
 const Range = Position.Range;
 const Ast = @import("Ast.zig");
 const ArrayMemoryPool = @import("array_memory_pool.zig").ArrayMemoryPool;
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 const RTree = @import("tree.zig").RTree;
 const DependentTree = @import("tree.zig").DependentTree;
+const ArrayHashMapUnmanaged = @import("array_hash_map.zig").ArrayHashMapUnmanaged;
 
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -20,7 +22,7 @@ const NodeListUnmanaged = std.ArrayListUnmanaged(Position);
 
 const log = std.log.scoped(.sheet);
 
-const CellMap = std.ArrayHashMapUnmanaged(Position, Cell, ArrayPositionContext, false);
+const CellMap = ArrayHashMapUnmanaged(Position, Cell, ArrayPositionContext, false);
 const CellSet = std.HashMapUnmanaged(Position, void, PositionContext, 80);
 
 /// List of cells that need to be re-evaluated.
@@ -31,8 +33,8 @@ cells: CellMap = .{},
 
 strings: std.HashMapUnmanaged(Position, []const u8, PositionContext, 80) = .{},
 
-/// Maps column indexes (0 - 65535) to `Column` structs containing info about that column.
-columns: std.AutoArrayHashMapUnmanaged(u16, Column) = .{},
+/// Maps column indexes (0 - 2^32-1) to `Column` structs containing info about that column.
+columns: std.AutoArrayHashMapUnmanaged(Position.Int, Column) = .{},
 filepath: std.BoundedArray(u8, std.fs.MAX_PATH_BYTES) = .{}, // TODO: Heap allocate this
 
 /// True if there have been any changes since the last save
@@ -95,18 +97,18 @@ pub const Undo = union(enum) {
     delete_cell: Position,
 
     set_column_width: struct {
-        col: u16,
+        col: Position.Int,
         width: u16,
     },
     set_column_precision: struct {
-        col: u16,
+        col: Position.Int,
         precision: u8,
     },
 
     comptime {
         assert(@sizeOf(std.meta.Tag(Undo)) == 1);
         inline for (std.meta.fields(Undo)) |field| {
-            assert(@sizeOf(field.type) <= 8);
+            assert(@sizeOf(field.type) <= 12);
         }
     }
 };
@@ -382,7 +384,7 @@ fn removeExprDependents(
     }
 }
 
-pub fn firstCellInRow(sheet: *Sheet, row: u16) ?Position {
+pub fn firstCellInRow(sheet: *Sheet, row: Position.Int) ?Position {
     return for (sheet.cells.keys()) |pos| {
         if (pos.y < row) continue;
         if (pos.y == row) break pos;
@@ -390,7 +392,7 @@ pub fn firstCellInRow(sheet: *Sheet, row: u16) ?Position {
     } else null;
 }
 
-pub fn lastCellInRow(sheet: *Sheet, row: u16) ?Position {
+pub fn lastCellInRow(sheet: *Sheet, row: Position.Int) ?Position {
     var ret: ?Position = null;
 
     for (sheet.cells.keys()) |pos| {
@@ -401,13 +403,13 @@ pub fn lastCellInRow(sheet: *Sheet, row: u16) ?Position {
     return ret;
 }
 
-pub fn firstCellInColumn(sheet: *Sheet, col: u16) ?Position {
+pub fn firstCellInColumn(sheet: *Sheet, col: Position.Int) ?Position {
     return for (sheet.cells.keys()) |pos| {
         if (pos.x == col) break pos;
     } else null;
 }
 
-pub fn lastCellInColumn(sheet: *Sheet, col: u16) ?Position {
+pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) ?Position {
     var iter = std.mem.reverseIterator(sheet.cells.keys());
     return while (iter.next()) |pos| {
         if (pos.x == col) break pos;
@@ -578,7 +580,7 @@ pub fn redo(sheet: *Sheet) Allocator.Error!void {
 
 pub fn setWidth(
     sheet: *Sheet,
-    column_index: u16,
+    column_index: Position.Int,
     width: u16,
     opts: UndoOpts,
 ) Allocator.Error!void {
@@ -590,7 +592,7 @@ pub fn setWidth(
 pub fn setColWidth(
     sheet: *Sheet,
     col: *Column,
-    index: u16,
+    index: Position.Int,
     width: u16,
     opts: UndoOpts,
 ) Allocator.Error!void {
@@ -611,7 +613,7 @@ pub fn setColWidth(
 
 pub fn incWidth(
     sheet: *Sheet,
-    column_index: u16,
+    column_index: Position.Int,
     n: u16,
     opts: UndoOpts,
 ) Allocator.Error!void {
@@ -622,7 +624,7 @@ pub fn incWidth(
 
 pub fn decWidth(
     sheet: *Sheet,
-    column_index: u16,
+    column_index: Position.Int,
     n: u16,
     opts: UndoOpts,
 ) Allocator.Error!void {
@@ -634,7 +636,7 @@ pub fn decWidth(
 
 pub fn setPrecision(
     sheet: *Sheet,
-    column_index: u16,
+    column_index: Position.Int,
     precision: u8,
     opts: UndoOpts,
 ) Allocator.Error!void {
@@ -646,7 +648,7 @@ pub fn setPrecision(
 pub fn setColPrecision(
     sheet: *Sheet,
     col: *Column,
-    index: u16,
+    index: Position.Int,
     precision: u8,
     opts: UndoOpts,
 ) Allocator.Error!void {
@@ -667,7 +669,7 @@ pub fn setColPrecision(
 
 pub fn incPrecision(
     sheet: *Sheet,
-    column_index: u16,
+    column_index: Position.Int,
     n: u8,
     opts: UndoOpts,
 ) Allocator.Error!void {
@@ -678,7 +680,7 @@ pub fn incPrecision(
 
 pub fn decPrecision(
     sheet: *Sheet,
-    column_index: u16,
+    column_index: Position.Int,
     n: u8,
     opts: UndoOpts,
 ) Allocator.Error!void {
@@ -687,11 +689,11 @@ pub fn decPrecision(
     }
 }
 
-pub fn cellCount(sheet: *Sheet) u32 {
+pub fn cellCount(sheet: *Sheet) Position.HashInt {
     return @intCast(sheet.cells.entries.len);
 }
 
-pub fn colCount(sheet: *Sheet) u32 {
+pub fn colCount(sheet: *Sheet) Position.Int {
     return @intCast(sheet.columns.entries.len);
 }
 
@@ -814,14 +816,14 @@ pub fn insertCell(
 
 pub fn setCell(
     sheet: *Sheet,
-    position: Position,
+    pos: Position,
     source: []const u8,
     ast: Ast,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
     const strings = try ast.dupeStrings(sheet.allocator, source);
     errdefer sheet.allocator.free(strings);
-    try sheet.insertCell(position, strings, ast, undo_opts);
+    try sheet.insertCell(pos, strings, ast, undo_opts);
 }
 
 pub fn deleteCell(
@@ -1074,22 +1076,20 @@ pub fn printCellExpression(sheet: Sheet, pos: Position, writer: anytype) !void {
 }
 
 pub const Column = struct {
-    const CellMap = std.AutoArrayHashMapUnmanaged(u16, Cell);
-
     pub const default_width = 10;
 
     width: u16 = default_width,
     precision: u8 = 2,
 };
 
-pub fn getColumn(sheet: Sheet, index: u16) Column {
+pub fn getColumn(sheet: Sheet, index: PosInt) Column {
     return sheet.columns.get(index) orelse Column{};
 }
 
 pub fn widthNeededForColumn(
     sheet: Sheet,
-    column_index: u16,
-    precision: u16,
+    column_index: PosInt,
+    precision: u8,
     max_width: u16,
 ) u16 {
     var width: u16 = Column.default_width;
@@ -1130,7 +1130,7 @@ const ArrayPositionContext = struct {
         return p1.y == p2.y and p1.x == p2.x;
     }
 
-    pub fn hash(_: ArrayPositionContext, pos: Position) u32 {
+    pub fn hash(_: ArrayPositionContext, pos: Position) u64 {
         return pos.hash();
     }
 };
@@ -1154,8 +1154,8 @@ test "Sheet basics" {
     var sheet = Sheet.init(t.allocator);
     defer sheet.deinit();
 
-    try t.expectEqual(@as(u32, 0), sheet.cellCount());
-    try t.expectEqual(@as(u32, 0), sheet.colCount());
+    try t.expectEqual(@as(Position.HashInt, 0), sheet.cellCount());
+    try t.expectEqual(@as(Position.Int, 0), sheet.colCount());
     try t.expectEqualStrings("", sheet.filepath.slice());
 
     const exprs: []const []const u8 = &.{ "50 + 5", "500 * 2 / 34 + 1", "a0", "a2 * a1" };
@@ -1168,25 +1168,17 @@ test "Sheet basics" {
         try sheet.setCell(.{ .x = 0, .y = @intCast(i) }, expr, ast, .{});
     }
 
-    try t.expectEqual(@as(u32, 4), sheet.cellCount());
-    try t.expectEqual(@as(u32, 1), sheet.colCount());
+    try t.expectEqual(@as(Position.HashInt, 4), sheet.cellCount());
+    try t.expectEqual(@as(Position.Int, 1), sheet.colCount());
     for (asts, 0..) |ast, i| {
         try t.expectEqual(ast, sheet.cells.get(.{ .x = 0, .y = @intCast(i) }).?.ast);
     }
 
-    // for (0..4) |y| {
-    //const pos = .{ .x = 0, .y = @intCast(u16, y) };
-    //try t.expectEqual(@as(?f64, null), sheet.cells.get(pos).?.getValue());
-    // }
     try sheet.update();
-    // for (0..4) |y| {
-    // const pos = .{ .x = 0, .y = @intCast(u16, y) };
-    // try t.expect(sheet.cells.get(pos).?.getValue() != null);
-    // }
 
     try sheet.deleteCell(.{ .x = 0, .y = 0 }, .{});
 
-    try t.expectEqual(@as(u32, 3), sheet.cellCount());
+    try t.expectEqual(@as(Position.HashInt, 3), sheet.cellCount());
 }
 
 test "setCell allocations" {
@@ -1217,17 +1209,6 @@ test "setCell allocations" {
     };
 
     try t.checkAllAllocationFailures(t.allocator, Test.testSetCellAllocs, .{});
-}
-
-test "Position.columnAddressBuf" {
-    const t = std.testing;
-    var buf: [4]u8 = undefined;
-
-    try t.expectEqualStrings("A", Position.columnAddressBuf(0, &buf));
-    try t.expectEqualStrings("AA", Position.columnAddressBuf(26, &buf));
-    try t.expectEqualStrings("AAA", Position.columnAddressBuf(702, &buf));
-    try t.expectEqualStrings("AAAA", Position.columnAddressBuf(18278, &buf));
-    try t.expectEqualStrings("CRXP", Position.columnAddressBuf(Position.MAX, &buf));
 }
 
 fn testCellEvaluation(allocator: Allocator) !void {
@@ -1984,10 +1965,10 @@ fn testCellEvaluation(allocator: Allocator) !void {
     // Only checks the eval results of some of the cells, checking all is kinda slow
     const strings = @embedFile("strings.csv");
     var line_iter = std.mem.tokenizeScalar(u8, strings, '\n');
-    var y: u16 = 0;
+    var y: PosInt = 0;
     while (line_iter.next()) |line| : (y += 1) {
         var col_iter = std.mem.tokenizeScalar(u8, line, ',');
-        var x: u16 = 0;
+        var x: PosInt = 0;
         while (col_iter.next()) |col| : (x += 1) {
             const str = std.mem.span(sheet.cells.get(.{ .x = x, .y = y }).?.value.string);
             try t.expectEqualStrings(col, str);
