@@ -7,6 +7,12 @@ const Position = @import("Position.zig");
 const wcWidth = @import("wcwidth").wcWidth;
 const assert = std.debug.assert;
 const log = std.log.scoped(.tui);
+const CellType = enum {
+    number,
+    string,
+    err,
+    blank,
+};
 
 const Term = spoon.Term;
 
@@ -19,6 +25,29 @@ const UpdateFlags = packed struct {
     row_numbers: bool = true,
     cells: bool = true,
     cursor: bool = true,
+};
+
+const styles = blk: {
+    const T = std.enums.EnumArray(CellType, [2]spoon.Style);
+    var array = T.initUndefined();
+    array.set(.number, .{
+        .{ .fg = .white, .bg = .black },
+        .{ .fg = .black, .bg = .blue },
+    });
+    array.set(.string, .{
+        .{ .fg = .green, .bg = .black },
+        .{ .fg = .black, .bg = .blue },
+    });
+    array.set(.err, .{
+        .{ .fg = .red, .bg = .black },
+        .{ .fg = .red, .bg = .blue },
+    });
+    array.set(.blank, .{
+        .{ .fg = .white, .bg = .black },
+        .{ .fg = .black, .bg = .blue },
+    });
+    assert(@typeInfo(CellType).Enum.fields.len == 4);
+    break :blk array;
 };
 
 const Self = @This();
@@ -363,7 +392,7 @@ pub fn renderCursor(
 
     // Render the cells and headings at the current cursor position with a specific colour.
     try rc.moveCursorTo(pos.y, pos.x);
-    _ = try renderCursorCell(rc, zc, zc.cursor);
+    _ = try renderCell(rc, zc, zc.cursor);
     try rc.setStyle(.{ .fg = .black, .bg = .blue });
 
     const col = zc.sheet.getColumn(zc.cursor.x);
@@ -379,15 +408,11 @@ pub fn renderCursor(
     try rc.setStyle(.{ .fg = .white, .bg = .black });
 }
 
-pub fn renderCursorCell(
-    rc: *RenderContext,
-    zc: *ZC,
-    pos: Position,
-) RenderError!u16 {
-    try rc.setStyle(.{ .fg = .black, .bg = .blue });
-    const ret = renderCell(rc, zc, pos);
-    try rc.setStyle(.{ .fg = .white, .bg = .black });
-    return ret;
+fn isSelected(zc: ZC, pos: Position) bool {
+    return pos.hash() == zc.cursor.hash() or switch (zc.mode) {
+        .visual, .select => pos.intersects(zc.anchor, zc.cursor),
+        else => false,
+    };
 }
 
 pub fn renderCells(
@@ -405,22 +430,7 @@ pub fn renderCells(
         var w: u16 = reserved_cols;
         for (zc.screen_pos.x..@as(usize, std.math.maxInt(u16)) + 1) |x| {
             const pos = Position{ .y = @intCast(y), .x = @intCast(x) };
-            switch (zc.mode) {
-                .visual, .select => {
-                    if (pos.hash() == zc.cursor.hash() or pos.intersects(zc.anchor, zc.cursor)) {
-                        w += try renderCursorCell(rc, zc, pos);
-                    } else {
-                        w += try renderCell(rc, zc, pos);
-                    }
-                },
-                else => {
-                    if (pos.hash() == zc.cursor.hash()) {
-                        w += try renderCursorCell(rc, zc, pos);
-                    } else {
-                        w += try renderCell(rc, zc, pos);
-                    }
-                },
-            }
+            w += try renderCell(rc, zc, pos);
             if (w >= self.term.width) break;
         } else {
             // Hit maxInt(u16) and didn't go past the end of the screen, so we clear the rest of
@@ -435,7 +445,11 @@ pub fn renderCell(
     zc: *ZC,
     pos: Position,
 ) RenderError!u16 {
+    const selected = isSelected(zc.*, pos);
+
     const col = zc.sheet.columns.get(pos.x) orelse {
+        // No cells in this column, render blank cell
+        try rc.setStyle(styles.get(.blank)[@intFromBool(selected)]);
         const width = Sheet.Column.default_width;
         try rc.buffer.writer().writeByteNTimes(' ', width);
         return width;
@@ -455,6 +469,9 @@ pub fn renderCell(
     const writer = rpw.writer();
 
     if (zc.sheet.getCell(pos)) |cell| {
+        const tag: CellType = @enumFromInt(@intFromEnum(cell.value));
+        try rc.setStyle(styles.get(tag)[@intFromBool(selected)]);
+
         switch (cell.value) {
             .number => |num| {
                 try writer.print("{d: >[1].[2]}", .{
@@ -472,29 +489,24 @@ pub fn renderCell(
                         try writer.writeAll(text);
                         try rpw.pad();
                     } else {
-                        try rc.setStyle(.{ .fg = .red, .bg = .black });
                         try writer.writeAll(text);
                         try rpw.pad();
-                        try rc.setStyle(.{ .fg = .white, .bg = .black });
                     }
                 } else if (pos.hash() != zc.cursor.hash()) {
-                    try rc.setStyle(.{ .fg = .green, .bg = .black });
                     try writer.writeAll(text);
                     try rpw.pad();
-                    try rc.setStyle(.{ .fg = .white, .bg = .black });
                 } else {
                     try writer.writeAll(text);
                     try rpw.pad();
                 }
             },
             .err => {
-                try rc.setStyle(.{ .fg = .red, .bg = .black });
                 try writer.print("{s: >[1]}", .{ "ERROR", width });
                 try rpw.pad();
-                try rc.setStyle(.{ .fg = .white, .bg = .black });
             },
         }
     } else {
+        try rc.setStyle(styles.get(.blank)[@intFromBool(selected)]);
         try writer.print("{s: >[1]}", .{ "", width });
         try rpw.pad();
     }
