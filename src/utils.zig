@@ -1,5 +1,5 @@
 const std = @import("std");
-const Position = @import("Sheet.zig").Position;
+const Position = @import("Position.zig").Position;
 const wcWidth = @import("wcwidth").wcWidth;
 
 const unicode = std.unicode;
@@ -7,6 +7,38 @@ const mem = std.mem;
 const assert = std.debug.assert;
 
 pub usingnamespace @import("buffer_utils.zig");
+
+pub fn binarySearch(
+    key: u64,
+    positions: []const Position,
+) struct { usize, bool } {
+    const items: []align(4) const u64 = @ptrCast(positions);
+    var left: usize = 0;
+    var right: usize = items.len;
+
+    while (left < right) {
+        // Avoid overflowing in the midpoint calculation
+        const mid = left + (right - left) / 2;
+        // Compare the key with the midpoint element
+        switch (std.math.order(key, items[mid])) {
+            .eq => return .{ mid, true },
+            .gt => left = mid + 1,
+            .lt => right = mid,
+        }
+    }
+
+    return .{ right, false };
+}
+
+// test binarySearch {
+//     const t = std.testing;
+//     const items: []const u64 = &.{
+//         1, 2, 3, 4, 6, 7, 8, 9,
+//     };
+//     const index, const found = binarySearch(5, @ptrCast(items));
+//     try t.expectEqual(false, found);
+//     try t.expectEqual(@as(usize, 3), index);
+// }
 
 pub fn dupeZ(comptime T: type, buf: anytype) [buf.len:0]T {
     var ret: [buf.len:0]T = undefined;

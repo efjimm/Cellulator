@@ -1,9 +1,10 @@
 // TODO:
-// Experiment with O(n^2) node splitting
+// Experiment with O(n^2) node splitting algorithm
+// Implement R*-tree
 const std = @import("std");
 const builtin = @import("builtin");
 const utils = @import("utils.zig");
-const Position = @import("Position.zig");
+const Position = @import("Position.zig").Position;
 const PosInt = Position.Int;
 const Range = Position.Range;
 const Ast = @import("Ast.zig");
@@ -733,44 +734,29 @@ pub fn insertCell(
     }
 
     const cell = Cell{ .ast = ast };
+    const index, const found = utils.binarySearch(pos.hash(), sheet.cells.keys());
 
-    if (!sheet.cells.contains(pos)) {
+    if (!found) {
         // Ensure capacities for cells and strings
         try sheet.cells.ensureUnusedCapacity(sheet.allocator, 1);
-
         const u = Undo{ .delete_cell = pos };
 
-        for (sheet.cells.keys(), 0..) |key, i| {
-            if (key.hash() > pos.hash()) {
-                sheet.cells.entries.insertAssumeCapacity(i, .{
-                    .hash = {},
-                    .key = pos,
-                    .value = cell,
-                });
+        sheet.cells.entries.insertAssumeCapacity(index, .{
+            .hash = {},
+            .key = pos,
+            .value = cell,
+        });
 
-                // If this fails with OOM we could potentially end up with the map in an invalid
-                // state. All instances of OOM must be recoverable. If we error here we remove the
-                // newly inserted entry so that the old index remains correct.
-                sheet.cells.reIndex(sheet.allocator) catch |err| {
-                    sheet.cells.entries.orderedRemove(i);
-                    return err;
-                };
-                errdefer _ = sheet.cells.orderedRemove(pos);
-
-                sheet.pushUndo(u, undo_opts) catch unreachable;
-
-                sheet.has_changes = true;
-                break;
-            }
-        } else {
-            // Found no entries
-            sheet.cells.putAssumeCapacity(pos, cell);
-            errdefer _ = sheet.cells.orderedRemove(pos);
-
-            sheet.pushUndo(u, undo_opts) catch unreachable;
-            sheet.has_changes = true;
-        }
+        // If this fails with OOM we could potentially end up with the map in an invalid
+        // state. All instances of OOM must be recoverable. If we error here we remove the
+        // newly inserted entry so that the old index remains correct.
+        sheet.cells.reIndex(sheet.allocator) catch |err| {
+            sheet.cells.entries.orderedRemove(index);
+            return err;
+        };
         errdefer _ = sheet.cells.orderedRemove(pos);
+        sheet.pushUndo(u, undo_opts) catch unreachable;
+        sheet.has_changes = true;
 
         if (strings.len > 0) {
             // NoClobber because cell didn't exist in map, so strings shouldn't exist either
@@ -783,7 +769,7 @@ pub fn insertCell(
 
     try sheet.undo_asts.ensureUnusedCapacity(sheet.allocator, 1);
 
-    const ptr = sheet.cells.getPtr(pos).?;
+    const ptr = &sheet.cells.values()[index];
     const old_cell = ptr.*;
 
     try sheet.removeExprDependents(range, old_cell.ast);
@@ -794,8 +780,8 @@ pub fn insertCell(
     const old_strings = if (res.found_existing) res.value_ptr.* else "";
     errdefer if (old_strings.len > 0) sheet.strings.putAssumeCapacity(pos, old_strings);
 
-    const index = sheet.createUndoAst(old_cell.ast, old_strings) catch unreachable;
-    errdefer sheet.undo_asts.destroy(index);
+    const uindex = sheet.createUndoAst(old_cell.ast, old_strings) catch unreachable;
+    errdefer sheet.undo_asts.destroy(uindex);
 
     if (strings.len > 0) {
         res.value_ptr.* = strings;
@@ -804,7 +790,7 @@ pub fn insertCell(
     }
     errdefer _ = sheet.strings.removeByPtr(res.key_ptr);
 
-    const u = Undo{ .set_cell = .{ .pos = pos, .index = index } };
+    const u = Undo{ .set_cell = .{ .pos = pos, .index = uindex } };
     sheet.pushUndo(u, undo_opts) catch unreachable;
 
     sheet.enqueueUpdate(pos) catch unreachable;
@@ -854,22 +840,12 @@ pub fn deleteCell(
     sheet.has_changes = true;
 }
 
-pub fn deleteCellsInRange(sheet: *Sheet, p1: Position, p2: Position) Allocator.Error!void {
-    var i: usize = 0;
-    const positions = sheet.cells.keys();
-    const tl = Position.topLeft(p1, p2);
-    const br = Position.bottomRight(p1, p2);
+pub fn deleteCellsInRange(sheet: *Sheet, range: Range) Allocator.Error!void {
+    const kvs = try sheet.cell_tree.search(sheet.allocator, range);
+    defer sheet.allocator.free(kvs);
 
-    defer sheet.endUndoGroup();
-
-    while (i < positions.len) {
-        const pos = positions[i];
-        if (pos.y > br.y) break;
-        if (pos.y >= tl.y and pos.x >= tl.x and pos.x <= br.x) {
-            try sheet.deleteCell(pos, .{});
-        } else {
-            i += 1;
-        }
+    for (kvs) |kv| {
+        try sheet.deleteCell(kv.key.tl, .{});
     }
 }
 
@@ -1127,7 +1103,7 @@ pub fn widthNeededForColumn(
 
 const ArrayPositionContext = struct {
     pub fn eql(_: ArrayPositionContext, p1: Position, p2: Position, _: usize) bool {
-        return p1.y == p2.y and p1.x == p2.x;
+        return @as(Position.HashInt, @bitCast(p1)) == @as(Position.HashInt, @bitCast(p2));
     }
 
     pub fn hash(_: ArrayPositionContext, pos: Position) u64 {

@@ -1,9 +1,15 @@
+// TODO:
+// Instead of ArrayLists use *BoundedArray
+//   Makes OOM easier to handle via less allocations
+//   Can write `ensureUnusedCapacity(n)` by pre-allocating root.level + n BoundedArrays
+// Use MultiArrayLists for faster iteration of Node.range/KV.key
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
-const Position = @import("Position.zig");
+const Position = @import("Position.zig").Position;
 const Range = Position.Range;
 const PosInt = Position.Int;
+const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 
 pub fn RTree(comptime V: type, comptime min_children: usize) type {
     return struct {
@@ -238,7 +244,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 return .{ null, res };
             }
 
-            fn contains(node: *Node, key: Range) ?*KV {
+            fn getSingle(node: *Node, key: Range) ?*KV {
                 if (!node.range.contains(key)) return null;
 
                 if (node.isLeaf()) {
@@ -248,7 +254,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 }
 
                 return for (node.data.children.items) |*n| {
-                    break n.contains(key) orelse continue;
+                    break n.getSingle(key) orelse continue;
                 } else null;
             }
 
@@ -580,7 +586,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             allocator: Allocator,
             key: Range,
         ) !GetOrPutResult {
-            if (tree.root.contains(key)) |kv| return .{ .found_existing = true, .kv = kv };
+            if (tree.root.getSingle(key)) |kv| return .{ .found_existing = true, .kv = kv };
             var maybe_new_node, const res = try tree.root.getOrPut(allocator, key, {});
             if (maybe_new_node) |*new_node| {
                 errdefer new_node.deinit(allocator);
@@ -732,7 +738,7 @@ pub fn DependentTree(comptime min_children: usize) type {
             key: Range,
             init_capacity: usize,
         ) Allocator.Error!GetOrPutResult {
-            if (self.rtree.root.contains(key)) |kv|
+            if (self.rtree.root.getSingle(key)) |kv|
                 return .{ .found_existing = true, .kv = kv };
             var maybe_new_node, const res = try self.rtree.root.getOrPut(
                 allocator,
@@ -1084,9 +1090,9 @@ pub fn DependentTree(comptime min_children: usize) type {
                     const key = Range.initSingle(@intCast(i), @intCast(j));
                     const value = Range.initSingle(@intCast(bound - i - 1), @intCast(bound - j - 1));
                     try r.put(t.allocator, key, value);
-                    try std.testing.expect(r.rtree.root.contains(key) != null);
+                    try std.testing.expect(r.rtree.root.getSingle(key) != null);
                     try r.put(t.allocator, key, value);
-                    try std.testing.expect(r.rtree.root.contains(key) != null);
+                    try std.testing.expect(r.rtree.root.getSingle(key) != null);
                 }
             }
 

@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 
 const spoon = @import("spoon");
 const Sheet = @import("Sheet.zig");
+const Position = @import("Position.zig").Position;
 const Tui = @import("Tui.zig");
 const ZC = @import("ZC.zig");
 

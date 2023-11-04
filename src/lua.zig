@@ -4,7 +4,7 @@ const utils = @import("utils.zig");
 const Lua = lua.Lua;
 const ZC = @import("ZC.zig");
 const Allocator = std.mem.Allocator;
-const Position = @import("Position.zig");
+const Position = @import("Position.zig").Position;
 const assert = std.debug.assert;
 const _log = std.log.scoped(.lua);
 

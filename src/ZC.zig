@@ -10,7 +10,8 @@ const Motion = text.Motion;
 const wcWidth = @import("wcwidth").wcWidth;
 const GapBuffer = @import("GapBuffer.zig");
 const Command = @import("Command.zig");
-const Position = @import("Position.zig");
+const Position = @import("Position.zig").Position;
+const Range = Position.Range;
 const PosInt = Position.Int;
 const lua = @import("lua.zig");
 const Lua = @import("ziglua").Lua;
@@ -834,9 +835,8 @@ fn doVisualMode(self: *Self, action: Action) Allocator.Error!void {
         .visual_move_right => self.selectionRight(),
 
         .delete_cell => {
-            try self.sheet.deleteCellsInRange(self.cursor, self.anchor);
-            self.setMode(.normal);
-            self.tui.update.cells = true;
+            defer self.setMode(.normal);
+            try self.deleteCellsInRange();
         },
         else => {},
     }
@@ -1109,8 +1109,23 @@ pub fn redo(self: *Self) Allocator.Error!void {
     }
 }
 
+fn visualRange(self: Self) Range {
+    assert(self.mode == .visual or self.mode == .select);
+    return Range.initNormalizePos(self.cursor, self.anchor);
+}
+
 pub fn deleteCell(self: *Self) Allocator.Error!void {
+    assert(self.mode != .visual);
     try self.sheet.deleteCell(self.cursor, .{});
+    self.sheet.endUndoGroup();
+
+    self.tui.update.cells = true;
+    self.tui.update.cursor = true;
+}
+
+pub fn deleteCellsInRange(self: *Self) Allocator.Error!void {
+    assert(self.mode == .visual);
+    try self.sheet.deleteCellsInRange(self.visualRange());
     self.sheet.endUndoGroup();
 
     self.tui.update.cells = true;

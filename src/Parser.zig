@@ -1,5 +1,5 @@
 const std = @import("std");
-const Position = @import("Position.zig");
+const Position = @import("Position.zig").Position;
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 const Tokenizer = @import("Tokenizer.zig");
 
