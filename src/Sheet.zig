@@ -8,11 +8,9 @@ const Position = @import("Position.zig").Position;
 const PosInt = Position.Int;
 const Range = Position.Range;
 const Ast = @import("Ast.zig");
-const ArrayMemoryPool = @import("array_memory_pool.zig").ArrayMemoryPool;
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 const RTree = @import("tree.zig").RTree;
 const DependentTree = @import("tree.zig").DependentTree;
-const ArrayHashMapUnmanaged = @import("array_hash_map.zig").ArrayHashMapUnmanaged;
 const NodePool = std.heap.MemoryPool(CellTreap.Node);
 
 const Allocator = std.mem.Allocator;
@@ -24,7 +22,6 @@ const NodeListUnmanaged = std.ArrayListUnmanaged(Position);
 
 const log = std.log.scoped(.sheet);
 
-const CellMap = ArrayHashMapUnmanaged(Position, Cell, ArrayPositionContext, false);
 const CellSet = std.HashMapUnmanaged(Position, void, PositionContext, 80);
 pub const CellTreap = std.Treap(Cell, Cell.compare);
 
