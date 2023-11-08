@@ -924,11 +924,11 @@ pub fn deleteCell(
 }
 
 pub fn deleteCellsInRange(sheet: *Sheet, range: Range) Allocator.Error!void {
-    const kvs = try sheet.cell_tree.search(sheet.allocator(), range);
-    defer sheet.allocator().free(kvs);
+    const items = try sheet.cell_tree.search(sheet.allocator(), range);
+    defer sheet.allocator().free(items);
 
-    for (kvs) |kv| {
-        try sheet.deleteCell(kv.key.tl, .{});
+    for (items) |item| {
+        try sheet.deleteCell(item.key_ptr.tl, .{});
     }
 }
 
@@ -988,8 +988,8 @@ fn markDirty(
     const res = try sheet.rtree.search(sheet.allocator(), Range.initSinglePos(pos));
     defer sheet.allocator().free(res);
 
-    for (res) |kv| {
-        for (kv.value.items) |r| {
+    for (res) |item| {
+        for (item.value_ptr.items) |r| {
             var iter = r.iterator();
             while (iter.next()) |p| {
                 const cell = sheet.getCellPtr(p) orelse continue;
@@ -1080,7 +1080,7 @@ pub const EvalContext = struct {
         defer context.sheet.allocator().free(res);
 
         for (res) |kv| {
-            for (kv.value.items) |r| {
+            for (kv.value_ptr.items) |r| {
                 var iter = r.iterator();
                 while (iter.next()) |p| {
                     const c = context.sheet.getCellPtr(p) orelse continue;

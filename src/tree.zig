@@ -30,19 +30,22 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
 
         const Self = @This();
 
-        pub const KV = struct {
+        const KV = struct {
             key: Range,
             /// List of cells that depend on the cells in `key`
             value: V,
         };
 
+        pub const SearchItem = struct {
+            key_ptr: *Range,
+            value_ptr: *V,
+        };
+
         const Node = struct {
             const ChildList = std.ArrayListUnmanaged(Node);
-            const ValueList = std.ArrayListUnmanaged(KV);
+            const ValueList = std.MultiArrayList(KV);
 
-            level: usize,
-            range: Range,
-            data: union {
+            const Data = union {
                 children: ChildList,
                 values: ValueList,
 
@@ -63,7 +66,11 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                         });
                     }
                 }
-            },
+            };
+
+            level: usize,
+            range: Range,
+            data: Data,
 
             pub fn format(
                 node: *const Node,
@@ -94,11 +101,10 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             fn deinitContext(node: *Node, allocator: Allocator, context: anytype) void {
                 if (node.isLeaf()) {
                     if (@TypeOf(context) != void) {
-                        for (node.data.values.items) |*kv| {
-                            context.deinit(allocator, &kv.value);
+                        for (node.data.values.items(.value)) |*v| {
+                            context.deinit(allocator, v);
                         }
                     }
-                    // assert(@intFromPtr(node.data.values.items.ptr) != 0xaaaaaaaaaaaaaaaa);
                     node.data.values.deinit(allocator);
                 } else {
                     for (node.data.children.items) |*n| n.deinitContext(allocator, context);
@@ -107,19 +113,22 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 node.* = undefined;
             }
 
-            fn isLeaf(node: Node) bool {
+            fn isLeaf(node: *const Node) bool {
                 return node.level == 0;
             }
 
             fn search(
                 node: Node,
                 range: Range,
-                list: *std.ArrayList(*KV),
+                list: *std.ArrayList(SearchItem),
             ) Allocator.Error!void {
                 if (node.isLeaf()) {
-                    for (node.data.values.items) |*kv| {
-                        if (range.intersects(kv.key)) {
-                            try list.append(kv);
+                    for (node.data.values.items(.key), 0..) |*k, i| {
+                        if (range.intersects(k.*)) {
+                            try list.append(.{
+                                .key_ptr = k,
+                                .value_ptr = &node.data.values.items(.value)[i],
+                            });
                         }
                     }
                 } else {
@@ -129,23 +138,6 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                         }
                     }
                 }
-            }
-
-            /// Returns the first kv pair whose key is exactly equal to `key`
-            pub fn get(node: *Node, key: Range) ?struct { *Node, usize } {
-                if (node.isLeaf()) {
-                    for (node.data.values.items, 0..) |*kv, i| {
-                        if (Range.eql(key, kv.key)) return .{ node, i };
-                    }
-                } else {
-                    for (node.data.children.items) |*n| {
-                        if (key.intersects(n.range)) {
-                            if (n.get(key)) |kv| return kv;
-                        }
-                    }
-                }
-
-                return null;
             }
 
             const GetOrPutResultInternal = struct {
@@ -171,10 +163,16 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 errdefer ok = false;
 
                 if (node.isLeaf()) {
-                    for (node.data.values.items) |*kv| {
-                        if (Range.eql(kv.key, key)) {
+                    for (node.data.values.items(.key), 0..) |*k, i| {
+                        if (Range.eql(k.*, key)) {
                             // Already exists
-                            return .{ null, .{ .found_existing = true, .kv = kv } };
+                            return .{
+                                null, .{
+                                    .found_existing = true,
+                                    .key_ptr = k,
+                                    .value_ptr = &node.data.values.items(.value)[i],
+                                },
+                            };
                         }
                     }
 
@@ -191,34 +189,36 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                     node.data.values.appendAssumeCapacity(new_kv);
                     errdefer _ = node.data.values.pop();
 
-                    if (node.data.values.items.len >= max_children) {
+                    if (node.data.values.len >= max_children) {
                         // Don't merge ranges in this branch, split does that
                         ok = false;
                         // Too many kvs, need to split this node
                         const new_node = try node.split(allocator);
 
+                        const s = new_node.data.values.slice();
+                        const index = @intFromBool(!s.items(.key)[0].eql(key));
                         const ret = .{
                             // Return the new node up the call stack so the parent
                             // can add it to their child list
                             new_node,
                             .{
                                 .found_existing = false,
-                                .kv = if (new_node.data.values.items[0].key.eql(key))
-                                    &new_node.data.values.items[0]
-                                else
-                                    &new_node.data.values.items[1],
+                                .key_ptr = &s.items(.key)[index],
+                                .value_ptr = &s.items(.value)[index],
                             },
                         };
 
-                        assert(ret[1].kv.key.eql(key));
+                        assert(ret[1].key_ptr.eql(key));
                         return ret;
                     }
 
+                    const index = node.data.values.len - 1;
                     return .{
                         null,
                         .{
                             .found_existing = false,
-                            .kv = &node.data.values.items[node.data.values.items.len - 1],
+                            .key_ptr = &node.data.values.items(.key)[index],
+                            .value_ptr = &node.data.values.items(.value)[index],
                         },
                     };
                 }
@@ -244,12 +244,13 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 return .{ null, res };
             }
 
-            fn getSingle(node: *Node, key: Range) ?*KV {
+            fn getSingle(node: *Node, key: Range) ?struct { *Range, *V } {
                 if (!node.range.contains(key)) return null;
 
                 if (node.isLeaf()) {
-                    return for (node.data.values.items) |*kv| {
-                        if (kv.key.eql(key)) break kv;
+                    return for (node.data.values.items(.key), 0..) |*k, i| {
+                        if (k.eql(key))
+                            break .{ k, &node.data.values.items(.value)[i] };
                     } else null;
                 }
 
@@ -286,13 +287,11 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
 
             fn recalcBoundingRange(node: Node) Range {
                 if (node.isLeaf()) {
-                    const slice: []const KV = node.data.values.items;
+                    const slice: []const Range = node.data.values.items(.key);
                     assert(slice.len > 0);
 
-                    var range = slice[0].key;
-                    for (slice[1..]) |kv| {
-                        range = range.merge(kv.key);
-                    }
+                    var range = slice[0];
+                    for (slice[1..]) |k| range = range.merge(k);
                     return range;
                 }
 
@@ -324,19 +323,22 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             } {
                 if (node.isLeaf()) {
                     const list = &node.data.values;
-                    const ret = for (list.items, 0..) |kv, i| {
-                        if (!Range.eql(kv.key, key)) continue;
+                    const ret = for (list.items(.key), 0..) |k, i| {
+                        if (!k.eql(key)) continue;
                         _ = list.swapRemove(i);
                         break .{
-                            kv,
-                            list.items.len < min_children,
+                            KV{
+                                .key = k,
+                                .value = if (V == void) {} else list.items(.value)[i],
+                            },
+                            list.len < min_children,
                             key.tl.anyMatch(node.range.tl) or key.br.anyMatch(node.range.br),
                             null,
                             null,
                         };
                     } else .{ null, false, false, null, null };
 
-                    if (list.items.len > 0 and ret[2])
+                    if (list.len > 0 and ret[2])
                         node.range = node.recalcBoundingRange();
                     return ret;
                 }
@@ -373,6 +375,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 return switch (@TypeOf(a)) {
                     Node => a.range,
                     KV => a.key,
+                    Range => a,
                     else => @compileError("Invalid type"),
                 };
             }
@@ -405,9 +408,21 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 errdefer new_entries.deinit(allocator);
 
                 const seed2, const seed1 = blk: {
-                    const i_1, const i_2 = linearSplit(entries.items);
-                    assert(i_1 < i_2);
-                    break :blk .{ entries.orderedRemove(i_2), entries.orderedRemove(i_1) };
+                    switch (node_type) {
+                        .leaf => {
+                            const i_1, const i_2 = linearSplit(entries.items(.key));
+                            assert(i_1 < i_2);
+                            const res = .{ entries.get(i_2), entries.get(i_1) };
+                            entries.orderedRemove(i_2);
+                            entries.orderedRemove(i_1);
+                            break :blk res;
+                        },
+                        .branch => {
+                            const i_1, const i_2 = linearSplit(entries.items);
+                            assert(i_1 < i_2);
+                            break :blk .{ entries.orderedRemove(i_2), entries.orderedRemove(i_1) };
+                        },
+                    }
                 };
 
                 var bound2 = getRange(seed2);
@@ -511,8 +526,8 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             tree: Self,
             allocator: Allocator,
             range: Range,
-        ) Allocator.Error![]*KV {
-            var list = std.ArrayList(*KV).init(allocator);
+        ) Allocator.Error![]SearchItem {
+            var list = std.ArrayList(SearchItem).init(allocator);
             errdefer list.deinit();
 
             try tree.root.search(range, &list);
@@ -538,7 +553,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             value: V,
         ) Allocator.Error!void {
             const res = try tree.getOrPut(allocator, key);
-            res.kv.value = value;
+            res.value_ptr.* = value;
         }
 
         // pub fn putContext(
@@ -577,8 +592,9 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
         }
 
         pub const GetOrPutResult = struct {
-            kv: *KV,
             found_existing: bool,
+            key_ptr: *Range,
+            value_ptr: *V,
         };
 
         pub fn getOrPut(
@@ -586,7 +602,12 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             allocator: Allocator,
             key: Range,
         ) !GetOrPutResult {
-            if (tree.root.getSingle(key)) |kv| return .{ .found_existing = true, .kv = kv };
+            if (tree.root.getSingle(key)) |res| return .{
+                .found_existing = true,
+                .key_ptr = res[0],
+                .value_ptr = res[1],
+            };
+
             var maybe_new_node, const res = try tree.root.getOrPut(allocator, key, {});
             if (maybe_new_node) |*new_node| {
                 errdefer new_node.deinit(allocator);
@@ -686,7 +707,6 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
     };
 }
 
-// Dependent tree
 pub fn DependentTree(comptime min_children: usize) type {
     return struct {
         rtree: Tree = .{},
@@ -719,7 +739,7 @@ pub fn DependentTree(comptime min_children: usize) type {
             value: Range,
         ) Allocator.Error!void {
             const res = try self.getOrPut(allocator, key, 1);
-            try res.kv.value.append(allocator, value);
+            try res.value_ptr.append(allocator, value);
         }
 
         pub fn putSlice(
@@ -729,7 +749,7 @@ pub fn DependentTree(comptime min_children: usize) type {
             values: []const Range,
         ) Allocator.Error!void {
             const res = try self.getOrPut(allocator, key, values.len);
-            try res.kv.value.appendSlice(allocator, values);
+            try res.value_ptr.appendSlice(allocator, values);
         }
 
         pub fn getOrPut(
@@ -738,8 +758,11 @@ pub fn DependentTree(comptime min_children: usize) type {
             key: Range,
             init_capacity: usize,
         ) Allocator.Error!GetOrPutResult {
-            if (self.rtree.root.getSingle(key)) |kv|
-                return .{ .found_existing = true, .kv = kv };
+            if (self.rtree.root.getSingle(key)) |res| return .{
+                .found_existing = true,
+                .key_ptr = res[0],
+                .value_ptr = res[1],
+            };
             var maybe_new_node, const res = try self.rtree.root.getOrPut(
                 allocator,
                 key,
@@ -756,7 +779,7 @@ pub fn DependentTree(comptime min_children: usize) type {
             self: *Self,
             allocator: Allocator,
             key: Range,
-        ) Allocator.Error![]*Tree.KV {
+        ) Allocator.Error![]Tree.SearchItem {
             return self.rtree.search(allocator, key);
         }
 
@@ -835,34 +858,37 @@ pub fn DependentTree(comptime min_children: usize) type {
         } {
             if (node.isLeaf()) {
                 const list = &node.data.values;
-                return for (list.items, 0..) |*kv, i| {
-                    if (!Range.eql(kv.key, key)) continue;
-                    errdefer if (kv.value.items.len == 0) {
+                return for (list.items(.key), 0..) |k, i| {
+                    if (!k.eql(key)) continue;
+
+                    const values = &list.items(.value)[i];
+                    errdefer if (values.items.len == 0) {
                         var old_kv = list.swapRemove(i);
                         Context.deinit(.{}, allocator, &old_kv.value);
                     };
 
                     // Found matching key
                     // Now find the matching value
-                    for (kv.value.items, 0..) |v, j| {
+                    for (values.items, 0..) |v, j| {
                         if (!v.eql(value)) continue;
-                        _ = kv.value.swapRemove(j);
+                        _ = values.swapRemove(j);
                         break;
                     }
 
-                    if (kv.value.items.len == 0) {
+                    if (values.items.len == 0) {
                         // This KV has no more values, so remove it entirely
-                        var old_kv = list.swapRemove(i);
-                        Context.deinit(.{}, allocator, &old_kv.value);
+                        var old_value = list.items(.value)[i];
+                        list.swapRemove(i);
+                        Context.deinit(.{}, allocator, &old_value);
 
                         const recalc = key.tl.anyMatch(node.range.tl) or
                             key.br.anyMatch(node.range.br);
-                        if (list.items.len > 0 and recalc)
+                        if (list.len > 0 and recalc)
                             node.range = node.recalcBoundingRange();
 
                         break .{
                             true,
-                            list.items.len < min_children,
+                            list.len < min_children,
                             recalc,
                             null,
                             null,
@@ -909,7 +935,7 @@ pub fn DependentTree(comptime min_children: usize) type {
             var tree = Self{};
             defer tree.deinit(t.allocator);
 
-            try t.expectEqual(@as(usize, 0), tree.rtree.root.data.values.items.len);
+            try t.expectEqual(@as(usize, 0), tree.rtree.root.data.values.len);
             try t.expect(tree.rtree.root.isLeaf());
 
             const data = .{
@@ -1010,7 +1036,7 @@ pub fn DependentTree(comptime min_children: usize) type {
 
                 // Check that all ranges in `expected_results` are found in `res` in ANY order.
                 for (res) |kv| {
-                    for (kv.value.items) |r| {
+                    for (kv.value_ptr.items) |r| {
                         inline for (expected_results) |e| {
                             if (Range.eql(r, e)) break;
                         } else return error.SearchMismatch;
@@ -1028,7 +1054,7 @@ pub fn DependentTree(comptime min_children: usize) type {
                 };
 
                 for (res) |kv| {
-                    for (kv.value.items) |r| {
+                    for (kv.value_ptr.items) |r| {
                         inline for (expected_results) |e| {
                             if (Range.eql(r, e)) break;
                         } else return error.SearchMismatch;
@@ -1050,7 +1076,7 @@ pub fn DependentTree(comptime min_children: usize) type {
                     Range.initSingle(503, 501),
                 };
                 for (res) |kv| {
-                    for (kv.value.items) |r| {
+                    for (kv.value_ptr.items) |r| {
                         inline for (expected_results) |e| {
                             if (Range.eql(r, e)) break;
                         } else return error.SearchMismatch;
@@ -1059,7 +1085,7 @@ pub fn DependentTree(comptime min_children: usize) type {
             }
             {
                 const res = try tree.search(t.allocator, Range.initSingle(11, 11));
-                try t.expectEqualSlices(*Tree.KV, &.{}, res);
+                try t.expectEqualSlices(Tree.SearchItem, &.{}, res);
             }
 
             {
@@ -1069,7 +1095,7 @@ pub fn DependentTree(comptime min_children: usize) type {
                 for (res) |kv| {
                     data_loop: inline for (data) |d| {
                         inline for (d[1]) |range| {
-                            for (kv.value.items) |r|
+                            for (kv.value_ptr.items) |r|
                                 if (range.eql(r)) break :data_loop;
                         }
                     } else return error.SearchMismatch;

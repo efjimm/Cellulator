@@ -48,7 +48,7 @@ pub fn main() !void {
     try zc.init(gpa.allocator(), .{ .filepath = filepath });
     defer zc.deinit();
 
-    try zc.run();
+    // try zc.run();
 }
 
 pub fn panic(msg: []const u8, trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {

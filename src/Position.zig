@@ -178,7 +178,7 @@ pub const Position = extern struct {
         };
     }
 
-    pub const Range = struct {
+    pub const Range = extern struct {
         /// Top left
         tl: Position,
         /// Bottom right
@@ -272,7 +272,8 @@ pub const Position = extern struct {
         }
 
         pub fn eql(r1: Range, r2: Range) bool {
-            return r1.tl.eql(r2.tl) and r2.br.eql(r2.br);
+            return r1.tl.x == r2.tl.x and r1.tl.y == r2.tl.y and
+                r1.br.x == r2.br.x and r1.br.y == r2.br.y;
         }
 
         /// Returns true if `r1` contains `r2`.

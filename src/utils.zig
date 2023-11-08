@@ -28,17 +28,16 @@ pub fn memoryPoolEnsureUnusedCapacity(pool: anytype, n: usize) !void {
 
 pub fn binarySearch(
     key: u64,
-    positions: []const Position,
+    ranges: []const Position.Range,
 ) struct { usize, bool } {
-    const items: []align(4) const u64 = @ptrCast(positions);
     var left: usize = 0;
-    var right: usize = items.len;
+    var right: usize = ranges.len;
 
     while (left < right) {
         // Avoid overflowing in the midpoint calculation
         const mid = left + (right - left) / 2;
         // Compare the key with the midpoint element
-        switch (std.math.order(key, items[mid])) {
+        switch (std.math.order(key, ranges[mid].tl.hash())) {
             .eq => return .{ mid, true },
             .gt => left = mid + 1,
             .lt => right = mid,
