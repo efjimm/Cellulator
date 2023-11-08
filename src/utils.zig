@@ -8,6 +8,24 @@ const assert = std.debug.assert;
 
 pub usingnamespace @import("buffer_utils.zig");
 
+pub fn memoryPoolEnsureUnusedCapacity(pool: anytype, n: usize) !void {
+    const T = std.meta.Child(@TypeOf(pool));
+    for (0..n) |_| {
+        const raw_mem = blk: {
+            const m = try pool.arena.allocator().alignedAlloc(
+                u8,
+                T.item_alignment,
+                T.item_size,
+            );
+            break :blk m[0..T.item_size];
+        };
+        const NodePtr = std.meta.Child(@TypeOf(pool.free_list));
+        const free_node: NodePtr = @ptrCast(raw_mem);
+        free_node.* = .{ .next = pool.free_list };
+        pool.free_list = free_node;
+    }
+}
+
 pub fn binarySearch(
     key: u64,
     positions: []const Position,

@@ -919,7 +919,7 @@ pub fn eval(
     /// which evaluates the cell at the given position.
     context: anytype,
 ) !DynamicEvalResult {
-    var arena = std.heap.ArenaAllocator.init(sheet.allocator);
+    var arena = std.heap.ArenaAllocator.init(sheet.allocator());
     defer arena.deinit();
 
     const ctx = EvalContext(@TypeOf(context)){
@@ -936,7 +936,7 @@ pub fn eval(
     return switch (res) {
         .none => .none,
         .number => |n| .{ .number = n },
-        .string => |str| .{ .string = try sheet.allocator.dupeZ(u8, str) },
+        .string => |str| .{ .string = try sheet.allocator().dupeZ(u8, str) },
     };
 }
 

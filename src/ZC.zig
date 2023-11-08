@@ -155,7 +155,7 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
     var sheet = Sheet.init(allocator);
     errdefer sheet.deinit();
 
-    try sheet.ensureTotalCapacity(128);
+    try sheet.ensureUnusedCapacity(128);
 
     var lua_state = try lua.init(zc);
     errdefer lua_state.deinit();
@@ -894,31 +894,33 @@ pub fn isSelectedRow(self: Self, y: PosInt) bool {
 }
 
 pub fn nextPopulatedCell(self: *Self, start_pos: Position, count: u32) Position {
-    if (count == 0) return start_pos;
-    const positions = self.sheet.cells.keys();
-    if (positions.len == 0) return start_pos;
+    const entry = self.sheet.cell_treap.getEntryFor(.{ .pos = start_pos });
 
-    var ret = start_pos;
+    var node = entry.node;
+    var parent = entry.context.inserted_under;
+    var ret: Position = start_pos;
 
-    // Index of the first position that is greater than start_pos
-    const first = for (positions, count - 1..) |pos, i| {
-        if (pos.hash() > start_pos.hash()) break i;
-    } else return ret;
-
-    // count-1 positions after the first one that is greater than start_pos
-    return positions[@min(positions.len - 1, first)];
+    for (0..count) |_| {
+        node = Sheet.treapNextNode(node, parent) orelse break;
+        ret = node.?.key.pos;
+        parent = node.?.parent;
+    }
+    return ret;
 }
 
 pub fn prevPopulatedCell(self: *Self, start_pos: Position, count: u32) Position {
-    if (count == 0) return start_pos;
+    const entry = self.sheet.cell_treap.getEntryFor(.{ .pos = start_pos });
 
-    const positions = self.sheet.cells.keys();
-    var iter = std.mem.reverseIterator(positions);
-    while (iter.next()) |pos| {
-        if (pos.hash() < start_pos.hash()) break;
-    } else return start_pos;
+    var node = entry.node;
+    var parent = entry.context.inserted_under;
+    var ret: Position = start_pos;
 
-    return positions[iter.index -| (count - 1)];
+    for (0..count) |_| {
+        node = Sheet.treapPrevNode(node, parent) orelse break;
+        ret = node.?.key.pos;
+        parent = node.?.parent;
+    }
+    return ret;
 }
 
 pub fn cursorNextPopulatedCell(self: *Self) void {
