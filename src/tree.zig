@@ -687,9 +687,8 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             const parent = res[4] orelse return;
             const index = res[3].?;
             var child: Node = parent.data.children.swapRemove(index);
-            defer child.deinitContext(allocator, context);
 
-            // try tree.reAddRecursive(allocator, &child, context);
+            try tree.reAddRecursive(allocator, &child, context);
         }
 
         pub fn deinit(tree: *Self, allocator: Allocator) void {
