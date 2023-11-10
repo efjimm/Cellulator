@@ -947,7 +947,9 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
     if (!sheet.needsUpdate()) return;
 
     log.debug("Updating cells...", .{});
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = if (builtin.mode == .Debug)
+        std.time.Timer.start() catch unreachable
+    else {};
 
     defer sheet.queued_cells.clearRetainingCapacity();
 
@@ -966,9 +968,11 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
         };
     }
 
-    log.debug("Finished cell update in {d} seconds", .{
-        @as(f64, @floatFromInt(timer.read())) / std.time.ns_per_s,
-    });
+    if (builtin.mode == .Debug) {
+        log.debug("Finished cell update in {d} seconds", .{
+            @as(f64, @floatFromInt(timer.read())) / std.time.ns_per_s,
+        });
+    }
 }
 
 /// Marks the cell at `pos` as needing to be updated.

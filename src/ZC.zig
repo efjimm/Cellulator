@@ -241,7 +241,6 @@ pub fn inputBufSlice(self: *Self) Allocator.Error![:0]const u8 {
 pub fn run(self: *Self) !void {
     while (self.running) {
         try self.updateCells();
-        try self.updateTextCells();
         try self.tui.render(self);
         try self.handleInput();
     }
@@ -311,10 +310,6 @@ pub fn dismissStatusMessage(self: *Self) void {
 }
 
 pub fn updateCells(self: *Self) Allocator.Error!void {
-    return self.sheet.update();
-}
-
-pub fn updateTextCells(self: *Self) Allocator.Error!void {
     return self.sheet.update();
 }
 
