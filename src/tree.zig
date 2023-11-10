@@ -14,10 +14,7 @@ const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 pub fn RTree(comptime V: type, comptime min_children: usize) type {
     return struct {
         const max_children = min_children * 2;
-
-        comptime {
-            assert(min_children > 2);
-        }
+        const ListPool = @import("pool.zig").MemoryPool(std.BoundedArray(Node, max_children), .{});
 
         root: Node = .{
             .level = 0,
@@ -27,6 +24,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             },
             .data = .{ .values = .{} },
         },
+        pool: ListPool = .{},
 
         const Self = @This();
 
@@ -42,11 +40,10 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
         };
 
         const Node = struct {
-            const ChildList = std.ArrayListUnmanaged(Node);
             const ValueList = std.MultiArrayList(KV);
 
             const Data = union {
-                children: ChildList,
+                children: *std.BoundedArray(Node, max_children),
                 values: ValueList,
 
                 pub fn print(
@@ -107,8 +104,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                     }
                     node.data.values.deinit(allocator);
                 } else {
-                    for (node.data.children.items) |*n| n.deinitContext(allocator, context);
-                    node.data.children.deinit(allocator);
+                    for (node.data.children.slice()) |*n| n.deinitContext(allocator, context);
                 }
                 node.* = undefined;
             }
@@ -132,7 +128,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                         }
                     }
                 } else {
-                    for (node.data.children.items) |n| {
+                    for (node.data.children.constSlice()) |n| {
                         if (range.intersects(n.range)) {
                             try n.search(range, list);
                         }
@@ -149,6 +145,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 node: *Node,
                 allocator: Allocator,
                 key: Range,
+                pool: *ListPool,
                 /// Context that has the method `fn init(@This()) !V` This allows errors resulting
                 /// from init to be caught before inserting, which means OOM from initialising a
                 /// value doesn't require a remove (which may fail due to OOM and leave the tree in
@@ -193,7 +190,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                         // Don't merge ranges in this branch, split does that
                         ok = false;
                         // Too many kvs, need to split this node
-                        const new_node = try node.split(allocator);
+                        const new_node = try node.split(allocator, pool);
 
                         const s = new_node.data.values.slice();
                         const index = @intFromBool(!s.items(.key)[0].eql(key));
@@ -224,19 +221,18 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 }
 
                 // Branch node
-                const list = &node.data.children;
-                try list.ensureUnusedCapacity(allocator, 1);
+                const list = node.data.children;
 
                 const best = node.bestChild(key);
-                const maybe_new_node, const res = try best.getOrPut(allocator, key, context);
+                const maybe_new_node, const res = try best.getOrPut(allocator, key, pool, context);
 
                 if (maybe_new_node) |split_node| {
                     // Child node was split, need to add new node to child list
                     list.appendAssumeCapacity(split_node);
 
-                    if (list.items.len >= max_children) {
+                    if (list.len >= max_children) {
                         ok = false;
-                        const new_node = try node.split(allocator);
+                        const new_node = try node.split(allocator, pool);
                         return .{ new_node, res };
                     }
                 }
@@ -244,9 +240,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 return .{ null, res };
             }
 
-            fn getSingle(node: *Node, key: Range) ?struct { *Range, *V } {
-                if (!node.range.contains(key)) return null;
-
+            fn getSingleRecursive(node: *Node, key: Range) ?struct { *Range, *V } {
                 if (node.isLeaf()) {
                     return for (node.data.values.items(.key), 0..) |*k, i| {
                         if (k.eql(key))
@@ -254,9 +248,15 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                     } else null;
                 }
 
-                return for (node.data.children.items) |*n| {
-                    break n.getSingle(key) orelse continue;
+                return for (node.data.children.slice()) |*n| {
+                    if (n.range.contains(key)) {
+                        if (n.getSingle(key)) |res| break res;
+                    }
                 } else null;
+            }
+
+            fn getSingle(node: *Node, key: Range) ?struct { *Range, *V } {
+                return if (node.range.contains(key)) getSingleRecursive(node, key) else null;
             }
 
             /// Find best child to insert into.
@@ -264,7 +264,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             fn bestChild(node: *Node, key: Range) *Node {
                 assert(!node.isLeaf());
 
-                const slice = node.data.children.items;
+                const slice = node.data.children.constSlice();
                 assert(slice.len > 0);
 
                 var min_index: usize = 0;
@@ -282,7 +282,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                     }
                 }
 
-                return &node.data.children.items[min_index];
+                return &node.data.children.slice()[min_index];
             }
 
             fn recalcBoundingRange(node: Node) Range {
@@ -295,7 +295,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                     return range;
                 }
 
-                const slice: []const Node = node.data.children.items;
+                const slice = node.data.children.constSlice();
                 assert(slice.len > 0);
                 var range = slice[0].range;
                 for (slice[1..]) |n| {
@@ -343,29 +343,29 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                     return ret;
                 }
 
-                const list = &node.data.children;
-                for (list.items, 0..) |*n, i| {
+                const list = node.data.children;
+                for (list.slice(), 0..) |*n, i| {
                     if (!n.range.contains(key)) continue;
                     const res = n.remove(key);
                     const kv, const merge_node, const recalc, var index, var parent = res;
                     if (kv == null) continue; // Didn't find a value
 
-                    if (merge_node and list.items.len > 1) {
+                    if (merge_node and list.len > 1) {
                         parent = node;
                         index = i;
 
                         if (recalc) {
                             const start = @intFromBool(i == 0);
-                            var range = list.items[start].range;
-                            for (list.items[0..i]) |c| range = range.merge(c.range);
-                            for (list.items[i + 1 ..]) |c| range = range.merge(c.range);
+                            var range = list.constSlice()[start].range;
+                            for (list.constSlice()[0..i]) |c| range = range.merge(c.range);
+                            for (list.constSlice()[i + 1 ..]) |c| range = range.merge(c.range);
                             node.range = range;
                         }
                     } else if (recalc) {
                         node.range = node.recalcBoundingRange();
                     }
 
-                    const len = list.items.len - @intFromBool(parent == node);
+                    const len = list.len - @intFromBool(parent == node);
                     return .{ kv, len < min_children, recalc, index, parent };
                 } else return .{ null, false, false, null, null };
                 unreachable;
@@ -380,32 +380,42 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 };
             }
 
-            fn split(node: *Node, allocator: Allocator) Allocator.Error!Node {
+            fn split(node: *Node, allocator: Allocator, pool: *ListPool) Allocator.Error!Node {
                 if (node.isLeaf()) {
-                    return node.splitNode(.leaf, allocator);
+                    return node.splitNode(allocator, pool, .leaf);
                 } else {
-                    return node.splitNode(.branch, allocator);
+                    return node.splitNode(allocator, pool, .branch);
                 }
             }
 
             /// Splits a node in place, returning the other half as a new node.
             fn splitNode(
                 node: *Node,
-                comptime node_type: enum { branch, leaf },
                 allocator: Allocator,
+                pool: *ListPool,
+                comptime node_type: enum { branch, leaf },
             ) !Node {
                 const entries = switch (node_type) {
                     .leaf => &node.data.values,
-                    .branch => &node.data.children,
+                    .branch => node.data.children,
                 };
 
                 var new_entries = switch (node_type) {
-                    .leaf => ValueList{},
-                    .branch => ChildList{},
+                    .leaf => blk: {
+                        var new_entries: ValueList = .{};
+                        try new_entries.ensureTotalCapacity(allocator, max_children);
+                        break :blk new_entries;
+                    },
+                    .branch => blk: {
+                        const mem = try pool.create(allocator);
+                        mem.* = .{};
+                        break :blk mem;
+                    },
                 };
-
-                try new_entries.ensureTotalCapacity(allocator, max_children);
-                errdefer new_entries.deinit(allocator);
+                errdefer switch (node_type) {
+                    .leaf => new_entries.deinit(allocator),
+                    .branch => allocator.destroy(new_entries),
+                };
 
                 const seed2, const seed1 = blk: {
                     switch (node_type) {
@@ -418,7 +428,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                             break :blk res;
                         },
                         .branch => {
-                            const i_1, const i_2 = linearSplit(entries.items);
+                            const i_1, const i_2 = linearSplit(entries.constSlice());
                             assert(i_1 < i_2);
                             break :blk .{ entries.orderedRemove(i_2), entries.orderedRemove(i_1) };
                         },
@@ -534,15 +544,26 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             return list.toOwnedSlice();
         }
 
-        fn mergeRoots(tree: *Self, allocator: Allocator, new_node: Node) Allocator.Error!void {
+        fn mergeRoots(
+            tree: *Self,
+            allocator: Allocator,
+            new_node: Node,
+            pool: *ListPool,
+        ) Allocator.Error!void {
             // Root node got split, need to create a new root
             var new_root = Node{
                 .level = new_node.level + 1,
                 .range = Range.merge(tree.root.range, new_node.range),
-                .data = .{ .children = .{} },
+                .data = .{
+                    .children = blk: {
+                        const mem = try pool.create(allocator);
+                        mem.* = .{};
+                        break :blk mem;
+                    },
+                },
             };
 
-            try new_root.data.children.appendSlice(allocator, &.{ tree.root, new_node });
+            new_root.data.children.appendSliceAssumeCapacity(&.{ tree.root, new_node });
             tree.root = new_root;
         }
 
@@ -608,10 +629,10 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 .value_ptr = res[1],
             };
 
-            var maybe_new_node, const res = try tree.root.getOrPut(allocator, key, {});
+            var maybe_new_node, const res = try tree.root.getOrPut(allocator, key, &tree.pool, {});
             if (maybe_new_node) |*new_node| {
                 errdefer new_node.deinit(allocator);
-                try tree.mergeRoots(allocator, new_node.*);
+                try tree.mergeRoots(allocator, new_node.*, &tree.pool);
             }
             return res;
         }
@@ -625,7 +646,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             var maybe_new_node, const res = try tree.root.getOrPut(allocator, key, context);
             if (maybe_new_node) |*new_node| {
                 errdefer new_node.deinitContext(allocator, context);
-                try tree.mergeRoots(allocator, new_node.*);
+                try tree.mergeRoots(allocator, new_node.*, &tree.pool);
             }
             return res;
         }
@@ -649,7 +670,6 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                     };
                 }
             } else {
-                defer root.data.children.deinit(allocator);
                 while (root.data.children.popOrNull()) |temp| {
                     var child = temp;
                     tree.reAddRecursive(allocator, &child, context) catch |err| {
@@ -701,6 +721,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             context: anytype,
         ) void {
             tree.root.deinitContext(allocator, context);
+            tree.pool.deinit(allocator);
             tree.* = undefined;
         }
     };
@@ -765,11 +786,12 @@ pub fn DependentTree(comptime min_children: usize) type {
             var maybe_new_node, const res = try self.rtree.root.getOrPut(
                 allocator,
                 key,
+                &self.rtree.pool,
                 Context{ .capacity = init_capacity },
             );
             if (maybe_new_node) |*new_node| {
                 errdefer new_node.deinitContext(allocator, Context{});
-                try self.rtree.mergeRoots(allocator, new_node.*);
+                try self.rtree.mergeRoots(allocator, new_node.*, &self.rtree.pool);
             }
             return res;
         }
@@ -802,7 +824,7 @@ pub fn DependentTree(comptime min_children: usize) type {
 
             const parent: *Tree.Node = res[4] orelse return;
             const index: usize = res[3].?;
-            assert(parent.data.children.items.len > 1);
+            assert(parent.data.children.len > 1);
             var child = parent.data.children.swapRemove(index);
             assert(child.level < self.rtree.root.level);
 
@@ -815,26 +837,7 @@ pub fn DependentTree(comptime min_children: usize) type {
             allocator: Allocator,
             root: *Tree.Node,
         ) Allocator.Error!void {
-            var maybe_err: Allocator.Error!void = {};
-            if (root.isLeaf()) {
-                defer root.data.values.deinit(allocator);
-                while (root.data.values.popOrNull()) |temp| {
-                    var kv = temp;
-                    self.rtree.put(allocator, kv.key, kv.value) catch |err| {
-                        kv.value.deinit(allocator);
-                        maybe_err = err;
-                    };
-                }
-            } else {
-                defer root.data.children.deinit(allocator);
-                while (root.data.children.popOrNull()) |temp| {
-                    var child = temp;
-                    self.reAddRecursive(allocator, &child) catch |err| {
-                        maybe_err = err;
-                    };
-                }
-            }
-            return maybe_err;
+            return self.rtree.reAddRecursive(allocator, root, Context{});
         }
 
         /// Custom implementation of `remove` for the DependentTree
@@ -900,29 +903,30 @@ pub fn DependentTree(comptime min_children: usize) type {
                 } else .{ false, false, false, null, null };
             }
 
-            const list = &node.data.children;
-            for (list.items, 0..) |*n, i| {
+            const list = node.data.children;
+            for (list.slice(), 0..) |*n, i| {
                 if (!n.range.contains(key)) continue;
+
                 const res = removeNode(n, allocator, key, value);
                 const found, const merge_node, const recalc, var index, var parent = res;
                 if (!found) continue;
 
-                if (merge_node and list.items.len > 1) {
+                if (merge_node and list.len > 1) {
                     parent = node;
                     index = i;
 
                     if (recalc) {
                         const start = @intFromBool(i == 0);
-                        var range = list.items[start].range;
-                        for (list.items[0..i]) |c| range = range.merge(c.range);
-                        for (list.items[i + 1 ..]) |c| range = range.merge(c.range);
+                        var range = list.constSlice()[start].range;
+                        for (list.constSlice()[0..i]) |c| range = range.merge(c.range);
+                        for (list.constSlice()[i + 1 ..]) |c| range = range.merge(c.range);
                         node.range = range;
                     }
                 } else if (recalc) {
                     node.range = node.recalcBoundingRange();
                 }
 
-                const len = list.items.len - @intFromBool(parent == node);
+                const len = list.len - @intFromBool(parent == node);
                 return .{ true, len < min_children, recalc, index, parent };
             } else return .{ false, false, false, null, null };
             unreachable;

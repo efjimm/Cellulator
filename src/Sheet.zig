@@ -42,18 +42,19 @@ redos: UndoList = .{},
 
 undo_end_markers: std.AutoHashMapUnmanaged(u32, Marker) = .{},
 
-// TODO: Find optimal values for these
 /// Range tree mapping ranges to a list of ranges that depend on the first.
 /// Used to query whether a cell belongs to a range and then update the cells
 /// that depend on that range.
-rtree: DependentTree(64) = .{},
+rtree: DependentTree(tree_children) = .{},
 /// Range tree containing just the positions of extant cells.
 /// Used for quick lookup of all extant cells in a ranges.
-cell_tree: RTree(void, 64) = .{},
+cell_tree: RTree(void, tree_children) = .{},
 
 nodes: NodePool,
 
 cell_treap: CellTreap = .{},
+
+const tree_children = 4;
 
 const Node = CellTreap.Node;
 
