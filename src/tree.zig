@@ -114,7 +114,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             }
 
             fn search(
-                node: Node,
+                node: *const Node,
                 range: Range,
                 list: *std.ArrayList(SearchItem),
             ) Allocator.Error!void {
@@ -128,7 +128,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                         }
                     }
                 } else {
-                    for (node.data.children.constSlice()) |n| {
+                    for (node.data.children.constSlice()) |*n| {
                         if (range.intersects(n.range)) {
                             try n.search(range, list);
                         }
@@ -268,17 +268,21 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 assert(slice.len > 0);
 
                 var min_index: usize = 0;
-                var min_diff = blk: {
+                var min_diff, var min_area = blk: {
                     const rect = Range.merge(slice[0].range, key);
-                    break :blk rect.area() - slice[0].range.area();
+                    break :blk .{ rect.area() - slice[0].range.area(), slice[0].range.area() };
                 };
 
                 for (slice[1..], 1..) |n, i| {
                     const rect = Range.merge(n.range, key);
-                    const diff = rect.area() - n.range.area();
-                    if (diff < min_diff) {
-                        min_index = i;
-                        min_diff = diff;
+                    const a = n.range.area();
+                    const diff = rect.area() - a;
+                    if (diff <= min_diff) {
+                        if (diff != min_diff or a < min_area) {
+                            min_index = i;
+                            min_area = a;
+                            min_diff = diff;
+                        }
                     }
                 }
 
