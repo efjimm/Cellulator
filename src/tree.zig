@@ -13,7 +13,7 @@ const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 
 pub fn RTree(comptime V: type, comptime min_children: usize) type {
     return struct {
-        const max_children = min_children * 2;
+        const max_children: comptime_int = @intFromFloat(@as(f64, min_children) * 2.5);
         const ListPool = @import("pool.zig").MemoryPool(std.BoundedArray(Node, max_children), .{});
 
         root: Node = .{
@@ -273,8 +273,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                     const r = n1.range.merge(key);
                     const enlargement = r.area() - n1.range.area();
 
-                    var total_overlap: u64 = 0;
-                    for (slice) |n2| total_overlap +|= r.overlapArea(n2.range);
+                    const total_overlap = totalOverlap(slice, r);
 
                     if (total_overlap <= min_overlap) {
                         if (total_overlap != min_overlap or min_enlargement < enlargement) {
@@ -285,6 +284,14 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                     }
                 }
                 return &node.data.children.slice()[min_index];
+            }
+
+            fn totalOverlap(nodes: []const Node, range: Range) u64 {
+                var total: u64 = 0;
+                for (nodes) |n| {
+                    total += range.overlapArea(n.range);
+                }
+                return total;
             }
 
             /// Find best child to insert into.
@@ -420,8 +427,137 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 if (node.isLeaf()) {
                     return node.splitNode(allocator, pool, .leaf);
                 } else {
-                    return node.splitNode(allocator, pool, .branch);
+                    return node.splitBranch(allocator, pool);
+                    // return node.splitNode(allocator, pool, .branch);
                 }
+            }
+
+            const DistributionGroup = struct {
+                entries: std.BoundedArray(Node, max_children),
+                range: Range,
+            };
+            const Distribution = [2]DistributionGroup;
+            const Distributions = std.BoundedArray(Distribution, dist_count);
+            const dist_count = 2 * (max_children - 2 * min_children + 2);
+
+            fn chooseSplitAxis(node: *const Node) Distributions {
+                assert(!node.isLeaf());
+
+                var min_perimeter: u64 = std.math.maxInt(u64);
+                var ret: Distributions = .{};
+
+                inline for (.{ .x, .y }) |d| {
+                    var sorted_lower: std.BoundedArray(Node, max_children) = .{};
+                    var sorted_upper: std.BoundedArray(Node, max_children) = .{};
+
+                    // TODO: Elide copies (sort out of place)
+                    sorted_lower.appendSliceAssumeCapacity(node.data.children.constSlice());
+                    sorted_upper.appendSliceAssumeCapacity(node.data.children.constSlice());
+
+                    const LowerContext = struct {
+                        pub fn compare(_: @This(), lhs: Node, rhs: Node) bool {
+                            return switch (d) {
+                                .x => lhs.range.tl.x < rhs.range.tl.x,
+                                .y => lhs.range.tl.y < rhs.range.tl.y,
+                                else => unreachable,
+                            };
+                        }
+                    };
+
+                    const UpperContext = struct {
+                        pub fn compare(_: @This(), lhs: Node, rhs: Node) bool {
+                            return switch (d) {
+                                .x => lhs.range.br.x < rhs.range.br.x,
+                                .y => lhs.range.br.y < rhs.range.br.y,
+                                else => unreachable,
+                            };
+                        }
+                    };
+
+                    std.sort.heap(Node, sorted_lower.slice(), LowerContext{}, LowerContext.compare);
+                    std.sort.heap(Node, sorted_upper.slice(), UpperContext{}, UpperContext.compare);
+
+                    var sum: u64 = 0;
+                    var temp: Distributions = .{};
+                    temp.len = 0;
+                    inline for (.{
+                        sorted_lower.constSlice(),
+                        sorted_upper.constSlice(),
+                    }) |entries| {
+                        for (0..max_children - 2 * min_children + 2) |k| {
+                            var r1: Range = entries[0].range;
+                            var r2: Range = entries[min_children - 1 + k].range;
+                            for (entries[0 .. min_children - 2]) |n| r1 = r1.merge(n.range);
+                            for (entries[min_children + k ..]) |n| r2 = r2.merge(n.range);
+
+                            temp.appendAssumeCapacity(.{
+                                .{ .range = r1, .entries = .{} },
+                                .{ .range = r2, .entries = .{} },
+                            });
+                            const g1 = &temp.slice()[temp.len - 1][0].entries;
+                            const g2 = &temp.slice()[temp.len - 1][1].entries;
+                            g1.appendSliceAssumeCapacity(entries[0 .. min_children - 1 + k]);
+                            g2.appendSliceAssumeCapacity(entries[min_children - 1 + k ..]);
+                            sum += r1.perimeter() + r2.perimeter();
+                        }
+                    }
+
+                    if (sum <= min_perimeter) {
+                        min_perimeter = sum;
+                        ret = temp;
+                    }
+                }
+
+                return ret;
+            }
+
+            pub fn chooseSplitIndex(dists: *const Distributions) usize {
+                assert(dists.len > 0);
+
+                var min_overlap: u64 = comptime std.math.maxInt(u64);
+                var min_area: u64 = comptime std.math.maxInt(u64);
+                var best_index: usize = 0;
+
+                for (dists.constSlice(), 0..) |*dist, i| {
+                    const first, const second = .{ &dist[0], &dist[1] };
+                    const overlap = first.range.overlapArea(second.range);
+
+                    if (overlap < min_overlap) {
+                        min_overlap = overlap;
+                        min_area = first.range.area() + second.range.area();
+                        best_index = i;
+                    } else if (overlap == min_overlap) {
+                        const a = first.range.area() + second.range.area();
+                        if (a < min_area) {
+                            min_area = a;
+                            best_index = i;
+                        }
+                    }
+                }
+                return best_index;
+            }
+
+            fn splitBranch(
+                node: *Node,
+                allocator: Allocator,
+                pool: *ListPool,
+            ) Allocator.Error!Node {
+                assert(!node.isLeaf());
+
+                const dists: Distributions = chooseSplitAxis(node);
+                const index = chooseSplitIndex(&dists);
+                const d = &dists.constSlice()[index];
+
+                const new_entries = try pool.create(allocator);
+                new_entries.* = d[1].entries;
+
+                node.data.children.* = d[0].entries;
+                node.range = d[0].range;
+                return .{
+                    .level = node.level,
+                    .range = d[1].range,
+                    .data = .{ .children = new_entries },
+                };
             }
 
             /// Splits a node in place, returning the other half as a new node.

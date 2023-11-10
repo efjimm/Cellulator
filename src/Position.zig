@@ -217,6 +217,10 @@ pub const Position = extern struct {
             return initPos(p, p);
         }
 
+        pub fn perimeter(r: Range) u64 {
+            return r.width() * 2 + r.height() * 2;
+        }
+
         pub fn overlapArea(r1: Range, r2: Range) u64 {
             const dx = std.math.sub(
                 u64,
