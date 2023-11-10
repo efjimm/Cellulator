@@ -259,10 +259,42 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 return if (node.range.contains(key)) getSingleRecursive(node, key) else null;
             }
 
+            fn bestLeaf(node: *Node, key: Range) *Node {
+                assert(node.level == 1);
+                const slice = node.data.children.constSlice();
+                assert(slice.len > 0);
+
+                // Minimize overlap
+                var min_index: usize = 0;
+                var min_enlargement: u64 = 0;
+                var min_overlap: u64 = std.math.maxInt(u64);
+
+                for (slice, 0..) |n1, i| {
+                    const r = n1.range.merge(key);
+                    const enlargement = r.area() - n1.range.area();
+
+                    var total_overlap: u64 = 0;
+                    for (slice) |n2| total_overlap +|= r.overlapArea(n2.range);
+
+                    if (total_overlap <= min_overlap) {
+                        if (total_overlap != min_overlap or min_enlargement < enlargement) {
+                            min_index = i;
+                            min_enlargement = enlargement;
+                            min_overlap = total_overlap;
+                        }
+                    }
+                }
+                return &node.data.children.slice()[min_index];
+            }
+
             /// Find best child to insert into.
             /// Gets the child with the smallest area increase to store `key`
             fn bestChild(node: *Node, key: Range) *Node {
                 assert(!node.isLeaf());
+
+                if (node.level == 1) return bestLeaf(node, key);
+
+                // Minimize area enlargement
 
                 const slice = node.data.children.constSlice();
                 assert(slice.len > 0);
