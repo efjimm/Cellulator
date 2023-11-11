@@ -45,53 +45,11 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             const Data = union {
                 children: *std.BoundedArray(Node, max_children),
                 values: ValueList,
-
-                pub fn print(
-                    self: *const @This(),
-                    writer: anytype,
-                ) !void {
-                    const node: *const Node = @fieldParentPtr(Node, "data", self);
-                    if (node.isLeaf()) {
-                        try writer.print("{d} value{s}", .{
-                            self.values.len,
-                            if (self.values.len == 1) "" else "s",
-                        });
-                    } else {
-                        try writer.print("{d} {s}", .{
-                            self.children.len,
-                            if (self.children.len == 1) "child" else "children",
-                        });
-                    }
-                }
             };
 
             level: usize,
             range: Range,
             data: Data,
-
-            pub fn format(
-                node: *const Node,
-                comptime _: []const u8,
-                _: std.fmt.FormatOptions,
-                writer: anytype,
-            ) !void {
-                try writer.print("{{ level = {d}, range = {d}, ", .{
-                    node.level,
-                    node.range,
-                });
-                try node.data.print(writer);
-                try writer.writeAll(" }}\n");
-                if (!node.isLeaf()) {
-                    for (node.data.children.constSlice()) |*child| {
-                        try child.data.print(writer);
-                    }
-                }
-            }
-
-            /// Frees all memory associated with `node` and its children.
-            fn deinit(node: *Node, allocator: Allocator) void {
-                return node.deinitContext(allocator, {});
-            }
 
             /// Frees all memory associated with `node` and its children, and calls
             /// `context.deinitValue` on every instance of `V` in the tree.
@@ -134,118 +92,6 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                         }
                     }
                 }
-            }
-
-            const GetOrPutResultInternal = struct {
-                ?Node,
-                GetOrPutResult,
-            };
-
-            fn getOrPut(
-                node: *Node,
-                allocator: Allocator,
-                key: Range,
-                pool: *ListPool,
-                /// Context that has the method `fn init(@This()) !V` This allows errors resulting
-                /// from init to be caught before inserting, which means OOM from initialising a
-                /// value doesn't require a remove (which may fail due to OOM and leave the tree in
-                /// an invalid state).
-                context: anytype,
-            ) !GetOrPutResultInternal {
-                var ok = true;
-                defer if (ok) {
-                    // Update the node's range if there are no errors
-                    node.range = node.range.merge(key);
-                };
-                errdefer ok = false;
-
-                if (node.isLeaf()) {
-                    for (node.data.values.items(.key), 0..) |*k, i| {
-                        if (Range.eql(k.*, key)) {
-                            // Already exists
-                            return .{
-                                null, .{
-                                    .found_existing = true,
-                                    .key_ptr = k,
-                                    .value_ptr = &node.data.values.items(.value)[i],
-                                },
-                            };
-                        }
-                    }
-
-                    // `key` doesn't already exist
-                    try node.data.values.ensureUnusedCapacity(allocator, 1);
-                    var new_kv = KV{
-                        .key = key,
-                        .value = if (@TypeOf(context) != void)
-                            try context.init(allocator)
-                        else
-                            undefined,
-                    };
-                    errdefer if (@TypeOf(context) != void) context.deinit(allocator, &new_kv.value);
-                    node.data.values.appendAssumeCapacity(new_kv);
-                    errdefer _ = node.data.values.pop();
-
-                    if (node.data.values.len >= max_children) {
-                        // Don't merge ranges in this branch, split does that
-                        ok = false;
-                        // Too many kvs, need to split this node
-                        const new_node = try node.split(allocator, pool);
-
-                        const s = new_node.data.values.slice();
-                        // const index = @intFromBool(!s.items(.key)[0].eql(key));
-                        const key_ptr, const value_ptr = for (s.items(.key), 0..) |*k, i| {
-                            if (k.eql(key))
-                                break .{ k, &s.items(.value)[i] };
-                        } else for (node.data.values.items(.key), 0..) |*k, i| {
-                            if (k.eql(key))
-                                break .{ k, &node.data.values.items(.value)[i] };
-                        } else unreachable;
-
-                        const ret = .{
-                            // Return the new node up the call stack so the parent
-                            // can add it to their child list
-                            new_node,
-                            .{
-                                .found_existing = false,
-                                .key_ptr = key_ptr,
-                                .value_ptr = value_ptr,
-                            },
-                        };
-
-                        assert(ret[1].key_ptr.eql(key));
-                        return ret;
-                    }
-
-                    const index = node.data.values.len - 1;
-                    return .{
-                        null,
-                        .{
-                            .found_existing = false,
-                            .key_ptr = &node.data.values.items(.key)[index],
-                            .value_ptr = &node.data.values.items(.value)[index],
-                        },
-                    };
-                }
-
-                // Branch node
-                const list = node.data.children;
-
-                const best = node.bestChild(key);
-                const maybe_new_node, const res = try best.getOrPut(allocator, key, pool, context);
-
-                if (maybe_new_node) |split_node| {
-                    // Child node was split, need to add new node to child list
-                    list.appendAssumeCapacity(split_node);
-
-                    if (list.len >= max_children) {
-                        ok = false;
-                        const new_node = try node.split(allocator, pool);
-                        return .{ new_node, res };
-                    }
-                }
-
-                return .{ null, res };
             }
 
             fn getSingleRecursive(node: *Node, key: Range) ?struct { *Range, *V } {
@@ -768,7 +614,6 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             tree: *Self,
             allocator: Allocator,
             new_node: Node,
-            pool: *ListPool,
         ) Allocator.Error!void {
             // Root node got split, need to create a new root
             var new_root = Node{
@@ -776,7 +621,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 .range = Range.merge(tree.root.range, new_node.range),
                 .data = .{
                     .children = blk: {
-                        const mem = try pool.create(allocator);
+                        const mem = try tree.pool.create(allocator);
                         mem.* = .{};
                         break :blk mem;
                     },
@@ -787,120 +632,86 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             tree.root = new_root;
         }
 
+        fn putNode(
+            tree: *Self,
+            allocator: Allocator,
+            node: *Node,
+            key: Range,
+            value: V,
+        ) !?Node {
+            var ok = true;
+            defer if (ok) {
+                // Update the node's range if there are no errors
+                node.range = node.range.merge(key);
+            };
+            errdefer ok = false;
+
+            if (node.isLeaf()) {
+                node.data.values.ensureUnusedCapacity(allocator, 1) catch return error.NotAdded;
+                node.data.values.appendAssumeCapacity(.{ .key = key, .value = value });
+                errdefer _ = node.data.values.pop();
+
+                if (node.data.values.len >= max_children) {
+                    // Don't merge ranges in this branch, split does that
+                    ok = false;
+                    // Too many kvs, need to split this node
+                    const new_node = node.split(allocator, &tree.pool) catch return error.NotAdded;
+                    return new_node;
+                }
+                return null;
+            }
+
+            // Branch node
+            const list = node.data.children;
+
+            const best = node.bestChild(key);
+            const maybe_new_node = try tree.putNode(allocator, best, key, value);
+
+            if (maybe_new_node) |split_node| {
+                // Child node was split, need to add new node to child list
+                list.appendAssumeCapacity(split_node);
+
+                if (list.len >= max_children) {
+                    ok = false;
+                    const new_node = try node.split(allocator, &tree.pool);
+                    return new_node;
+                }
+            }
+
+            return null;
+        }
+
+        /// Finds the key/value pair whose key matches `key` and returns pointers
+        /// to the key and value, or `null` if not found.
+        pub fn get(tree: *Self, key: Range) ?struct { *Range, *V } {
+            return tree.root.getSingle(key);
+        }
+
         pub fn put(
             tree: *Self,
             allocator: Allocator,
             key: Range,
             value: V,
         ) Allocator.Error!void {
-            const res = try tree.getOrPut(allocator, key);
-            res.value_ptr.* = value;
+            return tree.putContext(allocator, key, value, {});
         }
 
-        // pub fn putContext(
-        //     tree: *Self,
-        //     allocator: Allocator,
-        //     key: Range,
-        //     value: V,
-        //     context: anytype,
-        // ) !void {
-        //     const res = try tree.getOrPutContext(allocator, key, context);
-        //     context.deinit(allocator, &res.kv.value);
-        //     res.kv.value = value;
-        // }
-
-        pub fn putNoClobber(
+        pub fn putContext(
             tree: *Self,
             allocator: Allocator,
             key: Range,
             value: V,
-        ) !void {
-            const res = try tree.getOrPut(allocator, key);
-            assert(!res.found_existing);
-            res.kv.value = value;
-        }
-
-        pub fn putNoClobberContext(
-            tree: *Self,
-            allocator: Allocator,
-            key: Range,
-            value: V,
-            context: anytype,
-        ) !void {
-            const res = try tree.getOrPutContext(allocator, key, context);
-            assert(!res.found_existing);
-            res.kv.value = value;
-        }
-
-        pub const GetOrPutResult = struct {
-            found_existing: bool,
-            key_ptr: *Range,
-            value_ptr: *V,
-        };
-
-        pub fn getOrPut(
-            tree: *Self,
-            allocator: Allocator,
-            key: Range,
-        ) !GetOrPutResult {
-            if (tree.root.getSingle(key)) |res| return .{
-                .found_existing = true,
-                .key_ptr = res[0],
-                .value_ptr = res[1],
-            };
-
-            var maybe_new_node, const res = try tree.root.getOrPut(allocator, key, &tree.pool, {});
-            if (maybe_new_node) |*new_node| {
-                errdefer new_node.deinit(allocator);
-                try tree.mergeRoots(allocator, new_node.*, &tree.pool);
-            }
-            return res;
-        }
-
-        pub fn getOrPutContext(
-            tree: *Self,
-            allocator: Allocator,
-            key: Range,
-            context: anytype,
-        ) !GetOrPutResult {
-            var maybe_new_node, const res = try tree.root.getOrPut(allocator, key, context);
-            if (maybe_new_node) |*new_node| {
-                errdefer new_node.deinitContext(allocator, context);
-                try tree.mergeRoots(allocator, new_node.*, &tree.pool);
-            }
-            return res;
-        }
-
-        /// Adds all keys contained in the tree belonging to `root` into `tree`
-        fn reAddRecursive(
-            tree: *Self,
-            allocator: Allocator,
-            root: *Node,
             context: anytype,
         ) Allocator.Error!void {
-            var maybe_err: Allocator.Error!void = {};
-            if (root.isLeaf()) {
-                defer root.data.values.deinit(allocator);
-                while (root.data.values.popOrNull()) |temp| {
-                    var kv = temp;
-                    tree.put(allocator, kv.key, kv.value) catch |err| {
-                        if (@TypeOf(context) != void)
-                            context.deinit(allocator, &kv.value);
-                        maybe_err = err;
-                    };
-                }
-            } else {
-                while (root.data.children.popOrNull()) |temp| {
-                    var child = temp;
-                    tree.reAddRecursive(allocator, &child, context) catch |err| {
-                        maybe_err = err;
-                    };
-                }
+            var maybe_new_node = tree.putNode(allocator, &tree.root, key, value) catch
+                return error.OutOfMemory;
+            if (maybe_new_node) |*new_node| {
+                errdefer new_node.deinitContext(allocator, context);
+                try tree.mergeRoots(allocator, new_node.*);
             }
-            return maybe_err;
         }
 
-        /// Removes `key` and its associated value from the true.
+        /// Removes `key` and its associated value from the tree.
         pub fn remove(
             tree: *Self,
             allocator: Allocator,
@@ -944,6 +755,35 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             tree.pool.deinit(allocator);
             tree.* = undefined;
         }
+
+        /// Adds all keys contained in the tree belonging to `root` into `tree`
+        fn reAddRecursive(
+            tree: *Self,
+            allocator: Allocator,
+            root: *Node,
+            context: anytype,
+        ) Allocator.Error!void {
+            var maybe_err: Allocator.Error!void = {};
+            if (root.isLeaf()) {
+                defer root.data.values.deinit(allocator);
+                while (root.data.values.popOrNull()) |temp| {
+                    var kv = temp;
+                    tree.put(allocator, kv.key, kv.value) catch |err| {
+                        if (@TypeOf(context) != void)
+                            context.deinit(allocator, &kv.value);
+                        maybe_err = err;
+                    };
+                }
+            } else {
+                while (root.data.children.popOrNull()) |temp| {
+                    var child = temp;
+                    tree.reAddRecursive(allocator, &child, context) catch |err| {
+                        maybe_err = err;
+                    };
+                }
+            }
+            return maybe_err;
+        }
     };
 }
 
@@ -965,11 +805,14 @@ pub fn DependentTree(comptime min_children: usize) type {
                 value.deinit(allocator);
             }
         };
-        pub const GetOrPutResult = Tree.GetOrPutResult;
 
         pub fn deinit(self: *Self, allocator: Allocator) void {
             self.rtree.deinitContext(allocator, Context{});
             self.* = undefined;
+        }
+
+        pub fn get(self: *Self, key: Range) ?struct { *Range, *RangeList } {
+            return self.rtree.get(key);
         }
 
         pub fn put(
@@ -978,8 +821,7 @@ pub fn DependentTree(comptime min_children: usize) type {
             key: Range,
             value: Range,
         ) Allocator.Error!void {
-            const res = try self.getOrPut(allocator, key, 1);
-            try res.value_ptr.append(allocator, value);
+            return self.putSlice(allocator, key, &.{value});
         }
 
         pub fn putSlice(
@@ -988,32 +830,30 @@ pub fn DependentTree(comptime min_children: usize) type {
             key: Range,
             values: []const Range,
         ) Allocator.Error!void {
-            const res = try self.getOrPut(allocator, key, values.len);
-            try res.value_ptr.appendSlice(allocator, values);
-        }
+            if (self.get(key)) |kv| {
+                try kv[1].appendSlice(allocator, values);
+                return;
+            }
 
-        pub fn getOrPut(
-            self: *Self,
-            allocator: Allocator,
-            key: Range,
-            init_capacity: usize,
-        ) Allocator.Error!GetOrPutResult {
-            if (self.rtree.root.getSingle(key)) |res| return .{
-                .found_existing = true,
-                .key_ptr = res[0],
-                .value_ptr = res[1],
-            };
-            var maybe_new_node, const res = try self.rtree.root.getOrPut(
+            var list = try RangeList.initCapacity(allocator, values.len);
+            list.appendSliceAssumeCapacity(values);
+
+            var maybe_new_node = self.rtree.putNode(
                 allocator,
+                &self.rtree.root,
                 key,
-                &self.rtree.pool,
-                Context{ .capacity = init_capacity },
-            );
+                list,
+            ) catch |err| switch (err) {
+                error.NotAdded => {
+                    list.deinit(allocator);
+                    return error.OutOfMemory;
+                },
+                else => |e| return e,
+            };
             if (maybe_new_node) |*new_node| {
                 errdefer new_node.deinitContext(allocator, Context{});
-                try self.rtree.mergeRoots(allocator, new_node.*, &self.rtree.pool);
+                try self.rtree.mergeRoots(allocator, new_node.*);
             }
-            return res;
         }
 
         pub fn search(
