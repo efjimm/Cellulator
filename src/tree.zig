@@ -13,7 +13,7 @@ const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 
 pub fn RTree(comptime V: type, comptime min_children: usize) type {
     return struct {
-        const max_children: comptime_int = @intFromFloat(@as(f64, min_children) * 2.5);
+        const max_children: comptime_int = min_children * 2;
         const ListPool = @import("pool.zig").MemoryPool(std.BoundedArray(Node, max_children), .{});
 
         root: Node = .{
@@ -53,13 +53,13 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                     const node: *const Node = @fieldParentPtr(Node, "data", self);
                     if (node.isLeaf()) {
                         try writer.print("{d} value{s}", .{
-                            self.values.items.len,
-                            if (self.values.items.len == 1) "" else "s",
+                            self.values.len,
+                            if (self.values.len == 1) "" else "s",
                         });
                     } else {
                         try writer.print("{d} {s}", .{
-                            self.children.items.len,
-                            if (self.children.items.len == 1) "child" else "children",
+                            self.children.len,
+                            if (self.children.len == 1) "child" else "children",
                         });
                     }
                 }
@@ -82,7 +82,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 try node.data.print(writer);
                 try writer.writeAll(" }}\n");
                 if (!node.isLeaf()) {
-                    for (node.data.children.items) |child| {
+                    for (node.data.children.constSlice()) |*child| {
                         try child.data.print(writer);
                     }
                 }
@@ -193,15 +193,23 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                         const new_node = try node.split(allocator, pool);
 
                         const s = new_node.data.values.slice();
-                        const index = @intFromBool(!s.items(.key)[0].eql(key));
+                        // const index = @intFromBool(!s.items(.key)[0].eql(key));
+                        const key_ptr, const value_ptr = for (s.items(.key), 0..) |*k, i| {
+                            if (k.eql(key))
+                                break .{ k, &s.items(.value)[i] };
+                        } else for (node.data.values.items(.key), 0..) |*k, i| {
+                            if (k.eql(key))
+                                break .{ k, &node.data.values.items(.value)[i] };
+                        } else unreachable;
+
                         const ret = .{
                             // Return the new node up the call stack so the parent
                             // can add it to their child list
                             new_node,
                             .{
                                 .found_existing = false,
-                                .key_ptr = &s.items(.key)[index],
-                                .value_ptr = &s.items(.value)[index],
+                                .key_ptr = key_ptr,
+                                .value_ptr = value_ptr,
                             },
                         };
 
@@ -250,7 +258,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
 
                 return for (node.data.children.slice()) |*n| {
                     if (n.range.contains(key)) {
-                        if (n.getSingle(key)) |res| break res;
+                        if (n.getSingleRecursive(key)) |res| break res;
                     }
                 } else null;
             }
@@ -416,79 +424,93 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
 
             fn getRange(a: anytype) Range {
                 return switch (@TypeOf(a)) {
-                    Node => a.range,
-                    KV => a.key,
-                    Range => a,
-                    else => @compileError("Invalid type"),
+                    Node, *Node, *const Node => a.range,
+                    KV, *KV, *const KV => a.key,
+                    Range, *Range, *const Range => a,
+                    else => @compileError("Invalid type " ++ @typeName(@TypeOf(a))),
                 };
             }
 
             fn split(node: *Node, allocator: Allocator, pool: *ListPool) Allocator.Error!Node {
                 if (node.isLeaf()) {
-                    return node.splitNode(allocator, pool, .leaf);
+                    return node.splitLeaf(allocator);
                 } else {
                     return node.splitBranch(allocator, pool);
                     // return node.splitNode(allocator, pool, .branch);
                 }
             }
 
-            const DistributionGroup = struct {
-                entries: std.BoundedArray(Node, max_children),
-                range: Range,
-            };
-            const Distribution = [2]DistributionGroup;
-            const Distributions = std.BoundedArray(Distribution, dist_count);
+            fn DistributionGroup(comptime T: type) type {
+                return struct {
+                    entries: std.BoundedArray(T, max_children),
+                    range: Range,
+                };
+            }
+            fn Distribution(comptime T: type) type {
+                return [2]DistributionGroup(T);
+            }
+
+            fn Distributions(comptime T: type) type {
+                return std.BoundedArray(Distribution(T), dist_count);
+            }
+
             const dist_count = 2 * (max_children - 2 * min_children + 2);
 
-            fn chooseSplitAxis(node: *const Node) Distributions {
-                assert(!node.isLeaf());
-
+            fn chooseSplitAxis(node: *const Node, comptime T: type) Distributions(T) {
                 var min_perimeter: u64 = std.math.maxInt(u64);
-                var ret: Distributions = .{};
+                var ret: Distributions(T) = .{};
 
                 inline for (.{ .x, .y }) |d| {
-                    var sorted_lower: std.BoundedArray(Node, max_children) = .{};
-                    var sorted_upper: std.BoundedArray(Node, max_children) = .{};
+                    var sorted_lower: std.BoundedArray(T, max_children) = .{};
+                    var sorted_upper: std.BoundedArray(T, max_children) = .{};
 
                     // TODO: Elide copies (sort out of place)
-                    sorted_lower.appendSliceAssumeCapacity(node.data.children.constSlice());
-                    sorted_upper.appendSliceAssumeCapacity(node.data.children.constSlice());
+                    if (T == Node) {
+                        sorted_lower.appendSliceAssumeCapacity(node.data.children.constSlice());
+                        sorted_upper.appendSliceAssumeCapacity(node.data.children.constSlice());
+                    } else {
+                        const s = node.data.values.slice();
+                        for (s.items(.key), s.items(.value)) |k, v| {
+                            sorted_lower.appendAssumeCapacity(.{ .key = k, .value = v });
+                            sorted_upper.appendAssumeCapacity(.{ .key = k, .value = v });
+                        }
+                    }
 
                     const LowerContext = struct {
-                        pub fn compare(_: @This(), lhs: Node, rhs: Node) bool {
+                        pub fn compare(_: @This(), lhs: T, rhs: T) bool {
                             return switch (d) {
-                                .x => lhs.range.tl.x < rhs.range.tl.x,
-                                .y => lhs.range.tl.y < rhs.range.tl.y,
+                                .x => getRange(lhs).tl.x < getRange(rhs).tl.x,
+                                .y => getRange(lhs).tl.y < getRange(rhs).tl.y,
                                 else => unreachable,
                             };
                         }
                     };
 
                     const UpperContext = struct {
-                        pub fn compare(_: @This(), lhs: Node, rhs: Node) bool {
+                        pub fn compare(_: @This(), lhs: T, rhs: T) bool {
                             return switch (d) {
-                                .x => lhs.range.br.x < rhs.range.br.x,
-                                .y => lhs.range.br.y < rhs.range.br.y,
+                                .x => getRange(lhs).br.x < getRange(rhs).br.x,
+                                .y => getRange(lhs).br.y < getRange(rhs).br.y,
                                 else => unreachable,
                             };
                         }
                     };
 
-                    std.sort.heap(Node, sorted_lower.slice(), LowerContext{}, LowerContext.compare);
-                    std.sort.heap(Node, sorted_upper.slice(), UpperContext{}, UpperContext.compare);
+                    std.sort.heap(T, sorted_lower.slice(), LowerContext{}, LowerContext.compare);
+                    std.sort.heap(T, sorted_upper.slice(), UpperContext{}, UpperContext.compare);
 
                     var sum: u64 = 0;
-                    var temp: Distributions = .{};
+                    var temp: Distributions(T) = .{};
                     temp.len = 0;
                     inline for (.{
                         sorted_lower.constSlice(),
                         sorted_upper.constSlice(),
                     }) |entries| {
                         for (0..max_children - 2 * min_children + 2) |k| {
-                            var r1: Range = entries[0].range;
-                            var r2: Range = entries[min_children - 1 + k].range;
-                            for (entries[0 .. min_children - 2]) |n| r1 = r1.merge(n.range);
-                            for (entries[min_children + k ..]) |n| r2 = r2.merge(n.range);
+                            var r1: Range = getRange(entries[0]);
+                            var r2: Range = getRange(entries[min_children - 1 + k]);
+                            for (entries[1 .. min_children - 1 + k]) |e| r1 = r1.merge(getRange(e));
+                            for (entries[min_children + k ..]) |e| r2 = r2.merge(getRange(e));
 
                             temp.appendAssumeCapacity(.{
                                 .{ .range = r1, .entries = .{} },
@@ -511,7 +533,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 return ret;
             }
 
-            pub fn chooseSplitIndex(dists: *const Distributions) usize {
+            pub fn chooseSplitIndex(comptime T: type, dists: *const Distributions(T)) usize {
                 assert(dists.len > 0);
 
                 var min_overlap: u64 = comptime std.math.maxInt(u64);
@@ -537,6 +559,32 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 return best_index;
             }
 
+            fn splitLeaf(
+                node: *Node,
+                allocator: Allocator,
+            ) Allocator.Error!Node {
+                const dists: Distributions(KV) = node.chooseSplitAxis(KV);
+                const index = chooseSplitIndex(KV, &dists);
+                const d = &dists.constSlice()[index];
+
+                var new_entries: ValueList = .{};
+                try new_entries.ensureUnusedCapacity(allocator, d[1].entries.len);
+                for (d[1].entries.constSlice()) |e| {
+                    new_entries.appendAssumeCapacity(e);
+                }
+
+                node.data.values.len = 0;
+                for (d[0].entries.constSlice()) |e| {
+                    node.data.values.appendAssumeCapacity(e);
+                }
+                node.range = d[0].range;
+                return .{
+                    .level = node.level,
+                    .range = d[1].range,
+                    .data = .{ .values = new_entries },
+                };
+            }
+
             fn splitBranch(
                 node: *Node,
                 allocator: Allocator,
@@ -544,8 +592,8 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             ) Allocator.Error!Node {
                 assert(!node.isLeaf());
 
-                const dists: Distributions = chooseSplitAxis(node);
-                const index = chooseSplitIndex(&dists);
+                const dists: Distributions(Node) = node.chooseSplitAxis(Node);
+                const index = chooseSplitIndex(Node, &dists);
                 const d = &dists.constSlice()[index];
 
                 const new_entries = try pool.create(allocator);
@@ -1291,7 +1339,11 @@ pub fn DependentTree(comptime min_children: usize) type {
                     const key = Range.initSingle(@intCast(i), @intCast(j));
                     const value = Range.initSingle(@intCast(bound - i - 1), @intCast(bound - j - 1));
                     try r.put(t.allocator, key, value);
-                    try std.testing.expect(r.rtree.root.getSingle(key) != null);
+                    std.testing.expect(r.rtree.root.getSingle(key) != null) catch |err| {
+                        std.debug.print("{}\n", .{r.rtree.root});
+                        std.debug.print("{}\n", .{key});
+                        return err;
+                    };
                     try r.put(t.allocator, key, value);
                     try std.testing.expect(r.rtree.root.getSingle(key) != null);
                 }
