@@ -51,6 +51,8 @@ nodes: NodePool,
 
 cell_treap: CellTreap = .{},
 
+search_buffer: std.ArrayListUnmanaged(std.ArrayListUnmanaged(Range)) = .{},
+
 const tree_children = 4;
 
 const Node = CellTreap.Node;
@@ -183,6 +185,7 @@ pub fn deinit(sheet: *Sheet) void {
         sheet.allocator().free(kv.value_ptr.*);
     }
     sheet.strings.deinit(sheet.allocator());
+    sheet.search_buffer.deinit(sheet.allocator());
 
     sheet.clearAndFreeUndos(.undo);
     sheet.clearAndFreeUndos(.redo);
@@ -267,7 +270,6 @@ pub fn loadFile(sheet: *Sheet, ast_allocator: Allocator, filepath: []const u8, c
 
     var sfa = std.heap.stackFallback(8192, sheet.allocator());
     var a = sfa.get();
-    defer sheet.endUndoGroup();
     while (try reader.readUntilDelimiterOrEofAlloc(a, '\n', std.math.maxInt(u30))) |line| {
         defer {
             a.free(line);
@@ -291,7 +293,7 @@ pub fn loadFile(sheet: *Sheet, ast_allocator: Allocator, filepath: []const u8, c
         const pos = data[assignment.lhs].cell;
         ast.splice(assignment.rhs);
 
-        try sheet.setCell(pos, line, ast, .{});
+        try sheet.setCell(pos, line, ast, .{ .undo_type = null });
     }
 }
 
@@ -488,7 +490,7 @@ pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) ?Position {
 }
 
 pub const UndoOpts = struct {
-    undo_type: UndoType = .undo,
+    undo_type: ?UndoType = .undo,
     clear_redos: bool = true,
 };
 
@@ -584,10 +586,11 @@ pub fn ensureUndoCapacity(sheet: *Sheet, undo_type: UndoType, n: u32) Allocator.
 }
 
 pub fn pushUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
+    const undo_type = opts.undo_type orelse return;
     // Ensure that we can add a group end marker later without allocating
     try sheet.undo_end_markers.ensureUnusedCapacity(sheet.allocator(), 1);
 
-    switch (opts.undo_type) {
+    switch (undo_type) {
         .undo => {
             try sheet.undos.ensureUnusedCapacity(sheet.allocator(), 1);
             sheet.undos.appendAssumeCapacity(u);
@@ -800,7 +803,9 @@ pub fn insertCellNode(
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
     const pos = new_node.key.pos;
-    try sheet.ensureUndoCapacity(undo_opts.undo_type, 1);
+    if (undo_opts.undo_type) |undo_type| {
+        try sheet.ensureUndoCapacity(undo_type, 1);
+    }
     try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator(), 1);
     _ = try sheet.columns.getOrPutValue(sheet.allocator(), pos.x, .{});
     try sheet.strings.ensureUnusedCapacity(sheet.allocator(), 1);
@@ -898,7 +903,9 @@ pub fn deleteCell(
     const node = entry.node orelse return;
     var cell = node.key;
 
-    try sheet.ensureUndoCapacity(undo_opts.undo_type, 1);
+    if (undo_opts.undo_type) |undo_type| {
+        try sheet.ensureUndoCapacity(undo_type, 1);
+    }
     try sheet.enqueueUpdate(pos);
     try sheet.removeExprDependents(Range.initSinglePos(pos), cell.ast);
 
@@ -987,11 +994,15 @@ fn markDirty(
     sheet: *Sheet,
     pos: Position,
 ) Allocator.Error!void {
-    const res = try sheet.rtree.search(sheet.allocator(), Range.initSinglePos(pos));
-    defer sheet.allocator().free(res);
+    sheet.search_buffer.clearRetainingCapacity();
+    try sheet.rtree.rtree.searchBuffer(
+        sheet.allocator(),
+        &sheet.search_buffer,
+        Range.initSinglePos(pos),
+    );
 
-    for (res) |item| {
-        for (item.value_ptr.items) |r| {
+    for (sheet.search_buffer.items) |*list| {
+        for (list.items) |r| {
             var iter = r.iterator();
             while (iter.next()) |p| {
                 const cell = sheet.getCellPtr(p) orelse continue;
@@ -1078,11 +1089,15 @@ pub const EvalContext = struct {
     sheet: *Sheet,
 
     fn queueDependents(context: EvalContext, pos: Position) Allocator.Error!void {
-        const res = try context.sheet.rtree.search(context.sheet.allocator(), Range.initSinglePos(pos));
-        defer context.sheet.allocator().free(res);
+        context.sheet.search_buffer.clearRetainingCapacity();
+        try context.sheet.rtree.rtree.searchBuffer(
+            context.sheet.allocator(),
+            &context.sheet.search_buffer,
+            Range.initSinglePos(pos),
+        );
 
-        for (res) |kv| {
-            for (kv.value_ptr.items) |r| {
+        for (context.sheet.search_buffer.items) |*value_list| {
+            for (value_list.items) |r| {
                 var iter = r.iterator();
                 while (iter.next()) |p| {
                     const c = context.sheet.getCellPtr(p) orelse continue;

@@ -69,17 +69,40 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 return node.level == 0;
             }
 
+            fn searchValues(
+                node: *const Node,
+                allocator: Allocator,
+                range: Range,
+                list: *std.ArrayListUnmanaged(V),
+            ) Allocator.Error!void {
+                if (node.isLeaf()) {
+                    const values = node.data.values.items(.value);
+                    for (node.data.values.items(.key), 0..) |*k, i| {
+                        if (range.intersects(k.*)) {
+                            try list.append(allocator, values[i]);
+                        }
+                    }
+                } else {
+                    for (node.data.children.constSlice()) |*n| {
+                        if (range.intersects(n.range)) {
+                            try n.searchValues(allocator, range, list);
+                        }
+                    }
+                }
+            }
+
             fn search(
                 node: *const Node,
                 range: Range,
                 list: *std.ArrayList(SearchItem),
             ) Allocator.Error!void {
                 if (node.isLeaf()) {
+                    const values = node.data.values.items(.value);
                     for (node.data.values.items(.key), 0..) |*k, i| {
                         if (range.intersects(k.*)) {
                             try list.append(.{
                                 .key_ptr = k,
-                                .value_ptr = &node.data.values.items(.value)[i],
+                                .value_ptr = &values[i],
                             });
                         }
                     }
@@ -463,6 +486,15 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             return list.toOwnedSlice();
         }
 
+        pub fn searchBuffer(
+            tree: Self,
+            allocator: Allocator,
+            list: *std.ArrayListUnmanaged(V),
+            range: Range,
+        ) Allocator.Error!void {
+            try tree.root.searchValues(allocator, range, list);
+        }
+
         fn mergeRoots(
             tree: *Self,
             allocator: Allocator,
@@ -697,6 +729,8 @@ pub fn DependentTree(comptime min_children: usize) type {
         const Self = @This();
         const RangeList = std.ArrayListUnmanaged(Range);
         const Tree = RTree(RangeList, min_children);
+        pub const Node = Tree.Node;
+        pub const KV = Tree.KV;
         const Context = struct {
             capacity: usize = 1,
 
