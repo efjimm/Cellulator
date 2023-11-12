@@ -3,12 +3,15 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const use_x86_backend = b.option(bool, "native-backend", "Use Zig's native x86 backend for compilation") orelse false;
 
     const exe = b.addExecutable(.{
         .name = "cellulator",
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
         .optimize = optimize,
+        .use_llvm = !use_x86_backend,
+        .use_lld = !use_x86_backend,
     });
 
     const strip: ?bool = b.option(bool, "strip", "");
@@ -49,6 +52,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .filter = filter,
+        .use_llvm = !use_x86_backend,
+        .use_lld = !use_x86_backend,
     });
 
     const fast_tests = b.option(bool, "fast-tests", "Skip slow tests") orelse false;
