@@ -210,6 +210,7 @@ pub fn clearRetainingCapacity(sheet: *Sheet, context: anytype) void {
     var iter = sheet.cell_treap.inorderIterator();
     while (iter.next()) |node| context.destroyAst(node.key.ast);
     _ = sheet.nodes.reset(.retain_capacity);
+    sheet.cell_treap.root = null;
 
     var strings_iter = sheet.strings.valueIterator();
     while (strings_iter.next()) |string_ptr| {
@@ -270,6 +271,7 @@ pub fn loadFile(sheet: *Sheet, ast_allocator: Allocator, filepath: []const u8, c
 
     var sfa = std.heap.stackFallback(8192, sheet.allocator());
     var a = sfa.get();
+    defer sheet.endUndoGroup();
     while (try reader.readUntilDelimiterOrEofAlloc(a, '\n', std.math.maxInt(u30))) |line| {
         defer {
             a.free(line);
@@ -825,11 +827,8 @@ pub fn insertCellNode(
     }
 
     const cell = new_node.key;
-    // const index, const found = utils.binarySearch(pos.hash(), sheet.cells.keys());
     var entry = sheet.cell_treap.getEntryFor(cell);
     const node = entry.node orelse {
-        // Ensure capacities for cells and strings
-        // try sheet.cells.ensureUnusedCapacity(sheet.allocator(), 1);
         const u = Undo{ .delete_cell = pos };
 
         entry.set(new_node);
