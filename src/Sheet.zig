@@ -1,6 +1,3 @@
-// TODO:
-// Experiment with O(n^2) node splitting algorithm
-// Implement R*-tree
 const std = @import("std");
 const builtin = @import("builtin");
 const utils = @import("utils.zig");

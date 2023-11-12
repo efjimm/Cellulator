@@ -281,15 +281,6 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 };
             }
 
-            fn split(node: *Node, allocator: Allocator, pool: *ListPool) Allocator.Error!Node {
-                if (node.isLeaf()) {
-                    return node.splitLeaf(allocator);
-                } else {
-                    return node.splitBranch(allocator, pool);
-                    // return node.splitNode(allocator, pool, .branch);
-                }
-            }
-
             fn DistributionGroup(comptime T: type) type {
                 return struct {
                     entries: std.BoundedArray(T, max_children),
@@ -408,198 +399,56 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 }
                 return best_index;
             }
-
-            fn splitLeaf(
-                node: *Node,
-                allocator: Allocator,
-            ) Allocator.Error!Node {
-                const dists: Distributions(KV) = node.chooseSplitAxis(KV);
-                const index = chooseSplitIndex(KV, &dists);
-                const d = &dists.constSlice()[index];
-
-                var new_entries: ValueList = .{};
-                try new_entries.ensureUnusedCapacity(allocator, d[1].entries.len);
-                for (d[1].entries.constSlice()) |e| {
-                    new_entries.appendAssumeCapacity(e);
-                }
-
-                node.data.values.len = 0;
-                for (d[0].entries.constSlice()) |e| {
-                    node.data.values.appendAssumeCapacity(e);
-                }
-                node.range = d[0].range;
-                return .{
-                    .level = node.level,
-                    .range = d[1].range,
-                    .data = .{ .values = new_entries },
-                };
-            }
-
-            fn splitBranch(
-                node: *Node,
-                allocator: Allocator,
-                pool: *ListPool,
-            ) Allocator.Error!Node {
-                assert(!node.isLeaf());
-
-                const dists: Distributions(Node) = node.chooseSplitAxis(Node);
-                const index = chooseSplitIndex(Node, &dists);
-                const d = &dists.constSlice()[index];
-
-                const new_entries = try pool.create(allocator);
-                new_entries.* = d[1].entries;
-
-                node.data.children.* = d[0].entries;
-                node.range = d[0].range;
-                return .{
-                    .level = node.level,
-                    .range = d[1].range,
-                    .data = .{ .children = new_entries },
-                };
-            }
-
-            /// Splits a node in place, returning the other half as a new node.
-            fn splitNode(
-                node: *Node,
-                allocator: Allocator,
-                pool: *ListPool,
-                comptime node_type: enum { branch, leaf },
-            ) !Node {
-                const entries = switch (node_type) {
-                    .leaf => &node.data.values,
-                    .branch => node.data.children,
-                };
-
-                var new_entries = switch (node_type) {
-                    .leaf => blk: {
-                        var new_entries: ValueList = .{};
-                        try new_entries.ensureTotalCapacity(allocator, max_children);
-                        break :blk new_entries;
-                    },
-                    .branch => blk: {
-                        const mem = try pool.create(allocator);
-                        mem.* = .{};
-                        break :blk mem;
-                    },
-                };
-                errdefer switch (node_type) {
-                    .leaf => new_entries.deinit(allocator),
-                    .branch => allocator.destroy(new_entries),
-                };
-
-                const seed2, const seed1 = blk: {
-                    switch (node_type) {
-                        .leaf => {
-                            const i_1, const i_2 = linearSplit(entries.items(.key));
-                            assert(i_1 < i_2);
-                            const res = .{ entries.get(i_2), entries.get(i_1) };
-                            entries.orderedRemove(i_2);
-                            entries.orderedRemove(i_1);
-                            break :blk res;
-                        },
-                        .branch => {
-                            const i_1, const i_2 = linearSplit(entries.constSlice());
-                            assert(i_1 < i_2);
-                            break :blk .{ entries.orderedRemove(i_2), entries.orderedRemove(i_1) };
-                        },
-                    }
-                };
-
-                var bound2 = getRange(seed2);
-                new_entries.appendAssumeCapacity(seed2);
-
-                for (0..min_children - 1) |_| {
-                    const e = entries.pop();
-                    bound2 = bound2.merge(getRange(e));
-                    new_entries.appendAssumeCapacity(e);
-                }
-
-                entries.appendAssumeCapacity(seed1);
-                node.recalcBoundingRange();
-
-                return .{
-                    .level = node.level,
-                    .range = bound2,
-                    .data = switch (node_type) {
-                        .leaf => .{ .values = new_entries },
-                        .branch => .{ .children = new_entries },
-                    },
-                };
-            }
-
-            const DimStats = struct {
-                const maxInt = std.math.maxInt;
-                const minInt = std.math.minInt;
-
-                min_tl: PosInt = maxInt(PosInt),
-                max_tl: PosInt = minInt(PosInt),
-
-                max_br: PosInt = minInt(PosInt),
-                min_br: PosInt = maxInt(PosInt),
-
-                tl_index: usize = 0,
-                br_index: usize = 0,
-
-                fn farthest(s: DimStats) PosInt {
-                    return if (s.max_br > s.min_tl)
-                        s.max_br - s.min_tl
-                    else
-                        s.min_tl - s.max_br;
-                }
-
-                fn nearest(s: DimStats) PosInt {
-                    return if (s.min_br > s.max_tl)
-                        s.min_br - s.max_tl
-                    else
-                        s.max_tl - s.min_br;
-                }
-
-                fn computeDim(s: *DimStats, lo: PosInt, hi: PosInt, i: usize) void {
-                    s.min_tl = @min(s.min_tl, lo);
-                    s.max_br = @max(s.max_br, hi);
-
-                    if (lo > s.max_tl) {
-                        s.max_tl = lo;
-                        s.tl_index = i;
-                    }
-
-                    if (hi < s.min_br) {
-                        s.min_br = hi;
-                        s.br_index = i;
-                    }
-                }
-            };
-
-            fn linearSplit(entries: anytype) struct { usize, usize } {
-                var dx = DimStats{};
-                var dy = DimStats{};
-
-                if (entries.len > 2) {
-                    for (entries, 0..) |e, i| {
-                        const rect = getRange(e);
-                        dx.computeDim(rect.tl.x, rect.br.x, i);
-                        dy.computeDim(rect.tl.y, rect.br.y, i);
-                    }
-                }
-
-                const max = std.math.maxInt(PosInt);
-                const norm_x = std.math.divTrunc(PosInt, dx.nearest(), dx.farthest()) catch max;
-                const norm_y = std.math.divTrunc(PosInt, dy.nearest(), dy.farthest()) catch max;
-                const x, const y = if (norm_x > norm_y)
-                    .{ dx.tl_index, dx.br_index }
-                else
-                    .{ dy.tl_index, dy.br_index };
-
-                return if (x < y)
-                    .{ x, y }
-                else if (x > y)
-                    .{ y, x }
-                else if (x == 0)
-                    .{ 0, 1 }
-                else
-                    .{ 0, y };
-            }
         };
+
+        fn splitLeafNode(
+            allocator: Allocator,
+            node: *Node,
+        ) Allocator.Error!Node {
+            const dists: Node.Distributions(KV) = node.chooseSplitAxis(KV);
+            const index = Node.chooseSplitIndex(KV, &dists);
+            const d = &dists.constSlice()[index];
+
+            var new_entries: Node.ValueList = .{};
+            try new_entries.ensureUnusedCapacity(allocator, d[1].entries.len);
+            for (d[1].entries.constSlice()) |e| {
+                new_entries.appendAssumeCapacity(e);
+            }
+
+            node.data.values.len = 0;
+            for (d[0].entries.constSlice()) |e| {
+                node.data.values.appendAssumeCapacity(e);
+            }
+            node.range = d[0].range;
+            return .{
+                .level = node.level,
+                .range = d[1].range,
+                .data = .{ .values = new_entries },
+            };
+        }
+
+        fn splitBranchNode(
+            allocator: Allocator,
+            tree: *Self,
+            node: *Node,
+        ) Allocator.Error!Node {
+            assert(!node.isLeaf());
+
+            const dists: Node.Distributions(Node) = node.chooseSplitAxis(Node);
+            const index = Node.chooseSplitIndex(Node, &dists);
+            const d = &dists.constSlice()[index];
+
+            const new_entries = try tree.pool.create(allocator);
+            new_entries.* = d[1].entries;
+
+            node.data.children.* = d[0].entries;
+            node.range = d[0].range;
+            return .{
+                .level = node.level,
+                .range = d[1].range,
+                .data = .{ .children = new_entries },
+            };
+        }
 
         /// Returns an unorded list of key-value pairs whose keys intersect `range`
         pub fn search(
@@ -659,7 +508,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                     // Don't merge ranges in this branch, split does that
                     ok = false;
                     // Too many kvs, need to split this node
-                    const new_node = node.split(allocator, &tree.pool) catch return error.NotAdded;
+                    const new_node = tree.splitNode(allocator, node) catch return error.NotAdded;
                     return new_node;
                 } else if (node.data.values.len == 1) {
                     // This was the first node added to this leaf
@@ -680,12 +529,19 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
 
                 if (list.len >= max_children) {
                     ok = false;
-                    const new_node = try node.split(allocator, &tree.pool);
+                    const new_node = try tree.splitNode(allocator, node);
                     return new_node;
                 }
             }
 
             return null;
+        }
+
+        fn splitNode(tree: *Self, allocator: Allocator, node: *Node) Allocator.Error!Node {
+            return if (node.isLeaf())
+                splitLeafNode(allocator, node)
+            else
+                splitBranchNode(allocator, tree, node);
         }
 
         /// Finds the key/value pair whose key matches `key` and returns pointers
