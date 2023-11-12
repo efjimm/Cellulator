@@ -1,8 +1,3 @@
-// TODO:
-// Instead of ArrayLists use *BoundedArray
-//   Makes OOM easier to handle via less allocations
-//   Can write `ensureUnusedCapacity(n)` by pre-allocating root.level + n BoundedArrays
-// Use MultiArrayLists for faster iteration of Node.range/KV.key
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
