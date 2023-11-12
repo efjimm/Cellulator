@@ -140,6 +140,7 @@ pub fn treapNextNode(node: ?*Node, parent: ?*Node) ?*Node {
         if (n.children[1]) |right| return treapMin(right);
     }
     if (parent) |p| if (p.children[0] == node) return parent;
+
     var p = parent;
     var n = node;
     while (p != null and n == p.?.children[1]) {
@@ -445,49 +446,61 @@ fn removeExprDependents(
     }
 }
 
-// TODO: Fix these
-
 pub fn firstCellInRow(sheet: *Sheet, row: Position.Int) ?Position {
-    _ = row;
-    _ = sheet;
-    // return for (sheet.cells.keys()) |pos| {
-    //     if (pos.y < row) continue;
-    //     if (pos.y == row) break pos;
-    //     break null;
-    // } else null;
+    const entry = sheet.cell_treap.getEntryFor(.{ .pos = .{ .x = 0, .y = row } });
+
+    if (entry.node) |node| return node.key.pos;
+    if (treapNextNode(entry.node, entry.context.inserted_under)) |node| {
+        if (node.key.pos.y == row)
+            return node.key.pos;
+    }
     return null;
 }
 
 pub fn lastCellInRow(sheet: *Sheet, row: Position.Int) ?Position {
-    _ = row;
-    _ = sheet;
-    // var ret: ?Position = null;
+    const entry = sheet.cell_treap.getEntryFor(.{
+        .pos = .{ .x = std.math.maxInt(Position.Int), .y = row },
+    });
 
-    // for (sheet.cells.keys()) |pos| {
-    //     if (pos.y > row) break;
-    //     ret = pos;
-    // }
-
-    // return ret;
+    if (entry.node) |node| return node.key.pos;
+    if (treapPrevNode(entry.node, entry.context.inserted_under)) |node| {
+        if (node.key.pos.y == row)
+            return node.key.pos;
+    }
     return null;
 }
 
+// TODO: Optimize these
+
 pub fn firstCellInColumn(sheet: *Sheet, col: Position.Int) ?Position {
-    _ = col;
-    _ = sheet;
-    // return for (sheet.cells.keys()) |pos| {
-    //     if (pos.x == col) break pos;
-    // } else null;
+    const start = if (sheet.cell_treap.getMin()) |node| node.key.pos.y else 0;
+    const end = if (sheet.cell_treap.getMax()) |node|
+        node.key.pos.y
+    else
+        std.math.maxInt(Position.Int);
+
+    for (start..end) |y| {
+        var entry = sheet.cell_treap.getEntryFor(.{
+            .pos = .{ .x = col, .y = @intCast(y) },
+        });
+        if (entry.node) |node| return node.key.pos;
+    }
     return null;
 }
 
 pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) ?Position {
-    _ = col;
-    _ = sheet;
-    // var iter = std.mem.reverseIterator(sheet.cells.keys());
-    // return while (iter.next()) |pos| {
-    //     if (pos.x == col) break pos;
-    // } else null;
+    const start = if (sheet.cell_treap.getMin()) |node| node.key.pos.y else 0;
+    const end = if (sheet.cell_treap.getMax()) |node|
+        node.key.pos.y
+    else
+        std.math.maxInt(Position.Int);
+
+    for (0..end - start) |y| {
+        var entry = sheet.cell_treap.getEntryFor(.{
+            .pos = .{ .x = col, .y = end - @as(Position.Int, @intCast(y)) },
+        });
+        if (entry.node) |node| return node.key.pos;
+    }
     return null;
 }
 
