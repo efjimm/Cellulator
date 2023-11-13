@@ -77,8 +77,6 @@ pub fn isRedoMarker(sheet: *Sheet, index: u32) bool {
 }
 
 pub const UndoList = MultiArrayList(Undo);
-pub const AstMap = std.AutoArrayHashMapUnmanaged(u32, Ast);
-
 pub const UndoType = enum { undo, redo };
 
 pub const Undo = union(enum) {
@@ -135,11 +133,16 @@ fn treapMax(node: *Node) *Node {
     return current;
 }
 
-pub fn treapNextNode(node: ?*Node, parent: ?*Node) ?*Node {
+pub fn treapNextNode(key: Position, node: ?*Node, parent: ?*Node) ?*Node {
     if (node) |n| {
-        if (n.children[1]) |right| return treapMin(right);
+        if (n.children[1]) |right|
+            return treapMin(right);
     }
-    if (parent) |p| if (p.children[0] == node) return parent;
+
+    if (parent) |p| {
+        if (p.children[0] == node and Cell.compare(.{ .pos = key }, p.key) == .lt)
+            return parent;
+    }
 
     var p = parent;
     var n = node;
@@ -150,11 +153,15 @@ pub fn treapNextNode(node: ?*Node, parent: ?*Node) ?*Node {
     return p;
 }
 
-pub fn treapPrevNode(node: ?*Node, parent: ?*Node) ?*Node {
+pub fn treapPrevNode(key: Position, node: ?*Node, parent: ?*Node) ?*Node {
     if (node) |n| {
         if (n.children[0]) |left| return treapMax(left);
     }
-    if (parent) |p| if (p.children[1] == node) return parent;
+
+    if (parent) |p| {
+        if (p.children[1] == node and Cell.compare(.{ .pos = key }, p.key) == .gt)
+            return parent;
+    }
 
     var p = parent;
     var n = node;
@@ -163,11 +170,6 @@ pub fn treapPrevNode(node: ?*Node, parent: ?*Node) ?*Node {
         p = p.?.parent;
     }
     return p;
-}
-
-pub fn treapNextNodeKey(treap: anytype, key: anytype) ?*std.meta.Child(@TypeOf(treap)).Node {
-    const entry = treap.getEntryFor(key);
-    if (entry.node) |n| return treapNextNode(n);
 }
 
 pub fn init(a: Allocator) Sheet {
@@ -450,7 +452,7 @@ pub fn firstCellInRow(sheet: *Sheet, row: Position.Int) ?Position {
     const entry = sheet.cell_treap.getEntryFor(.{ .pos = .{ .x = 0, .y = row } });
 
     if (entry.node) |node| return node.key.pos;
-    if (treapNextNode(entry.node, entry.context.inserted_under)) |node| {
+    if (treapNextNode(entry.key.pos, entry.node, entry.context.inserted_under)) |node| {
         if (node.key.pos.y == row)
             return node.key.pos;
     }
@@ -463,7 +465,7 @@ pub fn lastCellInRow(sheet: *Sheet, row: Position.Int) ?Position {
     });
 
     if (entry.node) |node| return node.key.pos;
-    if (treapPrevNode(entry.node, entry.context.inserted_under)) |node| {
+    if (treapPrevNode(entry.key.pos, entry.node, entry.context.inserted_under)) |node| {
         if (node.key.pos.y == row)
             return node.key.pos;
     }
@@ -479,11 +481,23 @@ pub fn firstCellInColumn(sheet: *Sheet, col: Position.Int) ?Position {
     else
         std.math.maxInt(Position.Int);
 
-    for (start..end) |y| {
+    var y = start;
+    while (y < end) {
         var entry = sheet.cell_treap.getEntryFor(.{
-            .pos = .{ .x = col, .y = @intCast(y) },
+            .pos = .{ .x = col, .y = y },
         });
+
         if (entry.node) |node| return node.key.pos;
+        const next = treapNextNode(entry.key.pos, entry.node, entry.context.inserted_under) orelse break;
+
+        if (next.key.pos.x == col) return next.key.pos;
+        y = if (next.key.pos.x < col) next.key.pos.y else next.key.pos.y +| 1;
+    }
+    if (end == std.math.maxInt(Position.Int)) {
+        var entry = sheet.cell_treap.getEntryFor(.{
+            .pos = .{ .x = col, .y = std.math.maxInt(Position.Int) },
+        });
+        return if (entry.node) |node| node.key.pos else null;
     }
     return null;
 }
@@ -495,11 +509,23 @@ pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) ?Position {
     else
         std.math.maxInt(Position.Int);
 
-    for (0..end - start) |y| {
+    var y = end;
+    while (y > start) {
         var entry = sheet.cell_treap.getEntryFor(.{
-            .pos = .{ .x = col, .y = end - @as(Position.Int, @intCast(y)) },
+            .pos = .{ .x = col, .y = y },
         });
+
         if (entry.node) |node| return node.key.pos;
+        const prev = treapPrevNode(entry.key.pos, entry.node, entry.context.inserted_under) orelse break;
+
+        if (prev.key.pos.x == col) return prev.key.pos;
+        y = if (prev.key.pos.x > col) prev.key.pos.y else prev.key.pos.y -| 1;
+    }
+    if (start == 0) {
+        var entry = sheet.cell_treap.getEntryFor(.{
+            .pos = .{ .x = col, .y = 0 },
+        });
+        return if (entry.node) |node| node.key.pos else null;
     }
     return null;
 }
@@ -508,21 +534,6 @@ pub const UndoOpts = struct {
     undo_type: ?UndoType = .undo,
     clear_redos: bool = true,
 };
-
-// fn createUndoAst(sheet: *Sheet, ast: Ast, strings: []const u8) Allocator.Error!u32 {
-//     const ret = try sheet.undo_asts.createWithInit(sheet.allocator(), .{
-//         .ast = ast,
-//         .strings = strings,
-//     });
-//     return ret;
-// }
-
-// fn freeUndoAst(sheet: *Sheet, index: u32) void {
-//     var t = sheet.undo_asts.get(index);
-//     t.ast.deinit(sheet.allocator());
-//     sheet.allocator().free(t.strings);
-//     sheet.undo_asts.destroy(index);
-// }
 
 pub fn clearAndFreeUndos(sheet: *Sheet, comptime kind: UndoType) void {
     const list = switch (kind) {

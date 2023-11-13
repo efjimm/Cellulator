@@ -895,8 +895,12 @@ pub fn nextPopulatedCell(self: *Self, start_pos: Position, count: u32) Position 
     var parent = entry.context.inserted_under;
     var ret: Position = start_pos;
 
-    for (0..count) |_| {
-        node = Sheet.treapNextNode(node, parent) orelse break;
+    node = Sheet.treapNextNode(start_pos, node, parent) orelse return start_pos;
+    ret = node.?.key.pos;
+    parent = node.?.parent;
+
+    for (1..count) |_| {
+        node = Sheet.treapNextNode(node.?.key.pos, node, parent) orelse break;
         ret = node.?.key.pos;
         parent = node.?.parent;
     }
@@ -910,8 +914,12 @@ pub fn prevPopulatedCell(self: *Self, start_pos: Position, count: u32) Position 
     var parent = entry.context.inserted_under;
     var ret: Position = start_pos;
 
-    for (0..count) |_| {
-        node = Sheet.treapPrevNode(node, parent) orelse break;
+    node = Sheet.treapPrevNode(start_pos, node, parent) orelse return start_pos;
+    ret = node.?.key.pos;
+    parent = node.?.parent;
+
+    for (1..count) |_| {
+        node = Sheet.treapPrevNode(node.?.key.pos, node, parent) orelse break;
         ret = node.?.key.pos;
         parent = node.?.parent;
     }
