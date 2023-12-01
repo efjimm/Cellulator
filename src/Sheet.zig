@@ -483,7 +483,7 @@ pub fn firstCellInColumn(sheet: *Sheet, col: Position.Int) ?Position {
 
     var y = start;
     while (y < end) {
-        var entry = sheet.cell_treap.getEntryFor(.{
+        const entry = sheet.cell_treap.getEntryFor(.{
             .pos = .{ .x = col, .y = y },
         });
 
@@ -494,7 +494,7 @@ pub fn firstCellInColumn(sheet: *Sheet, col: Position.Int) ?Position {
         y = if (next.key.pos.x < col) next.key.pos.y else next.key.pos.y +| 1;
     }
     if (end == std.math.maxInt(Position.Int)) {
-        var entry = sheet.cell_treap.getEntryFor(.{
+        const entry = sheet.cell_treap.getEntryFor(.{
             .pos = .{ .x = col, .y = std.math.maxInt(Position.Int) },
         });
         return if (entry.node) |node| node.key.pos else null;
@@ -511,7 +511,7 @@ pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) ?Position {
 
     var y = end;
     while (y > start) {
-        var entry = sheet.cell_treap.getEntryFor(.{
+        const entry = sheet.cell_treap.getEntryFor(.{
             .pos = .{ .x = col, .y = y },
         });
 
@@ -522,7 +522,7 @@ pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) ?Position {
         y = if (prev.key.pos.x > col) prev.key.pos.y else prev.key.pos.y -| 1;
     }
     if (start == 0) {
-        var entry = sheet.cell_treap.getEntryFor(.{
+        const entry = sheet.cell_treap.getEntryFor(.{
             .pos = .{ .x = col, .y = 0 },
         });
         return if (entry.node) |node| node.key.pos else null;

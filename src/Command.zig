@@ -228,7 +228,7 @@ test "Command" {
     try t.expectEqual(@as(usize, 0), self.history_indices.items.len);
     try t.expect(!self.cow);
 
-    var str = try self.submit(t.allocator);
+    const str = try self.submit(t.allocator);
     try t.expectEqual(@as(u32, 0), self.buffer.len);
     try t.expectEqualStrings("This is epic!", str);
     try t.expectEqual(@as(u32, 1), self.index);

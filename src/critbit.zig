@@ -314,7 +314,7 @@ test "critbit1" {
     try t.expectEqual(@as(usize, 4), map.head.inode.byte);
     try t.expectEqual(@as(u3, 2), map.head.inode.bit); // First differing bit should be 0b0100
 
-    var kv = &map.head.inode.child[1].kv;
+    const kv = &map.head.inode.child[1].kv;
     try t.expectEqualStrings("umm \x04", kv.key);
     try t.expectEqual(@as(u32, 50), kv.value);
 

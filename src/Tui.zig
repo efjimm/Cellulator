@@ -72,11 +72,7 @@ pub fn init() InitError!Self {
     }, null);
 
     return Self{
-        .term = blk: {
-            var term = try Term.init(.{});
-
-            break :blk term;
-        },
+        .term = try Term.init(.{}),
     };
 }
 
@@ -204,7 +200,7 @@ pub fn renderCommandLine(
         const right = zc.command.right();
 
         // TODO: don't write all of this, only write what fits on screen
-        var i = zc.command_screen_pos;
+        const i = zc.command_screen_pos;
         if (i < left_len) {
             try writer.writeAll(left[i..]);
             try writer.writeAll(right);

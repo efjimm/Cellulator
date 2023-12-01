@@ -70,7 +70,7 @@ fn pushArgument(state: *Lua, value: anytype) !i32 {
 
     try state.checkStack(1);
 
-    if (comptime std.meta.trait.isZigString(T)) {
+    if (comptime utils.isZigString(T)) {
         _ = state.pushBytes(value);
     } else switch (info) {
         .ComptimeInt => state.pushInteger(value),
