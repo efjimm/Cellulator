@@ -117,7 +117,7 @@ pub const Undo = union(enum) {
     // }
 };
 
-pub fn isEmpty(sheet: Sheet) bool {
+pub fn isEmpty(sheet: *const Sheet) bool {
     return sheet.cell_treap.root == null;
 }
 
@@ -178,7 +178,7 @@ pub fn init(a: Allocator) Sheet {
     };
 }
 
-pub inline fn allocator(sheet: Sheet) Allocator {
+pub inline fn allocator(sheet: *const Sheet) Allocator {
     return sheet.nodes.arena.child_allocator;
 }
 
@@ -272,14 +272,14 @@ pub fn loadFile(sheet: *Sheet, ast_allocator: Allocator, filepath: []const u8, c
     const reader = buf.reader();
     log.debug("Loading file {s}", .{filepath});
 
-    var sfa = std.heap.stackFallback(8192, sheet.allocator());
-    var a = sfa.get();
     defer sheet.endUndoGroup();
-    while (try reader.readUntilDelimiterOrEofAlloc(a, '\n', std.math.maxInt(u30))) |line| {
-        defer {
-            a.free(line);
-            a = sfa.get();
-        }
+    while (true) {
+        var sfa = std.heap.stackFallback(8192, sheet.allocator());
+        const a = sfa.get();
+
+        const line = try reader.readUntilDelimiterOrEofAlloc(a, '\n', std.math.maxInt(u30)) orelse
+            break;
+        defer a.free(line);
 
         var ast = context.createAst();
         errdefer context.destroyAst(ast);
@@ -802,7 +802,7 @@ pub fn ensureUnusedCapacity(sheet: *Sheet, n: usize) Allocator.Error!void {
     return utils.memoryPoolEnsureUnusedCapacity(&sheet.nodes, n);
 }
 
-pub fn needsUpdate(sheet: Sheet) bool {
+pub fn needsUpdate(sheet: *const Sheet) bool {
     return sheet.queued_cells.items.len > 0;
 }
 
@@ -1038,7 +1038,7 @@ fn markDirty(
     }
 }
 
-pub fn getFilePath(sheet: Sheet) []const u8 {
+pub fn getFilePath(sheet: *const Sheet) []const u8 {
     return sheet.filepath.constSlice();
 }
 
@@ -1047,7 +1047,7 @@ pub fn getFilePath(sheet: Sheet) []const u8 {
 /// Returns the name of the sheet.
 /// Currently this is the basename of the filepath, with the extension
 /// stripped.
-pub fn getName(sheet: Sheet) []const u8 {
+pub fn getName(sheet: *const Sheet) []const u8 {
     return std.fs.path.stem(sheet.getFilePath());
 }
 
@@ -1188,7 +1188,7 @@ pub const Column = struct {
     precision: u8 = 2,
 };
 
-pub fn getColumn(sheet: Sheet, index: PosInt) Column {
+pub fn getColumn(sheet: *const Sheet, index: PosInt) Column {
     return sheet.columns.get(index) orelse Column{};
 }
 

@@ -9,7 +9,7 @@ const assert = std.debug.assert;
 const _log = std.log.scoped(.lua);
 
 pub fn init(zc: *ZC) !Lua {
-    var state = try Lua.init(zc.allocator);
+    var state = try Lua.init(&zc.allocator);
     errdefer state.deinit();
     try state.checkStack(2);
 
@@ -27,7 +27,7 @@ pub fn init(zc: *ZC) !Lua {
 
     // zc uservalue
     state.createTable(0, 1);
-    try state.setIndexUserValue(1, 1);
+    try state.setUserValue(1, 1);
 
     state.setGlobal("zc");
 
@@ -107,7 +107,7 @@ fn initEvents(state: *Lua) !void {
 }
 
 fn newIndexCommon(state: *Lua) c_int {
-    _ = state.getIndexUserValue(1, 1) catch unreachable;
+    _ = state.getUserValue(1, 1) catch unreachable;
     state.pushValue(2);
     state.pushValue(3);
     state.setTable(-3);
@@ -122,7 +122,7 @@ fn indexCommon(state: *Lua) c_int {
 
     // If not found, index the uservalue
     if (state.isNil(-1)) {
-        _ = state.getIndexUserValue(1, 1) catch unreachable;
+        _ = state.getUserValue(1, 1) catch unreachable;
         state.pushValue(2);
         _ = state.getTable(-2);
     }
@@ -256,7 +256,7 @@ const metatables = .{
                     const zc = (state.toUserdata(*ZC, 1) catch unreachable).*;
                     switch (tag) {
                         .current_sheet => {
-                            _ = state.getIndexUserValue(1, 1) catch unreachable;
+                            _ = state.getUserValue(1, 1) catch unreachable;
                             _ = state.getField(-1, "current_sheet");
                             const name = zc.sheet.filepath.constSlice();
                             _ = state.pushBytes(name);
@@ -427,13 +427,13 @@ const metatables = .{
 // Exports all lua functions in `metatables` with unique names
 comptime {
     const Metatables = @TypeOf(metatables);
-    inline for (std.meta.fields(Metatables)) |field| {
+    for (std.meta.fields(Metatables)) |field| {
         const T = @field(metatables, field.name);
         assert(@TypeOf(T) == type);
 
         const prefix = "metatable." ++ field.name ++ ".";
 
-        inline for (@typeInfo(T).Struct.decls) |decl| {
+        for (@typeInfo(T).Struct.decls) |decl| {
             const d = @field(T, decl.name);
             if (!isLuaFunction(d)) @compileError(prefix ++ decl.name ++ " is not a Lua function");
             @export(d, .{ .name = prefix ++ decl.name });

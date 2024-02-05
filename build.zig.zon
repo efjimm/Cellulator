@@ -7,17 +7,17 @@
         "build.zig.zon",
     },
     .dependencies = .{
-        .spoon = .{
-            .url = "https://github.com/efjimm/zig-spoon/archive/master.tar.gz",
-            .hash = "1220a6d9ff1fee1d0cc5925fb942b207b5ff69e8c26d3075cd9647147306a78e67a1",
+        .shovel = .{
+            .url = "https://github.com/efjimm/Shovel/archive/9cee75a89ce081f9c3c300ec8582e7bb393810d7.tar.gz",
+            .hash = "1220d2aaecfbb7456821036e401a663f7bfa4ec445901a859c6eb7ac339223d9fc8a",
         },
         .wcwidth = .{
-            .url = "https://github.com/efjimm/zig-wcwidth/archive/master.tar.gz",
-            .hash = "1220e7c2da3e466432510df6a06bfff2539eaa94288c035c6730e2cb5d47750eece1",
+            .url = "https://github.com/efjimm/zig-wcwidth/archive/74e2c69a96ce3d86d8340668cdefe5999ab2eef0.tar.gz",
+            .hash = "1220bdcb9587a336131d417d969179264b5debb51e19de28567b42b6fa60ca333f48",
         },
         .ziglua = .{
-            .url = "https://github.com/natecraddock/ziglua/archive/3538e1710a21d24924d35ef274be1e127da63d7d.tar.gz",
-            .hash = "12202d1ee1975de6e494d5f81e5286bb25d7ae7e34e01c78d6a1f4b1667d2ddf72f6",
+            .url = "https://github.com/natecraddock/ziglua/archive/a213c57a32552c7d27318f1c4f6c4685bad54d9e.tar.gz",
+            .hash = "1220d1c61a0788d0fc4b88947a67746009cf5b00c59222a495682235bdf415ce9531",
         },
     },
 }

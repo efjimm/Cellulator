@@ -3,7 +3,9 @@ const utils = @import("utils.zig");
 const Allocator = std.mem.Allocator;
 const Motion = @import("text.zig").Motion;
 const critbit = @import("critbit.zig");
-const inputParser = @import("spoon").inputParser;
+const shovel = @import("spoon");
+const inputParser = shovel.inputParser;
+const Term = shovel.Term;
 
 const assert = std.debug.assert;
 
@@ -25,8 +27,8 @@ pub fn createKeymaps(allocator: Allocator) !struct {
 
 /// Parses the raw terminal input in `bytes` into a readable format for keybindings, outputting
 /// the results to the given writer.
-pub fn parse(bytes: []const u8, writer: anytype) @TypeOf(writer).Error!void {
-    var iter = inputParser(bytes);
+pub fn parse(term: *Term, bytes: []const u8, writer: anytype) @TypeOf(writer).Error!void {
+    var iter = inputParser(bytes, term);
 
     while (iter.next()) |in| {
         var special = false;
@@ -58,9 +60,12 @@ pub fn parse(bytes: []const u8, writer: anytype) @TypeOf(writer).Error!void {
             .scroll_lock => try writer.writeAll("<Scroll>"),
             .pause => try writer.writeAll("<Pause>"),
             .function => |function| try writer.print("<F{d}>", .{function}),
+            .enter => try writer.writeAll("<Return>"),
+            .command => {},
+            .tab => {},
+            .backspace => try writer.writeAll("<Backspace>"),
             .codepoint => |cp| switch (cp) {
                 '<' => try writer.writeAll("<<"),
-                '\n', '\r' => try writer.writeAll("<Return>"),
                 127 => try writer.writeAll("<Delete>"),
                 0...'\n' - 1, '\n' + 1...'\r' - 1, '\r' + 1...31 => {},
                 else => {

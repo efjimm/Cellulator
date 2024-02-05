@@ -3,34 +3,36 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const use_x86_backend = b.option(bool, "native-backend", "Use Zig's native x86 backend for compilation") orelse false;
+    const use_native_backend = b.option(bool, "native-backend", "Use Zig's native x86 backend for compilation") orelse false;
 
     const exe = b.addExecutable(.{
         .name = "cellulator",
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
         .optimize = optimize,
-        .use_llvm = !use_x86_backend,
-        .use_lld = !use_x86_backend,
+        .use_llvm = !use_native_backend,
+        .use_lld = !use_native_backend,
     });
 
-    const strip: ?bool = b.option(bool, "strip", "");
-    exe.strip = strip;
+    const spoon = b.dependency("shovel", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("shovel");
 
-    const spoon = b.dependency("spoon", .{
+    const wcwidth = b.dependency("wcwidth", .{
         .target = target,
         .optimize = optimize,
-    }).module("spoon");
-    const wcwidth = spoon.dependencies.get("wcwidth").?;
-    const ziglua_dep = b.dependency("ziglua", .{
+    }).module("wcwidth");
+
+    const ziglua = b.dependency("ziglua", .{
         .target = target,
         .optimize = optimize,
-        .version = .lua_54,
-    });
-    exe.addModule("ziglua", ziglua_dep.module("ziglua"));
-    exe.linkLibrary(ziglua_dep.artifact("lua"));
-    exe.addModule("spoon", spoon);
-    exe.addModule("wcwidth", wcwidth);
+        .lang = .lua54,
+    }).module("ziglua");
+
+    exe.root_module.addImport("ziglua", ziglua);
+    exe.root_module.addImport("spoon", spoon);
+    exe.root_module.addImport("wcwidth", wcwidth);
 
     b.installArtifact(exe);
 
@@ -52,19 +54,18 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .filter = filter,
-        .use_llvm = !use_x86_backend,
-        .use_lld = !use_x86_backend,
+        .use_llvm = !use_native_backend,
+        .use_lld = !use_native_backend,
     });
 
     const fast_tests = b.option(bool, "fast-tests", "Skip slow tests") orelse false;
     const opts = b.addOptions();
     opts.addOption(bool, "fast_tests", fast_tests);
-    tests.addOptions("compile_opts", opts);
+    tests.root_module.addOptions("compile_opts", opts);
 
-    tests.addModule("ziglua", ziglua_dep.module("ziglua"));
-    tests.linkLibrary(ziglua_dep.artifact("lua"));
-    tests.addModule("spoon", spoon);
-    tests.addModule("wcwidth", wcwidth);
+    tests.root_module.addImport("ziglua", ziglua);
+    tests.root_module.addImport("spoon", spoon);
+    tests.root_module.addImport("wcwidth", wcwidth);
 
     const run_tests = b.addRunArtifact(tests);
 

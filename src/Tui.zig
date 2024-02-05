@@ -6,6 +6,7 @@ const Sheet = @import("Sheet.zig");
 const Position = @import("Position.zig").Position;
 const PosInt = Position.Int;
 const wcWidth = @import("wcwidth").wcWidth;
+const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const log = std.log.scoped(.tui);
 const CellType = enum {
@@ -62,7 +63,7 @@ fn resizeHandler(_: c_int) callconv(.C) void {
     needs_resize = true;
 }
 
-pub fn init() InitError!Self {
+pub fn init(allocator: Allocator) InitError!Self {
     try std.os.sigaction(std.os.SIG.WINCH, &.{
         .handler = .{
             .handler = resizeHandler,
@@ -72,12 +73,12 @@ pub fn init() InitError!Self {
     }, null);
 
     return Self{
-        .term = try Term.init(.{}),
+        .term = try Term.init(allocator, .{}),
     };
 }
 
-pub fn deinit(self: *Self) void {
-    self.term.deinit();
+pub fn deinit(self: *Self, allocator: Allocator) void {
+    self.term.deinit(allocator);
     self.* = undefined;
 }
 
@@ -138,7 +139,7 @@ pub fn renderStatus(
     try rc.moveCursorTo(ZC.status_line, 0);
     try rc.hideCursor();
 
-    var rpw = rc.restrictedPaddingWriter(self.term.width);
+    var rpw = rc.cellWriter(self.term.width);
     const writer = rpw.writer();
 
     const filepath = zc.sheet.getFilePath();
@@ -190,7 +191,7 @@ pub fn renderCommandLine(
 ) RenderError!void {
     try rc.moveCursorTo(ZC.input_line, 0);
     try rc.clearToEol();
-    var rpw = rc.restrictedPaddingWriter(rc.term.width);
+    var rpw = rc.cellWriter(rc.term.width);
     const writer = rpw.writer();
     try rc.setStyle(.{ .fg = .white, .bg = .black });
 
@@ -308,7 +309,7 @@ pub fn renderRowNumbers(self: Self, rc: *RenderContext, zc: *ZC) RenderError!voi
     for (ZC.content_line..self.term.height, zc.screen_pos.y..) |screen_line, sheet_line| {
         try rc.moveCursorTo(@intCast(screen_line), 0);
 
-        var rpw = rc.restrictedPaddingWriter(width);
+        var rpw = rc.cellWriter(width);
         const writer = rpw.writer();
 
         if (zc.isSelectedRow(@intCast(sheet_line))) {
@@ -459,7 +460,7 @@ pub fn renderCell(
         break :getColWidth @min(col.width, screen_width - width);
     };
 
-    var rpw = rc.restrictedPaddingWriter(width);
+    var rpw = rc.cellWriter(width);
     const writer = rpw.writer();
 
     if (zc.sheet.getCell(pos)) |cell| {

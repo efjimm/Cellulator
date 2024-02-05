@@ -147,8 +147,8 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
         keys.command_keys.deinit(allocator);
     }
 
-    var tui = try Tui.init();
-    errdefer tui.deinit();
+    var tui = try Tui.init(allocator);
+    errdefer tui.deinit(allocator);
 
     if (options.ui) try tui.term.uncook(.{});
 
@@ -214,7 +214,7 @@ pub fn deinit(self: *Self) void {
 
     self.asts.deinit(self.allocator);
     self.sheet.deinit();
-    self.tui.deinit();
+    self.tui.deinit(self.allocator);
     self.* = undefined;
 }
 
@@ -388,7 +388,7 @@ fn handleInput(self: *Self) !void {
     const slice = try self.tui.term.readInput(&buf);
 
     const writer = self.input_buf.writer(self.allocator);
-    try input.parse(slice, writer);
+    try input.parse(&self.tui.term, slice, writer);
 
     const bytes = try self.inputBufSlice();
     const res = self.getAction(bytes);
