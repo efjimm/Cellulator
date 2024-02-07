@@ -63,7 +63,7 @@ pub fn parse(term: *Term, bytes: []const u8, writer: anytype) @TypeOf(writer).Er
             .enter => try writer.writeAll("<Return>"),
             .command => {},
             .tab => {},
-            .backspace => try writer.writeAll("<Backspace>"),
+            .backspace => try writer.writeAll("<Delete>"),
             .codepoint => |cp| switch (cp) {
                 '<' => try writer.writeAll("<<"),
                 127 => try writer.writeAll("<Delete>"),
