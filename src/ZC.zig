@@ -155,8 +155,6 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
     var sheet = Sheet.init(allocator);
     errdefer sheet.deinit();
 
-    try sheet.ensureUnusedCapacity(128);
-
     var lua_state = try lua.init(zc);
     errdefer lua_state.deinit();
 

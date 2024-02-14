@@ -8,7 +8,7 @@ const Ast = @import("Ast.zig");
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 const RTree = @import("tree.zig").RTree;
 const DependentTree = @import("tree.zig").DependentTree;
-const NodePool = std.heap.MemoryPool(CellTreap.Node);
+const Arena = std.heap.ArenaAllocator;
 
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -47,7 +47,8 @@ rtree: DependentTree(tree_children) = .{},
 /// Used for quick lookup of all extant cells in a ranges.
 cell_tree: RTree(void, tree_children) = .{},
 
-nodes: NodePool,
+allocator: Allocator,
+arena_state: Arena.State = .{},
 
 cell_treap: CellTreap = .{},
 
@@ -62,6 +63,31 @@ const SheetRange = struct {
     dependent_cells: RangeList,
 };
 const RangeList = std.ArrayListUnmanaged(Range);
+
+fn getArena(sheet: *Sheet) Arena {
+    return sheet.arena_state.promote(sheet.allocator);
+}
+
+fn arenaCreate(sheet: *Sheet, comptime T: type) !*T {
+    var arena = sheet.getArena();
+    defer sheet.arena_state = arena.state;
+
+    return arena.allocator().create(T);
+}
+
+fn arenaDestroy(sheet: *Sheet, ptr: anytype) void {
+    var arena = sheet.getArena();
+    defer sheet.arena_state = arena.state;
+
+    arena.allocator().destroy(ptr);
+}
+
+fn arenaReset(sheet: *Sheet, mode: Arena.ResetMode) bool {
+    var arena = sheet.getArena();
+    defer sheet.arena_state = arena.state;
+
+    return arena.reset(mode);
+}
 
 const Marker = packed struct(u2) {
     undo: bool = false,
@@ -99,8 +125,8 @@ pub const Undo = union(enum) {
         switch (u) {
             .set_cell => |data| {
                 var t = data;
-                t.node.key.ast.deinit(sheet.allocator());
-                sheet.allocator().free(t.strings);
+                t.node.key.ast.deinit(sheet.allocator);
+                sheet.allocator.free(t.strings);
             },
             .delete_cell,
             .set_column_width,
@@ -172,59 +198,56 @@ pub fn treapPrevNode(key: Position, node: ?*Node, parent: ?*Node) ?*Node {
     return p;
 }
 
-pub fn init(a: Allocator) Sheet {
+pub fn init(allocator: Allocator) Sheet {
     return .{
-        .nodes = NodePool.init(a),
+        .allocator = allocator,
     };
-}
-
-pub inline fn allocator(sheet: *const Sheet) Allocator {
-    return sheet.nodes.arena.child_allocator;
 }
 
 pub fn deinit(sheet: *Sheet) void {
     var strings_iter = sheet.strings.iterator();
     while (strings_iter.next()) |kv| {
-        sheet.allocator().free(kv.value_ptr.*);
+        sheet.allocator.free(kv.value_ptr.*);
     }
-    sheet.strings.deinit(sheet.allocator());
-    sheet.search_buffer.deinit(sheet.allocator());
+    sheet.strings.deinit(sheet.allocator);
+    sheet.search_buffer.deinit(sheet.allocator);
 
     sheet.clearAndFreeUndos(.undo);
     sheet.clearAndFreeUndos(.redo);
-    sheet.rtree.deinit(sheet.allocator());
-    sheet.cell_tree.deinit(sheet.allocator());
+    sheet.rtree.deinit(sheet.allocator);
+    sheet.cell_tree.deinit(sheet.allocator);
 
-    sheet.queued_cells.deinit(sheet.allocator());
-    sheet.undo_end_markers.deinit(sheet.allocator());
-    sheet.undos.deinit(sheet.allocator());
-    sheet.redos.deinit(sheet.allocator());
-    sheet.columns.deinit(sheet.allocator());
+    sheet.queued_cells.deinit(sheet.allocator);
+    sheet.undo_end_markers.deinit(sheet.allocator);
+    sheet.undos.deinit(sheet.allocator);
+    sheet.redos.deinit(sheet.allocator);
+    sheet.columns.deinit(sheet.allocator);
 
     var node_iter = sheet.cell_treap.inorderIterator();
     while (node_iter.next()) |node| {
-        node.key.deinit(sheet.allocator());
+        node.key.deinit(sheet.allocator);
     }
-    sheet.nodes.deinit();
+    var arena = sheet.arena_state.promote(sheet.allocator);
+    arena.deinit();
     sheet.* = undefined;
 }
 
 pub fn clearRetainingCapacity(sheet: *Sheet, context: anytype) void {
     var iter = sheet.cell_treap.inorderIterator();
     while (iter.next()) |node| context.destroyAst(node.key.ast);
-    _ = sheet.nodes.reset(.retain_capacity);
+    _ = sheet.arenaReset(.retain_capacity);
     sheet.cell_treap.root = null;
 
     var strings_iter = sheet.strings.valueIterator();
     while (strings_iter.next()) |string_ptr| {
-        sheet.allocator().free(string_ptr.*);
+        sheet.allocator.free(string_ptr.*);
     }
 
     const undo_slice = sheet.undos.slice();
     for (undo_slice.items(.tags), undo_slice.items(.data)) |tag, data| {
         switch (tag) {
             .set_cell => {
-                sheet.allocator().free(data.set_cell.strings);
+                sheet.allocator.free(data.set_cell.strings);
                 context.destroyAst(data.set_cell.node.key.ast);
             },
             .delete_cell,
@@ -238,7 +261,7 @@ pub fn clearRetainingCapacity(sheet: *Sheet, context: anytype) void {
     for (redo_slice.items(.tags), redo_slice.items(.data)) |tag, data| {
         switch (tag) {
             .set_cell => {
-                sheet.allocator().free(data.set_cell.strings);
+                sheet.allocator.free(data.set_cell.strings);
                 context.destroyAst(data.set_cell.node.key.ast);
             },
             .delete_cell,
@@ -274,7 +297,7 @@ pub fn loadFile(sheet: *Sheet, ast_allocator: Allocator, filepath: []const u8, c
 
     defer sheet.endUndoGroup();
     while (true) {
-        var sfa = std.heap.stackFallback(8192, sheet.allocator());
+        var sfa = std.heap.stackFallback(8192, sheet.allocator);
         const a = sfa.get();
 
         const line = try reader.readUntilDelimiterOrEofAlloc(a, '\n', std.math.maxInt(u30)) orelse
@@ -412,7 +435,7 @@ fn addRangeDependents(
     dependent_range: Range,
     range: Range,
 ) Allocator.Error!void {
-    return sheet.rtree.put(sheet.allocator(), range, dependent_range);
+    return sheet.rtree.put(sheet.allocator, range, dependent_range);
 }
 
 /// Adds `dependent_range` as a dependent of all cells referenced by `expr`.
@@ -433,7 +456,7 @@ fn removeRangeDependents(
     dependent_range: Range,
     range: Range,
 ) Allocator.Error!void {
-    return sheet.rtree.removeValue(sheet.allocator(), range, dependent_range);
+    return sheet.rtree.removeValue(sheet.allocator, range, dependent_range);
 }
 
 /// Removes `dependent_range` as a dependent of the cells referenced by `expr`.
@@ -604,26 +627,26 @@ fn unsetRedoEndMarker(sheet: *Sheet, index: u32) void {
 }
 
 pub fn ensureUndoCapacity(sheet: *Sheet, undo_type: UndoType, n: u32) Allocator.Error!void {
-    try sheet.undo_end_markers.ensureUnusedCapacity(sheet.allocator(), n);
+    try sheet.undo_end_markers.ensureUnusedCapacity(sheet.allocator, n);
     switch (undo_type) {
-        .undo => try sheet.undos.ensureUnusedCapacity(sheet.allocator(), n),
-        .redo => try sheet.redos.ensureUnusedCapacity(sheet.allocator(), n),
+        .undo => try sheet.undos.ensureUnusedCapacity(sheet.allocator, n),
+        .redo => try sheet.redos.ensureUnusedCapacity(sheet.allocator, n),
     }
 }
 
 pub fn pushUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
     const undo_type = opts.undo_type orelse return;
     // Ensure that we can add a group end marker later without allocating
-    try sheet.undo_end_markers.ensureUnusedCapacity(sheet.allocator(), 1);
+    try sheet.undo_end_markers.ensureUnusedCapacity(sheet.allocator, 1);
 
     switch (undo_type) {
         .undo => {
-            try sheet.undos.ensureUnusedCapacity(sheet.allocator(), 1);
+            try sheet.undos.ensureUnusedCapacity(sheet.allocator, 1);
             sheet.undos.appendAssumeCapacity(u);
             if (opts.clear_redos) sheet.clearAndFreeUndos(.redo);
         },
         .redo => {
-            try sheet.redos.append(sheet.allocator(), u);
+            try sheet.redos.append(sheet.allocator, u);
         },
     }
 }
@@ -797,11 +820,6 @@ pub fn colCount(sheet: *Sheet) Position.Int {
     return @intCast(sheet.columns.entries.len);
 }
 
-/// Allocates enough space for `n` more cells
-pub fn ensureUnusedCapacity(sheet: *Sheet, n: usize) Allocator.Error!void {
-    return utils.memoryPoolEnsureUnusedCapacity(&sheet.nodes, n);
-}
-
 pub fn needsUpdate(sheet: *const Sheet) bool {
     return sheet.queued_cells.items.len > 0;
 }
@@ -813,8 +831,9 @@ pub fn insertCell(
     ast: Ast,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
-    const new_node = try sheet.nodes.create();
-    errdefer sheet.nodes.destroy(new_node);
+    const new_node = try sheet.arenaCreate(Node);
+    errdefer sheet.arenaDestroy(new_node);
+
     new_node.key = .{
         .pos = pos,
         .ast = ast,
@@ -832,14 +851,14 @@ pub fn insertCellNode(
     if (undo_opts.undo_type) |undo_type| {
         try sheet.ensureUndoCapacity(undo_type, 1);
     }
-    try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator(), 1);
-    _ = try sheet.columns.getOrPutValue(sheet.allocator(), pos.x, .{});
-    try sheet.strings.ensureUnusedCapacity(sheet.allocator(), 1);
+    try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, 1);
+    _ = try sheet.columns.getOrPutValue(sheet.allocator, pos.x, .{});
+    try sheet.strings.ensureUnusedCapacity(sheet.allocator, 1);
 
     const range = Range.initSinglePos(pos);
 
-    try sheet.cell_tree.put(sheet.allocator(), range, {});
-    errdefer sheet.cell_tree.remove(sheet.allocator(), range) catch {};
+    try sheet.cell_tree.put(sheet.allocator, range, {});
+    errdefer sheet.cell_tree.remove(sheet.allocator, range) catch {};
 
     // Add cells referenced by the expression as dependents of `pos`
     try sheet.addExpressionDependents(range, new_node.key.ast);
@@ -900,7 +919,7 @@ pub fn insertCellNode(
 
     sheet.enqueueUpdate(pos) catch unreachable;
     if (node.key.value == .string) {
-        sheet.allocator().free(std.mem.span(node.key.value.string));
+        sheet.allocator.free(std.mem.span(node.key.value.string));
     }
     sheet.has_changes = true;
 }
@@ -912,8 +931,8 @@ pub fn setCell(
     ast: Ast,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
-    const strings = try ast.dupeStrings(sheet.allocator(), source);
-    errdefer sheet.allocator().free(strings);
+    const strings = try ast.dupeStrings(sheet.allocator, source);
+    errdefer sheet.allocator.free(strings);
     try sheet.insertCell(pos, strings, ast, undo_opts);
 }
 
@@ -933,13 +952,13 @@ pub fn deleteCell(
     try sheet.removeExprDependents(Range.initSinglePos(pos), cell.ast);
 
     // TODO: re-use string buffer
-    cell.setError(sheet.allocator());
+    cell.setError(sheet.allocator);
     entry.set(null);
 
     const strings = if (sheet.strings.fetchRemove(pos)) |kv| kv.value else "";
 
     // const index = sheet.createUndoAst(cell.ast, strings) catch |err| {
-    //     cell.deinit(sheet.allocator());
+    //     cell.deinit(sheet.allocator);
     //     return err;
     // };
     // errdefer sheet.freeUndoAst(index);
@@ -952,8 +971,8 @@ pub fn deleteCell(
 }
 
 pub fn deleteCellsInRange(sheet: *Sheet, range: Range) Allocator.Error!void {
-    const items = try sheet.cell_tree.search(sheet.allocator(), range);
-    defer sheet.allocator().free(items);
+    const items = try sheet.cell_tree.search(sheet.allocator, range);
+    defer sheet.allocator.free(items);
 
     for (items) |item| {
         try sheet.deleteCell(item.key_ptr.tl, .{});
@@ -1007,7 +1026,7 @@ pub fn enqueueUpdate(
     sheet: *Sheet,
     pos: Position,
 ) Allocator.Error!void {
-    try sheet.queued_cells.append(sheet.allocator(), pos);
+    try sheet.queued_cells.append(sheet.allocator, pos);
     const cell = sheet.getCellPtr(pos) orelse return;
     cell.state = .enqueued;
 }
@@ -1019,7 +1038,7 @@ fn markDirty(
 ) Allocator.Error!void {
     sheet.search_buffer.clearRetainingCapacity();
     try sheet.rtree.rtree.searchBuffer(
-        sheet.allocator(),
+        sheet.allocator,
         &sheet.search_buffer,
         Range.initSinglePos(pos),
     );
@@ -1114,7 +1133,7 @@ pub const EvalContext = struct {
     fn queueDependents(context: EvalContext, pos: Position) Allocator.Error!void {
         context.sheet.search_buffer.clearRetainingCapacity();
         try context.sheet.rtree.rtree.searchBuffer(
-            context.sheet.allocator(),
+            context.sheet.allocator,
             &context.sheet.search_buffer,
             Range.initSinglePos(pos),
         );
@@ -1126,7 +1145,7 @@ pub const EvalContext = struct {
                     const c = context.sheet.getCellPtr(p) orelse continue;
                     if (c.state == .dirty) {
                         c.state = .enqueued;
-                        try context.sheet.queued_cells.append(context.sheet.allocator(), p);
+                        try context.sheet.queued_cells.append(context.sheet.allocator, p);
                     }
                 }
             }
@@ -1155,7 +1174,7 @@ pub const EvalContext = struct {
                     return err;
                 };
                 if (cell.value == .string)
-                    context.sheet.allocator().free(std.mem.span(cell.value.string));
+                    context.sheet.allocator.free(std.mem.span(cell.value.string));
                 cell.value = switch (res) {
                     .none => .{ .number = 0 },
                     .string => |str| .{ .string = str.ptr },
