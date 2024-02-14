@@ -8,8 +8,8 @@
     },
     .dependencies = .{
         .shovel = .{
-            .url = "https://github.com/efjimm/Shovel/archive/9cee75a89ce081f9c3c300ec8582e7bb393810d7.tar.gz",
-            .hash = "1220d2aaecfbb7456821036e401a663f7bfa4ec445901a859c6eb7ac339223d9fc8a",
+            .url = "https://github.com/efjimm/Shovel/archive/439e66ad83aea08498bd8cea893b391c0a85536d.tar.gz",
+            .hash = "1220c62769904f8b46e3055883acd961d9c6ae1525c9686c52819249b4a4249d6a9f",
         },
         .wcwidth = .{
             .url = "https://github.com/efjimm/zig-wcwidth/archive/74e2c69a96ce3d86d8340668cdefe5999ab2eef0.tar.gz",
