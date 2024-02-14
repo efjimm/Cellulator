@@ -57,10 +57,10 @@ pub fn panic(msg: []const u8, trace: ?*std.builtin.StackTrace, ret_addr: ?usize)
     std.builtin.default_panic(msg, trace, ret_addr);
 }
 
-pub const std_options = if (use_logfile) struct {
-    pub const log_level = .debug;
-    pub const logFn = log;
-} else struct {};
+pub const std_options: std.Options = if (use_logfile) .{
+    .log_level = .debug,
+    .logFn = log,
+} else .{};
 
 pub fn log(
     comptime level: std.log.Level,
