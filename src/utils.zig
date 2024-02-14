@@ -48,37 +48,6 @@ pub fn isZigString(comptime T: type) bool {
     };
 }
 
-pub fn binarySearch(
-    key: u64,
-    ranges: []const Position.Range,
-) struct { usize, bool } {
-    var left: usize = 0;
-    var right: usize = ranges.len;
-
-    while (left < right) {
-        // Avoid overflowing in the midpoint calculation
-        const mid = left + (right - left) / 2;
-        // Compare the key with the midpoint element
-        switch (std.math.order(key, ranges[mid].tl.hash())) {
-            .eq => return .{ mid, true },
-            .gt => left = mid + 1,
-            .lt => right = mid,
-        }
-    }
-
-    return .{ right, false };
-}
-
-// test binarySearch {
-//     const t = std.testing;
-//     const items: []const u64 = &.{
-//         1, 2, 3, 4, 6, 7, 8, 9,
-//     };
-//     const index, const found = binarySearch(5, @ptrCast(items));
-//     try t.expectEqual(false, found);
-//     try t.expectEqual(@as(usize, 3), index);
-// }
-
 pub fn dupeZ(comptime T: type, buf: anytype) [buf.len:0]T {
     var ret: [buf.len:0]T = undefined;
     @memcpy(&ret, &buf);
