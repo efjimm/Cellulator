@@ -15,6 +15,7 @@ const CellType = enum {
     err,
     blank,
 };
+const Col = Sheet.Column;
 
 const Term = spoon.Term;
 
@@ -105,7 +106,7 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
 
     try self.renderStatus(&rc, zc);
     if (self.update.column_headings) {
-        try self.renderColumnHeadings(&rc, zc.*);
+        try self.renderColumnHeadings(&rc, zc);
         self.update.column_headings = false;
     }
     if (self.update.row_numbers) {
@@ -262,7 +263,7 @@ pub fn renderCommandLine(
 pub fn renderColumnHeadings(
     self: Self,
     rc: *Term.RenderContext(8192),
-    zc: ZC,
+    zc: *ZC,
 ) RenderError!void {
     const writer = rc.buffer.writer();
 
@@ -276,7 +277,8 @@ pub fn renderColumnHeadings(
     try rc.setStyle(.{ .fg = .blue, .bg = .black });
 
     while (w < self.term.width) : (x += 1) {
-        const width = @min(self.term.width - reserved_cols, zc.sheet.getColumn(x).width);
+        const col: Col = zc.sheet.getColumn(x) orelse .{ .index = x };
+        const width = @min(self.term.width - reserved_cols, col.width);
 
         var buf: [Position.max_str_len]u8 = undefined;
         const name = Position.columnAddressBuf(x, &buf);
@@ -346,7 +348,7 @@ pub fn renderCursor(
         const prev_x = blk: {
             var x: u16 = left;
             for (zc.screen_pos.x..zc.prev_cursor.x) |i| {
-                const col = zc.sheet.getColumn(@intCast(i));
+                const col: Col = zc.sheet.getColumn(@intCast(i)) orelse Sheet.Column{ .index = @intCast(i) };
                 x += col.width;
             }
             break :blk x;
@@ -359,7 +361,7 @@ pub fn renderCursor(
 
         try rc.setStyle(.{ .fg = .blue, .bg = .black });
 
-        const col = zc.sheet.getColumn(zc.prev_cursor.x);
+        const col: Col = zc.sheet.getColumn(zc.prev_cursor.x) orelse .{ .index = zc.prev_cursor.x };
         const width = @min(col.width, rc.term.width - left);
 
         try rc.moveCursorTo(ZC.col_heading_line, prev_x);
@@ -378,7 +380,7 @@ pub fn renderCursor(
 
         var x: u16 = left;
         for (zc.screen_pos.x..zc.cursor.x) |i| {
-            const col = zc.sheet.getColumn(@intCast(i));
+            const col: Col = zc.sheet.getColumn(@intCast(i)) orelse .{ .index = @intCast(i) };
             x += col.width;
         }
         break :blk x;
@@ -389,7 +391,7 @@ pub fn renderCursor(
     _ = try renderCell(rc, zc, zc.cursor);
     try rc.setStyle(.{ .fg = .black, .bg = .blue });
 
-    const col = zc.sheet.getColumn(zc.cursor.x);
+    const col: Col = zc.sheet.getColumn(zc.cursor.x) orelse .{ .index = zc.cursor.x };
     const width = @min(col.width, rc.term.width - left);
     try rc.moveCursorTo(ZC.col_heading_line, x);
     try writer.print("{s: ^[1]}", .{
@@ -442,7 +444,7 @@ pub fn renderCell(
 ) RenderError!u16 {
     const selected = isSelected(zc.*, pos);
 
-    const col = zc.sheet.columns.get(pos.x) orelse {
+    const col = zc.sheet.getColumn(pos.x) orelse {
         // No cells in this column, render blank cell
         try rc.setStyle(styles.get(.blank)[@intFromBool(selected)]);
         const width = Sheet.Column.default_width;
@@ -453,7 +455,7 @@ pub fn renderCell(
     const width = getColWidth: {
         var width: u16 = 0;
         for (zc.screen_pos.x..pos.x) |x| {
-            const c = zc.sheet.getColumn(@intCast(x));
+            const c: Col = zc.sheet.getColumn(@intCast(x)) orelse .{ .index = @intCast(x) };
             width += c.width;
         }
         const screen_width = rc.term.width - zc.leftReservedColumns();
@@ -516,7 +518,7 @@ pub fn isOnScreen(tui: *Self, zc: *ZC, pos: Position) bool {
     const end_col = blk: {
         var i = zc.screen_pos.x;
         while (true) : (i += 1) {
-            const col = zc.sheet.getColumn(i);
+            const col: Col = zc.sheet.getColumn(i) orelse .{ .index = i };
             w += col.width;
             if (w >= tui.term.width or i == std.math.maxInt(Position.Int))
                 break :blk i;

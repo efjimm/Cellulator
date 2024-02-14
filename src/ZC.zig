@@ -1304,7 +1304,7 @@ pub fn clampScreenToCursorX(self: *Self) void {
     while (true) : (x -= 1) {
         if (x < self.screen_pos.x) return;
 
-        const col = self.sheet.getColumn(x);
+        const col: Sheet.Column = self.sheet.getColumn(x) orelse .{ .index = x };
         w += @min(self.tui.term.width -| self.leftReservedColumns(), col.width);
 
         if (w > self.tui.term.width) break;
@@ -1370,7 +1370,7 @@ pub inline fn cursorDecWidth(self: *Self) Allocator.Error!void {
 }
 
 pub fn cursorExpandWidth(self: *Self) Allocator.Error!void {
-    const col = self.sheet.columns.getPtr(self.cursor.x) orelse return;
+    const col = self.sheet.getColumnPtr(self.cursor.x) orelse return;
 
     const max_width = self.tui.term.width - self.leftReservedColumns();
     const width_needed = self.sheet.widthNeededForColumn(self.cursor.x, col.precision, max_width);

@@ -27,8 +27,6 @@ queued_cells: std.ArrayListUnmanaged(Position) = .{},
 
 strings: std.HashMapUnmanaged(Position, []const u8, PositionContext, 80) = .{},
 
-/// Maps column indexes (0 - 2^32-1) to `Column` structs containing info about that column.
-columns: std.AutoArrayHashMapUnmanaged(Position.Int, Column) = .{},
 filepath: std.BoundedArray(u8, std.fs.MAX_PATH_BYTES) = .{}, // TODO: Heap allocate this
 
 /// True if there have been any changes since the last save
@@ -44,15 +42,26 @@ undo_end_markers: std.AutoHashMapUnmanaged(u32, Marker) = .{},
 /// that depend on that range.
 rtree: DependentTree(tree_children) = .{},
 /// Range tree containing just the positions of extant cells.
-/// Used for quick lookup of all extant cells in a ranges.
+/// Used for quick lookup of all extant cells in a range.
 cell_tree: RTree(void, tree_children) = .{},
 
 allocator: Allocator,
-arena_state: Arena.State = .{},
+
+/// Cells, rows, and columns must live for the entire life of the sheet in order to support undo/redo.
+arena: Arena.State = .{},
 
 cell_treap: CellTreap = .{},
+rows: RowAxis = .{},
+cols: ColumnAxis = .{},
 
 search_buffer: std.ArrayListUnmanaged(std.ArrayListUnmanaged(Range)) = .{},
+
+const ColumnAxis = std.Treap(Column, Column.compare);
+const RowAxis = std.Treap(Row, Row.compare);
+
+fn compareAnchor(a: u32, b: u32) std.math.Order {
+    return std.math.order(a, b);
+}
 
 const tree_children = 4;
 
@@ -65,26 +74,26 @@ const SheetRange = struct {
 const RangeList = std.ArrayListUnmanaged(Range);
 
 fn getArena(sheet: *Sheet) Arena {
-    return sheet.arena_state.promote(sheet.allocator);
+    return sheet.arena.promote(sheet.allocator);
 }
 
 fn arenaCreate(sheet: *Sheet, comptime T: type) !*T {
     var arena = sheet.getArena();
-    defer sheet.arena_state = arena.state;
+    defer sheet.arena = arena.state;
 
     return arena.allocator().create(T);
 }
 
 fn arenaDestroy(sheet: *Sheet, ptr: anytype) void {
     var arena = sheet.getArena();
-    defer sheet.arena_state = arena.state;
+    defer sheet.arena = arena.state;
 
     arena.allocator().destroy(ptr);
 }
 
 fn arenaReset(sheet: *Sheet, mode: Arena.ResetMode) bool {
     var arena = sheet.getArena();
-    defer sheet.arena_state = arena.state;
+    defer sheet.arena = arena.state;
 
     return arena.reset(mode);
 }
@@ -120,6 +129,10 @@ pub const Undo = union(enum) {
         col: Position.Int,
         precision: u8,
     },
+    // insert_row: *RowAxis.Node,
+    // insert_col: *ColumnAxis.Node,
+    // delete_row: u32,
+    // delete_col: u32,
 
     pub fn deinit(u: Undo, sheet: *Sheet) void {
         switch (u) {
@@ -221,13 +234,12 @@ pub fn deinit(sheet: *Sheet) void {
     sheet.undo_end_markers.deinit(sheet.allocator);
     sheet.undos.deinit(sheet.allocator);
     sheet.redos.deinit(sheet.allocator);
-    sheet.columns.deinit(sheet.allocator);
 
     var node_iter = sheet.cell_treap.inorderIterator();
     while (node_iter.next()) |node| {
         node.key.deinit(sheet.allocator);
     }
-    var arena = sheet.arena_state.promote(sheet.allocator);
+    var arena = sheet.arena.promote(sheet.allocator);
     arena.deinit();
     sheet.* = undefined;
 }
@@ -651,14 +663,40 @@ pub fn pushUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
     }
 }
 
+// fn insertRow(sheet: *Sheet, y: u32) !void {
+//     try insertRowOrColumn(sheet.arena.allocator(), &sheet.rows, y);
+// }
+
+// fn insertCol(sheet: *Sheet, x: u32) !void {
+//     try insertRowOrColumn(&sheet.cols, )
+// }
+
+// fn insertRowOrColumn(tree: anytype, new_node: *Axis.Node) void {
+//     const index = new_node.key;
+
+//     var entry = tree.getEntryFor(index);
+//     var n = entry.node;
+//     var p = entry.context.inserted_under;
+//     if (n) |node| node.key += 1;
+//     while (treapNextNode(Axis, entry.key, compareAnchor, n, p)) |node| {
+//         node.key += 1;
+//         n = node;
+//         p = node.parent;
+//         entry.key = node.key;
+//     }
+
+//     entry = tree.getEntryFor(index);
+//     entry.set(new_node);
+//     new_node.key = index;
+// }
+
 pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
     switch (u) {
-        .set_cell => |t| {
-            try sheet.insertCellNode(t.strings, t.node, opts);
-        },
+        .set_cell => |t| try sheet.insertCellNode(t.strings, t.node, opts),
         .delete_cell => |pos| try sheet.deleteCell(pos, opts),
         .set_column_width => |t| try sheet.setWidth(t.col, t.width, opts),
         .set_column_precision => |t| try sheet.setPrecision(t.col, t.precision, opts),
+        // .insert_row => |node| sheet.insertRowNode(node),
     }
 }
 
@@ -704,7 +742,7 @@ pub fn setWidth(
     width: u16,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    if (sheet.columns.getPtr(column_index)) |col| {
+    if (sheet.getColumnPtr(column_index)) |col| {
         try sheet.setColWidth(col, column_index, width, opts);
     }
 }
@@ -737,7 +775,7 @@ pub fn incWidth(
     n: u16,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    if (sheet.columns.getPtr(column_index)) |col| {
+    if (sheet.getColumnPtr(column_index)) |col| {
         try sheet.setColWidth(col, column_index, col.width +| n, opts);
     }
 }
@@ -748,7 +786,7 @@ pub fn decWidth(
     n: u16,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    if (sheet.columns.getPtr(column_index)) |col| {
+    if (sheet.getColumnPtr(column_index)) |col| {
         const new_width = @max(col.width -| n, 1);
         try sheet.setColWidth(col, column_index, new_width, opts);
     }
@@ -760,7 +798,7 @@ pub fn setPrecision(
     precision: u8,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    if (sheet.columns.getPtr(column_index)) |col| {
+    if (sheet.getColumnPtr(column_index)) |col| {
         try sheet.setColPrecision(col, column_index, precision, opts);
     }
 }
@@ -793,7 +831,7 @@ pub fn incPrecision(
     n: u8,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    if (sheet.columns.getPtr(column_index)) |col| {
+    if (sheet.getColumnPtr(column_index)) |col| {
         try sheet.setColPrecision(col, column_index, col.precision +| n, opts);
     }
 }
@@ -804,7 +842,7 @@ pub fn decPrecision(
     n: u8,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    if (sheet.columns.getPtr(column_index)) |col| {
+    if (sheet.getColumnPtr(column_index)) |col| {
         try sheet.setColPrecision(col, column_index, col.precision -| n, opts);
     }
 }
@@ -814,10 +852,6 @@ pub fn cellCount(sheet: *Sheet) Position.HashInt {
     var count: Position.HashInt = 0;
     while (iter.next()) |_| count += 1;
     return count;
-}
-
-pub fn colCount(sheet: *Sheet) Position.Int {
-    return @intCast(sheet.columns.entries.len);
 }
 
 pub fn needsUpdate(sheet: *const Sheet) bool {
@@ -852,7 +886,11 @@ pub fn insertCellNode(
         try sheet.ensureUndoCapacity(undo_type, 1);
     }
     try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, 1);
-    _ = try sheet.columns.getOrPutValue(sheet.allocator, pos.x, .{});
+
+    // Create row and column if they don't exist
+    try sheet.setColumn(.{ .index = pos.x });
+    try sheet.setRow(.{ .index = pos.y });
+
     try sheet.strings.ensureUnusedCapacity(sheet.allocator, 1);
 
     const range = Range.initSinglePos(pos);
@@ -956,12 +994,6 @@ pub fn deleteCell(
     entry.set(null);
 
     const strings = if (sheet.strings.fetchRemove(pos)) |kv| kv.value else "";
-
-    // const index = sheet.createUndoAst(cell.ast, strings) catch |err| {
-    //     cell.deinit(sheet.allocator);
-    //     return err;
-    // };
-    // errdefer sheet.freeUndoAst(index);
 
     sheet.pushUndo(
         .{ .set_cell = .{ .node = node, .strings = strings } },
@@ -1200,15 +1232,53 @@ pub fn printCellExpression(sheet: *Sheet, pos: Position, writer: anytype) !void 
     try cell.ast.print(strings, writer);
 }
 
+pub const Row = struct {
+    index: PosInt,
+
+    fn compare(a: Row, b: Row) std.math.Order {
+        return std.math.order(a.index, b.index);
+    }
+};
+
 pub const Column = struct {
     pub const default_width = 10;
 
+    index: PosInt,
     width: u16 = default_width,
     precision: u8 = 2,
+
+    fn compare(a: Column, b: Column) std.math.Order {
+        return std.math.order(a.index, b.index);
+    }
 };
 
-pub fn getColumn(sheet: *const Sheet, index: PosInt) Column {
-    return sheet.columns.get(index) orelse Column{};
+fn setRowOrColumn(sheet: *Sheet, comptime Tree: type, tree: *Tree, value: anytype) !void {
+    var entry = tree.getEntryFor(value);
+    if (entry.node) |node| {
+        node.key = value;
+    } else {
+        const new_node = try sheet.arenaCreate(Tree.Node);
+        entry.set(new_node);
+    }
+}
+
+/// Sets the column at `value.index` to `value`, creating it if it doesn't exist.
+pub fn setColumn(sheet: *Sheet, value: Column) !void {
+    try sheet.setRowOrColumn(ColumnAxis, &sheet.cols, value);
+}
+
+pub fn setRow(sheet: *Sheet, value: Row) !void {
+    try sheet.setRowOrColumn(RowAxis, &sheet.rows, value);
+}
+
+pub fn getColumn(sheet: *Sheet, index: PosInt) ?Column {
+    const entry = sheet.cols.getEntryFor(.{ .index = index });
+    return if (entry.node) |node| node.key else null;
+}
+
+pub fn getColumnPtr(sheet: *Sheet, index: PosInt) ?*Column {
+    const entry = sheet.cols.getEntryFor(.{ .index = index });
+    return if (entry.node) |node| &node.key else null;
 }
 
 pub fn widthNeededForColumn(
@@ -1252,16 +1322,6 @@ pub fn widthNeededForColumn(
     return width;
 }
 
-const ArrayPositionContext = struct {
-    pub fn eql(_: ArrayPositionContext, p1: Position, p2: Position, _: usize) bool {
-        return @as(Position.HashInt, @bitCast(p1)) == @as(Position.HashInt, @bitCast(p2));
-    }
-
-    pub fn hash(_: ArrayPositionContext, pos: Position) u64 {
-        return pos.hash();
-    }
-};
-
 /// std.HashMap and std.ArrayHashMap require slightly different contexts.
 const PositionContext = struct {
     pub fn eql(_: PositionContext, p1: Position, p2: Position) bool {
@@ -1282,7 +1342,6 @@ test "Sheet basics" {
     defer sheet.deinit();
 
     try t.expectEqual(@as(Position.HashInt, 0), sheet.cellCount());
-    try t.expectEqual(@as(Position.Int, 0), sheet.colCount());
     try t.expectEqualStrings("", sheet.filepath.slice());
 
     const exprs: []const []const u8 = &.{ "50 + 5", "500 * 2 / 34 + 1", "a0", "a2 * a1" };
@@ -1296,7 +1355,6 @@ test "Sheet basics" {
     }
 
     try t.expectEqual(@as(Position.HashInt, 4), sheet.cellCount());
-    try t.expectEqual(@as(Position.Int, 1), sheet.colCount());
     for (asts, 0..) |ast, i| {
         try t.expectEqual(ast, sheet.getCell(.{ .x = 0, .y = @intCast(i) }).?.ast);
     }
