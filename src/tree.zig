@@ -28,7 +28,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
         };
 
         pub const SearchItem = struct {
-            key_ptr: *Range,
+            key: Range,
             value_ptr: *V,
         };
 
@@ -93,10 +93,10 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             ) Allocator.Error!void {
                 if (node.isLeaf()) {
                     const values = node.data.values.items(.value);
-                    for (node.data.values.items(.key), 0..) |*k, i| {
-                        if (range.intersects(k.*)) {
+                    for (node.data.values.items(.key), 0..) |k, i| {
+                        if (range.intersects(k)) {
                             try list.append(.{
-                                .key_ptr = k,
+                                .key = k,
                                 .value_ptr = &values[i],
                             });
                         }
@@ -481,6 +481,70 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             return list.toOwnedSlice();
         }
 
+        pub fn searchIterator(tree: *Self, allocator: Allocator, range: Range) SearchIterator {
+            var ret: SearchIterator = .{
+                .range = range,
+                .allocator = allocator,
+            };
+            ret.stack.append(allocator, &tree.root) catch unreachable;
+            return ret;
+        }
+
+        pub const SearchIterator = struct {
+            stack: std.SegmentedList(*Node, 256) = .{},
+            index: usize = 0,
+            range: Range,
+            allocator: Allocator,
+
+            /// Resets the iterator, retaining any memory allocated for the stack
+            pub fn reset(iter: *SearchIterator, new_range: Range, tree: *Self) void {
+                iter.range = new_range;
+                iter.index = 0;
+                iter.stack.clearRetainingCapacity();
+                iter.stack.append(iter.allocator, &tree.root) catch unreachable;
+            }
+
+            pub fn deinit(iter: *SearchIterator) void {
+                iter.stack.deinit(iter.allocator);
+            }
+
+            pub fn next(iter: *SearchIterator) !?SearchItem {
+                const node = iter.stack.pop() orelse return null;
+
+                if (node.isLeaf()) {
+                    if (iter.index >= node.data.values.len) {
+                        iter.index = 0;
+                        return iter.next();
+                    }
+
+                    const values = node.data.values.items(.value);
+                    const keys = node.data.values.items(.key);
+
+                    for (keys[iter.index..], iter.index..) |k, i| {
+                        if (iter.range.intersects(k)) {
+                            // We might have more matches in this leaf node, put it back on the
+                            // stack
+                            iter.stack.append(iter.allocator, node) catch unreachable;
+                            iter.index = i + 1;
+                            return .{
+                                .key = k,
+                                .value_ptr = &values[i],
+                            };
+                        }
+                    }
+                } else {
+                    for (node.data.children.slice()) |*n| {
+                        if (iter.range.intersects(n.range)) {
+                            try iter.stack.append(iter.allocator, n);
+                        }
+                    }
+                }
+
+                iter.index = 0;
+                return iter.next();
+            }
+        };
+
         pub fn searchBuffer(
             tree: Self,
             allocator: Allocator,
@@ -610,7 +674,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             return tree.removeContext(allocator, key, {});
         }
 
-        /// Removes `key` and its associated value from the true.
+        /// Removes `key` and its associated value from the tree.
         pub fn removeContext(
             tree: *Self,
             allocator: Allocator,
@@ -624,6 +688,8 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
 
             var node_to_merge = blk: {
                 if (!tree.root.isLeaf()) {
+                    // Remove the root node if it goes under `min_children`, so all of its leaves
+                    // can be re-added
                     const root_len = tree.root.data.children.len -
                         @intFromBool(merge_info != null and merge_info.?[0] == &tree.root);
                     if (root_len < min_children) {

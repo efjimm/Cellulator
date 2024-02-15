@@ -218,7 +218,7 @@ pub const Position = extern struct {
         }
 
         pub fn perimeter(r: Range) u64 {
-            return r.width() * 2 + r.height() * 2;
+            return @as(u64, r.width()) * 2 + @as(u64, r.height() * 2);
         }
 
         pub fn overlapArea(r1: Range, r2: Range) u64 {

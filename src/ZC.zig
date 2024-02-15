@@ -199,6 +199,11 @@ pub fn sourceLua(self: *Self) !void {
 }
 
 pub fn deinit(self: *Self) void {
+    self.tui.deinit(self.allocator);
+
+    // Don't need to free memory on exit, the OS will do it for us :^)
+    if (!std.debug.runtime_safety) return;
+
     for (self.asts.items) |*ast| {
         ast.deinit(self.allocator);
     }
@@ -212,7 +217,6 @@ pub fn deinit(self: *Self) void {
 
     self.asts.deinit(self.allocator);
     self.sheet.deinit();
-    self.tui.deinit(self.allocator);
     self.* = undefined;
 }
 
@@ -754,18 +758,18 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
         .cell_cursor_down => self.cursorDown(),
         .cell_cursor_left => self.cursorLeft(),
         .cell_cursor_right => self.cursorRight(),
-        .cell_cursor_row_first => self.cursorToFirstCellInColumn(),
-        .cell_cursor_row_last => self.cursorToLastCellInColumn(),
-        .cell_cursor_col_first => self.cursorToFirstCellInRow(),
-        .cell_cursor_col_last => self.cursorToLastCellInRow(),
+        .cell_cursor_row_first => try self.cursorToFirstCellInColumn(),
+        .cell_cursor_row_last => try self.cursorToLastCellInColumn(),
+        .cell_cursor_col_first => try self.cursorToFirstCellInRow(),
+        .cell_cursor_col_last => try self.cursorToLastCellInRow(),
         .goto_col => self.cursorGotoCol(),
         .goto_row => self.cursorGotoRow(),
 
         .delete_cell => self.deleteCell() catch |err| switch (err) {
             error.OutOfMemory => self.setStatusMessage(.err, "Out of memory!", .{}),
         },
-        .next_populated_cell => self.cursorNextPopulatedCell(),
-        .prev_populated_cell => self.cursorPrevPopulatedCell(),
+        .next_populated_cell => try self.cursorNextPopulatedCell(),
+        .prev_populated_cell => try self.cursorPrevPopulatedCell(),
         .increase_precision => try self.cursorIncPrecision(),
         .decrease_precision => try self.cursorDecPrecision(),
         .increase_width => try self.cursorIncWidth(),
@@ -777,7 +781,7 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
 
         .zero => {
             if (self.count == 0) {
-                self.cursorToFirstCellInRow();
+                try self.cursorToFirstCellInRow();
             } else {
                 self.setCount(0);
             }
@@ -812,12 +816,12 @@ fn doVisualMode(self: *Self, action: Action) Allocator.Error!void {
         .cell_cursor_down => self.cursorDown(),
         .cell_cursor_left => self.cursorLeft(),
         .cell_cursor_right => self.cursorRight(),
-        .cell_cursor_row_first => self.cursorToFirstCellInColumn(),
-        .cell_cursor_row_last => self.cursorToLastCellInColumn(),
-        .cell_cursor_col_first => self.cursorToFirstCellInRow(),
-        .cell_cursor_col_last => self.cursorToLastCellInRow(),
-        .next_populated_cell => self.cursorNextPopulatedCell(),
-        .prev_populated_cell => self.cursorPrevPopulatedCell(),
+        .cell_cursor_row_first => try self.cursorToFirstCellInColumn(),
+        .cell_cursor_row_last => try self.cursorToLastCellInColumn(),
+        .cell_cursor_col_first => try self.cursorToFirstCellInRow(),
+        .cell_cursor_col_last => try self.cursorToLastCellInRow(),
+        .next_populated_cell => try self.cursorNextPopulatedCell(),
+        .prev_populated_cell => try self.cursorPrevPopulatedCell(),
 
         .zero => self.setCount(0),
         .count => |count| self.setCount(count),
@@ -886,52 +890,30 @@ pub fn isSelectedRow(self: Self, y: PosInt) bool {
     };
 }
 
-pub fn nextPopulatedCell(self: *Self, start_pos: Position, count: u32) Position {
-    const entry = self.sheet.cell_treap.getEntryFor(.{ .pos = start_pos });
-
-    var node = entry.node;
-    var parent = entry.context.inserted_under;
-    var ret: Position = start_pos;
-
-    node = Sheet.treapNextNode(start_pos, node, parent) orelse return start_pos;
-    ret = node.?.key.pos;
-    parent = node.?.parent;
-
-    for (1..count) |_| {
-        node = Sheet.treapNextNode(node.?.key.pos, node, parent) orelse break;
-        ret = node.?.key.pos;
-        parent = node.?.parent;
+pub fn nextPopulatedCell(self: *Self, start_pos: Position, count: u32) Allocator.Error!Position {
+    var pos = start_pos;
+    for (0..count) |_| {
+        pos = try self.sheet.nextPopulatedCell(pos) orelse return pos;
     }
-    return ret;
+    return pos;
 }
 
-pub fn prevPopulatedCell(self: *Self, start_pos: Position, count: u32) Position {
-    const entry = self.sheet.cell_treap.getEntryFor(.{ .pos = start_pos });
-
-    var node = entry.node;
-    var parent = entry.context.inserted_under;
-    var ret: Position = start_pos;
-
-    node = Sheet.treapPrevNode(start_pos, node, parent) orelse return start_pos;
-    ret = node.?.key.pos;
-    parent = node.?.parent;
-
-    for (1..count) |_| {
-        node = Sheet.treapPrevNode(node.?.key.pos, node, parent) orelse break;
-        ret = node.?.key.pos;
-        parent = node.?.parent;
+pub fn prevPopulatedCell(self: *Self, start_pos: Position, count: u32) Allocator.Error!Position {
+    var pos = start_pos;
+    for (0..count) |_| {
+        pos = try self.sheet.prevPopulatedCell(pos) orelse return pos;
     }
-    return ret;
+    return pos;
 }
 
-pub fn cursorNextPopulatedCell(self: *Self) void {
-    const new_pos = self.nextPopulatedCell(self.cursor, self.getCount());
+pub fn cursorNextPopulatedCell(self: *Self) Allocator.Error!void {
+    const new_pos = try self.nextPopulatedCell(self.cursor, self.getCount());
     self.setCursor(new_pos);
     self.resetCount();
 }
 
-pub fn cursorPrevPopulatedCell(self: *Self) void {
-    const new_pos = self.prevPopulatedCell(self.cursor, self.getCount());
+pub fn cursorPrevPopulatedCell(self: *Self) Allocator.Error!void {
+    const new_pos = try self.prevPopulatedCell(self.cursor, self.getCount());
     self.setCursor(new_pos);
     self.resetCount();
 }
@@ -1373,7 +1355,7 @@ pub fn cursorExpandWidth(self: *Self) Allocator.Error!void {
     const col = self.sheet.getColumnPtr(self.cursor.x) orelse return;
 
     const max_width = self.tui.term.width - self.leftReservedColumns();
-    const width_needed = self.sheet.widthNeededForColumn(self.cursor.x, col.precision, max_width);
+    const width_needed = try self.sheet.widthNeededForColumn(self.cursor.x, col.precision, max_width);
     try self.sheet.setColWidth(col, self.cursor.x, width_needed, .{});
     self.clampScreenToCursorX();
     self.tui.update.cells = true;
@@ -1396,23 +1378,23 @@ pub fn destroyAst(self: *Self, ast: Ast) void {
     self.asts.appendAssumeCapacity(temp);
 }
 
-pub fn cursorToFirstCellInRow(self: *Self) void {
-    const pos = self.sheet.firstCellInRow(self.cursor.y) orelse return;
+pub fn cursorToFirstCellInRow(self: *Self) !void {
+    const pos = try self.sheet.firstCellInRow(self.cursor.y) orelse return;
     self.setCursor(pos);
 }
 
-pub fn cursorToLastCellInRow(self: *Self) void {
-    const pos = self.sheet.lastCellInRow(self.cursor.y) orelse return;
+pub fn cursorToLastCellInRow(self: *Self) !void {
+    const pos = try self.sheet.lastCellInRow(self.cursor.y) orelse return;
     self.setCursor(pos);
 }
 
-pub fn cursorToFirstCellInColumn(self: *Self) void {
-    const pos = self.sheet.firstCellInColumn(self.cursor.x) orelse return;
+pub fn cursorToFirstCellInColumn(self: *Self) !void {
+    const pos = try self.sheet.firstCellInColumn(self.cursor.x) orelse return;
     self.setCursor(pos);
 }
 
-pub fn cursorToLastCellInColumn(self: *Self) void {
-    const pos = self.sheet.lastCellInColumn(self.cursor.x) orelse return;
+pub fn cursorToLastCellInColumn(self: *Self) !void {
+    const pos = try self.sheet.lastCellInColumn(self.cursor.x) orelse return;
     self.setCursor(pos);
 }
 

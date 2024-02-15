@@ -25,9 +25,8 @@ pub const CellTreap = std.Treap(Cell, Cell.compare);
 /// List of cells that need to be re-evaluated.
 queued_cells: std.ArrayListUnmanaged(Position) = .{},
 
+/// TODO: Use cell pointers as keys instead of positions
 strings: std.HashMapUnmanaged(Position, []const u8, PositionContext, 80) = .{},
-
-filepath: std.BoundedArray(u8, std.fs.MAX_PATH_BYTES) = .{}, // TODO: Heap allocate this
 
 /// True if there have been any changes since the last save
 has_changes: bool = false,
@@ -51,10 +50,13 @@ allocator: Allocator,
 arena: Arena.State = .{},
 
 cell_treap: CellTreap = .{},
+
 rows: RowAxis = .{},
 cols: ColumnAxis = .{},
 
 search_buffer: std.ArrayListUnmanaged(std.ArrayListUnmanaged(Range)) = .{},
+
+filepath: std.BoundedArray(u8, std.fs.MAX_PATH_BYTES) = .{}, // TODO: Heap allocate this
 
 const ColumnAxis = std.Treap(Column, Column.compare);
 const RowAxis = std.Treap(Row, Row.compare);
@@ -160,26 +162,34 @@ pub fn isEmpty(sheet: *const Sheet) bool {
     return sheet.cell_treap.root == null;
 }
 
-fn treapMin(node: *Node) *Node {
-    var current = node;
-    while (current.children[0]) |left| current = left;
-    return current;
-}
-
 fn treapMax(node: *Node) *Node {
     var current = node;
     while (current.children[1]) |right| current = right;
     return current;
 }
 
-pub fn treapNextNode(key: Position, node: ?*Node, parent: ?*Node) ?*Node {
+fn treapMin(comptime Tree: type, node: *Tree.Node) *Tree.Node {
+    var current = node;
+    while (current.children[0]) |left| current = left;
+    return current;
+}
+
+pub fn treapNextNode(
+    comptime Tree: type,
+    comptime compareFn: anytype,
+    entry: Tree.Entry,
+) ?*Tree.Node {
+    const key = entry.key;
+    const node = entry.node;
+    const parent = entry.context.inserted_under;
+
     if (node) |n| {
         if (n.children[1]) |right|
-            return treapMin(right);
+            return treapMin(Tree, right);
     }
 
     if (parent) |p| {
-        if (p.children[0] == node and Cell.compare(.{ .pos = key }, p.key) == .lt)
+        if (p.children[0] == node and compareFn(key, p.key) == .lt)
             return parent;
     }
 
@@ -356,7 +366,7 @@ pub fn writeFile(
 
     var iter = sheet.cell_treap.inorderIterator();
     while (iter.next()) |node| {
-        const pos = node.key.pos;
+        const pos = node.key.position();
         try writer.print("let {} = ", .{pos});
         try sheet.printCellExpression(pos, writer);
         try writer.writeByte('\n');
@@ -483,85 +493,225 @@ fn removeExprDependents(
     }
 }
 
-pub fn firstCellInRow(sheet: *Sheet, row: Position.Int) ?Position {
-    const entry = sheet.cell_treap.getEntryFor(.{ .pos = .{ .x = 0, .y = row } });
+pub fn firstCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
+    var iter = sheet.cell_tree.searchIterator(sheet.allocator, .{
+        .tl = .{ .x = 0, .y = row },
+        .br = .{ .x = std.math.maxInt(PosInt), .y = row },
+    });
+    defer iter.deinit();
 
-    if (entry.node) |node| return node.key.pos;
-    if (treapNextNode(entry.key.pos, entry.node, entry.context.inserted_under)) |node| {
-        if (node.key.pos.y == row)
-            return node.key.pos;
+    var min: ?PosInt = null;
+    while (try iter.next()) |item| {
+        const x = item.key.tl.x;
+        if (min == null or x < min.?) min = x;
     }
-    return null;
+
+    return if (min) |x| .{ .x = x, .y = row } else null;
 }
 
-pub fn lastCellInRow(sheet: *Sheet, row: Position.Int) ?Position {
-    const entry = sheet.cell_treap.getEntryFor(.{
-        .pos = .{ .x = std.math.maxInt(Position.Int), .y = row },
+pub fn lastCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
+    var iter = sheet.cell_tree.searchIterator(sheet.allocator, .{
+        .tl = .{ .x = 0, .y = row },
+        .br = .{ .x = std.math.maxInt(PosInt), .y = row },
     });
+    defer iter.deinit();
 
-    if (entry.node) |node| return node.key.pos;
-    if (treapPrevNode(entry.key.pos, entry.node, entry.context.inserted_under)) |node| {
-        if (node.key.pos.y == row)
-            return node.key.pos;
+    var max: ?PosInt = null;
+    while (try iter.next()) |item| {
+        const x = item.key.tl.x;
+        if (max == null or x > max.?) max = x;
     }
-    return null;
+
+    return if (max) |x| .{ .x = x, .y = row } else null;
 }
 
 // TODO: Optimize these
 
-pub fn firstCellInColumn(sheet: *Sheet, col: Position.Int) ?Position {
-    const start = if (sheet.cell_treap.getMin()) |node| node.key.pos.y else 0;
-    const end = if (sheet.cell_treap.getMax()) |node|
-        node.key.pos.y
+pub fn firstCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
+    var iter = sheet.cell_tree.searchIterator(sheet.allocator, .{
+        .tl = .{ .x = col, .y = 0 },
+        .br = .{ .x = col, .y = std.math.maxInt(PosInt) },
+    });
+    defer iter.deinit();
+
+    var min: ?PosInt = null;
+    while (try iter.next()) |item| {
+        const y = item.key.tl.y;
+        if (min == null or y < min.?) min = y;
+    }
+
+    return if (min) |y| .{ .x = col, .y = y } else null;
+}
+
+pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
+    var iter = sheet.cell_tree.searchIterator(sheet.allocator, .{
+        .tl = .{ .x = col, .y = 0 },
+        .br = .{ .x = col, .y = std.math.maxInt(PosInt) },
+    });
+    defer iter.deinit();
+
+    var max: ?PosInt = null;
+    while (try iter.next()) |item| {
+        const y = item.key.tl.y;
+        if (max == null or y > max.?) max = y;
+    }
+
+    return if (max) |y| .{ .x = col, .y = y } else null;
+}
+
+// These functions essentially do a binary search over a range using the cell range tree. It divides
+// the range in two, checking if first half has a cell using the range tree. If it does, we divide
+// the first side in two, and so on, until the range is one cell wide.
+
+/// Given a range, find the first row that contains a cell
+fn findExtantRow(sheet: *Sheet, range: Range, p: enum { first, last }) !?PosInt {
+    var r = range;
+    var iter = sheet.cell_tree.searchIterator(sheet.allocator, r);
+    defer iter.deinit();
+
+    if (try iter.next() == null) return null; // Range does not contain any cells
+
+    return while (true) {
+        const height = r.br.y - r.tl.y;
+        if (height == 0) break r.br.y;
+
+        const left_height = height / 2;
+        const left: Range = .{
+            .tl = r.tl,
+            .br = .{ .x = r.br.x, .y = r.tl.y + left_height },
+        };
+
+        const right: Range = .{
+            .tl = .{ .x = r.tl.x, .y = r.tl.y + left_height + 1 },
+            .br = r.br,
+        };
+
+        const first, const last = switch (p) {
+            .first => .{ left, right },
+            .last => .{ right, left },
+        };
+
+        iter.reset(first, &sheet.cell_tree);
+        r = if (try iter.next() != null) first else last;
+    } else unreachable;
+}
+
+/// Given a range, find the first column that contains a cell
+fn findExtantCol(sheet: *Sheet, range: Range, p: enum { first, last }) !?PosInt {
+    var r = range;
+    var iter = sheet.cell_tree.searchIterator(sheet.allocator, r);
+    defer iter.deinit();
+
+    if (try iter.next() == null) return null; // Range does not contain any cells
+
+    return while (true) {
+        const width = r.br.x - r.tl.x;
+        if (width == 0) break r.br.x;
+
+        const left_width = width / 2;
+        const left: Range = .{
+            .tl = r.tl,
+            .br = .{ .x = r.tl.x + left_width, .y = r.br.y },
+        };
+
+        const right: Range = .{
+            .tl = .{ .x = r.tl.x + left_width + 1, .y = r.tl.y },
+            .br = r.br,
+        };
+
+        const first, const last = switch (p) {
+            .first => .{ left, right },
+            .last => .{ right, left },
+        };
+
+        iter.reset(first, &sheet.cell_tree);
+        r = if (try iter.next() != null) first else last;
+    } else unreachable;
+}
+
+pub fn nextPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
+    const remaining_row: Range = if (pos.x != std.math.maxInt(PosInt))
+        .{
+            .tl = .{ .x = pos.x + 1, .y = pos.y },
+            .br = .{ .x = std.math.maxInt(PosInt), .y = pos.y },
+        }
+    else if (pos.y != std.math.maxInt(PosInt))
+        .{
+            .tl = .{ .x = 0, .y = pos.y + 1 },
+            .br = .{ .x = std.math.maxInt(PosInt), .y = pos.y + 1 },
+        }
     else
-        std.math.maxInt(Position.Int);
+        return null;
 
-    var y = start;
-    while (y < end) {
-        const entry = sheet.cell_treap.getEntryFor(.{
-            .pos = .{ .x = col, .y = y },
-        });
-
-        if (entry.node) |node| return node.key.pos;
-        const next = treapNextNode(entry.key.pos, entry.node, entry.context.inserted_under) orelse break;
-
-        if (next.key.pos.x == col) return next.key.pos;
-        y = if (next.key.pos.x < col) next.key.pos.y else next.key.pos.y +| 1;
+    if (try sheet.findExtantCol(remaining_row, .first)) |col_index| {
+        return .{
+            .x = col_index,
+            .y = remaining_row.br.y,
+        };
     }
-    if (end == std.math.maxInt(Position.Int)) {
-        const entry = sheet.cell_treap.getEntryFor(.{
-            .pos = .{ .x = col, .y = std.math.maxInt(Position.Int) },
-        });
-        return if (entry.node) |node| node.key.pos else null;
+
+    if (pos.y == std.math.maxInt(PosInt)) return null;
+
+    const range: Range = .{
+        .tl = .{ .x = 0, .y = pos.y + 1 },
+        .br = .{ .x = std.math.maxInt(PosInt), .y = std.math.maxInt(PosInt) },
+    };
+    if (try sheet.findExtantRow(range, .first)) |y| {
+        const row: Range = .{
+            .tl = .{ .x = 0, .y = y },
+            .br = .{ .x = std.math.maxInt(PosInt), .y = y },
+        };
+        if (try sheet.findExtantCol(row, .first)) |x| {
+            return .{
+                .x = x,
+                .y = y,
+            };
+        }
     }
+
     return null;
 }
 
-pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) ?Position {
-    const start = if (sheet.cell_treap.getMin()) |node| node.key.pos.y else 0;
-    const end = if (sheet.cell_treap.getMax()) |node|
-        node.key.pos.y
+pub fn prevPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
+    const remaining_row: Range = if (pos.x != 0)
+        .{
+            .tl = .{ .x = 0, .y = pos.y },
+            .br = .{ .x = pos.x - 1, .y = pos.y },
+        }
+    else if (pos.y != 0)
+        .{
+            .tl = .{ .x = 0, .y = pos.y - 1 },
+            .br = .{ .x = std.math.maxInt(PosInt), .y = pos.y - 1 },
+        }
     else
-        std.math.maxInt(Position.Int);
+        return null;
 
-    var y = end;
-    while (y > start) {
-        const entry = sheet.cell_treap.getEntryFor(.{
-            .pos = .{ .x = col, .y = y },
-        });
-
-        if (entry.node) |node| return node.key.pos;
-        const prev = treapPrevNode(entry.key.pos, entry.node, entry.context.inserted_under) orelse break;
-
-        if (prev.key.pos.x == col) return prev.key.pos;
-        y = if (prev.key.pos.x > col) prev.key.pos.y else prev.key.pos.y -| 1;
+    if (try sheet.findExtantCol(remaining_row, .last)) |col_index| {
+        return .{
+            .x = col_index,
+            .y = remaining_row.br.y,
+        };
     }
-    if (start == 0) {
-        const entry = sheet.cell_treap.getEntryFor(.{
-            .pos = .{ .x = col, .y = 0 },
-        });
-        return if (entry.node) |node| node.key.pos else null;
+
+    if (pos.y == 0) return null;
+
+    const range: Range = .{
+        .tl = .{ .x = 0, .y = 0 },
+        .br = .{ .x = std.math.maxInt(PosInt), .y = pos.y - 1 },
+    };
+    if (try sheet.findExtantRow(range, .last)) |y| {
+        const row: Range = .{
+            .tl = .{ .x = 0, .y = y },
+            .br = .{ .x = std.math.maxInt(PosInt), .y = y },
+        };
+        if (try sheet.findExtantCol(row, .last)) |x| {
+            return .{
+                .x = x,
+                .y = y,
+            };
+        }
     }
+
     return null;
 }
 
@@ -865,11 +1015,16 @@ pub fn insertCell(
     ast: Ast,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
+    // Create row and column if they don't exist
+    const row = try sheet.createRow(pos.y);
+    const col = try sheet.createColumn(pos.x);
+
     const new_node = try sheet.arenaCreate(Node);
     errdefer sheet.arenaDestroy(new_node);
 
     new_node.key = .{
-        .pos = pos,
+        .row = row,
+        .col = col,
         .ast = ast,
     };
     return sheet.insertCellNode(strings, new_node, undo_opts);
@@ -881,15 +1036,12 @@ pub fn insertCellNode(
     new_node: *Node,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
-    const pos = new_node.key.pos;
+    // TODO: Change this position to be a relative cell reference to this cell
+    const pos = new_node.key.position();
     if (undo_opts.undo_type) |undo_type| {
         try sheet.ensureUndoCapacity(undo_type, 1);
     }
     try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, 1);
-
-    // Create row and column if they don't exist
-    try sheet.setColumn(.{ .index = pos.x });
-    try sheet.setRow(.{ .index = pos.y });
 
     try sheet.strings.ensureUnusedCapacity(sheet.allocator, 1);
 
@@ -910,6 +1062,7 @@ pub fn insertCellNode(
     const cell = new_node.key;
     var entry = sheet.cell_treap.getEntryFor(cell);
     const node = entry.node orelse {
+        // TODO: Make relative
         const u = Undo{ .delete_cell = pos };
 
         entry.set(new_node);
@@ -920,6 +1073,7 @@ pub fn insertCellNode(
 
         if (strings.len > 0) {
             // NoClobber because cell didn't exist in map, so strings shouldn't exist either
+            // TODO: Make relative
             sheet.strings.putAssumeCapacityNoClobber(pos, strings);
         }
         errdefer _ = sheet.strings.remove(pos);
@@ -979,7 +1133,9 @@ pub fn deleteCell(
     pos: Position,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
-    var entry = sheet.cell_treap.getEntryFor(.{ .pos = pos });
+    const row = sheet.getRowPtr(pos.y) orelse return;
+    const col = sheet.getColumnPtr(pos.x) orelse return;
+    var entry = sheet.cell_treap.getEntryFor(.{ .row = row, .col = col });
     const node = entry.node orelse return;
     var cell = node.key;
 
@@ -988,6 +1144,12 @@ pub fn deleteCell(
     }
     try sheet.enqueueUpdate(pos);
     try sheet.removeExprDependents(Range.initSinglePos(pos), cell.ast);
+
+    // FIXME: If this allocation fails we are left with an inconsistent state.
+    //        This is actually a pain in the ass to fix...
+    //        Maybe an RTree function to calculate the amount of mem needed
+    //        for a removal ahead of time?
+    try sheet.cell_tree.remove(sheet.allocator, Range.initSinglePos(pos));
 
     // TODO: re-use string buffer
     cell.setError(sheet.allocator);
@@ -1003,21 +1165,35 @@ pub fn deleteCell(
 }
 
 pub fn deleteCellsInRange(sheet: *Sheet, range: Range) Allocator.Error!void {
-    const items = try sheet.cell_tree.search(sheet.allocator, range);
-    defer sheet.allocator.free(items);
+    var sfa = std.heap.stackFallback(4096, sheet.allocator);
+    const allocator = sfa.get();
+
+    const items = try sheet.cell_tree.search(allocator, range);
+    defer allocator.free(items);
 
     for (items) |item| {
-        try sheet.deleteCell(item.key_ptr.tl, .{});
+        try sheet.deleteCell(item.key.tl, .{});
     }
 }
 
+pub fn getRowPtr(sheet: *Sheet, index: PosInt) ?*Row {
+    const entry = sheet.rows.getEntryFor(.{ .index = index });
+    return if (entry.node) |node| &node.key else null;
+}
+
 pub fn getCell(sheet: *Sheet, pos: Position) ?Cell {
-    const entry = sheet.cell_treap.getEntryFor(.{ .pos = pos });
-    return if (entry.node) |n| n.key else null;
+    return if (sheet.getCellPtr(pos)) |ptr| ptr.* else null;
 }
 
 pub fn getCellPtr(sheet: *Sheet, pos: Position) ?*Cell {
-    const entry = sheet.cell_treap.getEntryFor(.{ .pos = pos });
+    const row = sheet.getRowPtr(pos.y) orelse return null;
+    const col = sheet.getColumnPtr(pos.x) orelse return null;
+    const key: Cell = .{
+        .row = row,
+        .col = col,
+    };
+
+    const entry = sheet.cell_treap.getEntryFor(key);
     return if (entry.node) |n| &n.key else null;
 }
 
@@ -1108,7 +1284,8 @@ pub fn setFilePath(sheet: *Sheet, filepath: []const u8) void {
 }
 
 pub const Cell = struct {
-    pos: Position,
+    row: *Row,
+    col: *Column,
     value: Value = .{ .err = error.NotEvaluable },
     ast: Ast = .{},
     state: enum {
@@ -1126,8 +1303,27 @@ pub const Cell = struct {
 
     pub const Error = Ast.EvalError;
 
+    pub const key_bits = @typeInfo(usize).Int.bits * 2;
+    pub const Key = std.meta.Int(.unsigned, key_bits);
+
+    pub fn position(cell: Cell) Position {
+        return .{
+            .x = cell.col.index,
+            .y = cell.row.index,
+        };
+    }
+
     fn compare(a: Cell, b: Cell) std.math.Order {
-        return std.math.order(a.pos.hash(), b.pos.hash());
+        const a_key = key(a.row, a.col);
+        const b_key = key(b.row, b.col);
+        return std.math.order(a_key, b_key);
+    }
+
+    fn key(row: *Row, col: *Column) Key {
+        const row_int = @intFromPtr(row);
+        const col_int = @intFromPtr(col);
+        const row_mul = comptime std.math.pow(Key, 2, @typeInfo(usize).Int.bits);
+        return row_int * row_mul + col_int;
     }
 
     pub fn fromExpression(a: Allocator, expr: []const u8) !Cell {
@@ -1252,7 +1448,13 @@ pub const Column = struct {
     }
 };
 
-fn setRowOrColumn(sheet: *Sheet, comptime Tree: type, tree: *Tree, value: anytype) !void {
+fn setRowOrColumn(
+    sheet: *Sheet,
+    comptime T: type,
+    comptime Tree: type,
+    tree: *Tree,
+    value: anytype,
+) !*T {
     var entry = tree.getEntryFor(value);
     if (entry.node) |node| {
         node.key = value;
@@ -1260,15 +1462,34 @@ fn setRowOrColumn(sheet: *Sheet, comptime Tree: type, tree: *Tree, value: anytyp
         const new_node = try sheet.arenaCreate(Tree.Node);
         entry.set(new_node);
     }
+    return &entry.key;
 }
 
 /// Sets the column at `value.index` to `value`, creating it if it doesn't exist.
-pub fn setColumn(sheet: *Sheet, value: Column) !void {
-    try sheet.setRowOrColumn(ColumnAxis, &sheet.cols, value);
+pub fn setColumn(sheet: *Sheet, value: Column) !*Column {
+    return sheet.setRowOrColumn(Column, ColumnAxis, &sheet.cols, value);
 }
 
-pub fn setRow(sheet: *Sheet, value: Row) !void {
-    try sheet.setRowOrColumn(RowAxis, &sheet.rows, value);
+pub fn createRow(sheet: *Sheet, index: PosInt) !*Row {
+    var entry = sheet.rows.getEntryFor(.{ .index = index });
+    if (entry.node == null) {
+        const new_node = try sheet.arenaCreate(RowAxis.Node);
+        entry.set(new_node);
+    }
+    return &entry.node.?.key;
+}
+
+pub fn createColumn(sheet: *Sheet, index: PosInt) !*Column {
+    var entry = sheet.cols.getEntryFor(.{ .index = index });
+    if (entry.node == null) {
+        const new_node = try sheet.arenaCreate(ColumnAxis.Node);
+        entry.set(new_node);
+    }
+    return &entry.node.?.key;
+}
+
+pub fn setRow(sheet: *Sheet, value: Row) !*Row {
+    return sheet.setRowOrColumn(Row, RowAxis, &sheet.rows, value);
 }
 
 pub fn getColumn(sheet: *Sheet, index: PosInt) ?Column {
@@ -1286,15 +1507,18 @@ pub fn widthNeededForColumn(
     column_index: PosInt,
     precision: u8,
     max_width: u16,
-) u16 {
+) !u16 {
     var width: u16 = Column.default_width;
+
+    var iter = sheet.cell_tree.searchIterator(sheet.allocator, .{
+        .tl = .{ .x = column_index, .y = 0 },
+        .br = .{ .x = column_index, .y = std.math.maxInt(PosInt) },
+    });
 
     var buf: std.BoundedArray(u8, 512) = .{};
     const writer = buf.writer();
-    var iter = sheet.cell_treap.inorderIterator();
-    while (iter.next()) |node| {
-        const cell = node.key;
-        if (cell.pos.x != column_index) continue;
+    while (try iter.next()) |item| {
+        const cell = sheet.getCellPtr(.{ .x = column_index, .y = item.key.tl.x }).?;
 
         switch (cell.value) {
             .err => {},

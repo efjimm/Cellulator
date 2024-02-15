@@ -754,7 +754,8 @@ pub fn EvalContext(comptime Context: type) type {
             var total: f64 = 0;
             const kvs = try self.sheet.cell_tree.search(self.allocator, range);
             for (kvs) |kv| {
-                var iter = kv.key_ptr.iterator();
+                // TODO: Check this out
+                var iter = kv.key.iterator();
                 while (iter.next()) |p| {
                     const res = try self.context.evalCell(p);
                     total += try res.toNumber(0);
