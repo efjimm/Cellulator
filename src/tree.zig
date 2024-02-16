@@ -2,7 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Position = @import("Position.zig").Position;
-const Range = Position.Range;
+const Rect = Position.Rect;
 const PosInt = Position.Int;
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 
@@ -22,13 +22,13 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
         const Self = @This();
 
         const KV = struct {
-            key: Range,
+            key: Rect,
             /// List of cells that depend on the cells in `key`
             value: V,
         };
 
         pub const SearchItem = struct {
-            key: Range,
+            key: Rect,
             value_ptr: *V,
         };
 
@@ -41,7 +41,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             };
 
             level: usize,
-            range: Range,
+            range: Rect,
             data: Data,
 
             /// Frees all memory associated with `node` and its children, and calls
@@ -67,7 +67,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             fn searchValues(
                 node: *const Node,
                 allocator: Allocator,
-                range: Range,
+                range: Rect,
                 list: *std.ArrayListUnmanaged(V),
             ) Allocator.Error!void {
                 if (node.isLeaf()) {
@@ -88,7 +88,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
 
             fn search(
                 node: *const Node,
-                range: Range,
+                range: Rect,
                 list: *std.ArrayList(SearchItem),
             ) Allocator.Error!void {
                 if (node.isLeaf()) {
@@ -110,7 +110,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 }
             }
 
-            fn getSingleRecursive(node: *Node, key: Range) ?struct { *Range, *V } {
+            fn getSingleRecursive(node: *Node, key: Rect) ?struct { *Rect, *V } {
                 if (node.isLeaf()) {
                     return for (node.data.values.items(.key), 0..) |*k, i| {
                         if (k.eql(key))
@@ -125,11 +125,11 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 } else null;
             }
 
-            fn getSingle(node: *Node, key: Range) ?struct { *Range, *V } {
+            fn getSingle(node: *Node, key: Rect) ?struct { *Rect, *V } {
                 return if (node.range.contains(key)) getSingleRecursive(node, key) else null;
             }
 
-            fn bestLeaf(node: *Node, key: Range) *Node {
+            fn bestLeaf(node: *Node, key: Rect) *Node {
                 assert(node.level == 1);
                 const slice = node.data.children.constSlice();
                 assert(slice.len > 0);
@@ -156,7 +156,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 return &node.data.children.slice()[min_index];
             }
 
-            fn totalOverlap(nodes: []const Node, range: Range) u64 {
+            fn totalOverlap(nodes: []const Node, range: Rect) u64 {
                 var total: u64 = 0;
                 for (nodes) |n| {
                     total += range.overlapArea(n.range);
@@ -166,7 +166,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
 
             /// Find best child to insert into.
             /// Gets the child with the smallest area increase to store `key`
-            fn bestChild(node: *Node, key: Range) *Node {
+            fn bestChild(node: *Node, key: Rect) *Node {
                 assert(!node.isLeaf());
 
                 if (node.level == 1) return bestLeaf(node, key);
@@ -178,12 +178,12 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
 
                 var min_index: usize = 0;
                 var min_diff, var min_area = blk: {
-                    const rect = Range.merge(slice[0].range, key);
+                    const rect = Rect.merge(slice[0].range, key);
                     break :blk .{ rect.area() - slice[0].range.area(), slice[0].range.area() };
                 };
 
                 for (slice[1..], 1..) |n, i| {
-                    const rect = Range.merge(n.range, key);
+                    const rect = Rect.merge(n.range, key);
                     const a = n.range.area();
                     const diff = rect.area() - a;
                     if (diff <= min_diff) {
@@ -200,7 +200,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
 
             fn recalcBoundingRange(node: *Node) void {
                 if (node.isLeaf()) {
-                    const slice: []const Range = node.data.values.items(.key);
+                    const slice: []const Rect = node.data.values.items(.key);
                     assert(slice.len > 0);
 
                     var range = slice[0];
@@ -221,7 +221,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             /// Removes `key` and its associated value from the tree.
             fn remove(
                 node: *Node,
-                key: Range,
+                key: Rect,
             ) ?struct {
                 /// Removed kv pair (if any)
                 KV,
@@ -290,11 +290,11 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 } else null;
             }
 
-            fn getRange(a: anytype) Range {
+            fn getRange(a: anytype) Rect {
                 return switch (@TypeOf(a)) {
                     Node, *Node, *const Node => a.range,
                     KV, *KV, *const KV => a.key,
-                    Range, *Range, *const Range => a,
+                    Rect, *Rect, *const Rect => a,
                     else => @compileError("Invalid type " ++ @typeName(@TypeOf(a))),
                 };
             }
@@ -302,7 +302,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             fn DistributionGroup(comptime T: type) type {
                 return struct {
                     entries: std.BoundedArray(T, max_children),
-                    range: Range,
+                    range: Rect,
                 };
             }
             fn Distribution(comptime T: type) type {
@@ -366,8 +366,8 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                         sorted_upper.constSlice(),
                     }) |entries| {
                         for (0..max_children - 2 * min_children + 2) |k| {
-                            var r1: Range = getRange(entries[0]);
-                            var r2: Range = getRange(entries[min_children + k]);
+                            var r1: Rect = getRange(entries[0]);
+                            var r2: Rect = getRange(entries[min_children + k]);
                             for (entries[1 .. min_children + k]) |e| r1 = r1.merge(getRange(e));
                             for (entries[min_children + k + 1 ..]) |e| r2 = r2.merge(getRange(e));
 
@@ -472,7 +472,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
         pub fn search(
             tree: Self,
             allocator: Allocator,
-            range: Range,
+            range: Rect,
         ) Allocator.Error![]SearchItem {
             var list = std.ArrayList(SearchItem).init(allocator);
             errdefer list.deinit();
@@ -481,7 +481,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             return list.toOwnedSlice();
         }
 
-        pub fn searchIterator(tree: *Self, allocator: Allocator, range: Range) SearchIterator {
+        pub fn searchIterator(tree: *Self, allocator: Allocator, range: Rect) SearchIterator {
             var ret: SearchIterator = .{
                 .range = range,
                 .allocator = allocator,
@@ -493,11 +493,11 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
         pub const SearchIterator = struct {
             stack: std.SegmentedList(*Node, 256) = .{},
             index: usize = 0,
-            range: Range,
+            range: Rect,
             allocator: Allocator,
 
             /// Resets the iterator, retaining any memory allocated for the stack
-            pub fn reset(iter: *SearchIterator, new_range: Range, tree: *Self) void {
+            pub fn reset(iter: *SearchIterator, new_range: Rect, tree: *Self) void {
                 iter.range = new_range;
                 iter.index = 0;
                 iter.stack.clearRetainingCapacity();
@@ -549,7 +549,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             tree: Self,
             allocator: Allocator,
             list: *std.ArrayListUnmanaged(V),
-            range: Range,
+            range: Rect,
         ) Allocator.Error!void {
             try tree.root.searchValues(allocator, range, list);
         }
@@ -562,7 +562,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             // Root node got split, need to create a new root
             var new_root = Node{
                 .level = new_node.level + 1,
-                .range = Range.merge(tree.root.range, new_node.range),
+                .range = Rect.merge(tree.root.range, new_node.range),
                 .data = .{
                     .children = blk: {
                         const mem = try tree.pool.create(allocator);
@@ -580,7 +580,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             tree: *Self,
             allocator: Allocator,
             node: *Node,
-            key: Range,
+            key: Rect,
             value: V,
         ) !?Node {
             var ok = true;
@@ -637,14 +637,14 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
 
         /// Finds the key/value pair whose key matches `key` and returns pointers
         /// to the key and value, or `null` if not found.
-        pub fn get(tree: *Self, key: Range) ?struct { *Range, *V } {
+        pub fn get(tree: *Self, key: Rect) ?struct { *Rect, *V } {
             return tree.root.getSingle(key);
         }
 
         pub fn put(
             tree: *Self,
             allocator: Allocator,
-            key: Range,
+            key: Rect,
             value: V,
         ) Allocator.Error!void {
             return tree.putContext(allocator, key, value, {});
@@ -653,7 +653,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
         pub fn putContext(
             tree: *Self,
             allocator: Allocator,
-            key: Range,
+            key: Rect,
             value: V,
             context: anytype,
         ) Allocator.Error!void {
@@ -669,7 +669,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
         pub fn remove(
             tree: *Self,
             allocator: Allocator,
-            key: Range,
+            key: Rect,
         ) Allocator.Error!void {
             return tree.removeContext(allocator, key, {});
         }
@@ -678,7 +678,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
         pub fn removeContext(
             tree: *Self,
             allocator: Allocator,
-            key: Range,
+            key: Rect,
             context: anytype,
         ) Allocator.Error!void {
             var kv, const merge_info = tree.root.remove(key) orelse return;
@@ -759,10 +759,10 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             defer r.deinit(t.allocator);
 
             for (100..100 + max_children) |i| {
-                try r.put(t.allocator, Range.initSingle(@intCast(i), 0), {});
+                try r.put(t.allocator, Rect.initSingle(@intCast(i), 0), {});
             }
-            const range1 = Range.init(100, 0, 100 + max_children - 1, 0);
-            const range2 = Range.init(101, 0, 100 + max_children - 1, 0);
+            const range1 = Rect.init(100, 0, 100 + max_children - 1, 0);
+            const range2 = Rect.init(101, 0, 100 + max_children - 1, 0);
 
             try t.expectEqual(@as(usize, 1), r.root.level);
             try t.expect(r.root.data.children.len == 2);
@@ -774,7 +774,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             try t.expect(r.root.data.children.len == 2);
             try t.expectEqual(range1, r.root.range);
 
-            try r.remove(t.allocator, Range.initSingle(100, 0));
+            try r.remove(t.allocator, Rect.initSingle(100, 0));
 
             try t.expectEqual(@as(usize, 0), r.root.level);
             try t.expectEqual(@as(usize, max_children - 1), r.root.data.values.len);
@@ -788,7 +788,7 @@ pub fn DependentTree(comptime min_children: usize) type {
         rtree: Tree = .{},
 
         const Self = @This();
-        const RangeList = std.ArrayListUnmanaged(Range);
+        const RangeList = std.ArrayListUnmanaged(Rect);
         const Tree = RTree(RangeList, min_children);
         pub const Node = Tree.Node;
         pub const KV = Tree.KV;
@@ -809,15 +809,15 @@ pub fn DependentTree(comptime min_children: usize) type {
             self.* = undefined;
         }
 
-        pub fn get(self: *Self, key: Range) ?struct { *Range, *RangeList } {
+        pub fn get(self: *Self, key: Rect) ?struct { *Rect, *RangeList } {
             return self.rtree.get(key);
         }
 
         pub fn put(
             self: *Self,
             allocator: Allocator,
-            key: Range,
-            value: Range,
+            key: Rect,
+            value: Rect,
         ) Allocator.Error!void {
             return self.putSlice(allocator, key, &.{value});
         }
@@ -825,8 +825,8 @@ pub fn DependentTree(comptime min_children: usize) type {
         pub fn putSlice(
             self: *Self,
             allocator: Allocator,
-            key: Range,
-            values: []const Range,
+            key: Rect,
+            values: []const Rect,
         ) Allocator.Error!void {
             if (self.get(key)) |kv| {
                 try kv[1].appendSlice(allocator, values);
@@ -857,7 +857,7 @@ pub fn DependentTree(comptime min_children: usize) type {
         pub fn search(
             self: *Self,
             allocator: Allocator,
-            key: Range,
+            key: Rect,
         ) Allocator.Error![]Tree.SearchItem {
             return self.rtree.search(allocator, key);
         }
@@ -865,7 +865,7 @@ pub fn DependentTree(comptime min_children: usize) type {
         pub fn removeKey(
             self: *Self,
             allocator: Allocator,
-            key: Range,
+            key: Rect,
         ) Allocator.Error!void {
             return self.rtree.removeContext(allocator, key, Context{});
         }
@@ -875,8 +875,8 @@ pub fn DependentTree(comptime min_children: usize) type {
         pub fn removeValue(
             self: *Self,
             allocator: Allocator,
-            key: Range,
-            value: Range,
+            key: Rect,
+            value: Rect,
         ) Allocator.Error!void {
             const merge_info = removeNode(&self.rtree.root, allocator, key, value) orelse return;
 
@@ -917,8 +917,8 @@ pub fn DependentTree(comptime min_children: usize) type {
         fn removeNode(
             node: *Tree.Node,
             allocator: Allocator,
-            key: Range,
-            value: Range,
+            key: Rect,
+            value: Rect,
         ) ??RemoveNodeRet {
             if (node.isLeaf()) {
                 const list = &node.data.values;
@@ -1006,69 +1006,69 @@ pub fn DependentTree(comptime min_children: usize) type {
             const data = .{
                 .{
                     // Key
-                    Range.init(11, 2, 11, 2),
+                    Rect.init(11, 2, 11, 2),
                     .{ // Values
-                        Range.initSingle(0, 0),
-                        Range.initSingle(10, 10),
+                        Rect.initSingle(0, 0),
+                        Rect.initSingle(10, 10),
                     },
                 },
                 .{
-                    Range.init(0, 0, 2, 2),
+                    Rect.init(0, 0, 2, 2),
                     .{
-                        Range.initSingle(500, 500),
-                        Range.initSingle(500, 501),
-                        Range.initSingle(500, 502),
+                        Rect.initSingle(500, 500),
+                        Rect.initSingle(500, 501),
+                        Rect.initSingle(500, 502),
                     },
                 },
                 .{
-                    Range.init(1, 1, 3, 3),
+                    Rect.init(1, 1, 3, 3),
                     .{
-                        Range.initSingle(501, 500),
-                        Range.initSingle(501, 501),
-                        Range.initSingle(501, 502),
+                        Rect.initSingle(501, 500),
+                        Rect.initSingle(501, 501),
+                        Rect.initSingle(501, 502),
                     },
                 },
                 .{
-                    Range.init(1, 1, 10, 10),
+                    Rect.init(1, 1, 10, 10),
                     .{
-                        Range.initSingle(502, 500),
-                        Range.initSingle(502, 501),
-                        Range.initSingle(502, 502),
-                        Range.initSingle(502, 503),
-                        Range.initSingle(502, 504),
-                        Range.initSingle(502, 505),
+                        Rect.initSingle(502, 500),
+                        Rect.initSingle(502, 501),
+                        Rect.initSingle(502, 502),
+                        Rect.initSingle(502, 503),
+                        Rect.initSingle(502, 504),
+                        Rect.initSingle(502, 505),
                     },
                 },
                 .{
-                    Range.init(5, 5, 10, 10),
+                    Rect.init(5, 5, 10, 10),
                     .{
-                        Range.initSingle(503, 500),
-                        Range.initSingle(503, 501),
+                        Rect.initSingle(503, 500),
+                        Rect.initSingle(503, 501),
                     },
                 },
                 .{
-                    Range.init(3, 3, 4, 4),
+                    Rect.init(3, 3, 4, 4),
                     .{
-                        Range.initSingle(503, 500),
-                        Range.initSingle(503, 501),
+                        Rect.initSingle(503, 500),
+                        Rect.initSingle(503, 501),
                     },
                 },
                 .{
-                    Range.init(3, 3, 4, 4),
+                    Rect.init(3, 3, 4, 4),
                     .{
-                        Range.initSingle(503, 502),
+                        Rect.initSingle(503, 502),
                     },
                 },
                 .{
-                    Range.init(3, 3, 4, 4),
+                    Rect.init(3, 3, 4, 4),
                     .{
-                        Range.initSingle(503, 502),
+                        Rect.initSingle(503, 502),
                     },
                 },
                 .{
-                    Range.init(3, 3, 4, 4),
+                    Rect.init(3, 3, 4, 4),
                     .{
-                        Range.initSingle(503, 502),
+                        Rect.initSingle(503, 502),
                     },
                 },
             };
@@ -1078,84 +1078,84 @@ pub fn DependentTree(comptime min_children: usize) type {
                 try tree.putSlice(t.allocator, key, &values);
             }
 
-            try t.expectEqual(Range.init(0, 0, 11, 10), tree.rtree.root.range);
+            try t.expectEqual(Rect.init(0, 0, 11, 10), tree.rtree.root.range);
 
             {
-                const res = try tree.search(t.allocator, Range.init(3, 3, 4, 4));
+                const res = try tree.search(t.allocator, Rect.init(3, 3, 4, 4));
                 defer t.allocator.free(res);
 
                 const expected_results = .{
-                    Range.initSingle(501, 500),
-                    Range.initSingle(501, 501),
-                    Range.initSingle(501, 502),
-                    Range.initSingle(502, 500),
-                    Range.initSingle(502, 501),
-                    Range.initSingle(502, 502),
-                    Range.initSingle(502, 503),
-                    Range.initSingle(502, 504),
-                    Range.initSingle(502, 505),
-                    Range.initSingle(503, 500),
-                    Range.initSingle(503, 501),
-                    Range.initSingle(503, 502),
+                    Rect.initSingle(501, 500),
+                    Rect.initSingle(501, 501),
+                    Rect.initSingle(501, 502),
+                    Rect.initSingle(502, 500),
+                    Rect.initSingle(502, 501),
+                    Rect.initSingle(502, 502),
+                    Rect.initSingle(502, 503),
+                    Rect.initSingle(502, 504),
+                    Rect.initSingle(502, 505),
+                    Rect.initSingle(503, 500),
+                    Rect.initSingle(503, 501),
+                    Rect.initSingle(503, 502),
                 };
 
                 // Check that all ranges in `expected_results` are found in `res` in ANY order.
                 for (res) |kv| {
                     for (kv.value_ptr.items) |r| {
                         inline for (expected_results) |e| {
-                            if (Range.eql(r, e)) break;
+                            if (Rect.eql(r, e)) break;
                         } else return error.SearchMismatch;
                     }
                 }
             }
             {
-                const res = try tree.search(t.allocator, Range.initSingle(0, 0));
+                const res = try tree.search(t.allocator, Rect.initSingle(0, 0));
                 defer t.allocator.free(res);
 
                 const expected_results = .{
-                    Range.initSingle(500, 500),
-                    Range.initSingle(500, 501),
-                    Range.initSingle(500, 502),
+                    Rect.initSingle(500, 500),
+                    Rect.initSingle(500, 501),
+                    Rect.initSingle(500, 502),
                 };
 
                 for (res) |kv| {
                     for (kv.value_ptr.items) |r| {
                         inline for (expected_results) |e| {
-                            if (Range.eql(r, e)) break;
+                            if (Rect.eql(r, e)) break;
                         } else return error.SearchMismatch;
                     }
                 }
             }
             {
-                const res = try tree.search(t.allocator, Range.initSingle(5, 5));
+                const res = try tree.search(t.allocator, Rect.initSingle(5, 5));
                 defer t.allocator.free(res);
 
                 const expected_results = .{
-                    Range.initSingle(502, 500),
-                    Range.initSingle(502, 501),
-                    Range.initSingle(502, 502),
-                    Range.initSingle(502, 503),
-                    Range.initSingle(502, 504),
-                    Range.initSingle(502, 505),
-                    Range.initSingle(503, 500),
-                    Range.initSingle(503, 501),
+                    Rect.initSingle(502, 500),
+                    Rect.initSingle(502, 501),
+                    Rect.initSingle(502, 502),
+                    Rect.initSingle(502, 503),
+                    Rect.initSingle(502, 504),
+                    Rect.initSingle(502, 505),
+                    Rect.initSingle(503, 500),
+                    Rect.initSingle(503, 501),
                 };
                 for (res) |kv| {
                     for (kv.value_ptr.items) |r| {
                         inline for (expected_results) |e| {
-                            if (Range.eql(r, e)) break;
+                            if (Rect.eql(r, e)) break;
                         } else return error.SearchMismatch;
                     }
                 }
             }
             {
-                const res = try tree.search(t.allocator, Range.initSingle(11, 11));
+                const res = try tree.search(t.allocator, Rect.initSingle(11, 11));
                 try t.expectEqualSlices(Tree.SearchItem, &.{}, res);
             }
 
             {
                 // Check that it contains all ranges
-                const res = try tree.search(t.allocator, Range.init(0, 0, 500, 500));
+                const res = try tree.search(t.allocator, Rect.init(0, 0, 500, 500));
                 defer t.allocator.free(res);
                 for (res) |kv| {
                     data_loop: inline for (data) |d| {
@@ -1178,8 +1178,8 @@ pub fn DependentTree(comptime min_children: usize) type {
 
             for (0..bound) |i| {
                 for (0..bound) |j| {
-                    const key = Range.initSingle(@intCast(i), @intCast(j));
-                    const value = Range.initSingle(@intCast(bound - i - 1), @intCast(bound - j - 1));
+                    const key = Rect.initSingle(@intCast(i), @intCast(j));
+                    const value = Rect.initSingle(@intCast(bound - i - 1), @intCast(bound - j - 1));
                     try r.put(t.allocator, key, value);
                     std.testing.expect(r.rtree.root.getSingle(key) != null) catch |err| {
                         std.debug.print("{}\n", .{r.rtree.root});
@@ -1194,7 +1194,7 @@ pub fn DependentTree(comptime min_children: usize) type {
             for (0..bound) |i| {
                 for (0..bound) |j| {
                     // Ensure no duplicate keys are present
-                    const range = Range.initSingle(@intCast(i), @intCast(j));
+                    const range = Rect.initSingle(@intCast(i), @intCast(j));
                     const res = try r.search(t.allocator, range);
                     defer t.allocator.free(res);
                     std.testing.expectEqual(@as(usize, 1), res.len) catch |err| {
@@ -1208,13 +1208,13 @@ pub fn DependentTree(comptime min_children: usize) type {
                 for (0..bound) |j| {
                     try r.removeValue(
                         t.allocator,
-                        Range.initSingle(@intCast(bound - i - 1), @intCast(bound - j - 1)),
-                        Range.initSingle(@intCast(i), @intCast(j)),
+                        Rect.initSingle(@intCast(bound - i - 1), @intCast(bound - j - 1)),
+                        Rect.initSingle(@intCast(i), @intCast(j)),
                     );
                     try r.removeValue(
                         t.allocator,
-                        Range.initSingle(@intCast(bound - i - 1), @intCast(bound - j - 1)),
-                        Range.initSingle(@intCast(i), @intCast(j)),
+                        Rect.initSingle(@intCast(bound - i - 1), @intCast(bound - j - 1)),
+                        Rect.initSingle(@intCast(i), @intCast(j)),
                     );
                 }
             }

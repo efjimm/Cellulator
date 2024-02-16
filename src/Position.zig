@@ -178,50 +178,50 @@ pub const Position = extern struct {
         };
     }
 
-    pub const Range = extern struct {
+    pub const Rect = extern struct {
         /// Top left
         tl: Position,
         /// Bottom right
         br: Position,
 
-        pub fn init(tl_x: Int, tl_y: Int, br_x: Int, br_y: Int) Range {
-            return Range{
+        pub fn init(tl_x: Int, tl_y: Int, br_x: Int, br_y: Int) Rect {
+            return Rect{
                 .tl = .{ .x = tl_x, .y = tl_y },
                 .br = .{ .x = br_x, .y = br_y },
             };
         }
 
-        pub fn initNormalize(x1: Int, y1: Int, x2: Int, y2: Int) Range {
-            return Range{
+        pub fn initNormalize(x1: Int, y1: Int, x2: Int, y2: Int) Rect {
+            return Rect{
                 .tl = .{ .x = @min(x1, x2), .y = @min(y1, y2) },
                 .br = .{ .x = @max(x1, x2), .y = @max(y1, y2) },
             };
         }
 
-        pub fn initNormalizePos(p1: Position, p2: Position) Range {
+        pub fn initNormalizePos(p1: Position, p2: Position) Rect {
             return initNormalize(p1.x, p1.y, p2.x, p2.y);
         }
 
-        pub fn initSingle(x: Int, y: Int) Range {
-            return Range{
+        pub fn initSingle(x: Int, y: Int) Rect {
+            return Rect{
                 .tl = .{ .x = x, .y = y },
                 .br = .{ .x = x, .y = y },
             };
         }
 
-        pub fn initPos(tl: Position, br: Position) Range {
+        pub fn initPos(tl: Position, br: Position) Rect {
             return .{ .tl = tl, .br = br };
         }
 
-        pub fn initSinglePos(p: Position) Range {
+        pub fn initSinglePos(p: Position) Rect {
             return initPos(p, p);
         }
 
-        pub fn perimeter(r: Range) u64 {
+        pub fn perimeter(r: Rect) u64 {
             return @as(u64, r.width()) * 2 + @as(u64, r.height() * 2);
         }
 
-        pub fn overlapArea(r1: Range, r2: Range) u64 {
+        pub fn overlapArea(r1: Rect, r2: Rect) u64 {
             const dx = std.math.sub(
                 u64,
                 @min(r1.br.x, r2.br.x),
@@ -237,7 +237,7 @@ pub const Position = extern struct {
         }
 
         pub fn format(
-            range: Range,
+            range: Rect,
             comptime _: []const u8,
             _: std.fmt.FormatOptions,
             writer: anytype,
@@ -248,12 +248,12 @@ pub const Position = extern struct {
         /// Removes all positions in `m` from `target`, returning 0-4 new ranges, or `null` if
         /// `m` does not intersect `target`.
         pub fn mask(
-            target: Range,
-            m: Range,
-        ) ?std.BoundedArray(Range, 4) {
+            target: Rect,
+            m: Rect,
+        ) ?std.BoundedArray(Rect, 4) {
             if (!m.intersects(target)) return null;
 
-            var ret: std.BoundedArray(Range, 4) = .{};
+            var ret: std.BoundedArray(Rect, 4) = .{};
 
             // North
             if (m.tl.y > target.tl.y) {
@@ -290,51 +290,51 @@ pub const Position = extern struct {
             return if (ret.len > 0) ret else null;
         }
 
-        pub fn eql(r1: Range, r2: Range) bool {
+        pub fn eql(r1: Rect, r2: Rect) bool {
             return r1.tl.x == r2.tl.x and r1.tl.y == r2.tl.y and
                 r1.br.x == r2.br.x and r1.br.y == r2.br.y;
         }
 
         /// Returns true if `r1` contains `r2`.
-        pub fn contains(r1: Range, r2: Range) bool {
+        pub fn contains(r1: Rect, r2: Rect) bool {
             return r1.tl.x <= r2.tl.x and r1.tl.y <= r2.tl.y and
                 r1.br.x >= r2.br.x and r1.br.y >= r2.br.y;
         }
 
         /// Returns true if `r1` intersects `r2`
-        pub fn intersects(r1: Range, r2: Range) bool {
+        pub fn intersects(r1: Rect, r2: Rect) bool {
             return r1.tl.x <= r2.br.x and r1.br.x >= r2.tl.x and
                 r1.tl.y <= r2.br.y and r1.br.y >= r2.tl.y;
         }
 
-        pub fn initMax() Range {
+        pub fn initMax() Rect {
             return .{
                 .tl = .{ .x = 0, .y = 0 },
                 .br = .{ .x = std.math.maxInt(Int), .y = std.math.maxInt(Int) },
             };
         }
 
-        pub fn merge(r1: Range, r2: Range) Range {
+        pub fn merge(r1: Rect, r2: Rect) Rect {
             return .{
                 .tl = Position.min(r1.tl, r2.tl),
                 .br = Position.max(r1.br, r2.br),
             };
         }
 
-        pub fn height(r: Range) Int {
+        pub fn height(r: Rect) Int {
             return r.br.y - r.tl.y;
         }
 
-        pub fn width(r: Range) Int {
+        pub fn width(r: Rect) Int {
             return r.br.x - r.tl.x;
         }
 
-        pub fn area(r: Range) HashInt {
+        pub fn area(r: Rect) HashInt {
             return @as(HashInt, r.width()) * r.height();
         }
 
         pub const Iterator = struct {
-            range: Range,
+            range: Rect,
             x: Int,
             y: Int,
 
@@ -361,7 +361,7 @@ pub const Position = extern struct {
             }
         };
 
-        pub fn iterator(range: Range) Iterator {
+        pub fn iterator(range: Rect) Iterator {
             return .{
                 .range = range,
                 .x = range.tl.x,

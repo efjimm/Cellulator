@@ -3,6 +3,8 @@
 
 const std = @import("std");
 const Position = @import("Position.zig").Position;
+const Sheet = @import("Sheet.zig");
+const Reference = Sheet.Reference;
 const PosInt = Position.Int;
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 
@@ -24,7 +26,8 @@ pub const String = struct {
 pub const Node = union(enum) {
     number: f64,
     column: PosInt,
-    cell: Position,
+    pos: Position,
+    ref: u32,
     assignment: BinaryOperator,
     concat: BinaryOperator,
     add: BinaryOperator,
@@ -38,6 +41,10 @@ pub const Node = union(enum) {
 };
 
 nodes: MultiArrayList(Node) = .{},
+
+// TODO: Consider storing this in a map to reduce memory usage, as most cells just contain data
+//       without any references. Need benchmarks to see perf impact.
+refs: []Reference = &.{},
 
 const Self = @This();
 
@@ -61,6 +68,45 @@ pub fn parseExpr(ast: *Self, allocator: Allocator, source: []const u8) ParseErro
     _ = try parser.parseExpression();
 
     ast.nodes = parser.nodes;
+}
+
+// TODO: sheet.allocator is not necessarily the same allocator as used for the AST nodes.
+
+/// Anchors the AST to the given sheet, by replacing all 'dumb' coordinate references with
+/// references to the row/column pointers in `sheet`.
+pub fn anchor(ast: *Self, sheet: *Sheet) Allocator.Error!void {
+    assert(ast.refs.items.len == 0);
+
+    const tags = ast.nodes.items(.tags);
+    const data = ast.nodes.items(.data);
+
+    const pos_count = blk: {
+        var count: u32 = 0;
+        for (tags) |tag|
+            count += @intFromBool(tag == .pos);
+        break :blk count;
+    };
+
+    var refs = try std.ArrayListUnmanaged(Reference).initCapacity(sheet.allocator, pos_count);
+    // Don't need to shrink because initCapacity allocates *exactly* pos_count
+    defer ast.refs = refs.items;
+
+    for (tags, data) |*tag, *d| {
+        if (tag == .pos) {
+            const row = try sheet.createRow(d.pos.y);
+            const col = try sheet.createColumn(d.pos.x);
+
+            const index: u32 = @intCast(ast.refs.items.len);
+            refs.appendAssumeCapacity(.{
+                .relative_row = true, // TODO: Allow absolute
+                .relative_col = true,
+                .row = row,
+                .col = col,
+            });
+            tag.* = .ref;
+            data.* = .{ .ref = index };
+        }
+    }
 }
 
 pub fn dupeStrings(
@@ -154,18 +200,18 @@ pub fn fromStringExpression(allocator: Allocator, source: []const u8) ParseError
 
 pub fn deinit(ast: *Self, allocator: Allocator) void {
     ast.nodes.deinit(allocator);
-    // if (ast.strings) |strings| {
-    //     strings.destroy(allocator);
-    // }
+    allocator.free(ast.refs);
     ast.* = .{};
 }
 
 pub const Slice = struct {
     nodes: MultiArrayList(Node).Slice,
+    refs: []Reference,
 
     pub fn toAst(ast: *Slice) Self {
         return .{
             .nodes = ast.nodes.toMultiArrayList(),
+            .refs = ast.refs,
         };
     }
 
@@ -187,7 +233,7 @@ pub const Slice = struct {
         const node = ast.nodes.get(index);
 
         return switch (node) {
-            .string_literal, .number, .column, .cell => index,
+            .string_literal, .number, .column, .pos, .ref => index,
             .assignment,
             .concat,
             .add,
@@ -200,6 +246,8 @@ pub const Slice = struct {
             .builtin => |b| ast.leftMostChild(b.first_arg),
         };
     }
+
+    // TODO: Shrink refs allocation if needed
 
     /// Removes all nodes except for the given index and its children
     /// Nodes in the list are already sorted in reverse topological order which allows us to overwrite
@@ -226,7 +274,7 @@ pub const Slice = struct {
                 .builtin => |*b| {
                     b.first_arg -= first_node;
                 },
-                .string_literal, .number, .column, .cell => {},
+                .string_literal, .number, .column, .pos, .ref => {},
             }
             ast.nodes.set(@intCast(i), n);
         }
@@ -259,7 +307,11 @@ pub const Slice = struct {
         switch (node) {
             .number => |n| try writer.print("{d}", .{n}),
             .column => |col| try Position.writeColumnAddress(col, writer),
-            .cell => |pos| try pos.writeCellAddress(writer),
+            .pos => |pos| try pos.writeCellAddress(writer),
+            .ref => |ref_index| {
+                const ref = ast.refs[ref_index];
+                try ref.resolve().writeCellAddress(writer);
+            },
 
             .string_literal => |str| {
                 try writer.print("\"{s}\"", .{strings[str.start..str.end]});
@@ -416,7 +468,7 @@ pub const Slice = struct {
                     },
                 }
             },
-            .string_literal, .number, .cell, .column => {
+            .string_literal, .number, .pos, .column => {
                 if (!try context.evalCell(index)) return false;
             },
             .builtin => |b| {
@@ -519,6 +571,7 @@ pub fn splice(ast: *Self, new_root: u32) void {
 pub fn toSlice(ast: Self) Slice {
     return .{
         .nodes = ast.nodes.slice(),
+        .refs = ast.refs,
     };
 }
 
@@ -612,8 +665,6 @@ pub const EvalError = error{
     NotEvaluable,
 } || Allocator.Error;
 
-const Sheet = @import("Sheet.zig");
-
 pub fn EvalContext(comptime Context: type) type {
     return struct {
         slice: Slice,
@@ -643,6 +694,7 @@ pub fn EvalContext(comptime Context: type) type {
             break :blk E || ret_info.ErrorUnion.error_set;
         };
 
+        // TODO: Pass references to `context.evalCell` instead of positions
         fn eval(
             self: @This(),
             index: u32,
@@ -651,7 +703,11 @@ pub fn EvalContext(comptime Context: type) type {
 
             return switch (node) {
                 .number => |n| .{ .number = n },
-                .cell => |pos| try self.context.evalCell(pos),
+                .pos => |pos| try self.context.evalCell(pos),
+                .ref => |ref_index| {
+                    const ref = self.slice.refs[ref_index];
+                    return try self.context.evalCell(ref.resolve());
+                },
                 .add => |op| {
                     const lhs = try self.eval(op.lhs);
                     const rhs = try self.eval(op.rhs);
@@ -743,9 +799,9 @@ pub fn EvalContext(comptime Context: type) type {
         }
 
         /// Converts an ast range to a position range.
-        fn toPosRange(self: @This(), r: BinaryOperator) Position.Range {
+        fn toPosRange(self: @This(), r: BinaryOperator) Position.Rect {
             const data = self.slice.nodes.items(.data);
-            return Position.Range.initPos(data[r.lhs].cell, data[r.rhs].cell);
+            return Position.Rect.initPos(data[r.lhs].pos, data[r.rhs].pos);
         }
 
         fn sumRange(self: @This(), r: BinaryOperator) !f64 {
@@ -811,8 +867,8 @@ pub fn EvalContext(comptime Context: type) type {
                     const r = data[i].range;
                     total += try self.sumRange(r);
 
-                    const p1 = data[r.lhs].cell;
-                    const p2 = data[r.rhs].cell;
+                    const p1 = data[r.lhs].pos;
+                    const p2 = data[r.rhs].pos;
                     total_items += Position.area(p1, p2);
                 } else {
                     const res = try self.eval(i);

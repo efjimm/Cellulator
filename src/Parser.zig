@@ -125,7 +125,7 @@ fn parseStringLiteral(parser: *Parser) ParseError!u32 {
     });
 }
 
-/// Assignment <- CellName '=' Expression
+/// Assignment <- CellReference '=' Expression
 fn parseAssignment(parser: *Parser) ParseError!u32 {
     const lhs = try parser.parseCellName();
     _ = try parser.expectToken(.equals_sign);
@@ -209,7 +209,7 @@ fn parsePrimaryExpr(parser: *Parser) !u32 {
     };
 }
 
-/// Range <- CellName (':' CellName)?
+/// Range <- CellReference (':' CellReference)?
 fn parseRange(parser: *Parser) !u32 {
     const lhs = try parser.parseCellName();
 
@@ -284,7 +284,7 @@ fn parseNumber(parser: *Parser) !u32 {
     });
 }
 
-/// CellName <- ('a'-'z' / 'A'-'Z')+ ('0'-'9')+
+/// CellReference <- ('a'-'z' / 'A'-'Z')+ ('0'-'9')+
 fn parseCellName(parser: *Parser) !u32 {
     const token = try parser.expectToken(.cell_name);
     const text = token.text(parser.source());
@@ -292,7 +292,7 @@ fn parseCellName(parser: *Parser) !u32 {
     const pos = Position.fromAddress(text) catch return error.InvalidCellAddress;
 
     return parser.addNode(.{
-        .cell = pos,
+        .pos = pos,
     });
 }
 
@@ -357,23 +357,23 @@ test "parser" {
         }
     }.func;
 
-    try testParser("let a0 = 5", &.{ .cell, .number, .assignment });
-    try testParser("let a0 = 5.0 + +5.0", &.{ .cell, .number, .number, .add, .assignment });
-    try testParser("let a0 = 5.0 + -5.0", &.{ .cell, .number, .number, .add, .assignment });
-    try testParser("let a0 = 5.0 - +5.0", &.{ .cell, .number, .number, .sub, .assignment });
-    try testParser("let a0 = 5.0 - -5.0", &.{ .cell, .number, .number, .sub, .assignment });
-    try testParser("let b0 = 0.0 + 1.123", &.{ .cell, .number, .number, .add, .assignment });
-    try testParser("let xxx50000 = 000000 - 11111122222223333333444444", &.{ .cell, .number, .number, .sub, .assignment });
-    try testParser("let c30 = 123_123.231 * 2", &.{ .cell, .number, .number, .mul, .assignment });
-    try testParser("let crxp65535 = 123_123.321 / 123_123.321", &.{ .cell, .number, .number, .div, .assignment });
+    try testParser("let a0 = 5", &.{ .pos, .number, .assignment });
+    try testParser("let a0 = 5.0 + +5.0", &.{ .pos, .number, .number, .add, .assignment });
+    try testParser("let a0 = 5.0 + -5.0", &.{ .pos, .number, .number, .add, .assignment });
+    try testParser("let a0 = 5.0 - +5.0", &.{ .pos, .number, .number, .sub, .assignment });
+    try testParser("let a0 = 5.0 - -5.0", &.{ .pos, .number, .number, .sub, .assignment });
+    try testParser("let b0 = 0.0 + 1.123", &.{ .pos, .number, .number, .add, .assignment });
+    try testParser("let xxx50000 = 000000 - 11111122222223333333444444", &.{ .pos, .number, .number, .sub, .assignment });
+    try testParser("let c30 = 123_123.231 * 2", &.{ .pos, .number, .number, .mul, .assignment });
+    try testParser("let crxp65535 = 123_123.321 / 123_123.321", &.{ .pos, .number, .number, .div, .assignment });
 
-    try testParser("let a0 = 3 - 1 * 2", &.{ .cell, .number, .number, .number, .mul, .sub, .assignment });
-    try testParser("let a0 = 1 / 2 + 3", &.{ .cell, .number, .number, .div, .number, .add, .assignment });
-    try testParser("let a0 = 1 - (3 + 5)", &.{ .cell, .number, .number, .number, .add, .sub, .assignment });
-    try testParser("let a0 = (1 + 2) - (2 + 1)", &.{ .cell, .number, .number, .add, .number, .number, .add, .sub, .assignment });
-    try testParser("let a0 = 2 / (1 - (1 + 3))", &.{ .cell, .number, .number, .number, .number, .add, .sub, .div, .assignment });
+    try testParser("let a0 = 3 - 1 * 2", &.{ .pos, .number, .number, .number, .mul, .sub, .assignment });
+    try testParser("let a0 = 1 / 2 + 3", &.{ .pos, .number, .number, .div, .number, .add, .assignment });
+    try testParser("let a0 = 1 - (3 + 5)", &.{ .pos, .number, .number, .number, .add, .sub, .assignment });
+    try testParser("let a0 = (1 + 2) - (2 + 1)", &.{ .pos, .number, .number, .add, .number, .number, .add, .sub, .assignment });
+    try testParser("let a0 = 2 / (1 - (1 + 3))", &.{ .pos, .number, .number, .number, .number, .add, .sub, .div, .assignment });
 
-    try testParser("let a0 = 'this is epic' # ' and nice'", &.{ .cell, .string_literal, .string_literal, .concat, .assignment });
+    try testParser("let a0 = 'this is epic' # ' and nice'", &.{ .pos, .string_literal, .string_literal, .concat, .assignment });
 
     try testParseError("unga bunga", error.UnexpectedToken);
     try testParseError("let", error.UnexpectedToken);
@@ -447,7 +447,7 @@ test "Node contents" {
     try testNodes(
         "let b30 = 5 * (3 - 2) / (2 + 1)",
         &.{
-            .{ .cell = .{ .x = 1, .y = 30 } },
+            .{ .pos = .{ .x = 1, .y = 30 } },
             .{ .number = 5.0 },
             .{ .number = 3.0 },
             .{ .number = 2.0 },
@@ -463,7 +463,7 @@ test "Node contents" {
     try testNodes(
         "let crxp65535 = 'this is epic' # 'nice'",
         &.{
-            .{ .cell = .{ .x = 65535, .y = 65535 } },
+            .{ .pos = .{ .x = 65535, .y = 65535 } },
             .{
                 .string_literal = .{
                     .start = "let crxp65535 = '".len,

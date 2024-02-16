@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const utils = @import("utils.zig");
 const Position = @import("Position.zig").Position;
 const PosInt = Position.Int;
-const Range = Position.Range;
+const Rect = Position.Rect;
 const Ast = @import("Ast.zig");
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 const RTree = @import("tree.zig").RTree;
@@ -14,12 +14,9 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 const Sheet = @This();
-const NodeList = std.ArrayList(Position);
-const NodeListUnmanaged = std.ArrayListUnmanaged(Position);
 
 const log = std.log.scoped(.sheet);
 
-const CellSet = std.HashMapUnmanaged(Position, void, PositionContext, 80);
 pub const CellTreap = std.Treap(Cell, Cell.compare);
 
 /// List of cells that need to be re-evaluated.
@@ -54,7 +51,7 @@ cell_treap: CellTreap = .{},
 rows: RowAxis = .{},
 cols: ColumnAxis = .{},
 
-search_buffer: std.ArrayListUnmanaged(std.ArrayListUnmanaged(Range)) = .{},
+search_buffer: std.ArrayListUnmanaged(std.ArrayListUnmanaged(Rect)) = .{},
 
 filepath: std.BoundedArray(u8, std.fs.MAX_PATH_BYTES) = .{}, // TODO: Heap allocate this
 
@@ -70,10 +67,10 @@ const tree_children = 4;
 const Node = CellTreap.Node;
 
 const SheetRange = struct {
-    range: Range,
+    range: Rect,
     dependent_cells: RangeList,
 };
-const RangeList = std.ArrayListUnmanaged(Range);
+const RangeList = std.ArrayListUnmanaged(Rect);
 
 fn getArena(sheet: *Sheet) Arena {
     return sheet.arena.promote(sheet.allocator);
@@ -340,7 +337,7 @@ pub fn loadFile(sheet: *Sheet, ast_allocator: Allocator, filepath: []const u8, c
 
         const data = ast.nodes.items(.data);
         const assignment = data[ast.rootNodeIndex()].assignment;
-        const pos = data[assignment.lhs].cell;
+        const pos = data[assignment.lhs].pos;
         ast.splice(assignment.rhs);
 
         try sheet.setCell(pos, line, ast, .{ .undo_type = null });
@@ -383,7 +380,7 @@ pub fn writeFile(
 /// Iterator over all the positions referenced in an expression.
 const ExprPosIterator = struct {
     range_iter: ExprRangeIterator,
-    pos_iter: Range.Iterator,
+    pos_iter: Rect.Iterator,
 
     fn init(ast: Ast) ExprPosIterator {
         var ret = ExprPosIterator{
@@ -394,8 +391,8 @@ const ExprPosIterator = struct {
         if (ret.range_iter.next()) |range| {
             ret.pos_iterator = range.iterator();
         } else {
-            ret.pos_iterator = Range.Iterator{
-                .range = std.mem.zeroes(Range.Iterator),
+            ret.pos_iterator = Rect.Iterator{
+                .range = std.mem.zeroes(Rect.Iterator),
                 .y = 1,
                 .x = 0,
             };
@@ -425,7 +422,7 @@ const ExprRangeIterator = struct {
         };
     }
 
-    fn next(it: *ExprRangeIterator) ?Range {
+    fn next(it: *ExprRangeIterator) ?Rect {
         if (it.i == 0) return null;
 
         const slice = it.ast.nodes;
@@ -435,16 +432,16 @@ const ExprRangeIterator = struct {
         defer it.i = @intCast(iter.index);
 
         return while (iter.next()) |tag| switch (tag) {
-            .cell => {
-                const pos = data[iter.index].cell;
-                break Range.initSinglePos(pos);
+            .pos => {
+                const pos = data[iter.index].pos;
+                break Rect.initSinglePos(pos);
             },
             .range => {
                 const r = data[iter.index].range;
-                const p1 = data[r.lhs].cell;
-                const p2 = data[r.rhs].cell;
+                const p1 = data[r.lhs].pos;
+                const p2 = data[r.rhs].pos;
                 iter.index -= 2;
-                break Range.initPos(p1, p2);
+                break Rect.initPos(p1, p2);
             },
             else => continue,
         } else null;
@@ -454,8 +451,8 @@ const ExprRangeIterator = struct {
 /// Adds `dependent_range` as a dependent of all cells in `range`.
 fn addRangeDependents(
     sheet: *Sheet,
-    dependent_range: Range,
-    range: Range,
+    dependent_range: Rect,
+    range: Rect,
 ) Allocator.Error!void {
     return sheet.rtree.put(sheet.allocator, range, dependent_range);
 }
@@ -463,7 +460,7 @@ fn addRangeDependents(
 /// Adds `dependent_range` as a dependent of all cells referenced by `expr`.
 fn addExpressionDependents(
     sheet: *Sheet,
-    dependent_range: Range,
+    dependent_range: Rect,
     expr: Ast,
 ) Allocator.Error!void {
     var iter = ExprRangeIterator.init(expr);
@@ -475,8 +472,8 @@ fn addExpressionDependents(
 /// Removes `dependent_range` as a dependent of all cells in `range`
 fn removeRangeDependents(
     sheet: *Sheet,
-    dependent_range: Range,
-    range: Range,
+    dependent_range: Rect,
+    range: Rect,
 ) Allocator.Error!void {
     return sheet.rtree.removeValue(sheet.allocator, range, dependent_range);
 }
@@ -484,12 +481,24 @@ fn removeRangeDependents(
 /// Removes `dependent_range` as a dependent of the cells referenced by `expr`.
 fn removeExprDependents(
     sheet: *Sheet,
-    dependent_range: Range,
+    dependent_range: Rect,
     expr: Ast,
 ) Allocator.Error!void {
     var iter = ExprRangeIterator.init(expr);
     while (iter.next()) |range| {
         try sheet.removeRangeDependents(dependent_range, range);
+    }
+}
+
+/// Creates any necessary row/column anchors referred to in the expression
+fn createAnchorsForExpression(sheet: *Sheet, expr: Ast) Allocator.Error!void {
+    var iter = ExprRangeIterator.init(expr);
+    while (iter.next()) |range| {
+        _ = try sheet.createRow(range.tl.y);
+        _ = try sheet.createColumn(range.tl.x);
+
+        if (range.br.y != range.tl.y) _ = try sheet.createRow(range.br.y);
+        if (range.br.x != range.tl.x) _ = try sheet.createColumn(range.br.x);
     }
 }
 
@@ -564,7 +573,7 @@ pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
 // the first side in two, and so on, until the range is one cell wide.
 
 /// Given a range, find the first row that contains a cell
-fn findExtantRow(sheet: *Sheet, range: Range, p: enum { first, last }) !?PosInt {
+fn findExtantRow(sheet: *Sheet, range: Rect, p: enum { first, last }) !?PosInt {
     var r = range;
     var iter = sheet.cell_tree.searchIterator(sheet.allocator, r);
     defer iter.deinit();
@@ -576,12 +585,12 @@ fn findExtantRow(sheet: *Sheet, range: Range, p: enum { first, last }) !?PosInt 
         if (height == 0) break r.br.y;
 
         const left_height = height / 2;
-        const left: Range = .{
+        const left: Rect = .{
             .tl = r.tl,
             .br = .{ .x = r.br.x, .y = r.tl.y + left_height },
         };
 
-        const right: Range = .{
+        const right: Rect = .{
             .tl = .{ .x = r.tl.x, .y = r.tl.y + left_height + 1 },
             .br = r.br,
         };
@@ -597,7 +606,7 @@ fn findExtantRow(sheet: *Sheet, range: Range, p: enum { first, last }) !?PosInt 
 }
 
 /// Given a range, find the first column that contains a cell
-fn findExtantCol(sheet: *Sheet, range: Range, p: enum { first, last }) !?PosInt {
+fn findExtantCol(sheet: *Sheet, range: Rect, p: enum { first, last }) !?PosInt {
     var r = range;
     var iter = sheet.cell_tree.searchIterator(sheet.allocator, r);
     defer iter.deinit();
@@ -609,12 +618,12 @@ fn findExtantCol(sheet: *Sheet, range: Range, p: enum { first, last }) !?PosInt 
         if (width == 0) break r.br.x;
 
         const left_width = width / 2;
-        const left: Range = .{
+        const left: Rect = .{
             .tl = r.tl,
             .br = .{ .x = r.tl.x + left_width, .y = r.br.y },
         };
 
-        const right: Range = .{
+        const right: Rect = .{
             .tl = .{ .x = r.tl.x + left_width + 1, .y = r.tl.y },
             .br = r.br,
         };
@@ -630,7 +639,7 @@ fn findExtantCol(sheet: *Sheet, range: Range, p: enum { first, last }) !?PosInt 
 }
 
 pub fn nextPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
-    const remaining_row: Range = if (pos.x != std.math.maxInt(PosInt))
+    const remaining_row: Rect = if (pos.x != std.math.maxInt(PosInt))
         .{
             .tl = .{ .x = pos.x + 1, .y = pos.y },
             .br = .{ .x = std.math.maxInt(PosInt), .y = pos.y },
@@ -652,12 +661,12 @@ pub fn nextPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
 
     if (pos.y == std.math.maxInt(PosInt)) return null;
 
-    const range: Range = .{
+    const range: Rect = .{
         .tl = .{ .x = 0, .y = pos.y + 1 },
         .br = .{ .x = std.math.maxInt(PosInt), .y = std.math.maxInt(PosInt) },
     };
     if (try sheet.findExtantRow(range, .first)) |y| {
-        const row: Range = .{
+        const row: Rect = .{
             .tl = .{ .x = 0, .y = y },
             .br = .{ .x = std.math.maxInt(PosInt), .y = y },
         };
@@ -673,7 +682,7 @@ pub fn nextPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
 }
 
 pub fn prevPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
-    const remaining_row: Range = if (pos.x != 0)
+    const remaining_row: Rect = if (pos.x != 0)
         .{
             .tl = .{ .x = 0, .y = pos.y },
             .br = .{ .x = pos.x - 1, .y = pos.y },
@@ -695,12 +704,12 @@ pub fn prevPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
 
     if (pos.y == 0) return null;
 
-    const range: Range = .{
+    const range: Rect = .{
         .tl = .{ .x = 0, .y = 0 },
         .br = .{ .x = std.math.maxInt(PosInt), .y = pos.y - 1 },
     };
     if (try sheet.findExtantRow(range, .last)) |y| {
-        const row: Range = .{
+        const row: Rect = .{
             .tl = .{ .x = 0, .y = y },
             .br = .{ .x = std.math.maxInt(PosInt), .y = y },
         };
@@ -1045,7 +1054,7 @@ pub fn insertCellNode(
 
     try sheet.strings.ensureUnusedCapacity(sheet.allocator, 1);
 
-    const range = Range.initSinglePos(pos);
+    const range = Rect.initSinglePos(pos);
 
     try sheet.cell_tree.put(sheet.allocator, range, {});
     errdefer sheet.cell_tree.remove(sheet.allocator, range) catch {};
@@ -1143,13 +1152,13 @@ pub fn deleteCell(
         try sheet.ensureUndoCapacity(undo_type, 1);
     }
     try sheet.enqueueUpdate(pos);
-    try sheet.removeExprDependents(Range.initSinglePos(pos), cell.ast);
+    try sheet.removeExprDependents(Rect.initSinglePos(pos), cell.ast);
 
     // FIXME: If this allocation fails we are left with an inconsistent state.
     //        This is actually a pain in the ass to fix...
     //        Maybe an RTree function to calculate the amount of mem needed
     //        for a removal ahead of time?
-    try sheet.cell_tree.remove(sheet.allocator, Range.initSinglePos(pos));
+    try sheet.cell_tree.remove(sheet.allocator, Rect.initSinglePos(pos));
 
     // TODO: re-use string buffer
     cell.setError(sheet.allocator);
@@ -1164,7 +1173,7 @@ pub fn deleteCell(
     sheet.has_changes = true;
 }
 
-pub fn deleteCellsInRange(sheet: *Sheet, range: Range) Allocator.Error!void {
+pub noinline fn deleteCellsInRange(sheet: *Sheet, range: Rect) Allocator.Error!void {
     var sfa = std.heap.stackFallback(4096, sheet.allocator);
     const allocator = sfa.get();
 
@@ -1248,7 +1257,7 @@ fn markDirty(
     try sheet.rtree.rtree.searchBuffer(
         sheet.allocator,
         &sheet.search_buffer,
-        Range.initSinglePos(pos),
+        Rect.initSinglePos(pos),
     );
 
     for (sheet.search_buffer.items) |*list| {
@@ -1363,7 +1372,7 @@ pub const EvalContext = struct {
         try context.sheet.rtree.rtree.searchBuffer(
             context.sheet.allocator,
             &context.sheet.search_buffer,
-            Range.initSinglePos(pos),
+            Rect.initSinglePos(pos),
         );
 
         for (context.sheet.search_buffer.items) |*value_list| {
@@ -1546,7 +1555,6 @@ pub fn widthNeededForColumn(
     return width;
 }
 
-/// std.HashMap and std.ArrayHashMap require slightly different contexts.
 const PositionContext = struct {
     pub fn eql(_: PositionContext, p1: Position, p2: Position) bool {
         return p1.y == p2.y and p1.x == p2.x;
@@ -1554,6 +1562,30 @@ const PositionContext = struct {
 
     pub fn hash(_: PositionContext, pos: Position) u64 {
         return pos.hash();
+    }
+};
+
+/// Reference to a specific cell. The cell may not exist.
+pub const Reference = struct {
+    relative_row: bool,
+    relative_col: bool,
+    row: *Row,
+    col: *Column,
+
+    pub fn resolve(pos: Reference) Position {
+        return .{ .x = pos.col.index, .y = pos.row.index };
+    }
+};
+
+pub const Range = struct {
+    tl: Reference,
+    br: Reference,
+
+    pub fn resolve(range: Range) Rect {
+        return .{
+            .tl = range.tl.resolve(),
+            .br = range.br.resolve(),
+        };
     }
 };
 

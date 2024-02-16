@@ -11,7 +11,7 @@ const wcWidth = @import("wcwidth").wcWidth;
 const GapBuffer = @import("GapBuffer.zig");
 const Command = @import("Command.zig");
 const Position = @import("Position.zig").Position;
-const Range = Position.Range;
+const Rect = Position.Rect;
 const PosInt = Position.Int;
 const lua = @import("lua.zig");
 const Lua = @import("ziglua").Lua;
@@ -854,7 +854,7 @@ fn parseCommand(self: *Self, str: []const u8) !void {
     try ast.parse(self.allocator, str);
 
     const op = ast.rootNode().assignment;
-    const pos = ast.nodes.items(.data)[op.lhs].cell;
+    const pos = ast.nodes.items(.data)[op.lhs].pos;
     ast.splice(op.rhs);
 
     try self.setCell(pos, str, ast, .{});
@@ -1094,9 +1094,9 @@ pub fn redo(self: *Self) Allocator.Error!void {
     }
 }
 
-fn visualRange(self: Self) Range {
+fn visualRange(self: Self) Rect {
     assert(self.mode == .visual or self.mode == .select);
-    return Range.initNormalizePos(self.cursor, self.anchor);
+    return Rect.initNormalizePos(self.cursor, self.anchor);
 }
 
 pub fn deleteCell(self: *Self) Allocator.Error!void {
