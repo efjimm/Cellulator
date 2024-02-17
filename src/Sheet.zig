@@ -1,28 +1,27 @@
 const std = @import("std");
+const assert = std.debug.assert;
+const log = std.log.scoped(.sheet);
+const Arena = std.heap.ArenaAllocator;
+const Allocator = std.mem.Allocator;
+
 const builtin = @import("builtin");
 const utils = @import("utils.zig");
+
 const Position = @import("Position.zig").Position;
 const PosInt = Position.Int;
 const Rect = Position.Rect;
+
 const Ast = @import("Ast.zig");
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 const RTree = @import("tree.zig").RTree;
 const DependentTree = @import("tree.zig").DependentTree;
-const Arena = std.heap.ArenaAllocator;
-
-const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 
 const Sheet = @This();
-
-const log = std.log.scoped(.sheet);
-
-pub const CellTreap = std.Treap(Cell, Cell.compare);
 
 /// List of cells that need to be re-evaluated.
 queued_cells: std.ArrayListUnmanaged(*Cell) = .{},
 
-strings: std.AutoHashMapUnmanaged(*Node, []const u8) = .{},
+strings: std.AutoHashMapUnmanaged(*CellNode, []const u8) = .{},
 
 /// True if there have been any changes since the last save
 has_changes: bool = false,
@@ -35,14 +34,15 @@ undo_end_markers: std.AutoHashMapUnmanaged(u32, Marker) = .{},
 /// Range tree mapping ranges to a list of ranges that depend on the first.
 /// Used to query whether a cell belongs to a range and then update the cells
 /// that depend on that range.
-rtree: DependentTree(tree_children) = .{},
+rtree: DependentTree(4) = .{},
 /// Range tree containing just the positions of extant cells.
 /// Used for quick lookup of all extant cells in a range.
-cell_tree: RTree(void, tree_children) = .{},
+cell_tree: RTree(void, 4) = .{},
 
 allocator: Allocator,
 
 /// Cells, rows, and columns must live for the entire life of the sheet in order to support undo/redo.
+/// So that means we can use an arena!
 arena: Arena.State = .{},
 
 cell_treap: CellTreap = .{},
@@ -54,22 +54,15 @@ search_buffer: std.ArrayListUnmanaged(std.ArrayListUnmanaged(*Cell)) = .{},
 
 filepath: std.BoundedArray(u8, std.fs.MAX_PATH_BYTES) = .{}, // TODO: Heap allocate this
 
-const ColumnAxis = std.Treap(Column, Column.compare);
-const RowAxis = std.Treap(Row, Row.compare);
+pub const CellTreap = std.Treap(Cell, Cell.compare);
+pub const ColumnAxis = std.Treap(Column, Column.compare);
+pub const RowAxis = std.Treap(Row, Row.compare);
 
 fn compareAnchor(a: u32, b: u32) std.math.Order {
     return std.math.order(a, b);
 }
 
-const tree_children = 4;
-
-const Node = CellTreap.Node;
-
-const SheetRange = struct {
-    range: Rect,
-    dependent_cells: RangeList,
-};
-const RangeList = std.ArrayListUnmanaged(Rect);
+const CellNode = CellTreap.Node;
 
 fn getArena(sheet: *Sheet) Arena {
     return sheet.arena.promote(sheet.allocator);
@@ -114,7 +107,7 @@ pub const UndoType = enum { undo, redo };
 
 pub const Undo = union(enum) {
     set_cell: struct {
-        node: *Node,
+        node: *CellNode,
         strings: []const u8,
     },
     delete_cell: Position,
@@ -151,7 +144,7 @@ pub fn isEmpty(sheet: *const Sheet) bool {
     return sheet.cell_treap.root == null;
 }
 
-fn treapMax(node: *Node) *Node {
+fn treapMax(node: *CellNode) *CellNode {
     var current = node;
     while (current.children[1]) |right| current = right;
     return current;
@@ -191,7 +184,7 @@ pub fn treapNextNode(
     return p;
 }
 
-pub fn treapPrevNode(key: Position, node: ?*Node, parent: ?*Node) ?*Node {
+pub fn treapPrevNode(key: Position, node: ?*CellNode, parent: ?*CellNode) ?*CellNode {
     if (node) |n| {
         if (n.children[0]) |left| return treapMax(left);
     }
@@ -378,38 +371,6 @@ pub fn writeFile(
         sheet.setFilePath(path);
     }
 }
-
-/// Iterator over all the positions referenced in an expression.
-const ExprPosIterator = struct {
-    range_iter: ExprRangeIterator,
-    pos_iter: Rect.Iterator,
-
-    fn init(ast: Ast) ExprPosIterator {
-        var ret = ExprPosIterator{
-            .range_iterator = ExprRangeIterator.init(ast),
-            .pos_iterator = undefined,
-        };
-
-        if (ret.range_iter.next()) |range| {
-            ret.pos_iterator = range.iterator();
-        } else {
-            ret.pos_iterator = Rect.Iterator{
-                .range = std.mem.zeroes(Rect.Iterator),
-                .y = 1,
-                .x = 0,
-            };
-        }
-
-        return ret;
-    }
-
-    fn next(it: *ExprPosIterator) ?Position {
-        if (it.pos_iter.next()) |p| return p;
-        const new_range = it.range_iter.next() orelse return null;
-        it.pos_iter = new_range.iterator();
-        return it.pos_iter.next();
-    }
-};
 
 /// Iterator over the cells referenced by an expression, as ranges.
 /// Singular cell references are treated as a single-celled range.
@@ -1029,7 +990,7 @@ pub fn setCell(
     const strings = try ast.dupeStrings(sheet.allocator, source);
     errdefer sheet.allocator.free(strings);
 
-    const new_node = try sheet.arenaCreate(Node);
+    const new_node = try sheet.arenaCreate(CellNode);
     errdefer sheet.arenaDestroy(new_node);
 
     // Create row and column if they don't exist
@@ -1053,7 +1014,7 @@ pub fn setCell(
 pub fn insertCellNode(
     sheet: *Sheet,
     strings: []const u8,
-    new_node: *Node,
+    new_node: *CellNode,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
     // TODO: Change this position to be a relative cell reference to this cell
@@ -1339,8 +1300,8 @@ pub const Cell = struct {
         };
     }
 
-    pub fn node(cell: *Cell) *Node {
-        return @fieldParentPtr(Node, "key", cell);
+    pub fn node(cell: *Cell) *CellNode {
+        return @fieldParentPtr(CellNode, "key", cell);
     }
 
     fn compare(a: Cell, b: Cell) std.math.Order {
