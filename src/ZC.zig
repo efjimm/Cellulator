@@ -1369,12 +1369,16 @@ pub fn createAst(self: *Self) Ast {
 pub fn delAst(self: *Self, ast: Ast) Allocator.Error!void {
     var temp = ast;
     temp.nodes.len = 0;
+    self.allocator.free(ast.refs);
+    temp.refs = &.{};
     try self.asts.append(self.allocator, temp);
 }
 
 pub fn destroyAst(self: *Self, ast: Ast) void {
     var temp = ast;
     temp.nodes.len = 0;
+    self.allocator.free(ast.refs);
+    temp.refs = &.{};
     self.asts.appendAssumeCapacity(temp);
 }
 

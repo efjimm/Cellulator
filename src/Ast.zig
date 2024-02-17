@@ -64,7 +64,10 @@ pub fn parseExpr(ast: *Self, allocator: Allocator, source: []const u8) ParseErro
     const tokenizer = Tokenizer.init(source);
 
     var parser = Parser.init(allocator, tokenizer, .{ .nodes = ast.nodes });
-    errdefer parser.deinit();
+    errdefer {
+        parser.deinit();
+        ast.nodes = .{};
+    }
     _ = try parser.parseExpression();
 
     ast.nodes = parser.nodes;
@@ -75,7 +78,7 @@ pub fn parseExpr(ast: *Self, allocator: Allocator, source: []const u8) ParseErro
 /// Anchors the AST to the given sheet, by replacing all 'dumb' coordinate references with
 /// references to the row/column pointers in `sheet`.
 pub fn anchor(ast: *Self, sheet: *Sheet) Allocator.Error!void {
-    assert(ast.refs.items.len == 0);
+    assert(ast.refs.len == 0);
 
     const tags = ast.nodes.items(.tags);
     const data = ast.nodes.items(.data);
@@ -87,16 +90,19 @@ pub fn anchor(ast: *Self, sheet: *Sheet) Allocator.Error!void {
         break :blk count;
     };
 
+    if (pos_count == 0) return;
+
     var refs = try std.ArrayListUnmanaged(Reference).initCapacity(sheet.allocator, pos_count);
     // Don't need to shrink because initCapacity allocates *exactly* pos_count
-    defer ast.refs = refs.items;
+    defer ast.refs = refs.allocatedSlice();
+    errdefer refs.clearAndFree(sheet.allocator);
 
+    var index: u32 = 0;
     for (tags, data) |*tag, *d| {
-        if (tag == .pos) {
+        if (tag.* == .pos) {
             const row = try sheet.createRow(d.pos.y);
             const col = try sheet.createColumn(d.pos.x);
 
-            const index: u32 = @intCast(ast.refs.items.len);
             refs.appendAssumeCapacity(.{
                 .relative_row = true, // TODO: Allow absolute
                 .relative_col = true,
@@ -104,7 +110,8 @@ pub fn anchor(ast: *Self, sheet: *Sheet) Allocator.Error!void {
                 .col = col,
             });
             tag.* = .ref;
-            data.* = .{ .ref = index };
+            d.* = .{ .ref = index };
+            index += 1;
         }
     }
 }
@@ -703,10 +710,10 @@ pub fn EvalContext(comptime Context: type) type {
 
             return switch (node) {
                 .number => |n| .{ .number = n },
-                .pos => |pos| try self.context.evalCell(pos),
+                .pos => unreachable,
                 .ref => |ref_index| {
                     const ref = self.slice.refs[ref_index];
-                    return try self.context.evalCell(ref.resolve());
+                    return try self.context.evalCell(ref);
                 },
                 .add => |op| {
                     const lhs = try self.eval(op.lhs);
@@ -801,21 +808,28 @@ pub fn EvalContext(comptime Context: type) type {
         /// Converts an ast range to a position range.
         fn toPosRange(self: @This(), r: BinaryOperator) Position.Rect {
             const data = self.slice.nodes.items(.data);
-            return Position.Rect.initPos(data[r.lhs].pos, data[r.rhs].pos);
+            const ref1 = self.slice.refs[data[r.lhs].ref];
+            const ref2 = self.slice.refs[data[r.rhs].ref];
+
+            const p1 = ref1.resolve();
+            const p2 = ref2.resolve();
+            return Position.Rect.initPos(p1, p2);
         }
 
         fn sumRange(self: @This(), r: BinaryOperator) !f64 {
             const range = self.toPosRange(r);
 
             var total: f64 = 0;
-            const kvs = try self.sheet.cell_tree.search(self.allocator, range);
-            for (kvs) |kv| {
-                // TODO: Check this out
-                var iter = kv.key.iterator();
-                while (iter.next()) |p| {
-                    const res = try self.context.evalCell(p);
-                    total += try res.toNumber(0);
-                }
+            var iter = self.sheet.cell_tree.searchIterator(self.allocator, range);
+            while (try iter.next()) |kv| {
+                const p = kv.key.tl;
+                const row = self.sheet.getRowPtr(p.y).?;
+                const col = self.sheet.getColumnPtr(p.x).?;
+                const res = try self.context.evalCell(.{
+                    .row = row,
+                    .col = col,
+                });
+                total += try res.toNumber(0);
             }
 
             return total;
@@ -845,9 +859,16 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var total: f64 = 1;
-            var iter = range.iterator();
-            while (iter.next()) |pos| {
-                const res = try self.context.evalCell(pos);
+            var iter = self.sheet.cell_tree.searchIterator(self.allocator, range);
+
+            while (try iter.next()) |item| {
+                const p = item.key.tl;
+                const row = self.sheet.getRowPtr(p.y).?;
+                const col = self.sheet.getColumnPtr(p.x).?;
+                const res = try self.context.evalCell(.{
+                    .row = row,
+                    .col = col,
+                });
                 total *= try res.toNumber(1);
             }
 
@@ -867,8 +888,14 @@ pub fn EvalContext(comptime Context: type) type {
                     const r = data[i].range;
                     total += try self.sumRange(r);
 
-                    const p1 = data[r.lhs].pos;
-                    const p2 = data[r.rhs].pos;
+                    const p1, const p2 = blk: {
+                        const r1 = data[r.lhs].ref;
+                        const r2 = data[r.rhs].ref;
+                        break :blk .{
+                            self.slice.refs[r1].resolve(),
+                            self.slice.refs[r2].resolve(),
+                        };
+                    };
                     total_items += Position.area(p1, p2);
                 } else {
                     const res = try self.eval(i);
@@ -908,9 +935,16 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var max: ?f64 = null;
-            var iter = range.iterator();
-            while (iter.next()) |pos| {
-                const res = try self.context.evalCell(pos);
+            var iter = self.sheet.cell_tree.searchIterator(self.allocator, range);
+            while (try iter.next()) |item| {
+                const p = item.key.tl;
+
+                const row = self.sheet.getRowPtr(p.y).?;
+                const col = self.sheet.getColumnPtr(p.x).?;
+                const res = try self.context.evalCell(.{
+                    .row = row,
+                    .col = col,
+                });
                 const n = try res.toNumberOrNull() orelse continue;
                 if (max == null or n > max.?) max = n;
             }
@@ -946,9 +980,15 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var min: ?f64 = null;
-            var iter = range.iterator();
-            while (iter.next()) |pos| {
-                const res = try self.context.evalCell(pos);
+            var iter = self.sheet.cell_tree.searchIterator(self.allocator, range);
+            while (try iter.next()) |item| {
+                const p = item.key.tl;
+                const row = self.sheet.getRowPtr(p.y).?;
+                const col = self.sheet.getColumnPtr(p.x).?;
+                const res = try self.context.evalCell(.{
+                    .row = row,
+                    .col = col,
+                });
                 const n = try res.toNumberOrNull() orelse continue;
                 if (min == null or n < min.?) min = n;
             }
@@ -1004,7 +1044,7 @@ const EvalDynamicError = error{
 test "Parse and Eval Expression" {
     const t = std.testing;
     const Context = struct {
-        pub fn evalCell(_: @This(), _: Position) !EvalResult {
+        pub fn evalCell(_: @This(), _: Reference) !EvalResult {
             unreachable;
         }
     };
@@ -1065,27 +1105,22 @@ test "Parse and Eval Expression" {
 test "Functions on Ranges" {
     const t = std.testing;
     const Test = struct {
-        sheet: *Sheet,
-
-        fn evalCell(context: *const @This(), pos: Position) !EvalResult {
-            const ptr: *const Sheet.EvalContext = @ptrCast(context);
-            return Sheet.EvalContext.evalCell(ptr.*, pos);
-        }
-
         fn testSheetExpr(expected: f64, expr: []const u8) !void {
             var sheet = Sheet.init(t.allocator);
             defer sheet.deinit();
 
-            try sheet.setCell(.{ .x = 0, .y = 0 }, "0", try Self.fromExpression(t.allocator, "0"), .{});
-            try sheet.setCell(.{ .x = 1, .y = 0 }, "100", try Self.fromExpression(t.allocator, "100"), .{});
-            try sheet.setCell(.{ .x = 0, .y = 1 }, "500", try Self.fromExpression(t.allocator, "500"), .{});
-            try sheet.setCell(.{ .x = 1, .y = 1 }, "333.33", try Self.fromExpression(t.allocator, "333.33"), .{});
+            try sheet.setCell(try Position.fromAddress("A0"), "0", try Self.fromExpression(t.allocator, "0"), .{});
+            try sheet.setCell(try Position.fromAddress("B0"), "100", try Self.fromExpression(t.allocator, "100"), .{});
+            try sheet.setCell(try Position.fromAddress("A1"), "500", try Self.fromExpression(t.allocator, "500"), .{});
+            try sheet.setCell(try Position.fromAddress("B1"), "333.33", try Self.fromExpression(t.allocator, "333.33"), .{});
 
             var ast = try fromExpression(t.allocator, expr);
             defer ast.deinit(t.allocator);
 
+            try ast.anchor(&sheet);
+
             try sheet.update();
-            const res = try ast.eval(&sheet, "", @This(){ .sheet = &sheet });
+            const res = try ast.eval(&sheet, "", Sheet.EvalContext{ .sheet = &sheet });
             try std.testing.expectApproxEqRel(expected, res.number, 0.0001);
         }
     };
@@ -1148,7 +1183,7 @@ test "Splice" {
     const allocator = arena.allocator();
 
     const Context = struct {
-        pub fn evalCell(_: @This(), _: Position) !EvalResult {
+        pub fn evalCell(_: @This(), _: Reference) !EvalResult {
             return .none;
         }
     };
