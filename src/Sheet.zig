@@ -417,7 +417,7 @@ fn addRangeDependents(
     dependent: *Cell,
     range: Range,
 ) Allocator.Error!void {
-    return sheet.rtree.put(sheet.allocator, range, dependent);
+    return sheet.rtree.put(sheet, range, dependent);
 }
 
 fn addExpressionDependents(
@@ -437,7 +437,7 @@ fn removeRangeDependents(
     dependent: *Cell,
     range: Range,
 ) Allocator.Error!void {
-    return sheet.rtree.removeValue(sheet.allocator, range, dependent);
+    return sheet.rtree.removeValue(sheet, range, dependent);
 }
 
 /// Removes `cell` as a dependent of all ranges referenced by `expr`.
@@ -1027,8 +1027,8 @@ pub fn insertCellNode(
 
     try sheet.strings.ensureUnusedCapacity(sheet.allocator, 1);
 
-    try sheet.cell_tree.put(sheet.allocator, cell_ptr, {});
-    errdefer sheet.cell_tree.remove(sheet.allocator, cell_ptr) catch {};
+    try sheet.cell_tree.put(sheet, cell_ptr, {});
+    errdefer sheet.cell_tree.remove(sheet, cell_ptr) catch {};
 
     var entry = sheet.cell_treap.getEntryFor(new_node.key);
     const node = entry.node orelse {
@@ -1113,7 +1113,7 @@ pub fn deleteCellByPtr(
     //        This is actually a pain in the ass to fix...
     //        Maybe an RTree function to calculate the amount of mem needed
     //        for a removal ahead of time?
-    try sheet.cell_tree.remove(sheet.allocator, cell);
+    try sheet.cell_tree.remove(sheet, cell);
 
     // TODO: re-use string buffer
     cell.setError(sheet.allocator);
@@ -1696,9 +1696,8 @@ test "Load file" {
     try zc.setCellString(try Position.fromAddress("C0"), "10", .{});
     try zc.updateCells();
 
-    zc.sheet.clearRetainingCapacity(&zc);
-    // try zc.loadCmd("erm.zc");
-    // try zc.updateCells();
+    try zc.loadCmd("erm.zc");
+    try zc.updateCells();
 }
 
 test "Update values" {
@@ -1706,11 +1705,19 @@ test "Update values" {
     var sheet = Sheet.init(t.allocator);
     defer sheet.deinit();
 
-    for (0..4) |_| {
+    try sheet.setCell(
+        try Position.fromAddress("C0"),
+        "@sum(A0:B0)",
+        try Ast.fromExpression(t.allocator, "@sum(A0:B0)"),
+        .{},
+    );
+
+    inline for (0..4) |i| {
+        const str = std.fmt.comptimePrint("{d}", .{i});
         try sheet.setCell(
             try Position.fromAddress("A0"),
-            "1",
-            try Ast.fromExpression(t.allocator, "1"),
+            str,
+            try Ast.fromExpression(t.allocator, str),
             .{},
         );
         try sheet.setCell(
@@ -1721,16 +1728,9 @@ test "Update values" {
         );
         try sheet.update();
     }
-
-    try sheet.setCell(
-        try Position.fromAddress("C0"),
-        "@sum(A0:B0)",
-        try Ast.fromExpression(t.allocator, "@sum(A0:B0)"),
-        .{},
-    );
     try sheet.update();
     const cell = sheet.getCellPtr(try Position.fromAddress("C0")).?;
-    try t.expectEqual(2.0, cell.value.number);
+    try t.expectEqual(6.0, cell.value.number);
 }
 
 fn testCellEvaluation(a: Allocator) !void {
