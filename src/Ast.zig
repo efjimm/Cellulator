@@ -822,13 +822,7 @@ pub fn EvalContext(comptime Context: type) type {
             var total: f64 = 0;
             var iter = self.sheet.cell_tree.searchIterator(self.allocator, range);
             while (try iter.next()) |kv| {
-                const p = kv.key.tl;
-                const row = self.sheet.getRowPtr(p.y).?;
-                const col = self.sheet.getColumnPtr(p.x).?;
-                const res = try self.context.evalCell(.{
-                    .row = row,
-                    .col = col,
-                });
+                const res = try self.context.evalCellByPtr(kv.key);
                 total += try res.toNumber(0);
             }
 
@@ -861,14 +855,8 @@ pub fn EvalContext(comptime Context: type) type {
             var total: f64 = 1;
             var iter = self.sheet.cell_tree.searchIterator(self.allocator, range);
 
-            while (try iter.next()) |item| {
-                const p = item.key.tl;
-                const row = self.sheet.getRowPtr(p.y).?;
-                const col = self.sheet.getColumnPtr(p.x).?;
-                const res = try self.context.evalCell(.{
-                    .row = row,
-                    .col = col,
-                });
+            while (try iter.next()) |kv| {
+                const res = try self.context.evalCellByPtr(kv.key);
                 total *= try res.toNumber(1);
             }
 
@@ -936,15 +924,8 @@ pub fn EvalContext(comptime Context: type) type {
 
             var max: ?f64 = null;
             var iter = self.sheet.cell_tree.searchIterator(self.allocator, range);
-            while (try iter.next()) |item| {
-                const p = item.key.tl;
-
-                const row = self.sheet.getRowPtr(p.y).?;
-                const col = self.sheet.getColumnPtr(p.x).?;
-                const res = try self.context.evalCell(.{
-                    .row = row,
-                    .col = col,
-                });
+            while (try iter.next()) |kv| {
+                const res = try self.context.evalCellByPtr(kv.key);
                 const n = try res.toNumberOrNull() orelse continue;
                 if (max == null or n > max.?) max = n;
             }
@@ -981,14 +962,8 @@ pub fn EvalContext(comptime Context: type) type {
 
             var min: ?f64 = null;
             var iter = self.sheet.cell_tree.searchIterator(self.allocator, range);
-            while (try iter.next()) |item| {
-                const p = item.key.tl;
-                const row = self.sheet.getRowPtr(p.y).?;
-                const col = self.sheet.getColumnPtr(p.x).?;
-                const res = try self.context.evalCell(.{
-                    .row = row,
-                    .col = col,
-                });
+            while (try iter.next()) |kv| {
+                const res = try self.context.evalCellByPtr(kv.key);
                 const n = try res.toNumberOrNull() orelse continue;
                 if (min == null or n < min.?) min = n;
             }
@@ -1045,6 +1020,10 @@ test "Parse and Eval Expression" {
     const t = std.testing;
     const Context = struct {
         pub fn evalCell(_: @This(), _: Reference) !EvalResult {
+            unreachable;
+        }
+
+        pub fn evalCellByPtr(_: @This(), _: *Sheet.Cell) !EvalResult {
             unreachable;
         }
     };
@@ -1184,6 +1163,10 @@ test "Splice" {
 
     const Context = struct {
         pub fn evalCell(_: @This(), _: Reference) !EvalResult {
+            return .none;
+        }
+
+        pub fn evalCellByPtr(_: @This(), _: *Sheet.Cell) !EvalResult {
             return .none;
         }
     };

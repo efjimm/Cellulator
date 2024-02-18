@@ -37,7 +37,7 @@ undo_end_markers: std.AutoHashMapUnmanaged(u32, Marker) = .{},
 rtree: DependentTree(4) = .{},
 /// Range tree containing just the positions of extant cells.
 /// Used for quick lookup of all extant cells in a range.
-cell_tree: RTree(void, 4) = .{},
+cell_tree: RTree(*Cell, void, 4) = .{},
 
 allocator: Allocator,
 
@@ -472,8 +472,8 @@ pub fn firstCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
     defer iter.deinit();
 
     var min: ?PosInt = null;
-    while (try iter.next()) |item| {
-        const x = item.key.tl.x;
+    while (try iter.next()) |kv| {
+        const x = kv.key.col.index;
         if (min == null or x < min.?) min = x;
     }
 
@@ -488,8 +488,8 @@ pub fn lastCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
     defer iter.deinit();
 
     var max: ?PosInt = null;
-    while (try iter.next()) |item| {
-        const x = item.key.tl.x;
+    while (try iter.next()) |kv| {
+        const x = kv.key.col.index;
         if (max == null or x > max.?) max = x;
     }
 
@@ -506,8 +506,8 @@ pub fn firstCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
     defer iter.deinit();
 
     var min: ?PosInt = null;
-    while (try iter.next()) |item| {
-        const y = item.key.tl.y;
+    while (try iter.next()) |kv| {
+        const y = kv.key.row.index;
         if (min == null or y < min.?) min = y;
     }
 
@@ -522,8 +522,8 @@ pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
     defer iter.deinit();
 
     var max: ?PosInt = null;
-    while (try iter.next()) |item| {
-        const y = item.key.tl.y;
+    while (try iter.next()) |kv| {
+        const y = kv.key.row.index;
         if (max == null or y > max.?) max = y;
     }
 
@@ -1018,6 +1018,7 @@ pub fn insertCellNode(
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
     // TODO: Change this position to be a relative cell reference to this cell
+    const cell_ptr = &new_node.key;
     const pos = new_node.key.position();
     if (undo_opts.undo_type) |undo_type| {
         try sheet.ensureUndoCapacity(undo_type, 1);
@@ -1026,12 +1027,9 @@ pub fn insertCellNode(
 
     try sheet.strings.ensureUnusedCapacity(sheet.allocator, 1);
 
-    const range = Rect.initSinglePos(pos);
+    try sheet.cell_tree.put(sheet.allocator, cell_ptr, {});
+    errdefer sheet.cell_tree.remove(sheet.allocator, cell_ptr) catch {};
 
-    try sheet.cell_tree.put(sheet.allocator, range, {});
-    errdefer sheet.cell_tree.remove(sheet.allocator, range) catch {};
-
-    const cell_ptr = &new_node.key;
     var entry = sheet.cell_treap.getEntryFor(new_node.key);
     const node = entry.node orelse {
         try sheet.addExpressionDependents(cell_ptr, new_node.key.ast);
@@ -1096,32 +1094,30 @@ pub fn insertCellNode(
     sheet.has_changes = true;
 }
 
-pub fn deleteCell(
+pub fn deleteCellByPtr(
     sheet: *Sheet,
-    pos: Position,
+    cell: *Cell,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
-    const row = sheet.getRowPtr(pos.y) orelse return;
-    const col = sheet.getColumnPtr(pos.x) orelse return;
-    var entry = sheet.cell_treap.getEntryFor(.{ .row = row, .col = col });
-    const node = entry.node orelse return;
-    var cell = node.key;
+    // Assert that this cell actually exists in the cell treap.
+    const node = cell.node();
+    assert(sheet.cell_treap.getEntryFor(cell.*).node == node);
 
     if (undo_opts.undo_type) |undo_type| {
         try sheet.ensureUndoCapacity(undo_type, 1);
     }
-    try sheet.enqueueUpdate(&node.key);
-    try sheet.removeExprDependents(&node.key, cell.ast);
+    try sheet.enqueueUpdate(cell);
+    try sheet.removeExprDependents(cell, cell.ast);
 
     // FIXME: If this allocation fails we are left with an inconsistent state.
     //        This is actually a pain in the ass to fix...
     //        Maybe an RTree function to calculate the amount of mem needed
     //        for a removal ahead of time?
-    try sheet.cell_tree.remove(sheet.allocator, Rect.initSinglePos(pos));
+    try sheet.cell_tree.remove(sheet.allocator, cell);
 
     // TODO: re-use string buffer
     cell.setError(sheet.allocator);
-    entry.set(null);
+    utils.treapRemove(CellTreap, &sheet.cell_treap, node);
 
     const strings = if (sheet.strings.fetchRemove(node)) |kv| kv.value else "";
 
@@ -1132,15 +1128,35 @@ pub fn deleteCell(
     sheet.has_changes = true;
 }
 
+pub fn deleteCellByRef(
+    sheet: *Sheet,
+    ref: Reference,
+    undo_opts: UndoOpts,
+) Allocator.Error!void {
+    const entry = sheet.cell_treap.getEntryFor(.{ .row = ref.row, .col = ref.col });
+    const node = entry.node orelse return;
+    return sheet.deleteCellByPtr(&node.key, undo_opts);
+}
+
+pub fn deleteCell(
+    sheet: *Sheet,
+    pos: Position,
+    undo_opts: UndoOpts,
+) Allocator.Error!void {
+    const row = sheet.getRowPtr(pos.y) orelse return;
+    const col = sheet.getColumnPtr(pos.x) orelse return;
+    return sheet.deleteCellByRef(.{ .row = row, .col = col }, undo_opts);
+}
+
 pub noinline fn deleteCellsInRange(sheet: *Sheet, range: Rect) Allocator.Error!void {
     var sfa = std.heap.stackFallback(4096, sheet.allocator);
     const allocator = sfa.get();
 
-    const items = try sheet.cell_tree.search(allocator, range);
-    defer allocator.free(items);
+    const kvs = try sheet.cell_tree.search(allocator, range);
+    defer allocator.free(kvs);
 
-    for (items) |item| {
-        try sheet.deleteCell(item.key.tl, .{});
+    for (kvs) |kv| {
+        try sheet.deleteCellByPtr(kv.key, .{});
     }
 }
 
@@ -1165,7 +1181,7 @@ pub fn getCellPtr(sheet: *Sheet, pos: Position) ?*Cell {
     return if (entry.node) |n| &n.key else null;
 }
 
-pub fn getCellPtrFromRef(sheet: *Sheet, ref: Reference) ?*Cell {
+pub fn getCellPtrByRef(sheet: *Sheet, ref: Reference) ?*Cell {
     const entry = sheet.cell_treap.getEntryFor(.{
         .row = ref.row,
         .col = ref.col,
@@ -1286,14 +1302,18 @@ pub const Cell = struct {
         };
     }
 
-    pub fn position(cell: Cell) Position {
+    pub inline fn position(cell: Cell) Position {
         return .{
             .x = cell.col.index,
             .y = cell.row.index,
         };
     }
 
-    pub fn rect(cell: Cell) Rect {
+    pub inline fn eql(a: *const Cell, b: *const Cell) bool {
+        return a.row == b.row and a.col == b.col;
+    }
+
+    pub inline fn rect(cell: Cell) Rect {
         return .{
             .tl = cell.position(),
             .br = cell.position(),
@@ -1346,14 +1366,10 @@ pub const Cell = struct {
     }
 };
 
-// TODO: Check this out
+/// Queues the dependents of `ref` for update.
 fn queueDependents(sheet: *Sheet, ref: Reference) Allocator.Error!void {
     sheet.search_buffer.clearRetainingCapacity();
-    try sheet.rtree.rtree.searchBuffer(
-        sheet.allocator,
-        &sheet.search_buffer,
-        ref.rect(),
-    );
+    try sheet.rtree.rtree.searchBuffer(sheet.allocator, &sheet.search_buffer, ref.rect());
 
     for (sheet.search_buffer.items) |*value_list| {
         for (value_list.items) |cell| {
@@ -1368,13 +1384,7 @@ fn queueDependents(sheet: *Sheet, ref: Reference) Allocator.Error!void {
 pub const EvalContext = struct {
     sheet: *Sheet,
 
-    /// Evaluates a cell and all of its dependencies.
-    pub fn evalCell(context: EvalContext, ref: Reference) Ast.EvalError!Ast.EvalResult {
-        const cell = context.sheet.getCellPtrFromRef(ref) orelse {
-            try context.sheet.queueDependents(ref);
-            return .none;
-        };
-
+    pub fn evalCellByPtr(context: EvalContext, cell: *Cell) Ast.EvalError!Ast.EvalResult {
         switch (cell.state) {
             .up_to_date => {},
             .computing => return error.CyclicalReference,
@@ -1398,7 +1408,7 @@ pub const EvalContext = struct {
                 };
                 cell.state = .up_to_date;
 
-                try context.sheet.queueDependents(ref);
+                try context.sheet.queueDependents(cell.reference());
             },
         }
 
@@ -1407,6 +1417,16 @@ pub const EvalContext = struct {
             .string => |ptr| .{ .string = std.mem.span(ptr) },
             .err => |err| err,
         };
+    }
+
+    /// Evaluates a cell and all of its dependencies.
+    pub fn evalCell(context: EvalContext, ref: Reference) Ast.EvalError!Ast.EvalResult {
+        const cell = context.sheet.getCellPtrByRef(ref) orelse {
+            try context.sheet.queueDependents(ref);
+            return .none;
+        };
+
+        return context.evalCellByPtr(cell);
     }
 };
 
@@ -1506,9 +1526,8 @@ pub fn widthNeededForColumn(
 
     var buf: std.BoundedArray(u8, 512) = .{};
     const writer = buf.writer();
-    while (try iter.next()) |item| {
-        const cell = sheet.getCellPtr(.{ .x = column_index, .y = item.key.tl.x }).?;
-
+    while (try iter.next()) |kv| {
+        const cell = kv.key;
         switch (cell.value) {
             .err => {},
             .number => |n| {
@@ -1545,7 +1564,8 @@ const PositionContext = struct {
     }
 };
 
-/// Reference to a specific cell. The cell may not exist.
+/// Reference to a specific cell in the sheet. References contain pointers to rows/columns and as
+/// such are 'automatically' adjusted when rows/columns are deleted.
 pub const Reference = struct {
     relative_row: bool = false,
     relative_col: bool = false,
@@ -1562,6 +1582,10 @@ pub const Reference = struct {
             .br = ref.resolve(),
         };
     }
+
+    pub inline fn eql(a: Reference, b: Reference) bool {
+        return a.row == b.row and a.col == b.col;
+    }
 };
 
 pub const Range = struct {
@@ -1573,6 +1597,10 @@ pub const Range = struct {
             .tl = range.tl.resolve(),
             .br = range.br.resolve(),
         };
+    }
+
+    pub inline fn eql(a: Range, b: Range) bool {
+        return Reference.eql(a.tl, b.tl) and Reference.eql(a.br, b.br);
     }
 
     pub fn fromRect(sheet: *Sheet, r: Rect) Range {

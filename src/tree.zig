@@ -9,7 +9,7 @@ const Sheet = @import("Sheet.zig");
 const Range = Sheet.Range;
 const Cell = Sheet.Cell;
 
-pub fn RTree(comptime V: type, comptime min_children: usize) type {
+pub fn RTree(comptime K: type, comptime V: type, comptime min_children: usize) type {
     assert(min_children >= 2);
     return struct {
         const max_children: comptime_int = min_children * 2;
@@ -25,13 +25,13 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
         const Self = @This();
 
         const KV = struct {
-            key: Rect,
+            key: K,
             /// List of cells that depend on the cells in `key`
             value: V,
         };
 
         pub const SearchItem = struct {
-            key: Rect,
+            key: K,
             value_ptr: *V,
         };
 
@@ -97,7 +97,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 if (node.isLeaf()) {
                     const values = node.data.values.items(.value);
                     for (node.data.values.items(.key), 0..) |k, i| {
-                        if (range.intersects(k)) {
+                        if (range.intersects(k.rect())) {
                             try list.append(.{
                                 .key = k,
                                 .value_ptr = &values[i],
@@ -113,7 +113,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 }
             }
 
-            fn getSingleRecursive(node: *Node, key: Rect) ?struct { *Rect, *V } {
+            fn getSingleRecursive(node: *Node, key: K) ?struct { *K, *V } {
                 if (node.isLeaf()) {
                     return for (node.data.values.items(.key), 0..) |*k, i| {
                         if (k.eql(key))
@@ -128,11 +128,11 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 } else null;
             }
 
-            fn getSingle(node: *Node, key: Rect) ?struct { *Rect, *V } {
+            fn getSingle(node: *Node, key: K) ?struct { *K, *V } {
                 return if (node.range.contains(key)) getSingleRecursive(node, key) else null;
             }
 
-            fn bestLeaf(node: *Node, key: Rect) *Node {
+            fn bestLeaf(node: *Node, key: K) *Node {
                 assert(node.level == 1);
                 const slice = node.data.children.constSlice();
                 assert(slice.len > 0);
@@ -143,7 +143,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                 var min_overlap: u64 = std.math.maxInt(u64);
 
                 for (slice, 0..) |n1, i| {
-                    const r = n1.range.merge(key);
+                    const r = n1.range.merge(key.rect());
                     const enlargement = r.area() - n1.range.area();
 
                     const total_overlap = totalOverlap(slice, r);
@@ -169,7 +169,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
 
             /// Find best child to insert into.
             /// Gets the child with the smallest area increase to store `key`
-            fn bestChild(node: *Node, key: Rect) *Node {
+            fn bestChild(node: *Node, key: K) *Node {
                 assert(!node.isLeaf());
 
                 if (node.level == 1) return bestLeaf(node, key);
@@ -181,12 +181,12 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
 
                 var min_index: usize = 0;
                 var min_diff, var min_area = blk: {
-                    const rect = Rect.merge(slice[0].range, key);
+                    const rect = Rect.merge(slice[0].range, key.rect());
                     break :blk .{ rect.area() - slice[0].range.area(), slice[0].range.area() };
                 };
 
                 for (slice[1..], 1..) |n, i| {
-                    const rect = Rect.merge(n.range, key);
+                    const rect = Rect.merge(n.range, key.rect());
                     const a = n.range.area();
                     const diff = rect.area() - a;
                     if (diff <= min_diff) {
@@ -203,11 +203,11 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
 
             fn recalcBoundingRange(node: *Node) void {
                 if (node.isLeaf()) {
-                    const slice: []const Rect = node.data.values.items(.key);
+                    const slice: []const K = node.data.values.items(.key);
                     assert(slice.len > 0);
 
-                    var range = slice[0];
-                    for (slice[1..]) |k| range = range.merge(k);
+                    var range = slice[0].rect();
+                    for (slice[1..]) |k| range = range.merge(k.rect());
                     node.range = range;
                     return;
                 }
@@ -224,7 +224,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             /// Removes `key` and its associated value from the tree.
             fn remove(
                 node: *Node,
-                key: Rect,
+                key: K,
             ) ?struct {
                 /// Removed kv pair (if any)
                 KV,
@@ -251,8 +251,8 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                     } else return null;
 
                     if (list.len > 0 and
-                        (key.tl.anyMatch(node.range.tl) or
-                        key.br.anyMatch(node.range.br)))
+                        (key.rect().tl.anyMatch(node.range.tl) or
+                        key.rect().br.anyMatch(node.range.br)))
                     {
                         node.recalcBoundingRange();
                     }
@@ -261,12 +261,13 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
 
                 const list = node.data.children;
                 return for (list.slice(), 0..) |*n, i| {
-                    if (!n.range.contains(key)) continue;
+                    if (!n.range.contains(key.rect())) continue;
 
                     const res = n.remove(key) orelse continue;
                     const kv, var p = res;
 
-                    const recalc = key.tl.anyMatch(node.range.tl) or key.br.anyMatch(node.range.br);
+                    const recalc = key.rect().tl.anyMatch(node.range.tl) or
+                        key.rect().br.anyMatch(node.range.br);
                     const merge_node = if (n.isLeaf())
                         n.data.values.len < min_children
                     else
@@ -296,9 +297,8 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             fn getRange(a: anytype) Rect {
                 return switch (@TypeOf(a)) {
                     Node, *Node, *const Node => a.range,
-                    KV, *KV, *const KV => a.key,
-                    Rect, *Rect, *const Rect => a,
-                    else => @compileError("Invalid type " ++ @typeName(@TypeOf(a))),
+                    KV, *KV, *const KV => a.key.rect(),
+                    else => a.rect(),
                 };
             }
 
@@ -524,7 +524,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                     const keys = node.data.values.items(.key);
 
                     for (keys[iter.index..], iter.index..) |k, i| {
-                        if (iter.range.intersects(k)) {
+                        if (iter.range.intersects(k.rect())) {
                             // We might have more matches in this leaf node, put it back on the
                             // stack
                             iter.stack.append(iter.allocator, node) catch unreachable;
@@ -583,13 +583,13 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
             tree: *Self,
             allocator: Allocator,
             node: *Node,
-            key: Rect,
+            key: K,
             value: V,
         ) !?Node {
             var ok = true;
             defer if (ok) {
                 // Update the node's range if there are no errors
-                node.range = node.range.merge(key);
+                node.range = node.range.merge(key.rect());
             };
             errdefer ok = false;
 
@@ -606,7 +606,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
                     return new_node;
                 } else if (node.data.values.len == 1) {
                     // This was the first node added to this leaf
-                    node.range = key;
+                    node.range = key.rect();
                 }
                 return null;
             }
@@ -647,7 +647,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
         pub fn put(
             tree: *Self,
             allocator: Allocator,
-            key: Rect,
+            key: K,
             value: V,
         ) Allocator.Error!void {
             return tree.putContext(allocator, key, value, {});
@@ -656,7 +656,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
         pub fn putContext(
             tree: *Self,
             allocator: Allocator,
-            key: Rect,
+            key: K,
             value: V,
             context: anytype,
         ) Allocator.Error!void {
@@ -672,7 +672,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
         pub fn remove(
             tree: *Self,
             allocator: Allocator,
-            key: Rect,
+            key: K,
         ) Allocator.Error!void {
             return tree.removeContext(allocator, key, {});
         }
@@ -681,7 +681,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
         pub fn removeContext(
             tree: *Self,
             allocator: Allocator,
-            key: Rect,
+            key: K,
             context: anytype,
         ) Allocator.Error!void {
             var kv, const merge_info = tree.root.remove(key) orelse return;
@@ -758,7 +758,7 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
         test "RTree1" {
             const t = std.testing;
 
-            var r: RTree(void, min_children) = .{};
+            var r: RTree(Rect, void, min_children) = .{};
             defer r.deinit(t.allocator);
 
             for (100..100 + max_children) |i| {
@@ -786,13 +786,57 @@ pub fn RTree(comptime V: type, comptime min_children: usize) type {
     };
 }
 
+test "RTree2" {
+    const t = std.testing;
+
+    const T = struct {
+        r: Rect,
+
+        fn rect(self: @This()) Rect {
+            return self.r;
+        }
+
+        fn eql(a: @This(), b: @This()) bool {
+            return a.rect().eql(b.rect());
+        }
+    };
+
+    const Tree = RTree(T, void, 8);
+    const max_children = Tree.max_children;
+    const min_children = 8;
+    var r: Tree = .{};
+    defer r.deinit(t.allocator);
+
+    for (100..100 + max_children) |i| {
+        try r.put(t.allocator, .{ .r = Rect.initSingle(@intCast(i), 0) }, {});
+    }
+    const range1 = Rect.init(100, 0, 100 + max_children - 1, 0);
+    const range2 = Rect.init(101, 0, 100 + max_children - 1, 0);
+
+    try t.expectEqual(@as(usize, 1), r.root.level);
+    try t.expect(r.root.data.children.len == 2);
+    for (r.root.data.children.constSlice()) |c| {
+        try t.expectEqual(@as(usize, 0), c.level);
+        try t.expectEqual(@as(usize, min_children), c.data.values.len);
+        try t.expect(range1.contains(c.range));
+    }
+    try t.expect(r.root.data.children.len == 2);
+    try t.expectEqual(range1, r.root.range);
+
+    try r.remove(t.allocator, .{ .r = Rect.initSingle(100, 0) });
+
+    try t.expectEqual(@as(usize, 0), r.root.level);
+    try t.expectEqual(@as(usize, max_children - 1), r.root.data.values.len);
+    try t.expectEqual(range2, r.root.range);
+}
+
 pub fn DependentTree(comptime min_children: usize) type {
     return struct {
         rtree: Tree = .{},
 
         const Self = @This();
         const ValueList = std.ArrayListUnmanaged(*Cell);
-        const Tree = RTree(ValueList, min_children);
+        const Tree = RTree(Rect, ValueList, min_children);
         pub const Node = Tree.Node;
         pub const KV = Tree.KV;
         const Context = struct {

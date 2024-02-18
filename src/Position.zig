@@ -184,6 +184,10 @@ pub const Position = extern struct {
         /// Bottom right
         br: Position,
 
+        pub fn rect(r: Rect) Rect {
+            return r;
+        }
+
         pub fn init(tl_x: Int, tl_y: Int, br_x: Int, br_y: Int) Rect {
             return Rect{
                 .tl = .{ .x = tl_x, .y = tl_y },
