@@ -823,6 +823,7 @@ pub fn EvalContext(comptime Context: type) type {
             var iter = self.sheet.cell_tree.searchIterator(self.allocator, range);
             while (try iter.next()) |kv| {
                 const res = try self.context.evalCellByPtr(kv.key);
+                std.log.debug("Adding {}", .{kv.key.position()});
                 total += try res.toNumber(0);
             }
 

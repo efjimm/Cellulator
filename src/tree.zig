@@ -76,7 +76,7 @@ pub fn RTree(comptime K: type, comptime V: type, comptime min_children: usize) t
                 if (node.isLeaf()) {
                     const values = node.data.values.items(.value);
                     for (node.data.values.items(.key), 0..) |*k, i| {
-                        if (range.intersects(k.*)) {
+                        if (range.intersects(k.rect())) {
                             try list.append(allocator, values[i]);
                         }
                     }
@@ -122,14 +122,14 @@ pub fn RTree(comptime K: type, comptime V: type, comptime min_children: usize) t
                 }
 
                 return for (node.data.children.slice()) |*n| {
-                    if (n.range.contains(key)) {
+                    if (n.range.contains(key.rect())) {
                         if (n.getSingleRecursive(key)) |res| break res;
                     }
                 } else null;
             }
 
             fn getSingle(node: *Node, key: K) ?struct { *K, *V } {
-                return if (node.range.contains(key)) getSingleRecursive(node, key) else null;
+                return if (node.range.contains(key.rect())) getSingleRecursive(node, key) else null;
             }
 
             fn bestLeaf(node: *Node, key: K) *Node {
@@ -594,6 +594,12 @@ pub fn RTree(comptime K: type, comptime V: type, comptime min_children: usize) t
             errdefer ok = false;
 
             if (node.isLeaf()) {
+                // TODO: Sort keys for faster search?
+                for (node.data.values.items(.key)) |k| {
+                    // Key already exists in tree
+                    if (key.eql(k)) return null;
+                }
+
                 node.data.values.ensureUnusedCapacity(allocator, 1) catch return error.NotAdded;
                 node.data.values.appendAssumeCapacity(.{ .key = key, .value = value });
                 errdefer _ = node.data.values.pop();
@@ -640,7 +646,7 @@ pub fn RTree(comptime K: type, comptime V: type, comptime min_children: usize) t
 
         /// Finds the key/value pair whose key matches `key` and returns pointers
         /// to the key and value, or `null` if not found.
-        pub fn get(tree: *Self, key: Rect) ?struct { *Rect, *V } {
+        pub fn get(tree: *Self, key: K) ?struct { *K, *V } {
             return tree.root.getSingle(key);
         }
 
@@ -836,7 +842,7 @@ pub fn DependentTree(comptime min_children: usize) type {
 
         const Self = @This();
         const ValueList = std.ArrayListUnmanaged(*Cell);
-        const Tree = RTree(Rect, ValueList, min_children);
+        const Tree = RTree(Range, ValueList, min_children);
         pub const Node = Tree.Node;
         pub const KV = Tree.KV;
         const Context = struct {
@@ -858,23 +864,23 @@ pub fn DependentTree(comptime min_children: usize) type {
 
         pub const SearchIterator = Tree.SearchIterator;
 
-        pub fn searchIterator(tree: *Self, allocator: Allocator, range: Rect) SearchIterator {
+        pub fn searchIterator(tree: *Self, allocator: Allocator, rect: Rect) SearchIterator {
             var ret: SearchIterator = .{
-                .range = range,
+                .range = rect,
                 .allocator = allocator,
             };
             ret.stack.append(allocator, &tree.root) catch unreachable;
             return ret;
         }
 
-        pub fn get(self: *Self, key: Rect) ?struct { *Rect, *ValueList } {
+        pub fn get(self: *Self, key: Range) ?struct { *Range, *ValueList } {
             return self.rtree.get(key);
         }
 
         pub fn put(
             self: *Self,
             allocator: Allocator,
-            key: Rect,
+            key: Range,
             value: *Cell,
         ) Allocator.Error!void {
             return self.putSlice(allocator, key, &.{value});
@@ -883,7 +889,7 @@ pub fn DependentTree(comptime min_children: usize) type {
         pub fn putSlice(
             self: *Self,
             allocator: Allocator,
-            key: Rect,
+            key: Range,
             values: []const *Cell,
         ) Allocator.Error!void {
             if (self.get(key)) |kv| {
@@ -923,7 +929,7 @@ pub fn DependentTree(comptime min_children: usize) type {
         pub fn removeKey(
             self: *Self,
             allocator: Allocator,
-            key: Rect,
+            key: Range,
         ) Allocator.Error!void {
             return self.rtree.removeContext(allocator, key, Context{});
         }
@@ -933,7 +939,7 @@ pub fn DependentTree(comptime min_children: usize) type {
         pub fn removeValue(
             self: *Self,
             allocator: Allocator,
-            key: Rect,
+            key: Range,
             value: *Cell,
         ) Allocator.Error!void {
             const merge_info = removeNode(&self.rtree.root, allocator, key, value) orelse return;
@@ -975,7 +981,7 @@ pub fn DependentTree(comptime min_children: usize) type {
         fn removeNode(
             node: *Tree.Node,
             allocator: Allocator,
-            key: Rect,
+            key: Range,
             value: *Cell,
         ) ??RemoveNodeRet {
             if (node.isLeaf()) {
@@ -1004,8 +1010,8 @@ pub fn DependentTree(comptime min_children: usize) type {
                         Context.deinit(.{}, allocator, &old_value);
 
                         if (list.len > 0 and
-                            (key.tl.anyMatch(node.range.tl) or
-                            key.br.anyMatch(node.range.br)))
+                            (key.rect().tl.anyMatch(node.range.tl) or
+                            key.rect().br.anyMatch(node.range.br)))
                         {
                             node.recalcBoundingRange();
                         }
@@ -1020,12 +1026,13 @@ pub fn DependentTree(comptime min_children: usize) type {
 
             const list = node.data.children;
             return for (list.slice(), 0..) |*n, i| {
-                if (!n.range.contains(key)) continue;
+                if (!n.range.contains(key.rect())) continue;
 
                 const res = removeNode(n, allocator, key, value);
                 var p = res orelse continue;
 
-                const recalc = key.tl.anyMatch(node.range.tl) or key.br.anyMatch(node.range.br);
+                const recalc = key.rect().tl.anyMatch(node.range.tl) or
+                    key.rect().br.anyMatch(node.range.br);
                 const merge_node = if (n.isLeaf())
                     n.data.values.len < min_children
                 else

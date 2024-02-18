@@ -415,9 +415,9 @@ const ExprRangeIterator = struct {
 fn addRangeDependents(
     sheet: *Sheet,
     dependent: *Cell,
-    rect: Rect,
+    range: Range,
 ) Allocator.Error!void {
-    return sheet.rtree.put(sheet.allocator, rect, dependent);
+    return sheet.rtree.put(sheet.allocator, range, dependent);
 }
 
 fn addExpressionDependents(
@@ -427,7 +427,7 @@ fn addExpressionDependents(
 ) Allocator.Error!void {
     var iter = ExprRangeIterator.init(expr);
     while (iter.next()) |range| {
-        try sheet.addRangeDependents(dependent, range.rect());
+        try sheet.addRangeDependents(dependent, range);
     }
 }
 
@@ -435,9 +435,9 @@ fn addExpressionDependents(
 fn removeRangeDependents(
     sheet: *Sheet,
     dependent: *Cell,
-    rect: Rect,
+    range: Range,
 ) Allocator.Error!void {
-    return sheet.rtree.removeValue(sheet.allocator, rect, dependent);
+    return sheet.rtree.removeValue(sheet.allocator, range, dependent);
 }
 
 /// Removes `cell` as a dependent of all ranges referenced by `expr`.
@@ -448,7 +448,7 @@ fn removeExprDependents(
 ) Allocator.Error!void {
     var iter = ExprRangeIterator.init(expr);
     while (iter.next()) |range| {
-        try sheet.removeRangeDependents(dependent, range.rect());
+        try sheet.removeRangeDependents(dependent, range);
     }
 }
 
@@ -1699,6 +1699,38 @@ test "Load file" {
     zc.sheet.clearRetainingCapacity(&zc);
     // try zc.loadCmd("erm.zc");
     // try zc.updateCells();
+}
+
+test "Update values" {
+    const t = std.testing;
+    var sheet = Sheet.init(t.allocator);
+    defer sheet.deinit();
+
+    for (0..4) |_| {
+        try sheet.setCell(
+            try Position.fromAddress("A0"),
+            "1",
+            try Ast.fromExpression(t.allocator, "1"),
+            .{},
+        );
+        try sheet.setCell(
+            try Position.fromAddress("B0"),
+            "A0",
+            try Ast.fromExpression(t.allocator, "A0"),
+            .{},
+        );
+        try sheet.update();
+    }
+
+    try sheet.setCell(
+        try Position.fromAddress("C0"),
+        "@sum(A0:B0)",
+        try Ast.fromExpression(t.allocator, "@sum(A0:B0)"),
+        .{},
+    );
+    try sheet.update();
+    const cell = sheet.getCellPtr(try Position.fromAddress("C0")).?;
+    try t.expectEqual(2.0, cell.value.number);
 }
 
 fn testCellEvaluation(a: Allocator) !void {
