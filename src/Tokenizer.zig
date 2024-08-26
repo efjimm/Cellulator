@@ -61,7 +61,7 @@ pub const Token = struct {
     };
 };
 
-const keywords = std.ComptimeStringMap(Token.Tag, .{
+const keywords = std.StaticStringMap(Token.Tag).initComptime(.{
     .{ "let", .keyword_let },
 });
 

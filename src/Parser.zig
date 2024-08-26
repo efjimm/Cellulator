@@ -46,7 +46,7 @@ pub const Builtin = struct {
     }
 };
 
-const builtins = std.ComptimeStringMap(Builtin.Tag, .{
+const builtins = std.StaticStringMap(Builtin.Tag).initComptime(.{
     .{ "sum", .sum },
     .{ "prod", .prod },
     .{ "avg", .avg },

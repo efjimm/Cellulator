@@ -52,7 +52,7 @@ cols: ColumnAxis = .{},
 
 search_buffer: std.ArrayListUnmanaged(std.ArrayListUnmanaged(*Cell)) = .{},
 
-filepath: std.BoundedArray(u8, std.fs.MAX_PATH_BYTES) = .{}, // TODO: Heap allocate this
+filepath: std.BoundedArray(u8, std.fs.max_path_bytes) = .{}, // TODO: Heap allocate this
 
 pub const CellTreap = std.Treap(Cell, Cell.compare);
 pub const ColumnAxis = std.Treap(Column, Column.compare);
@@ -1321,7 +1321,7 @@ pub const Cell = struct {
     }
 
     pub fn node(cell: *Cell) *CellNode {
-        return @fieldParentPtr(CellNode, "key", cell);
+        return @fieldParentPtr("key", cell);
     }
 
     fn compare(a: Cell, b: Cell) std.math.Order {

@@ -8,21 +8,21 @@ const Position = @import("Position.zig").Position;
 const assert = std.debug.assert;
 const _log = std.log.scoped(.lua);
 
-pub fn init(zc: *ZC) !Lua {
+pub fn init(zc: *ZC) !*Lua {
     var state = try Lua.init(&zc.allocator);
     errdefer state.deinit();
     try state.checkStack(2);
 
     state.openLibs();
 
-    try createMetatable(&state, "position");
+    try createMetatable(state, "position");
     state.pop(1);
 
     // Main 'zc' object is a reference to a ZC pointer, so we can use uservalues on it
     state.newUserdata(*ZC, 1).* = zc;
 
     // zc metatable
-    try createMetatable(&state, "zc");
+    try createMetatable(state, "zc");
     state.setMetatable(1);
 
     // zc uservalue
@@ -31,7 +31,7 @@ pub fn init(zc: *ZC) !Lua {
 
     state.setGlobal("zc");
 
-    try initEvents(&state);
+    try initEvents(state);
     return state;
 }
 
@@ -50,7 +50,7 @@ pub fn emitEvent(state: *Lua, event: []const u8, args: anytype) !void {
 
     // Push arguments
     _ = state.pushValue(-2);
-    _ = state.pushBytes(event);
+    _ = state.pushString(event);
 
     var arg_count: i32 = 0;
     inline for (args) |arg| arg_count += try pushArgument(state, arg);
@@ -71,7 +71,7 @@ fn pushArgument(state: *Lua, value: anytype) !i32 {
     try state.checkStack(1);
 
     if (comptime utils.isZigString(T)) {
-        _ = state.pushBytes(value);
+        _ = state.pushString(value);
     } else switch (info) {
         .ComptimeInt => state.pushInteger(value),
         .Int => state.pushInteger(@intCast(value)),
@@ -138,7 +138,7 @@ fn isLuaFunction(func: anytype) bool {
     return f.calling_convention == .C and
         f.return_type == c_int and
         f.params.len == 1 and
-        f.params[0].type == ?*lua.LuaState;
+        f.params[0].type == *Lua;
 }
 
 fn LuaFuncsRet(comptime T: type) type {
@@ -161,7 +161,7 @@ fn getLuaFunctions(comptime T: type) LuaFuncsRet(T) {
         if (comptime isLuaFunction(f)) {
             ret[i] = .{
                 .name = comptime &utils.dupeZ(u8, decl.name[0..].*),
-                .func = f,
+                .func = @ptrCast(&f),
             };
             i += 1;
         }
@@ -179,7 +179,7 @@ fn createMetatable(state: *Lua, comptime name: [:0]const u8) !void {
 fn checkCellAddress(state: *Lua, raw_index: i32) Position {
     const index = state.absIndex(raw_index);
     if (state.isString(index)) {
-        const str = state.toBytes(index) catch unreachable;
+        const str = state.toString(index) catch unreachable;
         return Position.fromAddress(str) catch
             state.argError(index, "Invalid cell address string");
     } else if (state.isTable(index)) {
@@ -209,10 +209,10 @@ fn getZc(state: *Lua) *ZC {
     return (state.toUserdata(*ZC, -1) catch unreachable).*;
 }
 
-/// Returns the Zig wrapper around a Lua state.
-inline fn getState(c_state: ?*lua.LuaState) Lua {
-    return .{ .state = c_state.? };
-}
+// /// Returns the Zig wrapper around a Lua state.
+// inline fn getState(c_state: ?*lua.LuaState) *Lua {
+//     return .{ .state = c_state.? };
+// }
 
 /// Zig functions that get called for certain events.
 /// These are not exposed to lua code, and always get executed BEFORE
@@ -226,27 +226,21 @@ const handlers = struct {
 
         zc.lua.createTable(0, 1);
         zc.lua.setMetatableRegistry("sheet");
-        zc.lua.pushBytes(name);
+        zc.lua.pushString(name);
         zc.lua.setField(-1, "name");
     }
 };
 
 const metatables = .{
     .zc = struct {
-        pub fn __newindex(c_state: ?*lua.LuaState) callconv(.C) c_int {
-            var state = getState(c_state);
-            return newIndexCommon(&state);
+        pub fn __newindex(state: *Lua) callconv(.C) c_int {
+            return newIndexCommon(state);
         }
 
-        pub fn __index(c_state: ?*lua.LuaState) callconv(.C) c_int {
-            var state = getState(c_state);
-
+        pub fn __index(state: *Lua) callconv(.C) c_int {
             if (state.isString(2)) {
-                const key = state.toBytes(2) catch unreachable;
-                const map = std.ComptimeStringMap(
-                    enum {
-                        current_sheet,
-                    },
+                const key = state.toString(2) catch unreachable;
+                const map = std.StaticStringMap(enum { current_sheet }).initComptime(
                     .{
                         .{ "current_sheet", .current_sheet },
                     },
@@ -259,7 +253,7 @@ const metatables = .{
                             _ = state.getUserValue(1, 1) catch unreachable;
                             _ = state.getField(-1, "current_sheet");
                             const name = zc.sheet.filepath.constSlice();
-                            _ = state.pushBytes(name);
+                            _ = state.pushString(name);
                             state.setField(-2, "name");
                             return 1;
                         },
@@ -267,19 +261,17 @@ const metatables = .{
                 }
             }
 
-            return indexCommon(&state);
+            return indexCommon(state);
         }
 
-        pub fn log(c_state: ?*lua.LuaState) callconv(.C) c_int {
-            var state = getState(c_state);
-
+        pub fn log(state: *Lua) callconv(.C) c_int {
             state.checkType(1, .table);
             _ = state.getIndex(1, 1);
-            const msg = state.checkBytes(-1);
+            const msg = state.checkString(-1);
             _ = state.getField(1, "level");
-            const level_str = state.toBytes(-1) catch "info";
+            const level_str = state.toString(-1) catch "info";
 
-            const map = std.ComptimeStringMap(std.log.Level, .{
+            const map = std.StaticStringMap(std.log.Level).initComptime(.{
                 .{ "error", .err },
                 .{ "warn", .warn },
                 .{ "info", .info },
@@ -298,24 +290,20 @@ const metatables = .{
             return 0;
         }
 
-        pub fn end_undo_group(c_state: ?*lua.LuaState) callconv(.C) c_int {
-            var state = getState(c_state);
-
+        pub fn end_undo_group(state: *Lua) callconv(.C) c_int {
             const zc = state.checkUserdata(*ZC, 1, "zc").*;
             zc.sheet.endUndoGroup();
             return 0;
         }
 
-        pub fn set_cell(c_state: ?*lua.LuaState) callconv(.C) c_int {
-            var state = getState(c_state);
-
+        pub fn set_cell(state: *Lua) callconv(.C) c_int {
             const zc = state.checkUserdata(*ZC, 1, "zc").*;
             state.checkType(2, .table);
 
             _ = state.getIndex(2, 1);
             _ = state.getIndex(2, 2);
-            const expr_str = state.checkBytes(-1);
-            const pos = checkCellAddress(&state, -2);
+            const expr_str = state.checkString(-1);
+            const pos = checkCellAddress(state, -2);
 
             zc.setCellString(pos, expr_str, .{ .emit_event = false }) catch |err| switch (err) {
                 error.InvalidCellAddress => unreachable,
@@ -325,25 +313,21 @@ const metatables = .{
             return 0;
         }
 
-        pub fn delete_cell(c_state: ?*lua.LuaState) callconv(.C) c_int {
-            var state = getState(c_state);
-
+        pub fn delete_cell(state: *Lua) callconv(.C) c_int {
             const zc = state.checkUserdata(*ZC, 1, "zc").*;
             state.checkType(2, .table);
 
             _ = state.getIndex(2, 1);
-            const pos = checkCellAddress(&state, -1);
+            const pos = checkCellAddress(state, -1);
 
             zc.deleteCell2(pos, .{ .emit_event = false }) catch {};
 
             return 0;
         }
 
-        pub fn set_cursor(c_state: ?*lua.LuaState) callconv(.C) c_int {
-            var state = getState(c_state);
-
+        pub fn set_cursor(state: *Lua) callconv(.C) c_int {
             const zc: *ZC = state.checkUserdata(*ZC, 1, "zc").*;
-            const pos = checkCellAddress(&state, 2);
+            const pos = checkCellAddress(state, 2);
 
             zc.setCursor(pos);
 
@@ -354,7 +338,7 @@ const metatables = .{
         //     var state = getState(c_state);
 
         //     const zc: *ZC = state.checkUserdata(*ZC, 1, "zc").*;
-        //     const pos = checkCellAddress(&state, 2);
+        //     const pos = checkCellAddress(state, 2);
 
         //     const cell = zc.sheet.cells.get(pos) orelse return 0;
         //     const num = cell.getValue() orelse return 0;
@@ -370,11 +354,11 @@ const metatables = .{
         //     const zc: *ZC = state.checkUserdata(*ZC, 1, "zc").*;
         //     state.checkType(2, .table);
         //     _ = state.getIndex(2, 1);
-        //     const pos = checkCellAddress(&state, -1);
+        //     const pos = checkCellAddress(state, -1);
 
         //     const cell = zc.sheet.text_cells.get(pos) orelse return 0;
         //     const str = cell.string() orelse return 0;
-        //     _ = state.pushBytes(str);
+        //     _ = state.pushString(str);
 
         //     return 1;
         // }
@@ -402,22 +386,19 @@ const metatables = .{
     },
 
     .position = struct {
-        pub fn __tostring(c_state: ?*lua.LuaState) callconv(.C) c_int {
-            var state = getState(c_state);
-
-            const pos = checkCellAddress(&state, 1);
+        pub fn __tostring(state: *Lua) callconv(.C) c_int {
+            const pos = checkCellAddress(state, 1);
             var buf = std.BoundedArray(u8, 64){};
             pos.writeCellAddress(buf.writer()) catch unreachable;
 
-            _ = state.pushBytes(buf.slice());
+            _ = state.pushString(buf.slice());
 
             return 1;
         }
 
-        pub fn __concat(c_state: ?*lua.LuaState) callconv(.C) c_int {
-            var state = getState(c_state);
-            _ = state.toBytesFmt(1);
-            _ = state.toBytesFmt(2);
+        pub fn __concat(state: *Lua) callconv(.C) c_int {
+            _ = state.toStringEx(1);
+            _ = state.toStringEx(2);
             state.concat(2);
             return 1;
         }

@@ -65,11 +65,11 @@ fn resizeHandler(_: c_int) callconv(.C) void {
 }
 
 pub fn init(allocator: Allocator) InitError!Self {
-    try std.os.sigaction(std.os.SIG.WINCH, &.{
+    std.posix.sigaction(std.posix.SIG.WINCH, &.{
         .handler = .{
             .handler = resizeHandler,
         },
-        .mask = std.os.empty_sigset,
+        .mask = std.posix.empty_sigset,
         .flags = 0,
     }, null);
 

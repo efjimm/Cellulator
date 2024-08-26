@@ -29,7 +29,7 @@ const log = std.log.scoped(.zc);
 
 const Self = @This();
 
-lua: Lua,
+lua: *Lua,
 
 running: bool = true,
 
@@ -182,13 +182,13 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
 }
 
 pub fn sourceLua(self: *Self) !void {
-    var buf: [std.fs.MAX_PATH_BYTES + 1]u8 = undefined;
+    var buf: [std.fs.max_path_bytes + 1]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     const allocator = fba.allocator();
 
-    const paths: []const []const u8 = if (std.os.getenv("XDG_CONFIG_HOME")) |path|
+    const paths: []const []const u8 = if (std.posix.getenv("XDG_CONFIG_HOME")) |path|
         &.{ path, "cellulator/init.lua" }
-    else if (std.os.getenv("HOME")) |path|
+    else if (std.posix.getenv("HOME")) |path|
         &.{ path, ".config/cellulator/init.lua" }
     else
         return error.CouldNotDeterminePath;
@@ -223,7 +223,7 @@ pub fn deinit(self: *Self) void {
 /// Emits the given event, calling it's dispatcher with `args`.
 pub fn emitEvent(self: *Self, event: [:0]const u8, args: anytype) void {
     log.debug("Emitting event '{s}' with {d} arguments", .{ event, args.len });
-    lua.emitEvent(&self.lua, event, args) catch |err| {
+    lua.emitEvent(self.lua, event, args) catch |err| {
         log.err("Lua runtime error: {}", .{err});
     }; // TODO: notify of Lua errors
 }
@@ -945,7 +945,7 @@ const Cmd = enum {
     fill,
 };
 
-const cmds = std.ComptimeStringMap(Cmd, .{
+const cmds = std.StaticStringMap(Cmd).initComptime(.{
     .{ "w", .save },
     .{ "w!", .save_force },
     .{ "e", .load },
