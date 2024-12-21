@@ -49,7 +49,7 @@ const styles = blk: {
         .{ .fg = .white, .bg = .black },
         .{ .fg = .black, .bg = .blue },
     });
-    assert(@typeInfo(CellType).Enum.fields.len == 4);
+    assert(@typeInfo(CellType).@"enum".fields.len == 4);
     break :blk array;
 };
 

@@ -915,7 +915,7 @@ test "Motions" {
     try testMotion(" ''word'' ", 5, " ''".len, " ''word".len, .{ .inside_single_delimiter = '\'' }, 1);
     try testMotion(" ''word'' ", 5, " '".len, " ''word'".len, .{ .around_single_delimiter = '\'' }, 1);
 
-    const delims = .{ .left = '(', .right = ')' };
+    const delims: Delimiters = .{ .left = '(', .right = ')' };
     try testMotion("((word))", 5, "((".len, "((word".len, .{ .inside_delimiters = delims }, 1);
     try testMotion("((word))", 5, "(".len, "((word)".len, .{ .around_delimiters = delims }, 1);
 }

@@ -9,7 +9,7 @@ const assert = std.debug.assert;
 const _log = std.log.scoped(.lua);
 
 pub fn init(zc: *ZC) !*Lua {
-    var state = try Lua.init(&zc.allocator);
+    var state = try Lua.init(zc.allocator);
     errdefer state.deinit();
     try state.checkStack(2);
 
@@ -42,7 +42,7 @@ pub fn emitEvent(state: *Lua, event: []const u8, args: anytype) !void {
     const top_index = state.getTop();
     defer state.setTop(top_index);
 
-    // Call `zc.events:emit`
+    // Push `zc.events:emit`
     _ = state.getGlobal("zc") catch return;
     _ = state.getField(-1, "events");
     _ = state.getField(-1, "emit");
@@ -54,7 +54,14 @@ pub fn emitEvent(state: *Lua, event: []const u8, args: anytype) !void {
 
     var arg_count: i32 = 0;
     inline for (args) |arg| arg_count += try pushArgument(state, arg);
-    try state.protectedCall(arg_count + 2, 0, 0);
+    state.protectedCall(.{
+        .args = args.len + 2,
+    }) catch |err| {
+        std.log.err("Lua pcall error: {s}", .{
+            try state.toString(-1),
+        });
+        return err;
+    };
 }
 
 /// Pushes a generic argument on to the Lua stack.
@@ -73,13 +80,13 @@ fn pushArgument(state: *Lua, value: anytype) !i32 {
     if (comptime utils.isZigString(T)) {
         _ = state.pushString(value);
     } else switch (info) {
-        .ComptimeInt => state.pushInteger(value),
-        .Int => state.pushInteger(@intCast(value)),
+        .comptime_int => state.pushInteger(value),
+        .int => state.pushInteger(@intCast(value)),
 
-        .ComptimeFloat => state.pushNumber(value),
-        .Float => state.pushNumber(@floatCast(value)),
+        .comptime_float => state.pushNumber(value),
+        .float => state.pushNumber(@floatCast(value)),
 
-        .Struct => {
+        .@"struct" => {
             if (@hasDecl(T, "toLua")) {
                 return value.toLua(state);
             } else {
@@ -131,11 +138,11 @@ fn indexCommon(state: *Lua) c_int {
 
 fn isLuaFunction(func: anytype) bool {
     const info = @typeInfo(@TypeOf(func));
-    if (info != .Fn) return false;
+    if (info != .@"fn") return false;
 
-    const f = info.Fn;
+    const f = info.@"fn";
 
-    return f.calling_convention == .C and
+    return f.calling_convention.eql(.c) and
         f.return_type == c_int and
         f.params.len == 1 and
         f.params[0].type == *Lua;
@@ -144,7 +151,7 @@ fn isLuaFunction(func: anytype) bool {
 fn LuaFuncsRet(comptime T: type) type {
     const info = @typeInfo(T);
     var func_count = 0;
-    inline for (info.Struct.decls) |decl| {
+    inline for (info.@"struct".decls) |decl| {
         const d = @field(T, decl.name);
         if (comptime isLuaFunction(d)) func_count += 1;
     }
@@ -154,7 +161,7 @@ fn LuaFuncsRet(comptime T: type) type {
 
 fn getLuaFunctions(comptime T: type) LuaFuncsRet(T) {
     var ret: LuaFuncsRet(T) = undefined;
-    const decls = @typeInfo(T).Struct.decls;
+    const decls = @typeInfo(T).@"struct".decls;
     comptime var i = 0;
     inline for (decls) |decl| {
         const f = @field(T, decl.name);
@@ -414,10 +421,10 @@ comptime {
 
         const prefix = "metatable." ++ field.name ++ ".";
 
-        for (@typeInfo(T).Struct.decls) |decl| {
+        for (@typeInfo(T).@"struct".decls) |decl| {
             const d = @field(T, decl.name);
             if (!isLuaFunction(d)) @compileError(prefix ++ decl.name ++ " is not a Lua function");
-            @export(d, .{ .name = prefix ++ decl.name });
+            @export(&d, .{ .name = prefix ++ decl.name });
         }
     }
 }

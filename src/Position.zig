@@ -230,12 +230,12 @@ pub const Position = extern struct {
                 u64,
                 @min(r1.br.x, r2.br.x),
                 @max(r1.tl.x, r2.tl.x),
-            ) catch return 0;
+            ) catch 0;
             const dy = std.math.sub(
                 u64,
                 @min(r1.br.y, r2.br.y),
                 @max(r1.tl.y, r2.tl.y),
-            ) catch return 0;
+            ) catch 0;
 
             return dx * dy;
         }

@@ -42,8 +42,6 @@ pub const Node = union(enum) {
 
 nodes: MultiArrayList(Node) = .{},
 
-// TODO: Consider storing this in a map to reduce memory usage, as most cells just contain data
-//       without any references. Need benchmarks to see perf impact.
 refs: []Reference = &.{},
 
 const Self = @This();
@@ -93,8 +91,6 @@ pub fn anchor(ast: *Self, sheet: *Sheet) Allocator.Error!void {
     if (pos_count == 0) return;
 
     var refs = try std.ArrayListUnmanaged(Reference).initCapacity(sheet.allocator, pos_count);
-    // Don't need to shrink because initCapacity allocates *exactly* pos_count
-    defer ast.refs = refs.allocatedSlice();
     errdefer refs.clearAndFree(sheet.allocator);
 
     var index: u32 = 0;
@@ -114,6 +110,9 @@ pub fn anchor(ast: *Self, sheet: *Sheet) Allocator.Error!void {
             index += 1;
         }
     }
+
+    assert(refs.capacity == refs.items.len);
+    ast.refs = refs.allocatedSlice();
 }
 
 pub fn dupeStrings(
@@ -291,16 +290,18 @@ pub const Slice = struct {
 
     pub inline fn printFromIndex(
         ast: Slice,
+        sheet: *Sheet,
         index: u32,
         writer: anytype,
         strings: []const u8,
     ) @TypeOf(writer).Error!void {
         const node = ast.nodes.get(index);
-        return ast.printFromNode(index, node, writer, strings);
+        return ast.printFromNode(sheet, index, node, writer, strings);
     }
 
     pub fn printFromNode(
         ast: Slice,
+        sheet: *Sheet,
         index: u32,
         node: Node,
         writer: anytype,
@@ -317,51 +318,51 @@ pub const Slice = struct {
             .pos => |pos| try pos.writeCellAddress(writer),
             .ref => |ref_index| {
                 const ref = ast.refs[ref_index];
-                try ref.resolve().writeCellAddress(writer);
+                try ref.resolve(sheet).writeCellAddress(writer);
             },
 
             .string_literal => |str| {
                 try writer.print("\"{s}\"", .{strings[str.start..str.end]});
             },
             .concat => |b| {
-                try ast.printFromIndex(b.lhs, writer, strings);
+                try ast.printFromIndex(sheet, b.lhs, writer, strings);
                 try writer.writeAll(" # ");
-                try ast.printFromIndex(b.rhs, writer, strings);
+                try ast.printFromIndex(sheet, b.rhs, writer, strings);
             },
             .assignment => |b| {
                 try writer.writeAll("let ");
-                try ast.printFromIndex(b.lhs, writer, strings);
+                try ast.printFromIndex(sheet, b.lhs, writer, strings);
                 try writer.writeAll(" = ");
-                try ast.printFromIndex(b.rhs, writer, strings);
+                try ast.printFromIndex(sheet, b.rhs, writer, strings);
             },
             .add => |b| {
-                try ast.printFromIndex(b.lhs, writer, strings);
+                try ast.printFromIndex(sheet, b.lhs, writer, strings);
                 try writer.writeAll(" + ");
                 const rhs = ast.nodes.get(b.rhs);
                 switch (rhs) {
                     .sub => {
                         try writer.writeByte('(');
-                        try ast.printFromNode(b.rhs, rhs, writer, strings);
+                        try ast.printFromNode(sheet, b.rhs, rhs, writer, strings);
                         try writer.writeByte(')');
                     },
                     else => {
-                        try ast.printFromNode(b.rhs, rhs, writer, strings);
+                        try ast.printFromNode(sheet, b.rhs, rhs, writer, strings);
                     },
                 }
             },
             .sub => |b| {
-                try ast.printFromIndex(b.lhs, writer, strings);
+                try ast.printFromIndex(sheet, b.lhs, writer, strings);
                 try writer.writeAll(" - ");
 
                 const rhs = ast.nodes.get(b.rhs);
                 switch (rhs) {
                     .add, .sub => {
                         try writer.writeByte('(');
-                        try ast.printFromNode(b.rhs, rhs, writer, strings);
+                        try ast.printFromNode(sheet, b.rhs, rhs, writer, strings);
                         try writer.writeByte(')');
                     },
                     else => {
-                        try ast.printFromNode(b.rhs, rhs, writer, strings);
+                        try ast.printFromNode(sheet, b.rhs, rhs, writer, strings);
                     },
                 }
             },
@@ -370,20 +371,20 @@ pub const Slice = struct {
                 switch (lhs) {
                     .add, .sub => {
                         try writer.writeByte('(');
-                        try ast.printFromNode(b.lhs, lhs, writer, strings);
+                        try ast.printFromNode(sheet, b.lhs, lhs, writer, strings);
                         try writer.writeByte(')');
                     },
-                    else => try ast.printFromNode(b.lhs, lhs, writer, strings),
+                    else => try ast.printFromNode(sheet, b.lhs, lhs, writer, strings),
                 }
                 try writer.writeAll(" * ");
                 const rhs = ast.nodes.get(b.rhs);
                 switch (rhs) {
                     .add, .sub, .div, .mod => {
                         try writer.writeByte('(');
-                        try ast.printFromNode(b.rhs, rhs, writer, strings);
+                        try ast.printFromNode(sheet, b.rhs, rhs, writer, strings);
                         try writer.writeByte(')');
                     },
-                    else => try ast.printFromNode(b.rhs, rhs, writer, strings),
+                    else => try ast.printFromNode(sheet, b.rhs, rhs, writer, strings),
                 }
             },
             .div => |b| {
@@ -391,20 +392,20 @@ pub const Slice = struct {
                 switch (lhs) {
                     .add, .sub => {
                         try writer.writeByte('(');
-                        try ast.printFromNode(b.lhs, lhs, writer, strings);
+                        try ast.printFromNode(sheet, b.lhs, lhs, writer, strings);
                         try writer.writeByte(')');
                     },
-                    else => try ast.printFromNode(b.lhs, lhs, writer, strings),
+                    else => try ast.printFromNode(sheet, b.lhs, lhs, writer, strings),
                 }
                 try writer.writeAll(" / ");
                 const rhs = ast.nodes.get(b.rhs);
                 switch (rhs) {
                     .add, .sub, .mul, .div, .mod => {
                         try writer.writeByte('(');
-                        try ast.printFromNode(b.rhs, rhs, writer, strings);
+                        try ast.printFromNode(sheet, b.rhs, rhs, writer, strings);
                         try writer.writeByte(')');
                     },
-                    else => try ast.printFromNode(b.rhs, rhs, writer, strings),
+                    else => try ast.printFromNode(sheet, b.rhs, rhs, writer, strings),
                 }
             },
             .mod => |b| {
@@ -412,26 +413,26 @@ pub const Slice = struct {
                 switch (lhs) {
                     .add, .sub => {
                         try writer.writeByte('(');
-                        try ast.printFromNode(b.lhs, lhs, writer, strings);
+                        try ast.printFromNode(sheet, b.lhs, lhs, writer, strings);
                         try writer.writeByte(')');
                     },
-                    else => try ast.printFromNode(b.lhs, lhs, writer, strings),
+                    else => try ast.printFromNode(sheet, b.lhs, lhs, writer, strings),
                 }
                 try writer.writeAll(" % ");
                 const rhs = ast.nodes.get(b.rhs);
                 switch (rhs) {
                     .add, .sub, .mul, .div, .mod => {
                         try writer.writeByte('(');
-                        try ast.printFromNode(b.rhs, rhs, writer, strings);
+                        try ast.printFromNode(sheet, b.rhs, rhs, writer, strings);
                         try writer.writeByte(')');
                     },
-                    else => try ast.printFromNode(b.rhs, rhs, writer, strings),
+                    else => try ast.printFromNode(sheet, b.rhs, rhs, writer, strings),
                 }
             },
             .range => |b| {
-                try ast.printFromIndex(b.lhs, writer, strings);
+                try ast.printFromIndex(sheet, b.lhs, writer, strings);
                 try writer.writeByte(':');
-                try ast.printFromIndex(b.rhs, writer, strings);
+                try ast.printFromIndex(sheet, b.rhs, writer, strings);
             },
 
             .builtin => |b| {
@@ -440,11 +441,11 @@ pub const Slice = struct {
                 }
                 var iter = ast.argIteratorForwards(b.first_arg, index);
                 if (iter.next()) |arg_index| {
-                    try ast.printFromIndex(arg_index, writer, strings);
+                    try ast.printFromIndex(sheet, arg_index, writer, strings);
                 }
                 while (iter.next()) |arg_index| {
                     try writer.writeAll(", ");
-                    try ast.printFromIndex(arg_index, writer, strings);
+                    try ast.printFromIndex(sheet, arg_index, writer, strings);
                 }
                 try writer.writeByte(')');
             },
@@ -582,9 +583,9 @@ pub fn toSlice(ast: Self) Slice {
     };
 }
 
-pub fn print(ast: Self, strings: []const u8, writer: anytype) @TypeOf(writer).Error!void {
+pub fn print(ast: Self, sheet: *Sheet, strings: []const u8, writer: anytype) @TypeOf(writer).Error!void {
     const slice = ast.toSlice();
-    return slice.printFromIndex(slice.rootNodeIndex(), writer, strings);
+    return slice.printFromIndex(sheet, slice.rootNodeIndex(), writer, strings);
 }
 
 /// The order in which nodes are evaluated.
@@ -690,15 +691,15 @@ pub fn EvalContext(comptime Context: type) type {
 
             if (Context == void) break :blk E;
 
-            const C = if (@typeInfo(Context) == .Pointer)
+            const C = if (@typeInfo(Context) == .pointer)
                 std.meta.Child(Context)
             else
                 Context;
 
             const func = @field(C, "evalCell");
             const info = @typeInfo(@TypeOf(func));
-            const ret_info = @typeInfo(info.Fn.return_type.?);
-            break :blk E || ret_info.ErrorUnion.error_set;
+            const ret_info = @typeInfo(info.@"fn".return_type.?);
+            break :blk E || ret_info.error_union.error_set;
         };
 
         // TODO: Pass references to `context.evalCell` instead of positions
@@ -811,8 +812,8 @@ pub fn EvalContext(comptime Context: type) type {
             const ref1 = self.slice.refs[data[r.lhs].ref];
             const ref2 = self.slice.refs[data[r.rhs].ref];
 
-            const p1 = ref1.resolve();
-            const p2 = ref2.resolve();
+            const p1 = ref1.resolve(self.sheet);
+            const p2 = ref2.resolve(self.sheet);
             return Position.Rect.initPos(p1, p2);
         }
 
@@ -880,8 +881,8 @@ pub fn EvalContext(comptime Context: type) type {
                         const r1 = data[r.lhs].ref;
                         const r2 = data[r.rhs].ref;
                         break :blk .{
-                            self.slice.refs[r1].resolve(),
-                            self.slice.refs[r2].resolve(),
+                            self.slice.refs[r1].resolve(self.sheet),
+                            self.slice.refs[r2].resolve(self.sheet),
                         };
                     };
                     total_items += Position.area(p1, p2);
@@ -1037,9 +1038,9 @@ test "Parse and Eval Expression" {
             };
             defer ast.deinit(t.allocator);
 
-            var sheet = Sheet.init(t.allocator);
-            defer sheet.deinit();
-            const res = ast.eval(&sheet, expr, Context{}) catch |err| {
+            const sheet = try Sheet.create(t.allocator);
+            defer sheet.destroy();
+            const res = ast.eval(sheet, expr, Context{}) catch |err| {
                 return if (err != expected) err else {};
             };
             const n = res.number;
@@ -1085,8 +1086,8 @@ test "Functions on Ranges" {
     const t = std.testing;
     const Test = struct {
         fn testSheetExpr(expected: f64, expr: []const u8) !void {
-            var sheet = Sheet.init(t.allocator);
-            defer sheet.deinit();
+            const sheet = try Sheet.create(t.allocator);
+            defer sheet.destroy();
 
             try sheet.setCell(try Position.fromAddress("A0"), "0", try Self.fromExpression(t.allocator, "0"), .{});
             try sheet.setCell(try Position.fromAddress("B0"), "100", try Self.fromExpression(t.allocator, "100"), .{});
@@ -1096,10 +1097,10 @@ test "Functions on Ranges" {
             var ast = try fromExpression(t.allocator, expr);
             defer ast.deinit(t.allocator);
 
-            try ast.anchor(&sheet);
+            try ast.anchor(sheet);
 
             try sheet.update();
-            const res = try ast.eval(&sheet, "", Sheet.EvalContext{ .sheet = &sheet });
+            const res = try ast.eval(sheet, "", Sheet.EvalContext{ .sheet = sheet });
             try std.testing.expectApproxEqRel(expected, res.number, 0.0001);
         }
     };
@@ -1174,13 +1175,13 @@ test "Splice" {
     var ast = try fromSource(allocator, "let a0 = 100 * 3 + 5 / 2 + @avg(1, 10)");
 
     ast.splice(ast.rootNode().assignment.rhs);
-    var sheet = Sheet.init(t.allocator);
-    defer sheet.deinit();
-    try t.expectApproxEqRel(@as(f64, 308), (try ast.eval(&sheet, "", Context{})).number, 0.0001);
+    const sheet = try Sheet.create(t.allocator);
+    defer sheet.destroy();
+    try t.expectApproxEqRel(@as(f64, 308), (try ast.eval(sheet, "", Context{})).number, 0.0001);
     try t.expectEqual(@as(usize, 11), ast.nodes.len);
 
     ast.splice(ast.rootNode().add.rhs);
-    try t.expectApproxEqRel(@as(f64, 5.5), (try ast.eval(&sheet, "", Context{})).number, 0.0001);
+    try t.expectApproxEqRel(@as(f64, 5.5), (try ast.eval(sheet, "", Context{})).number, 0.0001);
     try t.expectEqual(@as(usize, 3), ast.nodes.len);
 }
 
@@ -1259,17 +1260,6 @@ test "DupeStrings" {
 test "Print" {
     const t = std.testing;
 
-    const testPrint = struct {
-        fn func(expr: []const u8, expected: []const u8) !void {
-            var ast = try fromExpression(t.allocator, expr);
-            defer ast.deinit(t.allocator);
-
-            var buf = std.BoundedArray(u8, 4096){};
-            try ast.print(expr, buf.writer());
-            try t.expectEqualStrings(expected, buf.constSlice());
-        }
-    }.func;
-
     const data = .{
         .{ "1 + 2 + 3", "1 + 2 + 3" },
         .{ "1 + (2 + 3)", "1 + 2 + 3" },
@@ -1334,5 +1324,16 @@ test "Print" {
         .{ "@max(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)", "@max(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)" },
     };
 
-    inline for (data) |d| try testPrint(d[0], d[1]);
+    const sheet = try Sheet.create(t.allocator);
+    defer sheet.destroy();
+
+    inline for (data) |d| {
+        const expr, const expected = d;
+        var ast = try fromExpression(t.allocator, expr);
+        defer ast.deinit(t.allocator);
+
+        var buf = std.BoundedArray(u8, 4096){};
+        try ast.print(sheet, expr, buf.writer());
+        try t.expectEqualStrings(expected, buf.constSlice());
+    }
 }

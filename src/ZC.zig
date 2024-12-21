@@ -29,11 +29,11 @@ const log = std.log.scoped(.zc);
 
 const Self = @This();
 
-lua: *Lua,
+lua_ptr: *Lua,
 
 running: bool = true,
 
-sheet: Sheet,
+sheet: *Sheet,
 tui: Tui,
 
 prev_mode: Mode = .normal,
@@ -152,14 +152,14 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
 
     if (options.ui) try tui.term.uncook(.{});
 
-    var sheet = Sheet.init(allocator);
-    errdefer sheet.deinit();
+    const sheet = try Sheet.create(allocator);
+    errdefer sheet.destroy();
 
     var lua_state = try lua.init(zc);
     errdefer lua_state.deinit();
 
     zc.* = Self{
-        .lua = lua_state,
+        .lua_ptr = lua_state,
         .sheet = sheet,
         .tui = tui,
         .allocator = allocator,
@@ -174,7 +174,7 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
     zc.emitEvent("Init", .{});
 
     if (options.filepath) |filepath| {
-        try zc.loadFile(&zc.sheet, filepath);
+        try zc.loadFile(zc.sheet, filepath);
     }
 
     log.debug("Finished init", .{});
@@ -195,7 +195,7 @@ pub fn sourceLua(self: *Self) !void {
 
     const path = try std.fs.path.joinZ(allocator, paths);
     log.debug("Sourcing lua file '{s}'", .{path});
-    try self.lua.doFile(path);
+    try self.lua_ptr.doFile(path);
 }
 
 pub fn deinit(self: *Self) void {
@@ -208,7 +208,7 @@ pub fn deinit(self: *Self) void {
         ast.deinit(self.allocator);
     }
 
-    self.lua.deinit();
+    self.lua_ptr.deinit();
     self.command.deinit(self.allocator);
 
     self.input_buf.deinit(self.allocator);
@@ -216,16 +216,14 @@ pub fn deinit(self: *Self) void {
     self.command_keymaps.deinit(self.allocator);
 
     self.asts.deinit(self.allocator);
-    self.sheet.deinit();
+    self.sheet.destroy();
     self.* = undefined;
 }
 
 /// Emits the given event, calling it's dispatcher with `args`.
 pub fn emitEvent(self: *Self, event: [:0]const u8, args: anytype) void {
     log.debug("Emitting event '{s}' with {d} arguments", .{ event, args.len });
-    lua.emitEvent(self.lua, event, args) catch |err| {
-        log.err("Lua runtime error: {}", .{err});
-    }; // TODO: notify of Lua errors
+    lua.emitEvent(self.lua_ptr, event, args) catch {}; // TODO: Make sure handled correctly
 }
 
 pub fn resetInputBuf(self: *Self) void {
@@ -1044,7 +1042,7 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
 pub fn loadCmd(self: *Self, filepath: []const u8) !void {
     if (filepath.len == 0) return error.EmptyFileName;
 
-    self.clearSheet(&self.sheet) catch |err| switch (err) {
+    self.clearSheet(self.sheet) catch |err| switch (err) {
         error.OutOfMemory => {
             self.setStatusMessage(.err, "Out of memory!", .{});
             return;
@@ -1052,7 +1050,7 @@ pub fn loadCmd(self: *Self, filepath: []const u8) !void {
     };
     self.tui.update.cells = true;
 
-    self.loadFile(&self.sheet, filepath) catch |err| {
+    self.loadFile(self.sheet, filepath) catch |err| {
         self.setStatusMessage(.err, "Could not open file: {s}", .{@errorName(err)});
         return;
     };

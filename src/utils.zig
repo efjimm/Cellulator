@@ -74,7 +74,7 @@ pub fn isZigString(comptime T: type) bool {
     return comptime blk: {
         // Only pointer types can be strings, no optionals
         const info = @typeInfo(T);
-        if (info != .Pointer) break :blk false;
+        if (info != .pointer) break :blk false;
 
         const ptr = &info.Pointer;
         // Check for CV qualifiers that would prevent coerction to []const u8

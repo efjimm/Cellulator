@@ -8,16 +8,17 @@
     },
     .dependencies = .{
         .shovel = .{
-            .url = "git+https://github.com/efjimm/shovel?ref=master#41f766d806e9e12c91c5305e6306af88d9443c16",
-            .hash = "1220ea139b982d70aeab4d8d350ff7bd483210009fb0179df3906a4ebc9f79104a77",
+            .url = "git+https://github.com/efjimm/shovel?ref=master#5048a46a554e558d11bf09b751d100c1f01ea43c",
+            .hash = "1220c91109c77ba06b5c4fb6c092deb92f55b22edecca6b033b01999e58309b7dd71",
         },
         .wcwidth = .{
             .url = "git+https://github.com/efjimm/zig-wcwidth?ref=master#d3fde4f6d76d6208cee59ac570772275339d3c10",
             .hash = "12200686ad8c1d0cb234f282a6ac3cfd38071b81fab2b7c74654d7a2bf3655575929",
         },
         .ziglua = .{
-            .url = "git+https://github.com/natecraddock/ziglua?ref=main#74796808b5bf7c81bf6f1e1b48d97ad01f87ec45",
-            .hash = "122094a86e7171946ec9dc47ea22c4782511c26ae555a7e79e315ae857ccce15cfa5",
+            // .url = "git+https://github.com/natecraddock/ziglua?ref=main#90dab7e72173709353dcaaa6d911bed7655c030d",
+            // .hash = "12205923460670d52fb29fc74ec920d283dbe629a256787a54f4290748c05bee6ae1",
+            .path = "./ziglua",
         },
     },
 }

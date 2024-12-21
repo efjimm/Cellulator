@@ -34,10 +34,10 @@ undo_end_markers: std.AutoHashMapUnmanaged(u32, Marker) = .{},
 /// Range tree mapping ranges to a list of ranges that depend on the first.
 /// Used to query whether a cell belongs to a range and then update the cells
 /// that depend on that range.
-rtree: DependentTree(4) = .{},
+rtree: DependentTree(4),
 /// Range tree containing just the positions of extant cells.
 /// Used for quick lookup of all extant cells in a range.
-cell_tree: RTree(*Cell, void, 4) = .{},
+cell_tree: RTree(*Cell, void, 4),
 
 allocator: Allocator,
 
@@ -57,6 +57,46 @@ filepath: std.BoundedArray(u8, std.fs.max_path_bytes) = .{}, // TODO: Heap alloc
 pub const CellTreap = std.Treap(Cell, Cell.compare);
 pub const ColumnAxis = std.Treap(Column, Column.compare);
 pub const RowAxis = std.Treap(Row, Row.compare);
+
+pub fn create(allocator: Allocator) !*Sheet {
+    const sheet = try allocator.create(Sheet);
+    errdefer allocator.destroy(sheet);
+
+    sheet.* = .{
+        .allocator = allocator,
+        .cell_tree = .{ .sheet = sheet },
+        .rtree = .init(sheet),
+    };
+
+    return sheet;
+}
+
+pub fn destroy(sheet: *Sheet) void {
+    var strings_iter = sheet.strings.iterator();
+    while (strings_iter.next()) |kv| {
+        sheet.allocator.free(kv.value_ptr.*);
+    }
+    sheet.strings.deinit(sheet.allocator);
+    sheet.search_buffer.deinit(sheet.allocator);
+
+    sheet.clearAndFreeUndos(.undo);
+    sheet.clearAndFreeUndos(.redo);
+    sheet.rtree.deinit(sheet.allocator);
+    sheet.cell_tree.deinit(sheet.allocator);
+
+    sheet.queued_cells.deinit(sheet.allocator);
+    sheet.undo_end_markers.deinit(sheet.allocator);
+    sheet.undos.deinit(sheet.allocator);
+    sheet.redos.deinit(sheet.allocator);
+
+    var node_iter = sheet.cell_treap.inorderIterator();
+    while (node_iter.next()) |node| {
+        node.key.deinit(sheet.allocator);
+    }
+    var arena = sheet.arena.promote(sheet.allocator);
+    arena.deinit();
+    sheet.allocator.destroy(sheet);
+}
 
 fn compareAnchor(a: u32, b: u32) std.math.Order {
     return std.math.order(a, b);
@@ -203,39 +243,6 @@ pub fn treapPrevNode(key: Position, node: ?*CellNode, parent: ?*CellNode) ?*Cell
     return p;
 }
 
-pub fn init(allocator: Allocator) Sheet {
-    return .{
-        .allocator = allocator,
-    };
-}
-
-pub fn deinit(sheet: *Sheet) void {
-    var strings_iter = sheet.strings.iterator();
-    while (strings_iter.next()) |kv| {
-        sheet.allocator.free(kv.value_ptr.*);
-    }
-    sheet.strings.deinit(sheet.allocator);
-    sheet.search_buffer.deinit(sheet.allocator);
-
-    sheet.clearAndFreeUndos(.undo);
-    sheet.clearAndFreeUndos(.redo);
-    sheet.rtree.deinit(sheet.allocator);
-    sheet.cell_tree.deinit(sheet.allocator);
-
-    sheet.queued_cells.deinit(sheet.allocator);
-    sheet.undo_end_markers.deinit(sheet.allocator);
-    sheet.undos.deinit(sheet.allocator);
-    sheet.redos.deinit(sheet.allocator);
-
-    var node_iter = sheet.cell_treap.inorderIterator();
-    while (node_iter.next()) |node| {
-        node.key.deinit(sheet.allocator);
-    }
-    var arena = sheet.arena.promote(sheet.allocator);
-    arena.deinit();
-    sheet.* = undefined;
-}
-
 pub fn clearRetainingCapacity(sheet: *Sheet, context: anytype) void {
     var iter = sheet.cell_treap.inorderIterator();
     while (iter.next()) |node| context.destroyAst(node.key.ast);
@@ -246,10 +253,10 @@ pub fn clearRetainingCapacity(sheet: *Sheet, context: anytype) void {
     sheet.queued_cells.clearRetainingCapacity();
 
     sheet.cell_tree.deinit(sheet.allocator);
-    sheet.cell_tree = .{};
+    sheet.cell_tree = .{ .sheet = sheet };
 
     sheet.rtree.deinit(sheet.allocator);
-    sheet.rtree = .{};
+    sheet.rtree = .init(sheet);
 
     var strings_iter = sheet.strings.valueIterator();
     while (strings_iter.next()) |string_ptr| {
@@ -828,7 +835,7 @@ pub fn undo(sheet: *Sheet) Allocator.Error!void {
 
     defer sheet.endRedoGroup();
 
-    const opts = .{ .undo_type = .redo };
+    const opts: UndoOpts = .{ .undo_type = .redo };
     while (sheet.undos.popOrNull()) |u| {
         errdefer {
             sheet.undos.appendAssumeCapacity(u);
@@ -846,7 +853,7 @@ pub fn redo(sheet: *Sheet) Allocator.Error!void {
 
     defer sheet.endUndoGroup();
 
-    const opts = .{ .clear_redos = false };
+    const opts: UndoOpts = .{ .clear_redos = false };
     while (sheet.redos.popOrNull()) |u| {
         errdefer {
             sheet.redos.appendAssumeCapacity(u);
@@ -1028,7 +1035,7 @@ pub fn insertCellNode(
     try sheet.strings.ensureUnusedCapacity(sheet.allocator, 1);
 
     try sheet.cell_tree.put(sheet, cell_ptr, {});
-    errdefer sheet.cell_tree.remove(sheet, cell_ptr) catch {};
+    errdefer sheet.cell_tree.remove(cell_ptr) catch {};
 
     var entry = sheet.cell_treap.getEntryFor(new_node.key);
     const node = entry.node orelse {
@@ -1113,7 +1120,9 @@ pub fn deleteCellByPtr(
     //        This is actually a pain in the ass to fix...
     //        Maybe an RTree function to calculate the amount of mem needed
     //        for a removal ahead of time?
-    try sheet.cell_tree.remove(sheet, cell);
+    //
+    // TODO:  This is actually easy?
+    try sheet.cell_tree.remove(cell);
 
     // TODO: re-use string buffer
     cell.setError(sheet.allocator);
@@ -1292,7 +1301,7 @@ pub const Cell = struct {
 
     pub const Error = Ast.EvalError;
 
-    pub const key_bits = @typeInfo(usize).Int.bits * 2;
+    pub const key_bits = @typeInfo(usize).int.bits * 2;
     pub const Key = std.meta.Int(.unsigned, key_bits);
 
     pub fn reference(cell: Cell) Reference {
@@ -1313,7 +1322,7 @@ pub const Cell = struct {
         return a.row == b.row and a.col == b.col;
     }
 
-    pub inline fn rect(cell: Cell) Rect {
+    pub inline fn rect(cell: Cell, _: *Sheet) Rect {
         return .{
             .tl = cell.position(),
             .br = cell.position(),
@@ -1333,7 +1342,7 @@ pub const Cell = struct {
     fn key(row: *Row, col: *Column) Key {
         const row_int = @intFromPtr(row);
         const col_int = @intFromPtr(col);
-        const row_mul = comptime std.math.pow(Key, 2, @typeInfo(usize).Int.bits);
+        const row_mul = comptime std.math.pow(Key, 2, @typeInfo(usize).int.bits);
         return row_int * row_mul + col_int;
     }
 
@@ -1369,7 +1378,11 @@ pub const Cell = struct {
 /// Queues the dependents of `ref` for update.
 fn queueDependents(sheet: *Sheet, ref: Reference) Allocator.Error!void {
     sheet.search_buffer.clearRetainingCapacity();
-    try sheet.rtree.rtree.searchBuffer(sheet.allocator, &sheet.search_buffer, ref.rect());
+    try sheet.rtree.rtree.searchBuffer(
+        sheet.allocator,
+        &sheet.search_buffer,
+        ref.rect(sheet),
+    );
 
     for (sheet.search_buffer.items) |*value_list| {
         for (value_list.items) |cell| {
@@ -1433,7 +1446,7 @@ pub const EvalContext = struct {
 pub fn printCellExpression(sheet: *Sheet, pos: Position, writer: anytype) !void {
     const cell = sheet.getCellPtr(pos) orelse return;
     const strings = sheet.strings.get(cell.node()) orelse "";
-    try cell.ast.print(strings, writer);
+    try cell.ast.print(sheet, strings, writer);
 }
 
 pub const Row = struct {
@@ -1572,14 +1585,14 @@ pub const Reference = struct {
     row: *Row,
     col: *Column,
 
-    pub inline fn resolve(pos: Reference) Position {
+    pub inline fn resolve(pos: Reference, _: *Sheet) Position {
         return .{ .x = pos.col.index, .y = pos.row.index };
     }
 
-    pub inline fn rect(ref: Reference) Rect {
+    pub inline fn rect(ref: Reference, sheet: *Sheet) Rect {
         return .{
-            .tl = ref.resolve(),
-            .br = ref.resolve(),
+            .tl = ref.resolve(sheet),
+            .br = ref.resolve(sheet),
         };
     }
 
@@ -1592,10 +1605,10 @@ pub const Range = struct {
     tl: Reference,
     br: Reference,
 
-    pub inline fn rect(range: Range) Rect {
+    pub inline fn rect(range: Range, sheet: *Sheet) Rect {
         return .{
-            .tl = range.tl.resolve(),
-            .br = range.br.resolve(),
+            .tl = range.tl.resolve(sheet),
+            .br = range.br.resolve(sheet),
         };
     }
 
@@ -1622,8 +1635,8 @@ pub const Range = struct {
 test "Sheet basics" {
     const t = std.testing;
 
-    var sheet = Sheet.init(t.allocator);
-    defer sheet.deinit();
+    const sheet = try Sheet.create(t.allocator);
+    defer sheet.destroy();
 
     try t.expectEqual(@as(Position.HashInt, 0), sheet.cellCount());
     try t.expectEqualStrings("", sheet.filepath.slice());
@@ -1654,8 +1667,8 @@ test "setCell allocations" {
     const t = std.testing;
     const Test = struct {
         fn testSetCellAllocs(a: Allocator) !void {
-            var sheet = Sheet.init(a);
-            defer sheet.deinit();
+            const sheet = try Sheet.create(a);
+            defer sheet.destroy();
 
             {
                 const expr = "a4 * a1 * a3";
@@ -1702,8 +1715,8 @@ test "Load file" {
 
 test "Update values" {
     const t = std.testing;
-    var sheet = Sheet.init(t.allocator);
-    defer sheet.deinit();
+    const sheet = try Sheet.create(t.allocator);
+    defer sheet.destroy();
 
     try sheet.setCell(
         try Position.fromAddress("C0"),
@@ -1735,8 +1748,8 @@ test "Update values" {
 
 fn testCellEvaluation(a: Allocator) !void {
     const t = std.testing;
-    var sheet = Sheet.init(a);
-    defer sheet.deinit();
+    const sheet = try Sheet.create(a);
+    defer sheet.destroy();
 
     const _setCell = struct {
         fn _setCell(
@@ -1757,155 +1770,155 @@ fn testCellEvaluation(a: Allocator) !void {
     }._setCell;
 
     // Set cell values in random order
-    try _setCell(a, &sheet, try Position.fromAddress("B17"), try Ast.fromExpression(a, "A17+B16"));
-    try _setCell(a, &sheet, try Position.fromAddress("G8"), try Ast.fromExpression(a, "G7+F8"));
-    try _setCell(a, &sheet, try Position.fromAddress("A9"), try Ast.fromExpression(a, "A8+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("G11"), try Ast.fromExpression(a, "G10+F11"));
-    try _setCell(a, &sheet, try Position.fromAddress("E16"), try Ast.fromExpression(a, "E15+D16"));
-    try _setCell(a, &sheet, try Position.fromAddress("G10"), try Ast.fromExpression(a, "G9+F10"));
-    try _setCell(a, &sheet, try Position.fromAddress("D2"), try Ast.fromExpression(a, "D1+C2"));
-    try _setCell(a, &sheet, try Position.fromAddress("F2"), try Ast.fromExpression(a, "F1+E2"));
-    try _setCell(a, &sheet, try Position.fromAddress("B18"), try Ast.fromExpression(a, "A18+B17"));
-    try _setCell(a, &sheet, try Position.fromAddress("D15"), try Ast.fromExpression(a, "D14+C15"));
-    try _setCell(a, &sheet, try Position.fromAddress("D20"), try Ast.fromExpression(a, "D19+C20"));
-    try _setCell(a, &sheet, try Position.fromAddress("E13"), try Ast.fromExpression(a, "E12+D13"));
-    try _setCell(a, &sheet, try Position.fromAddress("C12"), try Ast.fromExpression(a, "C11+B12"));
-    try _setCell(a, &sheet, try Position.fromAddress("A16"), try Ast.fromExpression(a, "A15+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("A10"), try Ast.fromExpression(a, "A9+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("C19"), try Ast.fromExpression(a, "C18+B19"));
-    try _setCell(a, &sheet, try Position.fromAddress("F0"), try Ast.fromExpression(a, "E0+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("B4"), try Ast.fromExpression(a, "A4+B3"));
-    try _setCell(a, &sheet, try Position.fromAddress("C11"), try Ast.fromExpression(a, "C10+B11"));
-    try _setCell(a, &sheet, try Position.fromAddress("B6"), try Ast.fromExpression(a, "A6+B5"));
-    try _setCell(a, &sheet, try Position.fromAddress("G5"), try Ast.fromExpression(a, "G4+F5"));
-    try _setCell(a, &sheet, try Position.fromAddress("A18"), try Ast.fromExpression(a, "A17+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("D1"), try Ast.fromExpression(a, "D0+C1"));
-    try _setCell(a, &sheet, try Position.fromAddress("G12"), try Ast.fromExpression(a, "G11+F12"));
-    try _setCell(a, &sheet, try Position.fromAddress("B5"), try Ast.fromExpression(a, "A5+B4"));
-    try _setCell(a, &sheet, try Position.fromAddress("D4"), try Ast.fromExpression(a, "D3+C4"));
-    try _setCell(a, &sheet, try Position.fromAddress("A5"), try Ast.fromExpression(a, "A4+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("A0"), try Ast.fromExpression(a, "1"));
-    try _setCell(a, &sheet, try Position.fromAddress("D13"), try Ast.fromExpression(a, "D12+C13"));
-    try _setCell(a, &sheet, try Position.fromAddress("A15"), try Ast.fromExpression(a, "A14+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("A20"), try Ast.fromExpression(a, "A19+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("G19"), try Ast.fromExpression(a, "G18+F19"));
-    try _setCell(a, &sheet, try Position.fromAddress("G13"), try Ast.fromExpression(a, "G12+F13"));
-    try _setCell(a, &sheet, try Position.fromAddress("G17"), try Ast.fromExpression(a, "G16+F17"));
-    try _setCell(a, &sheet, try Position.fromAddress("C14"), try Ast.fromExpression(a, "C13+B14"));
-    try _setCell(a, &sheet, try Position.fromAddress("B8"), try Ast.fromExpression(a, "A8+B7"));
-    try _setCell(a, &sheet, try Position.fromAddress("D10"), try Ast.fromExpression(a, "D9+C10"));
-    try _setCell(a, &sheet, try Position.fromAddress("F19"), try Ast.fromExpression(a, "F18+E19"));
-    try _setCell(a, &sheet, try Position.fromAddress("B11"), try Ast.fromExpression(a, "A11+B10"));
-    try _setCell(a, &sheet, try Position.fromAddress("F9"), try Ast.fromExpression(a, "F8+E9"));
-    try _setCell(a, &sheet, try Position.fromAddress("G7"), try Ast.fromExpression(a, "G6+F7"));
-    try _setCell(a, &sheet, try Position.fromAddress("C10"), try Ast.fromExpression(a, "C9+B10"));
-    try _setCell(a, &sheet, try Position.fromAddress("C2"), try Ast.fromExpression(a, "C1+B2"));
-    try _setCell(a, &sheet, try Position.fromAddress("D0"), try Ast.fromExpression(a, "C0+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("C18"), try Ast.fromExpression(a, "C17+B18"));
-    try _setCell(a, &sheet, try Position.fromAddress("D6"), try Ast.fromExpression(a, "D5+C6"));
-    try _setCell(a, &sheet, try Position.fromAddress("C0"), try Ast.fromExpression(a, "B0+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("B14"), try Ast.fromExpression(a, "A14+B13"));
-    try _setCell(a, &sheet, try Position.fromAddress("B19"), try Ast.fromExpression(a, "A19+B18"));
-    try _setCell(a, &sheet, try Position.fromAddress("G16"), try Ast.fromExpression(a, "G15+F16"));
-    try _setCell(a, &sheet, try Position.fromAddress("C8"), try Ast.fromExpression(a, "C7+B8"));
-    try _setCell(a, &sheet, try Position.fromAddress("G4"), try Ast.fromExpression(a, "G3+F4"));
-    try _setCell(a, &sheet, try Position.fromAddress("D18"), try Ast.fromExpression(a, "D17+C18"));
-    try _setCell(a, &sheet, try Position.fromAddress("E17"), try Ast.fromExpression(a, "E16+D17"));
-    try _setCell(a, &sheet, try Position.fromAddress("D3"), try Ast.fromExpression(a, "D2+C3"));
-    try _setCell(a, &sheet, try Position.fromAddress("E20"), try Ast.fromExpression(a, "E19+D20"));
-    try _setCell(a, &sheet, try Position.fromAddress("C6"), try Ast.fromExpression(a, "C5+B6"));
-    try _setCell(a, &sheet, try Position.fromAddress("E2"), try Ast.fromExpression(a, "E1+D2"));
-    try _setCell(a, &sheet, try Position.fromAddress("C1"), try Ast.fromExpression(a, "C0+B1"));
-    try _setCell(a, &sheet, try Position.fromAddress("D17"), try Ast.fromExpression(a, "D16+C17"));
-    try _setCell(a, &sheet, try Position.fromAddress("C9"), try Ast.fromExpression(a, "C8+B9"));
-    try _setCell(a, &sheet, try Position.fromAddress("D12"), try Ast.fromExpression(a, "D11+C12"));
-    try _setCell(a, &sheet, try Position.fromAddress("F18"), try Ast.fromExpression(a, "F17+E18"));
-    try _setCell(a, &sheet, try Position.fromAddress("H0"), try Ast.fromExpression(a, "G0+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("D8"), try Ast.fromExpression(a, "D7+C8"));
-    try _setCell(a, &sheet, try Position.fromAddress("B12"), try Ast.fromExpression(a, "A12+B11"));
-    try _setCell(a, &sheet, try Position.fromAddress("E19"), try Ast.fromExpression(a, "E18+D19"));
-    try _setCell(a, &sheet, try Position.fromAddress("A14"), try Ast.fromExpression(a, "A13+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("E14"), try Ast.fromExpression(a, "E13+D14"));
-    try _setCell(a, &sheet, try Position.fromAddress("F14"), try Ast.fromExpression(a, "F13+E14"));
-    try _setCell(a, &sheet, try Position.fromAddress("A13"), try Ast.fromExpression(a, "A12+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("A19"), try Ast.fromExpression(a, "A18+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("A4"), try Ast.fromExpression(a, "A3+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("F7"), try Ast.fromExpression(a, "F6+E7"));
-    try _setCell(a, &sheet, try Position.fromAddress("A7"), try Ast.fromExpression(a, "A6+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("E11"), try Ast.fromExpression(a, "E10+D11"));
-    try _setCell(a, &sheet, try Position.fromAddress("B1"), try Ast.fromExpression(a, "A1+B0"));
-    try _setCell(a, &sheet, try Position.fromAddress("A11"), try Ast.fromExpression(a, "A10+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("B16"), try Ast.fromExpression(a, "A16+B15"));
-    try _setCell(a, &sheet, try Position.fromAddress("E12"), try Ast.fromExpression(a, "E11+D12"));
-    try _setCell(a, &sheet, try Position.fromAddress("F11"), try Ast.fromExpression(a, "F10+E11"));
-    try _setCell(a, &sheet, try Position.fromAddress("F1"), try Ast.fromExpression(a, "F0+E1"));
-    try _setCell(a, &sheet, try Position.fromAddress("C4"), try Ast.fromExpression(a, "C3+B4"));
-    try _setCell(a, &sheet, try Position.fromAddress("G20"), try Ast.fromExpression(a, "G19+F20"));
-    try _setCell(a, &sheet, try Position.fromAddress("F16"), try Ast.fromExpression(a, "F15+E16"));
-    try _setCell(a, &sheet, try Position.fromAddress("D5"), try Ast.fromExpression(a, "D4+C5"));
-    try _setCell(a, &sheet, try Position.fromAddress("A17"), try Ast.fromExpression(a, "A16+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("A22"), try Ast.fromExpression(a, "@sum(a0:g20)"));
-    try _setCell(a, &sheet, try Position.fromAddress("F4"), try Ast.fromExpression(a, "F3+E4"));
-    try _setCell(a, &sheet, try Position.fromAddress("B9"), try Ast.fromExpression(a, "A9+B8"));
-    try _setCell(a, &sheet, try Position.fromAddress("E4"), try Ast.fromExpression(a, "E3+D4"));
-    try _setCell(a, &sheet, try Position.fromAddress("F13"), try Ast.fromExpression(a, "F12+E13"));
-    try _setCell(a, &sheet, try Position.fromAddress("A1"), try Ast.fromExpression(a, "A0+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("F3"), try Ast.fromExpression(a, "F2+E3"));
-    try _setCell(a, &sheet, try Position.fromAddress("F17"), try Ast.fromExpression(a, "F16+E17"));
-    try _setCell(a, &sheet, try Position.fromAddress("G14"), try Ast.fromExpression(a, "G13+F14"));
-    try _setCell(a, &sheet, try Position.fromAddress("D11"), try Ast.fromExpression(a, "D10+C11"));
-    try _setCell(a, &sheet, try Position.fromAddress("A2"), try Ast.fromExpression(a, "A1+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("E9"), try Ast.fromExpression(a, "E8+D9"));
-    try _setCell(a, &sheet, try Position.fromAddress("B15"), try Ast.fromExpression(a, "A15+B14"));
-    try _setCell(a, &sheet, try Position.fromAddress("E18"), try Ast.fromExpression(a, "E17+D18"));
-    try _setCell(a, &sheet, try Position.fromAddress("E8"), try Ast.fromExpression(a, "E7+D8"));
-    try _setCell(a, &sheet, try Position.fromAddress("G18"), try Ast.fromExpression(a, "G17+F18"));
-    try _setCell(a, &sheet, try Position.fromAddress("A6"), try Ast.fromExpression(a, "A5+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("C3"), try Ast.fromExpression(a, "C2+B3"));
-    try _setCell(a, &sheet, try Position.fromAddress("B0"), try Ast.fromExpression(a, "A0+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("E10"), try Ast.fromExpression(a, "E9+D10"));
-    try _setCell(a, &sheet, try Position.fromAddress("B7"), try Ast.fromExpression(a, "A7+B6"));
-    try _setCell(a, &sheet, try Position.fromAddress("C7"), try Ast.fromExpression(a, "C6+B7"));
-    try _setCell(a, &sheet, try Position.fromAddress("D9"), try Ast.fromExpression(a, "D8+C9"));
-    try _setCell(a, &sheet, try Position.fromAddress("D14"), try Ast.fromExpression(a, "D13+C14"));
-    try _setCell(a, &sheet, try Position.fromAddress("B20"), try Ast.fromExpression(a, "A20+B19"));
-    try _setCell(a, &sheet, try Position.fromAddress("E7"), try Ast.fromExpression(a, "E6+D7"));
-    try _setCell(a, &sheet, try Position.fromAddress("E0"), try Ast.fromExpression(a, "D0+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("A3"), try Ast.fromExpression(a, "A2+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("G9"), try Ast.fromExpression(a, "G8+F9"));
-    try _setCell(a, &sheet, try Position.fromAddress("C17"), try Ast.fromExpression(a, "C16+B17"));
-    try _setCell(a, &sheet, try Position.fromAddress("F5"), try Ast.fromExpression(a, "F4+E5"));
-    try _setCell(a, &sheet, try Position.fromAddress("F6"), try Ast.fromExpression(a, "F5+E6"));
-    try _setCell(a, &sheet, try Position.fromAddress("G3"), try Ast.fromExpression(a, "G2+F3"));
-    try _setCell(a, &sheet, try Position.fromAddress("E5"), try Ast.fromExpression(a, "E4+D5"));
-    try _setCell(a, &sheet, try Position.fromAddress("A8"), try Ast.fromExpression(a, "A7+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("B13"), try Ast.fromExpression(a, "A13+B12"));
-    try _setCell(a, &sheet, try Position.fromAddress("B3"), try Ast.fromExpression(a, "A3+B2"));
-    try _setCell(a, &sheet, try Position.fromAddress("D19"), try Ast.fromExpression(a, "D18+C19"));
-    try _setCell(a, &sheet, try Position.fromAddress("B2"), try Ast.fromExpression(a, "A2+B1"));
-    try _setCell(a, &sheet, try Position.fromAddress("C5"), try Ast.fromExpression(a, "C4+B5"));
-    try _setCell(a, &sheet, try Position.fromAddress("G6"), try Ast.fromExpression(a, "G5+F6"));
-    try _setCell(a, &sheet, try Position.fromAddress("F12"), try Ast.fromExpression(a, "F11+E12"));
-    try _setCell(a, &sheet, try Position.fromAddress("E1"), try Ast.fromExpression(a, "E0+D1"));
-    try _setCell(a, &sheet, try Position.fromAddress("C15"), try Ast.fromExpression(a, "C14+B15"));
-    try _setCell(a, &sheet, try Position.fromAddress("A12"), try Ast.fromExpression(a, "A11+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("G1"), try Ast.fromExpression(a, "G0+F1"));
-    try _setCell(a, &sheet, try Position.fromAddress("D16"), try Ast.fromExpression(a, "D15+C16"));
-    try _setCell(a, &sheet, try Position.fromAddress("F20"), try Ast.fromExpression(a, "F19+E20"));
-    try _setCell(a, &sheet, try Position.fromAddress("E6"), try Ast.fromExpression(a, "E5+D6"));
-    try _setCell(a, &sheet, try Position.fromAddress("E15"), try Ast.fromExpression(a, "E14+D15"));
-    try _setCell(a, &sheet, try Position.fromAddress("F8"), try Ast.fromExpression(a, "F7+E8"));
-    try _setCell(a, &sheet, try Position.fromAddress("F10"), try Ast.fromExpression(a, "F9+E10"));
-    try _setCell(a, &sheet, try Position.fromAddress("C16"), try Ast.fromExpression(a, "C15+B16"));
-    try _setCell(a, &sheet, try Position.fromAddress("C20"), try Ast.fromExpression(a, "C19+B20"));
-    try _setCell(a, &sheet, try Position.fromAddress("E3"), try Ast.fromExpression(a, "E2+D3"));
-    try _setCell(a, &sheet, try Position.fromAddress("B10"), try Ast.fromExpression(a, "A10+B9"));
-    try _setCell(a, &sheet, try Position.fromAddress("G2"), try Ast.fromExpression(a, "G1+F2"));
-    try _setCell(a, &sheet, try Position.fromAddress("D7"), try Ast.fromExpression(a, "D6+C7"));
-    try _setCell(a, &sheet, try Position.fromAddress("G15"), try Ast.fromExpression(a, "G14+F15"));
-    try _setCell(a, &sheet, try Position.fromAddress("G0"), try Ast.fromExpression(a, "F0+1"));
-    try _setCell(a, &sheet, try Position.fromAddress("F15"), try Ast.fromExpression(a, "F14+E15"));
-    try _setCell(a, &sheet, try Position.fromAddress("C13"), try Ast.fromExpression(a, "C12+B13"));
+    try _setCell(a, sheet, try Position.fromAddress("B17"), try Ast.fromExpression(a, "A17+B16"));
+    try _setCell(a, sheet, try Position.fromAddress("G8"), try Ast.fromExpression(a, "G7+F8"));
+    try _setCell(a, sheet, try Position.fromAddress("A9"), try Ast.fromExpression(a, "A8+1"));
+    try _setCell(a, sheet, try Position.fromAddress("G11"), try Ast.fromExpression(a, "G10+F11"));
+    try _setCell(a, sheet, try Position.fromAddress("E16"), try Ast.fromExpression(a, "E15+D16"));
+    try _setCell(a, sheet, try Position.fromAddress("G10"), try Ast.fromExpression(a, "G9+F10"));
+    try _setCell(a, sheet, try Position.fromAddress("D2"), try Ast.fromExpression(a, "D1+C2"));
+    try _setCell(a, sheet, try Position.fromAddress("F2"), try Ast.fromExpression(a, "F1+E2"));
+    try _setCell(a, sheet, try Position.fromAddress("B18"), try Ast.fromExpression(a, "A18+B17"));
+    try _setCell(a, sheet, try Position.fromAddress("D15"), try Ast.fromExpression(a, "D14+C15"));
+    try _setCell(a, sheet, try Position.fromAddress("D20"), try Ast.fromExpression(a, "D19+C20"));
+    try _setCell(a, sheet, try Position.fromAddress("E13"), try Ast.fromExpression(a, "E12+D13"));
+    try _setCell(a, sheet, try Position.fromAddress("C12"), try Ast.fromExpression(a, "C11+B12"));
+    try _setCell(a, sheet, try Position.fromAddress("A16"), try Ast.fromExpression(a, "A15+1"));
+    try _setCell(a, sheet, try Position.fromAddress("A10"), try Ast.fromExpression(a, "A9+1"));
+    try _setCell(a, sheet, try Position.fromAddress("C19"), try Ast.fromExpression(a, "C18+B19"));
+    try _setCell(a, sheet, try Position.fromAddress("F0"), try Ast.fromExpression(a, "E0+1"));
+    try _setCell(a, sheet, try Position.fromAddress("B4"), try Ast.fromExpression(a, "A4+B3"));
+    try _setCell(a, sheet, try Position.fromAddress("C11"), try Ast.fromExpression(a, "C10+B11"));
+    try _setCell(a, sheet, try Position.fromAddress("B6"), try Ast.fromExpression(a, "A6+B5"));
+    try _setCell(a, sheet, try Position.fromAddress("G5"), try Ast.fromExpression(a, "G4+F5"));
+    try _setCell(a, sheet, try Position.fromAddress("A18"), try Ast.fromExpression(a, "A17+1"));
+    try _setCell(a, sheet, try Position.fromAddress("D1"), try Ast.fromExpression(a, "D0+C1"));
+    try _setCell(a, sheet, try Position.fromAddress("G12"), try Ast.fromExpression(a, "G11+F12"));
+    try _setCell(a, sheet, try Position.fromAddress("B5"), try Ast.fromExpression(a, "A5+B4"));
+    try _setCell(a, sheet, try Position.fromAddress("D4"), try Ast.fromExpression(a, "D3+C4"));
+    try _setCell(a, sheet, try Position.fromAddress("A5"), try Ast.fromExpression(a, "A4+1"));
+    try _setCell(a, sheet, try Position.fromAddress("A0"), try Ast.fromExpression(a, "1"));
+    try _setCell(a, sheet, try Position.fromAddress("D13"), try Ast.fromExpression(a, "D12+C13"));
+    try _setCell(a, sheet, try Position.fromAddress("A15"), try Ast.fromExpression(a, "A14+1"));
+    try _setCell(a, sheet, try Position.fromAddress("A20"), try Ast.fromExpression(a, "A19+1"));
+    try _setCell(a, sheet, try Position.fromAddress("G19"), try Ast.fromExpression(a, "G18+F19"));
+    try _setCell(a, sheet, try Position.fromAddress("G13"), try Ast.fromExpression(a, "G12+F13"));
+    try _setCell(a, sheet, try Position.fromAddress("G17"), try Ast.fromExpression(a, "G16+F17"));
+    try _setCell(a, sheet, try Position.fromAddress("C14"), try Ast.fromExpression(a, "C13+B14"));
+    try _setCell(a, sheet, try Position.fromAddress("B8"), try Ast.fromExpression(a, "A8+B7"));
+    try _setCell(a, sheet, try Position.fromAddress("D10"), try Ast.fromExpression(a, "D9+C10"));
+    try _setCell(a, sheet, try Position.fromAddress("F19"), try Ast.fromExpression(a, "F18+E19"));
+    try _setCell(a, sheet, try Position.fromAddress("B11"), try Ast.fromExpression(a, "A11+B10"));
+    try _setCell(a, sheet, try Position.fromAddress("F9"), try Ast.fromExpression(a, "F8+E9"));
+    try _setCell(a, sheet, try Position.fromAddress("G7"), try Ast.fromExpression(a, "G6+F7"));
+    try _setCell(a, sheet, try Position.fromAddress("C10"), try Ast.fromExpression(a, "C9+B10"));
+    try _setCell(a, sheet, try Position.fromAddress("C2"), try Ast.fromExpression(a, "C1+B2"));
+    try _setCell(a, sheet, try Position.fromAddress("D0"), try Ast.fromExpression(a, "C0+1"));
+    try _setCell(a, sheet, try Position.fromAddress("C18"), try Ast.fromExpression(a, "C17+B18"));
+    try _setCell(a, sheet, try Position.fromAddress("D6"), try Ast.fromExpression(a, "D5+C6"));
+    try _setCell(a, sheet, try Position.fromAddress("C0"), try Ast.fromExpression(a, "B0+1"));
+    try _setCell(a, sheet, try Position.fromAddress("B14"), try Ast.fromExpression(a, "A14+B13"));
+    try _setCell(a, sheet, try Position.fromAddress("B19"), try Ast.fromExpression(a, "A19+B18"));
+    try _setCell(a, sheet, try Position.fromAddress("G16"), try Ast.fromExpression(a, "G15+F16"));
+    try _setCell(a, sheet, try Position.fromAddress("C8"), try Ast.fromExpression(a, "C7+B8"));
+    try _setCell(a, sheet, try Position.fromAddress("G4"), try Ast.fromExpression(a, "G3+F4"));
+    try _setCell(a, sheet, try Position.fromAddress("D18"), try Ast.fromExpression(a, "D17+C18"));
+    try _setCell(a, sheet, try Position.fromAddress("E17"), try Ast.fromExpression(a, "E16+D17"));
+    try _setCell(a, sheet, try Position.fromAddress("D3"), try Ast.fromExpression(a, "D2+C3"));
+    try _setCell(a, sheet, try Position.fromAddress("E20"), try Ast.fromExpression(a, "E19+D20"));
+    try _setCell(a, sheet, try Position.fromAddress("C6"), try Ast.fromExpression(a, "C5+B6"));
+    try _setCell(a, sheet, try Position.fromAddress("E2"), try Ast.fromExpression(a, "E1+D2"));
+    try _setCell(a, sheet, try Position.fromAddress("C1"), try Ast.fromExpression(a, "C0+B1"));
+    try _setCell(a, sheet, try Position.fromAddress("D17"), try Ast.fromExpression(a, "D16+C17"));
+    try _setCell(a, sheet, try Position.fromAddress("C9"), try Ast.fromExpression(a, "C8+B9"));
+    try _setCell(a, sheet, try Position.fromAddress("D12"), try Ast.fromExpression(a, "D11+C12"));
+    try _setCell(a, sheet, try Position.fromAddress("F18"), try Ast.fromExpression(a, "F17+E18"));
+    try _setCell(a, sheet, try Position.fromAddress("H0"), try Ast.fromExpression(a, "G0+1"));
+    try _setCell(a, sheet, try Position.fromAddress("D8"), try Ast.fromExpression(a, "D7+C8"));
+    try _setCell(a, sheet, try Position.fromAddress("B12"), try Ast.fromExpression(a, "A12+B11"));
+    try _setCell(a, sheet, try Position.fromAddress("E19"), try Ast.fromExpression(a, "E18+D19"));
+    try _setCell(a, sheet, try Position.fromAddress("A14"), try Ast.fromExpression(a, "A13+1"));
+    try _setCell(a, sheet, try Position.fromAddress("E14"), try Ast.fromExpression(a, "E13+D14"));
+    try _setCell(a, sheet, try Position.fromAddress("F14"), try Ast.fromExpression(a, "F13+E14"));
+    try _setCell(a, sheet, try Position.fromAddress("A13"), try Ast.fromExpression(a, "A12+1"));
+    try _setCell(a, sheet, try Position.fromAddress("A19"), try Ast.fromExpression(a, "A18+1"));
+    try _setCell(a, sheet, try Position.fromAddress("A4"), try Ast.fromExpression(a, "A3+1"));
+    try _setCell(a, sheet, try Position.fromAddress("F7"), try Ast.fromExpression(a, "F6+E7"));
+    try _setCell(a, sheet, try Position.fromAddress("A7"), try Ast.fromExpression(a, "A6+1"));
+    try _setCell(a, sheet, try Position.fromAddress("E11"), try Ast.fromExpression(a, "E10+D11"));
+    try _setCell(a, sheet, try Position.fromAddress("B1"), try Ast.fromExpression(a, "A1+B0"));
+    try _setCell(a, sheet, try Position.fromAddress("A11"), try Ast.fromExpression(a, "A10+1"));
+    try _setCell(a, sheet, try Position.fromAddress("B16"), try Ast.fromExpression(a, "A16+B15"));
+    try _setCell(a, sheet, try Position.fromAddress("E12"), try Ast.fromExpression(a, "E11+D12"));
+    try _setCell(a, sheet, try Position.fromAddress("F11"), try Ast.fromExpression(a, "F10+E11"));
+    try _setCell(a, sheet, try Position.fromAddress("F1"), try Ast.fromExpression(a, "F0+E1"));
+    try _setCell(a, sheet, try Position.fromAddress("C4"), try Ast.fromExpression(a, "C3+B4"));
+    try _setCell(a, sheet, try Position.fromAddress("G20"), try Ast.fromExpression(a, "G19+F20"));
+    try _setCell(a, sheet, try Position.fromAddress("F16"), try Ast.fromExpression(a, "F15+E16"));
+    try _setCell(a, sheet, try Position.fromAddress("D5"), try Ast.fromExpression(a, "D4+C5"));
+    try _setCell(a, sheet, try Position.fromAddress("A17"), try Ast.fromExpression(a, "A16+1"));
+    try _setCell(a, sheet, try Position.fromAddress("A22"), try Ast.fromExpression(a, "@sum(a0:g20)"));
+    try _setCell(a, sheet, try Position.fromAddress("F4"), try Ast.fromExpression(a, "F3+E4"));
+    try _setCell(a, sheet, try Position.fromAddress("B9"), try Ast.fromExpression(a, "A9+B8"));
+    try _setCell(a, sheet, try Position.fromAddress("E4"), try Ast.fromExpression(a, "E3+D4"));
+    try _setCell(a, sheet, try Position.fromAddress("F13"), try Ast.fromExpression(a, "F12+E13"));
+    try _setCell(a, sheet, try Position.fromAddress("A1"), try Ast.fromExpression(a, "A0+1"));
+    try _setCell(a, sheet, try Position.fromAddress("F3"), try Ast.fromExpression(a, "F2+E3"));
+    try _setCell(a, sheet, try Position.fromAddress("F17"), try Ast.fromExpression(a, "F16+E17"));
+    try _setCell(a, sheet, try Position.fromAddress("G14"), try Ast.fromExpression(a, "G13+F14"));
+    try _setCell(a, sheet, try Position.fromAddress("D11"), try Ast.fromExpression(a, "D10+C11"));
+    try _setCell(a, sheet, try Position.fromAddress("A2"), try Ast.fromExpression(a, "A1+1"));
+    try _setCell(a, sheet, try Position.fromAddress("E9"), try Ast.fromExpression(a, "E8+D9"));
+    try _setCell(a, sheet, try Position.fromAddress("B15"), try Ast.fromExpression(a, "A15+B14"));
+    try _setCell(a, sheet, try Position.fromAddress("E18"), try Ast.fromExpression(a, "E17+D18"));
+    try _setCell(a, sheet, try Position.fromAddress("E8"), try Ast.fromExpression(a, "E7+D8"));
+    try _setCell(a, sheet, try Position.fromAddress("G18"), try Ast.fromExpression(a, "G17+F18"));
+    try _setCell(a, sheet, try Position.fromAddress("A6"), try Ast.fromExpression(a, "A5+1"));
+    try _setCell(a, sheet, try Position.fromAddress("C3"), try Ast.fromExpression(a, "C2+B3"));
+    try _setCell(a, sheet, try Position.fromAddress("B0"), try Ast.fromExpression(a, "A0+1"));
+    try _setCell(a, sheet, try Position.fromAddress("E10"), try Ast.fromExpression(a, "E9+D10"));
+    try _setCell(a, sheet, try Position.fromAddress("B7"), try Ast.fromExpression(a, "A7+B6"));
+    try _setCell(a, sheet, try Position.fromAddress("C7"), try Ast.fromExpression(a, "C6+B7"));
+    try _setCell(a, sheet, try Position.fromAddress("D9"), try Ast.fromExpression(a, "D8+C9"));
+    try _setCell(a, sheet, try Position.fromAddress("D14"), try Ast.fromExpression(a, "D13+C14"));
+    try _setCell(a, sheet, try Position.fromAddress("B20"), try Ast.fromExpression(a, "A20+B19"));
+    try _setCell(a, sheet, try Position.fromAddress("E7"), try Ast.fromExpression(a, "E6+D7"));
+    try _setCell(a, sheet, try Position.fromAddress("E0"), try Ast.fromExpression(a, "D0+1"));
+    try _setCell(a, sheet, try Position.fromAddress("A3"), try Ast.fromExpression(a, "A2+1"));
+    try _setCell(a, sheet, try Position.fromAddress("G9"), try Ast.fromExpression(a, "G8+F9"));
+    try _setCell(a, sheet, try Position.fromAddress("C17"), try Ast.fromExpression(a, "C16+B17"));
+    try _setCell(a, sheet, try Position.fromAddress("F5"), try Ast.fromExpression(a, "F4+E5"));
+    try _setCell(a, sheet, try Position.fromAddress("F6"), try Ast.fromExpression(a, "F5+E6"));
+    try _setCell(a, sheet, try Position.fromAddress("G3"), try Ast.fromExpression(a, "G2+F3"));
+    try _setCell(a, sheet, try Position.fromAddress("E5"), try Ast.fromExpression(a, "E4+D5"));
+    try _setCell(a, sheet, try Position.fromAddress("A8"), try Ast.fromExpression(a, "A7+1"));
+    try _setCell(a, sheet, try Position.fromAddress("B13"), try Ast.fromExpression(a, "A13+B12"));
+    try _setCell(a, sheet, try Position.fromAddress("B3"), try Ast.fromExpression(a, "A3+B2"));
+    try _setCell(a, sheet, try Position.fromAddress("D19"), try Ast.fromExpression(a, "D18+C19"));
+    try _setCell(a, sheet, try Position.fromAddress("B2"), try Ast.fromExpression(a, "A2+B1"));
+    try _setCell(a, sheet, try Position.fromAddress("C5"), try Ast.fromExpression(a, "C4+B5"));
+    try _setCell(a, sheet, try Position.fromAddress("G6"), try Ast.fromExpression(a, "G5+F6"));
+    try _setCell(a, sheet, try Position.fromAddress("F12"), try Ast.fromExpression(a, "F11+E12"));
+    try _setCell(a, sheet, try Position.fromAddress("E1"), try Ast.fromExpression(a, "E0+D1"));
+    try _setCell(a, sheet, try Position.fromAddress("C15"), try Ast.fromExpression(a, "C14+B15"));
+    try _setCell(a, sheet, try Position.fromAddress("A12"), try Ast.fromExpression(a, "A11+1"));
+    try _setCell(a, sheet, try Position.fromAddress("G1"), try Ast.fromExpression(a, "G0+F1"));
+    try _setCell(a, sheet, try Position.fromAddress("D16"), try Ast.fromExpression(a, "D15+C16"));
+    try _setCell(a, sheet, try Position.fromAddress("F20"), try Ast.fromExpression(a, "F19+E20"));
+    try _setCell(a, sheet, try Position.fromAddress("E6"), try Ast.fromExpression(a, "E5+D6"));
+    try _setCell(a, sheet, try Position.fromAddress("E15"), try Ast.fromExpression(a, "E14+D15"));
+    try _setCell(a, sheet, try Position.fromAddress("F8"), try Ast.fromExpression(a, "F7+E8"));
+    try _setCell(a, sheet, try Position.fromAddress("F10"), try Ast.fromExpression(a, "F9+E10"));
+    try _setCell(a, sheet, try Position.fromAddress("C16"), try Ast.fromExpression(a, "C15+B16"));
+    try _setCell(a, sheet, try Position.fromAddress("C20"), try Ast.fromExpression(a, "C19+B20"));
+    try _setCell(a, sheet, try Position.fromAddress("E3"), try Ast.fromExpression(a, "E2+D3"));
+    try _setCell(a, sheet, try Position.fromAddress("B10"), try Ast.fromExpression(a, "A10+B9"));
+    try _setCell(a, sheet, try Position.fromAddress("G2"), try Ast.fromExpression(a, "G1+F2"));
+    try _setCell(a, sheet, try Position.fromAddress("D7"), try Ast.fromExpression(a, "D6+C7"));
+    try _setCell(a, sheet, try Position.fromAddress("G15"), try Ast.fromExpression(a, "G14+F15"));
+    try _setCell(a, sheet, try Position.fromAddress("G0"), try Ast.fromExpression(a, "F0+1"));
+    try _setCell(a, sheet, try Position.fromAddress("F15"), try Ast.fromExpression(a, "F14+E15"));
+    try _setCell(a, sheet, try Position.fromAddress("C13"), try Ast.fromExpression(a, "C12+B13"));
 
     // Test that updating this takes less than 100 ms
     const begin = try std.time.Instant.now();
@@ -1924,155 +1937,155 @@ fn testCellEvaluation(a: Allocator) !void {
         }
     }.testCell;
 
-    try testCell(&sheet, "A0", 1.00);
-    try testCell(&sheet, "B0", 2.00);
-    try testCell(&sheet, "C0", 3.00);
-    try testCell(&sheet, "D0", 4.00);
-    try testCell(&sheet, "E0", 5.00);
-    try testCell(&sheet, "F0", 6.00);
-    try testCell(&sheet, "G0", 7.00);
-    try testCell(&sheet, "H0", 8.00);
-    try testCell(&sheet, "A1", 2.00);
-    try testCell(&sheet, "B1", 4.00);
-    try testCell(&sheet, "C1", 7.00);
-    try testCell(&sheet, "D1", 11.00);
-    try testCell(&sheet, "E1", 16.00);
-    try testCell(&sheet, "F1", 22.00);
-    try testCell(&sheet, "G1", 29.00);
-    try testCell(&sheet, "A2", 3.00);
-    try testCell(&sheet, "B2", 7.00);
-    try testCell(&sheet, "C2", 14.00);
-    try testCell(&sheet, "D2", 25.00);
-    try testCell(&sheet, "E2", 41.00);
-    try testCell(&sheet, "F2", 63.00);
-    try testCell(&sheet, "G2", 92.00);
-    try testCell(&sheet, "A3", 4.00);
-    try testCell(&sheet, "B3", 11.00);
-    try testCell(&sheet, "C3", 25.00);
-    try testCell(&sheet, "D3", 50.00);
-    try testCell(&sheet, "E3", 91.00);
-    try testCell(&sheet, "F3", 154.00);
-    try testCell(&sheet, "G3", 246.00);
-    try testCell(&sheet, "A4", 5.00);
-    try testCell(&sheet, "B4", 16.00);
-    try testCell(&sheet, "C4", 41.00);
-    try testCell(&sheet, "D4", 91.00);
-    try testCell(&sheet, "E4", 182.00);
-    try testCell(&sheet, "F4", 336.00);
-    try testCell(&sheet, "G4", 582.00);
-    try testCell(&sheet, "A5", 6.00);
-    try testCell(&sheet, "B5", 22.00);
-    try testCell(&sheet, "C5", 63.00);
-    try testCell(&sheet, "D5", 154.00);
-    try testCell(&sheet, "E5", 336.00);
-    try testCell(&sheet, "F5", 672.00);
-    try testCell(&sheet, "G5", 1254.00);
-    try testCell(&sheet, "A6", 7.00);
-    try testCell(&sheet, "B6", 29.00);
-    try testCell(&sheet, "C6", 92.00);
-    try testCell(&sheet, "D6", 246.00);
-    try testCell(&sheet, "E6", 582.00);
-    try testCell(&sheet, "F6", 1254.00);
-    try testCell(&sheet, "G6", 2508.00);
-    try testCell(&sheet, "A7", 8.00);
-    try testCell(&sheet, "B7", 37.00);
-    try testCell(&sheet, "C7", 129.00);
-    try testCell(&sheet, "D7", 375.00);
-    try testCell(&sheet, "E7", 957.00);
-    try testCell(&sheet, "F7", 2211.00);
-    try testCell(&sheet, "G7", 4719.00);
-    try testCell(&sheet, "A8", 9.00);
-    try testCell(&sheet, "B8", 46.00);
-    try testCell(&sheet, "C8", 175.00);
-    try testCell(&sheet, "D8", 550.00);
-    try testCell(&sheet, "E8", 1507.00);
-    try testCell(&sheet, "F8", 3718.00);
-    try testCell(&sheet, "G8", 8437.00);
-    try testCell(&sheet, "A9", 10.00);
-    try testCell(&sheet, "B9", 56.00);
-    try testCell(&sheet, "C9", 231.00);
-    try testCell(&sheet, "D9", 781.00);
-    try testCell(&sheet, "E9", 2288.00);
-    try testCell(&sheet, "F9", 6006.00);
-    try testCell(&sheet, "G9", 14443.00);
-    try testCell(&sheet, "A10", 11.00);
-    try testCell(&sheet, "B10", 67.00);
-    try testCell(&sheet, "C10", 298.00);
-    try testCell(&sheet, "D10", 1079.00);
-    try testCell(&sheet, "E10", 3367.00);
-    try testCell(&sheet, "F10", 9373.00);
-    try testCell(&sheet, "G10", 23816.00);
-    try testCell(&sheet, "A11", 12.00);
-    try testCell(&sheet, "B11", 79.00);
-    try testCell(&sheet, "C11", 377.00);
-    try testCell(&sheet, "D11", 1456.00);
-    try testCell(&sheet, "E11", 4823.00);
-    try testCell(&sheet, "F11", 14196.00);
-    try testCell(&sheet, "G11", 38012.00);
-    try testCell(&sheet, "A12", 13.00);
-    try testCell(&sheet, "B12", 92.00);
-    try testCell(&sheet, "C12", 469.00);
-    try testCell(&sheet, "D12", 1925.00);
-    try testCell(&sheet, "E12", 6748.00);
-    try testCell(&sheet, "F12", 20944.00);
-    try testCell(&sheet, "G12", 58956.00);
-    try testCell(&sheet, "A13", 14.00);
-    try testCell(&sheet, "B13", 106.00);
-    try testCell(&sheet, "C13", 575.00);
-    try testCell(&sheet, "D13", 2500.00);
-    try testCell(&sheet, "E13", 9248.00);
-    try testCell(&sheet, "F13", 30192.00);
-    try testCell(&sheet, "G13", 89148.00);
-    try testCell(&sheet, "A14", 15.00);
-    try testCell(&sheet, "B14", 121.00);
-    try testCell(&sheet, "C14", 696.00);
-    try testCell(&sheet, "D14", 3196.00);
-    try testCell(&sheet, "E14", 12444.00);
-    try testCell(&sheet, "F14", 42636.00);
-    try testCell(&sheet, "G14", 131784.00);
-    try testCell(&sheet, "A15", 16.00);
-    try testCell(&sheet, "B15", 137.00);
-    try testCell(&sheet, "C15", 833.00);
-    try testCell(&sheet, "D15", 4029.00);
-    try testCell(&sheet, "E15", 16473.00);
-    try testCell(&sheet, "F15", 59109.00);
-    try testCell(&sheet, "G15", 190893.00);
-    try testCell(&sheet, "A16", 17.00);
-    try testCell(&sheet, "B16", 154.00);
-    try testCell(&sheet, "C16", 987.00);
-    try testCell(&sheet, "D16", 5016.00);
-    try testCell(&sheet, "E16", 21489.00);
-    try testCell(&sheet, "F16", 80598.00);
-    try testCell(&sheet, "G16", 271491.00);
-    try testCell(&sheet, "A17", 18.00);
-    try testCell(&sheet, "B17", 172.00);
-    try testCell(&sheet, "C17", 1159.00);
-    try testCell(&sheet, "D17", 6175.00);
-    try testCell(&sheet, "E17", 27664.00);
-    try testCell(&sheet, "F17", 108262.00);
-    try testCell(&sheet, "G17", 379753.00);
-    try testCell(&sheet, "A18", 19.00);
-    try testCell(&sheet, "B18", 191.00);
-    try testCell(&sheet, "C18", 1350.00);
-    try testCell(&sheet, "D18", 7525.00);
-    try testCell(&sheet, "E18", 35189.00);
-    try testCell(&sheet, "F18", 143451.00);
-    try testCell(&sheet, "G18", 523204.00);
-    try testCell(&sheet, "A19", 20.00);
-    try testCell(&sheet, "B19", 211.00);
-    try testCell(&sheet, "C19", 1561.00);
-    try testCell(&sheet, "D19", 9086.00);
-    try testCell(&sheet, "E19", 44275.00);
-    try testCell(&sheet, "F19", 187726.00);
-    try testCell(&sheet, "G19", 710930.00);
-    try testCell(&sheet, "A20", 21.00);
-    try testCell(&sheet, "B20", 232.00);
-    try testCell(&sheet, "C20", 1793.00);
-    try testCell(&sheet, "D20", 10879.00);
-    try testCell(&sheet, "E20", 55154.00);
-    try testCell(&sheet, "F20", 242880.00);
-    try testCell(&sheet, "G20", 953810.00);
-    try testCell(&sheet, "A22", 4668856.00);
+    try testCell(sheet, "A0", 1.00);
+    try testCell(sheet, "B0", 2.00);
+    try testCell(sheet, "C0", 3.00);
+    try testCell(sheet, "D0", 4.00);
+    try testCell(sheet, "E0", 5.00);
+    try testCell(sheet, "F0", 6.00);
+    try testCell(sheet, "G0", 7.00);
+    try testCell(sheet, "H0", 8.00);
+    try testCell(sheet, "A1", 2.00);
+    try testCell(sheet, "B1", 4.00);
+    try testCell(sheet, "C1", 7.00);
+    try testCell(sheet, "D1", 11.00);
+    try testCell(sheet, "E1", 16.00);
+    try testCell(sheet, "F1", 22.00);
+    try testCell(sheet, "G1", 29.00);
+    try testCell(sheet, "A2", 3.00);
+    try testCell(sheet, "B2", 7.00);
+    try testCell(sheet, "C2", 14.00);
+    try testCell(sheet, "D2", 25.00);
+    try testCell(sheet, "E2", 41.00);
+    try testCell(sheet, "F2", 63.00);
+    try testCell(sheet, "G2", 92.00);
+    try testCell(sheet, "A3", 4.00);
+    try testCell(sheet, "B3", 11.00);
+    try testCell(sheet, "C3", 25.00);
+    try testCell(sheet, "D3", 50.00);
+    try testCell(sheet, "E3", 91.00);
+    try testCell(sheet, "F3", 154.00);
+    try testCell(sheet, "G3", 246.00);
+    try testCell(sheet, "A4", 5.00);
+    try testCell(sheet, "B4", 16.00);
+    try testCell(sheet, "C4", 41.00);
+    try testCell(sheet, "D4", 91.00);
+    try testCell(sheet, "E4", 182.00);
+    try testCell(sheet, "F4", 336.00);
+    try testCell(sheet, "G4", 582.00);
+    try testCell(sheet, "A5", 6.00);
+    try testCell(sheet, "B5", 22.00);
+    try testCell(sheet, "C5", 63.00);
+    try testCell(sheet, "D5", 154.00);
+    try testCell(sheet, "E5", 336.00);
+    try testCell(sheet, "F5", 672.00);
+    try testCell(sheet, "G5", 1254.00);
+    try testCell(sheet, "A6", 7.00);
+    try testCell(sheet, "B6", 29.00);
+    try testCell(sheet, "C6", 92.00);
+    try testCell(sheet, "D6", 246.00);
+    try testCell(sheet, "E6", 582.00);
+    try testCell(sheet, "F6", 1254.00);
+    try testCell(sheet, "G6", 2508.00);
+    try testCell(sheet, "A7", 8.00);
+    try testCell(sheet, "B7", 37.00);
+    try testCell(sheet, "C7", 129.00);
+    try testCell(sheet, "D7", 375.00);
+    try testCell(sheet, "E7", 957.00);
+    try testCell(sheet, "F7", 2211.00);
+    try testCell(sheet, "G7", 4719.00);
+    try testCell(sheet, "A8", 9.00);
+    try testCell(sheet, "B8", 46.00);
+    try testCell(sheet, "C8", 175.00);
+    try testCell(sheet, "D8", 550.00);
+    try testCell(sheet, "E8", 1507.00);
+    try testCell(sheet, "F8", 3718.00);
+    try testCell(sheet, "G8", 8437.00);
+    try testCell(sheet, "A9", 10.00);
+    try testCell(sheet, "B9", 56.00);
+    try testCell(sheet, "C9", 231.00);
+    try testCell(sheet, "D9", 781.00);
+    try testCell(sheet, "E9", 2288.00);
+    try testCell(sheet, "F9", 6006.00);
+    try testCell(sheet, "G9", 14443.00);
+    try testCell(sheet, "A10", 11.00);
+    try testCell(sheet, "B10", 67.00);
+    try testCell(sheet, "C10", 298.00);
+    try testCell(sheet, "D10", 1079.00);
+    try testCell(sheet, "E10", 3367.00);
+    try testCell(sheet, "F10", 9373.00);
+    try testCell(sheet, "G10", 23816.00);
+    try testCell(sheet, "A11", 12.00);
+    try testCell(sheet, "B11", 79.00);
+    try testCell(sheet, "C11", 377.00);
+    try testCell(sheet, "D11", 1456.00);
+    try testCell(sheet, "E11", 4823.00);
+    try testCell(sheet, "F11", 14196.00);
+    try testCell(sheet, "G11", 38012.00);
+    try testCell(sheet, "A12", 13.00);
+    try testCell(sheet, "B12", 92.00);
+    try testCell(sheet, "C12", 469.00);
+    try testCell(sheet, "D12", 1925.00);
+    try testCell(sheet, "E12", 6748.00);
+    try testCell(sheet, "F12", 20944.00);
+    try testCell(sheet, "G12", 58956.00);
+    try testCell(sheet, "A13", 14.00);
+    try testCell(sheet, "B13", 106.00);
+    try testCell(sheet, "C13", 575.00);
+    try testCell(sheet, "D13", 2500.00);
+    try testCell(sheet, "E13", 9248.00);
+    try testCell(sheet, "F13", 30192.00);
+    try testCell(sheet, "G13", 89148.00);
+    try testCell(sheet, "A14", 15.00);
+    try testCell(sheet, "B14", 121.00);
+    try testCell(sheet, "C14", 696.00);
+    try testCell(sheet, "D14", 3196.00);
+    try testCell(sheet, "E14", 12444.00);
+    try testCell(sheet, "F14", 42636.00);
+    try testCell(sheet, "G14", 131784.00);
+    try testCell(sheet, "A15", 16.00);
+    try testCell(sheet, "B15", 137.00);
+    try testCell(sheet, "C15", 833.00);
+    try testCell(sheet, "D15", 4029.00);
+    try testCell(sheet, "E15", 16473.00);
+    try testCell(sheet, "F15", 59109.00);
+    try testCell(sheet, "G15", 190893.00);
+    try testCell(sheet, "A16", 17.00);
+    try testCell(sheet, "B16", 154.00);
+    try testCell(sheet, "C16", 987.00);
+    try testCell(sheet, "D16", 5016.00);
+    try testCell(sheet, "E16", 21489.00);
+    try testCell(sheet, "F16", 80598.00);
+    try testCell(sheet, "G16", 271491.00);
+    try testCell(sheet, "A17", 18.00);
+    try testCell(sheet, "B17", 172.00);
+    try testCell(sheet, "C17", 1159.00);
+    try testCell(sheet, "D17", 6175.00);
+    try testCell(sheet, "E17", 27664.00);
+    try testCell(sheet, "F17", 108262.00);
+    try testCell(sheet, "G17", 379753.00);
+    try testCell(sheet, "A18", 19.00);
+    try testCell(sheet, "B18", 191.00);
+    try testCell(sheet, "C18", 1350.00);
+    try testCell(sheet, "D18", 7525.00);
+    try testCell(sheet, "E18", 35189.00);
+    try testCell(sheet, "F18", 143451.00);
+    try testCell(sheet, "G18", 523204.00);
+    try testCell(sheet, "A19", 20.00);
+    try testCell(sheet, "B19", 211.00);
+    try testCell(sheet, "C19", 1561.00);
+    try testCell(sheet, "D19", 9086.00);
+    try testCell(sheet, "E19", 44275.00);
+    try testCell(sheet, "F19", 187726.00);
+    try testCell(sheet, "G19", 710930.00);
+    try testCell(sheet, "A20", 21.00);
+    try testCell(sheet, "B20", 232.00);
+    try testCell(sheet, "C20", 1793.00);
+    try testCell(sheet, "D20", 10879.00);
+    try testCell(sheet, "E20", 55154.00);
+    try testCell(sheet, "F20", 242880.00);
+    try testCell(sheet, "G20", 953810.00);
+    try testCell(sheet, "A22", 4668856.00);
 
     for (sheet.undos.items(.tags)) |tag| {
         try t.expectEqual(std.meta.Tag(Undo).delete_cell, tag);
@@ -2298,154 +2311,154 @@ fn testCellEvaluation(a: Allocator) !void {
         }
     }.func;
 
-    try _setCellText(a, &sheet, try Position.fromAddress("A0"), "'1'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B0"), "A0 # '2'");
-    try _setCellText(a, &sheet, try Position.fromAddress("C0"), "B0 # '3'");
-    try _setCellText(a, &sheet, try Position.fromAddress("D0"), "C0 # '4'");
-    try _setCellText(a, &sheet, try Position.fromAddress("E0"), "D0 # '5'");
-    try _setCellText(a, &sheet, try Position.fromAddress("F0"), "E0 # '6'");
-    try _setCellText(a, &sheet, try Position.fromAddress("G0"), "F0 # '7'");
-    try _setCellText(a, &sheet, try Position.fromAddress("H0"), "G0 # '8'");
-    try _setCellText(a, &sheet, try Position.fromAddress("A1"), "A0 # '2'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B1"), "A1 # B0");
-    try _setCellText(a, &sheet, try Position.fromAddress("C1"), "B1 # C0");
-    try _setCellText(a, &sheet, try Position.fromAddress("D1"), "C1 # D0");
-    try _setCellText(a, &sheet, try Position.fromAddress("E1"), "D1 # E0");
-    try _setCellText(a, &sheet, try Position.fromAddress("F1"), "E1 # F0");
-    try _setCellText(a, &sheet, try Position.fromAddress("G1"), "F1 # G0");
-    try _setCellText(a, &sheet, try Position.fromAddress("A2"), "A1 # '3'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B2"), "A2 # B1");
-    try _setCellText(a, &sheet, try Position.fromAddress("C2"), "B2 # C1");
-    try _setCellText(a, &sheet, try Position.fromAddress("D2"), "C2 # D1");
-    try _setCellText(a, &sheet, try Position.fromAddress("E2"), "D2 # E1");
-    try _setCellText(a, &sheet, try Position.fromAddress("F2"), "E2 # F1");
-    try _setCellText(a, &sheet, try Position.fromAddress("G2"), "F2 # G1");
-    try _setCellText(a, &sheet, try Position.fromAddress("A3"), "A2 # '4'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B3"), "A3 # B2");
-    try _setCellText(a, &sheet, try Position.fromAddress("C3"), "B3 # C2");
-    try _setCellText(a, &sheet, try Position.fromAddress("D3"), "C3 # D2");
-    try _setCellText(a, &sheet, try Position.fromAddress("E3"), "D3 # E2");
-    try _setCellText(a, &sheet, try Position.fromAddress("F3"), "E3 # F2");
-    try _setCellText(a, &sheet, try Position.fromAddress("G3"), "F3 # G2");
-    try _setCellText(a, &sheet, try Position.fromAddress("A4"), "A3 # '5'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B4"), "A4 # B3");
-    try _setCellText(a, &sheet, try Position.fromAddress("C4"), "B4 # C3");
-    try _setCellText(a, &sheet, try Position.fromAddress("D4"), "C4 # D3");
-    try _setCellText(a, &sheet, try Position.fromAddress("E4"), "D4 # E3");
-    try _setCellText(a, &sheet, try Position.fromAddress("F4"), "E4 # F3");
-    try _setCellText(a, &sheet, try Position.fromAddress("G4"), "F4 # G3");
-    try _setCellText(a, &sheet, try Position.fromAddress("A5"), "A4 # '6'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B5"), "A5 # B4");
-    try _setCellText(a, &sheet, try Position.fromAddress("C5"), "B5 # C4");
-    try _setCellText(a, &sheet, try Position.fromAddress("D5"), "C5 # D4");
-    try _setCellText(a, &sheet, try Position.fromAddress("E5"), "D5 # E4");
-    try _setCellText(a, &sheet, try Position.fromAddress("F5"), "E5 # F4");
-    try _setCellText(a, &sheet, try Position.fromAddress("G5"), "F5 # G4");
-    try _setCellText(a, &sheet, try Position.fromAddress("A6"), "A5 # '7'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B6"), "A6 # B5");
-    try _setCellText(a, &sheet, try Position.fromAddress("C6"), "B6 # C5");
-    try _setCellText(a, &sheet, try Position.fromAddress("D6"), "C6 # D5");
-    try _setCellText(a, &sheet, try Position.fromAddress("E6"), "D6 # E5");
-    try _setCellText(a, &sheet, try Position.fromAddress("F6"), "E6 # F5");
-    try _setCellText(a, &sheet, try Position.fromAddress("G6"), "F6 # G5");
-    try _setCellText(a, &sheet, try Position.fromAddress("A7"), "A6 # '8'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B7"), "A7 # B6");
-    try _setCellText(a, &sheet, try Position.fromAddress("C7"), "B7 # C6");
-    try _setCellText(a, &sheet, try Position.fromAddress("D7"), "C7 # D6");
-    try _setCellText(a, &sheet, try Position.fromAddress("E7"), "D7 # E6");
-    try _setCellText(a, &sheet, try Position.fromAddress("F7"), "E7 # F6");
-    try _setCellText(a, &sheet, try Position.fromAddress("G7"), "F7 # G6");
-    try _setCellText(a, &sheet, try Position.fromAddress("A8"), "A7 # '9'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B8"), "A8 # B7");
-    try _setCellText(a, &sheet, try Position.fromAddress("C8"), "B8 # C7");
-    try _setCellText(a, &sheet, try Position.fromAddress("D8"), "C8 # D7");
-    try _setCellText(a, &sheet, try Position.fromAddress("E8"), "D8 # E7");
-    try _setCellText(a, &sheet, try Position.fromAddress("F8"), "E8 # F7");
-    try _setCellText(a, &sheet, try Position.fromAddress("G8"), "F8 # G7");
-    try _setCellText(a, &sheet, try Position.fromAddress("A9"), "A8 # '0'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B9"), "A9 # B8");
-    try _setCellText(a, &sheet, try Position.fromAddress("C9"), "B9 # C8");
-    try _setCellText(a, &sheet, try Position.fromAddress("D9"), "C9 # D8");
-    try _setCellText(a, &sheet, try Position.fromAddress("E9"), "D9 # E8");
-    try _setCellText(a, &sheet, try Position.fromAddress("F9"), "E9 # F8");
-    try _setCellText(a, &sheet, try Position.fromAddress("G9"), "F9 # G8");
-    try _setCellText(a, &sheet, try Position.fromAddress("A10"), "A9 # '1'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B10"), "A10 # B9");
-    try _setCellText(a, &sheet, try Position.fromAddress("C10"), "B10 # C9");
-    try _setCellText(a, &sheet, try Position.fromAddress("D10"), "C10 # D9");
-    try _setCellText(a, &sheet, try Position.fromAddress("E10"), "D10 # E9");
-    try _setCellText(a, &sheet, try Position.fromAddress("F10"), "E10 # F9");
-    try _setCellText(a, &sheet, try Position.fromAddress("G10"), "F10 # G9");
-    try _setCellText(a, &sheet, try Position.fromAddress("A11"), "A10 # '2'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B11"), "A11 # B10");
-    try _setCellText(a, &sheet, try Position.fromAddress("C11"), "B11 # C10");
-    try _setCellText(a, &sheet, try Position.fromAddress("D11"), "C11 # D10");
-    try _setCellText(a, &sheet, try Position.fromAddress("E11"), "D11 # E10");
-    try _setCellText(a, &sheet, try Position.fromAddress("F11"), "E11 # F10");
-    try _setCellText(a, &sheet, try Position.fromAddress("G11"), "F11 # G10");
-    try _setCellText(a, &sheet, try Position.fromAddress("A12"), "A11 # '3'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B12"), "A12 # B11");
-    try _setCellText(a, &sheet, try Position.fromAddress("C12"), "B12 # C11");
-    try _setCellText(a, &sheet, try Position.fromAddress("D12"), "C12 # D11");
-    try _setCellText(a, &sheet, try Position.fromAddress("E12"), "D12 # E11");
-    try _setCellText(a, &sheet, try Position.fromAddress("F12"), "E12 # F11");
-    try _setCellText(a, &sheet, try Position.fromAddress("G12"), "F12 # G11");
-    try _setCellText(a, &sheet, try Position.fromAddress("A13"), "A12 # '4'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B13"), "A13 # B12");
-    try _setCellText(a, &sheet, try Position.fromAddress("C13"), "B13 # C12");
-    try _setCellText(a, &sheet, try Position.fromAddress("D13"), "C13 # D12");
-    try _setCellText(a, &sheet, try Position.fromAddress("E13"), "D13 # E12");
-    try _setCellText(a, &sheet, try Position.fromAddress("F13"), "E13 # F12");
-    try _setCellText(a, &sheet, try Position.fromAddress("G13"), "F13 # G12");
-    try _setCellText(a, &sheet, try Position.fromAddress("A14"), "A13 # '5'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B14"), "A14 # B13");
-    try _setCellText(a, &sheet, try Position.fromAddress("C14"), "B14 # C13");
-    try _setCellText(a, &sheet, try Position.fromAddress("D14"), "C14 # D13");
-    try _setCellText(a, &sheet, try Position.fromAddress("E14"), "D14 # E13");
-    try _setCellText(a, &sheet, try Position.fromAddress("F14"), "E14 # F13");
-    try _setCellText(a, &sheet, try Position.fromAddress("G14"), "F14 # G13");
-    try _setCellText(a, &sheet, try Position.fromAddress("A15"), "A14 # '6'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B15"), "A15 # B14");
-    try _setCellText(a, &sheet, try Position.fromAddress("C15"), "B15 # C14");
-    try _setCellText(a, &sheet, try Position.fromAddress("D15"), "C15 # D14");
-    try _setCellText(a, &sheet, try Position.fromAddress("E15"), "D15 # E14");
-    try _setCellText(a, &sheet, try Position.fromAddress("F15"), "E15 # F14");
-    try _setCellText(a, &sheet, try Position.fromAddress("G15"), "F15 # G14");
-    try _setCellText(a, &sheet, try Position.fromAddress("A16"), "A15 # '7'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B16"), "A16 # B15");
-    try _setCellText(a, &sheet, try Position.fromAddress("C16"), "B16 # C15");
-    try _setCellText(a, &sheet, try Position.fromAddress("D16"), "C16 # D15");
-    try _setCellText(a, &sheet, try Position.fromAddress("E16"), "D16 # E15");
-    try _setCellText(a, &sheet, try Position.fromAddress("F16"), "E16 # F15");
-    try _setCellText(a, &sheet, try Position.fromAddress("G16"), "F16 # G15");
-    try _setCellText(a, &sheet, try Position.fromAddress("A17"), "A16 # '8'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B17"), "A17 # B16");
-    try _setCellText(a, &sheet, try Position.fromAddress("C17"), "B17 # C16");
-    try _setCellText(a, &sheet, try Position.fromAddress("D17"), "C17 # D16");
-    try _setCellText(a, &sheet, try Position.fromAddress("E17"), "D17 # E16");
-    try _setCellText(a, &sheet, try Position.fromAddress("F17"), "E17 # F16");
-    try _setCellText(a, &sheet, try Position.fromAddress("G17"), "F17 # G16");
-    try _setCellText(a, &sheet, try Position.fromAddress("A18"), "A17 # '9'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B18"), "A18 # B17");
-    try _setCellText(a, &sheet, try Position.fromAddress("C18"), "B18 # C17");
-    try _setCellText(a, &sheet, try Position.fromAddress("D18"), "C18 # D17");
-    try _setCellText(a, &sheet, try Position.fromAddress("E18"), "D18 # E17");
-    try _setCellText(a, &sheet, try Position.fromAddress("F18"), "E18 # F17");
-    try _setCellText(a, &sheet, try Position.fromAddress("G18"), "F18 # G17");
-    try _setCellText(a, &sheet, try Position.fromAddress("A19"), "A18 # '0'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B19"), "A19 # B18");
-    try _setCellText(a, &sheet, try Position.fromAddress("C19"), "B19 # C18");
-    try _setCellText(a, &sheet, try Position.fromAddress("D19"), "C19 # D18");
-    try _setCellText(a, &sheet, try Position.fromAddress("E19"), "D19 # E18");
-    try _setCellText(a, &sheet, try Position.fromAddress("F19"), "E19 # F18");
-    try _setCellText(a, &sheet, try Position.fromAddress("G19"), "F19 # G18");
-    try _setCellText(a, &sheet, try Position.fromAddress("A20"), "A19 # '1'");
-    try _setCellText(a, &sheet, try Position.fromAddress("B20"), "A20 # B19");
-    try _setCellText(a, &sheet, try Position.fromAddress("C20"), "B20 # C19");
-    try _setCellText(a, &sheet, try Position.fromAddress("D20"), "C20 # D19");
-    try _setCellText(a, &sheet, try Position.fromAddress("E20"), "D20 # E19");
-    try _setCellText(a, &sheet, try Position.fromAddress("F20"), "E20 # F19");
-    try _setCellText(a, &sheet, try Position.fromAddress("G20"), "F20 # G19");
+    try _setCellText(a, sheet, try Position.fromAddress("A0"), "'1'");
+    try _setCellText(a, sheet, try Position.fromAddress("B0"), "A0 # '2'");
+    try _setCellText(a, sheet, try Position.fromAddress("C0"), "B0 # '3'");
+    try _setCellText(a, sheet, try Position.fromAddress("D0"), "C0 # '4'");
+    try _setCellText(a, sheet, try Position.fromAddress("E0"), "D0 # '5'");
+    try _setCellText(a, sheet, try Position.fromAddress("F0"), "E0 # '6'");
+    try _setCellText(a, sheet, try Position.fromAddress("G0"), "F0 # '7'");
+    try _setCellText(a, sheet, try Position.fromAddress("H0"), "G0 # '8'");
+    try _setCellText(a, sheet, try Position.fromAddress("A1"), "A0 # '2'");
+    try _setCellText(a, sheet, try Position.fromAddress("B1"), "A1 # B0");
+    try _setCellText(a, sheet, try Position.fromAddress("C1"), "B1 # C0");
+    try _setCellText(a, sheet, try Position.fromAddress("D1"), "C1 # D0");
+    try _setCellText(a, sheet, try Position.fromAddress("E1"), "D1 # E0");
+    try _setCellText(a, sheet, try Position.fromAddress("F1"), "E1 # F0");
+    try _setCellText(a, sheet, try Position.fromAddress("G1"), "F1 # G0");
+    try _setCellText(a, sheet, try Position.fromAddress("A2"), "A1 # '3'");
+    try _setCellText(a, sheet, try Position.fromAddress("B2"), "A2 # B1");
+    try _setCellText(a, sheet, try Position.fromAddress("C2"), "B2 # C1");
+    try _setCellText(a, sheet, try Position.fromAddress("D2"), "C2 # D1");
+    try _setCellText(a, sheet, try Position.fromAddress("E2"), "D2 # E1");
+    try _setCellText(a, sheet, try Position.fromAddress("F2"), "E2 # F1");
+    try _setCellText(a, sheet, try Position.fromAddress("G2"), "F2 # G1");
+    try _setCellText(a, sheet, try Position.fromAddress("A3"), "A2 # '4'");
+    try _setCellText(a, sheet, try Position.fromAddress("B3"), "A3 # B2");
+    try _setCellText(a, sheet, try Position.fromAddress("C3"), "B3 # C2");
+    try _setCellText(a, sheet, try Position.fromAddress("D3"), "C3 # D2");
+    try _setCellText(a, sheet, try Position.fromAddress("E3"), "D3 # E2");
+    try _setCellText(a, sheet, try Position.fromAddress("F3"), "E3 # F2");
+    try _setCellText(a, sheet, try Position.fromAddress("G3"), "F3 # G2");
+    try _setCellText(a, sheet, try Position.fromAddress("A4"), "A3 # '5'");
+    try _setCellText(a, sheet, try Position.fromAddress("B4"), "A4 # B3");
+    try _setCellText(a, sheet, try Position.fromAddress("C4"), "B4 # C3");
+    try _setCellText(a, sheet, try Position.fromAddress("D4"), "C4 # D3");
+    try _setCellText(a, sheet, try Position.fromAddress("E4"), "D4 # E3");
+    try _setCellText(a, sheet, try Position.fromAddress("F4"), "E4 # F3");
+    try _setCellText(a, sheet, try Position.fromAddress("G4"), "F4 # G3");
+    try _setCellText(a, sheet, try Position.fromAddress("A5"), "A4 # '6'");
+    try _setCellText(a, sheet, try Position.fromAddress("B5"), "A5 # B4");
+    try _setCellText(a, sheet, try Position.fromAddress("C5"), "B5 # C4");
+    try _setCellText(a, sheet, try Position.fromAddress("D5"), "C5 # D4");
+    try _setCellText(a, sheet, try Position.fromAddress("E5"), "D5 # E4");
+    try _setCellText(a, sheet, try Position.fromAddress("F5"), "E5 # F4");
+    try _setCellText(a, sheet, try Position.fromAddress("G5"), "F5 # G4");
+    try _setCellText(a, sheet, try Position.fromAddress("A6"), "A5 # '7'");
+    try _setCellText(a, sheet, try Position.fromAddress("B6"), "A6 # B5");
+    try _setCellText(a, sheet, try Position.fromAddress("C6"), "B6 # C5");
+    try _setCellText(a, sheet, try Position.fromAddress("D6"), "C6 # D5");
+    try _setCellText(a, sheet, try Position.fromAddress("E6"), "D6 # E5");
+    try _setCellText(a, sheet, try Position.fromAddress("F6"), "E6 # F5");
+    try _setCellText(a, sheet, try Position.fromAddress("G6"), "F6 # G5");
+    try _setCellText(a, sheet, try Position.fromAddress("A7"), "A6 # '8'");
+    try _setCellText(a, sheet, try Position.fromAddress("B7"), "A7 # B6");
+    try _setCellText(a, sheet, try Position.fromAddress("C7"), "B7 # C6");
+    try _setCellText(a, sheet, try Position.fromAddress("D7"), "C7 # D6");
+    try _setCellText(a, sheet, try Position.fromAddress("E7"), "D7 # E6");
+    try _setCellText(a, sheet, try Position.fromAddress("F7"), "E7 # F6");
+    try _setCellText(a, sheet, try Position.fromAddress("G7"), "F7 # G6");
+    try _setCellText(a, sheet, try Position.fromAddress("A8"), "A7 # '9'");
+    try _setCellText(a, sheet, try Position.fromAddress("B8"), "A8 # B7");
+    try _setCellText(a, sheet, try Position.fromAddress("C8"), "B8 # C7");
+    try _setCellText(a, sheet, try Position.fromAddress("D8"), "C8 # D7");
+    try _setCellText(a, sheet, try Position.fromAddress("E8"), "D8 # E7");
+    try _setCellText(a, sheet, try Position.fromAddress("F8"), "E8 # F7");
+    try _setCellText(a, sheet, try Position.fromAddress("G8"), "F8 # G7");
+    try _setCellText(a, sheet, try Position.fromAddress("A9"), "A8 # '0'");
+    try _setCellText(a, sheet, try Position.fromAddress("B9"), "A9 # B8");
+    try _setCellText(a, sheet, try Position.fromAddress("C9"), "B9 # C8");
+    try _setCellText(a, sheet, try Position.fromAddress("D9"), "C9 # D8");
+    try _setCellText(a, sheet, try Position.fromAddress("E9"), "D9 # E8");
+    try _setCellText(a, sheet, try Position.fromAddress("F9"), "E9 # F8");
+    try _setCellText(a, sheet, try Position.fromAddress("G9"), "F9 # G8");
+    try _setCellText(a, sheet, try Position.fromAddress("A10"), "A9 # '1'");
+    try _setCellText(a, sheet, try Position.fromAddress("B10"), "A10 # B9");
+    try _setCellText(a, sheet, try Position.fromAddress("C10"), "B10 # C9");
+    try _setCellText(a, sheet, try Position.fromAddress("D10"), "C10 # D9");
+    try _setCellText(a, sheet, try Position.fromAddress("E10"), "D10 # E9");
+    try _setCellText(a, sheet, try Position.fromAddress("F10"), "E10 # F9");
+    try _setCellText(a, sheet, try Position.fromAddress("G10"), "F10 # G9");
+    try _setCellText(a, sheet, try Position.fromAddress("A11"), "A10 # '2'");
+    try _setCellText(a, sheet, try Position.fromAddress("B11"), "A11 # B10");
+    try _setCellText(a, sheet, try Position.fromAddress("C11"), "B11 # C10");
+    try _setCellText(a, sheet, try Position.fromAddress("D11"), "C11 # D10");
+    try _setCellText(a, sheet, try Position.fromAddress("E11"), "D11 # E10");
+    try _setCellText(a, sheet, try Position.fromAddress("F11"), "E11 # F10");
+    try _setCellText(a, sheet, try Position.fromAddress("G11"), "F11 # G10");
+    try _setCellText(a, sheet, try Position.fromAddress("A12"), "A11 # '3'");
+    try _setCellText(a, sheet, try Position.fromAddress("B12"), "A12 # B11");
+    try _setCellText(a, sheet, try Position.fromAddress("C12"), "B12 # C11");
+    try _setCellText(a, sheet, try Position.fromAddress("D12"), "C12 # D11");
+    try _setCellText(a, sheet, try Position.fromAddress("E12"), "D12 # E11");
+    try _setCellText(a, sheet, try Position.fromAddress("F12"), "E12 # F11");
+    try _setCellText(a, sheet, try Position.fromAddress("G12"), "F12 # G11");
+    try _setCellText(a, sheet, try Position.fromAddress("A13"), "A12 # '4'");
+    try _setCellText(a, sheet, try Position.fromAddress("B13"), "A13 # B12");
+    try _setCellText(a, sheet, try Position.fromAddress("C13"), "B13 # C12");
+    try _setCellText(a, sheet, try Position.fromAddress("D13"), "C13 # D12");
+    try _setCellText(a, sheet, try Position.fromAddress("E13"), "D13 # E12");
+    try _setCellText(a, sheet, try Position.fromAddress("F13"), "E13 # F12");
+    try _setCellText(a, sheet, try Position.fromAddress("G13"), "F13 # G12");
+    try _setCellText(a, sheet, try Position.fromAddress("A14"), "A13 # '5'");
+    try _setCellText(a, sheet, try Position.fromAddress("B14"), "A14 # B13");
+    try _setCellText(a, sheet, try Position.fromAddress("C14"), "B14 # C13");
+    try _setCellText(a, sheet, try Position.fromAddress("D14"), "C14 # D13");
+    try _setCellText(a, sheet, try Position.fromAddress("E14"), "D14 # E13");
+    try _setCellText(a, sheet, try Position.fromAddress("F14"), "E14 # F13");
+    try _setCellText(a, sheet, try Position.fromAddress("G14"), "F14 # G13");
+    try _setCellText(a, sheet, try Position.fromAddress("A15"), "A14 # '6'");
+    try _setCellText(a, sheet, try Position.fromAddress("B15"), "A15 # B14");
+    try _setCellText(a, sheet, try Position.fromAddress("C15"), "B15 # C14");
+    try _setCellText(a, sheet, try Position.fromAddress("D15"), "C15 # D14");
+    try _setCellText(a, sheet, try Position.fromAddress("E15"), "D15 # E14");
+    try _setCellText(a, sheet, try Position.fromAddress("F15"), "E15 # F14");
+    try _setCellText(a, sheet, try Position.fromAddress("G15"), "F15 # G14");
+    try _setCellText(a, sheet, try Position.fromAddress("A16"), "A15 # '7'");
+    try _setCellText(a, sheet, try Position.fromAddress("B16"), "A16 # B15");
+    try _setCellText(a, sheet, try Position.fromAddress("C16"), "B16 # C15");
+    try _setCellText(a, sheet, try Position.fromAddress("D16"), "C16 # D15");
+    try _setCellText(a, sheet, try Position.fromAddress("E16"), "D16 # E15");
+    try _setCellText(a, sheet, try Position.fromAddress("F16"), "E16 # F15");
+    try _setCellText(a, sheet, try Position.fromAddress("G16"), "F16 # G15");
+    try _setCellText(a, sheet, try Position.fromAddress("A17"), "A16 # '8'");
+    try _setCellText(a, sheet, try Position.fromAddress("B17"), "A17 # B16");
+    try _setCellText(a, sheet, try Position.fromAddress("C17"), "B17 # C16");
+    try _setCellText(a, sheet, try Position.fromAddress("D17"), "C17 # D16");
+    try _setCellText(a, sheet, try Position.fromAddress("E17"), "D17 # E16");
+    try _setCellText(a, sheet, try Position.fromAddress("F17"), "E17 # F16");
+    try _setCellText(a, sheet, try Position.fromAddress("G17"), "F17 # G16");
+    try _setCellText(a, sheet, try Position.fromAddress("A18"), "A17 # '9'");
+    try _setCellText(a, sheet, try Position.fromAddress("B18"), "A18 # B17");
+    try _setCellText(a, sheet, try Position.fromAddress("C18"), "B18 # C17");
+    try _setCellText(a, sheet, try Position.fromAddress("D18"), "C18 # D17");
+    try _setCellText(a, sheet, try Position.fromAddress("E18"), "D18 # E17");
+    try _setCellText(a, sheet, try Position.fromAddress("F18"), "E18 # F17");
+    try _setCellText(a, sheet, try Position.fromAddress("G18"), "F18 # G17");
+    try _setCellText(a, sheet, try Position.fromAddress("A19"), "A18 # '0'");
+    try _setCellText(a, sheet, try Position.fromAddress("B19"), "A19 # B18");
+    try _setCellText(a, sheet, try Position.fromAddress("C19"), "B19 # C18");
+    try _setCellText(a, sheet, try Position.fromAddress("D19"), "C19 # D18");
+    try _setCellText(a, sheet, try Position.fromAddress("E19"), "D19 # E18");
+    try _setCellText(a, sheet, try Position.fromAddress("F19"), "E19 # F18");
+    try _setCellText(a, sheet, try Position.fromAddress("G19"), "F19 # G18");
+    try _setCellText(a, sheet, try Position.fromAddress("A20"), "A19 # '1'");
+    try _setCellText(a, sheet, try Position.fromAddress("B20"), "A20 # B19");
+    try _setCellText(a, sheet, try Position.fromAddress("C20"), "B20 # C19");
+    try _setCellText(a, sheet, try Position.fromAddress("D20"), "C20 # D19");
+    try _setCellText(a, sheet, try Position.fromAddress("E20"), "D20 # E19");
+    try _setCellText(a, sheet, try Position.fromAddress("F20"), "E20 # F19");
+    try _setCellText(a, sheet, try Position.fromAddress("G20"), "F20 # G19");
 
     try sheet.update();
 
