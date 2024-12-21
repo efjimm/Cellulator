@@ -15,6 +15,7 @@ const Ast = @import("Ast.zig");
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 const RTree = @import("tree.zig").RTree;
 const DependentTree = @import("tree.zig").DependentTree;
+const SkipList = @import("skip_list.zig").SkipList;
 
 const Sheet = @This();
 
@@ -47,16 +48,16 @@ arena: Arena.State = .{},
 
 cell_treap: CellTreap = .{},
 
-rows: RowAxis = .{},
-cols: ColumnAxis = .{},
+rows: RowAxis,
+cols: ColumnAxis,
 
 search_buffer: std.ArrayListUnmanaged(std.ArrayListUnmanaged(*Cell)) = .{},
 
 filepath: std.BoundedArray(u8, std.fs.max_path_bytes) = .{}, // TODO: Heap allocate this
 
 pub const CellTreap = std.Treap(Cell, Cell.compare);
-pub const ColumnAxis = std.Treap(Column, Column.compare);
-pub const RowAxis = std.Treap(Row, Row.compare);
+pub const ColumnAxis = SkipList(Column, 4, Column.Context);
+pub const RowAxis = SkipList(Row, 4, Row.Context);
 
 pub fn create(allocator: Allocator) !*Sheet {
     const sheet = try allocator.create(Sheet);
@@ -66,7 +67,10 @@ pub fn create(allocator: Allocator) !*Sheet {
         .allocator = allocator,
         .cell_tree = .{ .sheet = sheet },
         .rtree = .init(sheet),
+        .rows = .init(1),
+        .cols = .init(1),
     };
+    assert(sheet.cols.nodes.len == 0);
 
     return sheet;
 }
@@ -95,6 +99,8 @@ pub fn destroy(sheet: *Sheet) void {
     }
     var arena = sheet.arena.promote(sheet.allocator);
     arena.deinit();
+    sheet.rows.deinit(sheet.allocator);
+    sheet.cols.deinit(sheet.allocator);
     sheet.allocator.destroy(sheet);
 }
 
@@ -247,8 +253,8 @@ pub fn clearRetainingCapacity(sheet: *Sheet, context: anytype) void {
     var iter = sheet.cell_treap.inorderIterator();
     while (iter.next()) |node| context.destroyAst(node.key.ast);
     sheet.cell_treap.root = null;
-    sheet.rows.root = null;
-    sheet.cols.root = null;
+    sheet.rows.clearRetainingCapacity();
+    sheet.cols.clearRetainingCapacity();
 
     sheet.queued_cells.clearRetainingCapacity();
 
@@ -365,7 +371,7 @@ pub fn writeFile(
 
     var iter = sheet.cell_treap.inorderIterator();
     while (iter.next()) |node| {
-        const pos = node.key.position();
+        const pos = node.key.position(sheet);
         try writer.print("let {} = ", .{pos});
         try sheet.printCellExpression(pos, writer);
         try writer.writeByte('\n');
@@ -480,7 +486,7 @@ pub fn firstCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
 
     var min: ?PosInt = null;
     while (try iter.next()) |kv| {
-        const x = kv.key.col.index;
+        const x = sheet.cols.get(kv.key.col).?.index;
         if (min == null or x < min.?) min = x;
     }
 
@@ -496,7 +502,7 @@ pub fn lastCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
 
     var max: ?PosInt = null;
     while (try iter.next()) |kv| {
-        const x = kv.key.col.index;
+        const x = sheet.cols.get(kv.key.col).?.index;
         if (max == null or x > max.?) max = x;
     }
 
@@ -514,7 +520,7 @@ pub fn firstCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
 
     var min: ?PosInt = null;
     while (try iter.next()) |kv| {
-        const y = kv.key.row.index;
+        const y = sheet.rows.get(kv.key.row).?.index;
         if (min == null or y < min.?) min = y;
     }
 
@@ -530,7 +536,7 @@ pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
 
     var max: ?PosInt = null;
     while (try iter.next()) |kv| {
-        const y = kv.key.row.index;
+        const y = sheet.rows.get(kv.key.row).?.index;
         if (max == null or y > max.?) max = y;
     }
 
@@ -870,18 +876,19 @@ pub fn setWidth(
     width: u16,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    if (sheet.getColumnPtr(column_index)) |col| {
+    if (sheet.getColumnHandle(column_index)) |col| {
         try sheet.setColWidth(col, column_index, width, opts);
     }
 }
 
 pub fn setColWidth(
     sheet: *Sheet,
-    col: *Column,
+    handle: Column.Handle,
     index: Position.Int,
     width: u16,
     opts: UndoOpts,
 ) Allocator.Error!void {
+    const col = sheet.cols.getPtr(handle).?;
     if (width == col.width) return;
     const old_width = col.width;
     col.width = width;
@@ -903,8 +910,9 @@ pub fn incWidth(
     n: u16,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    if (sheet.getColumnPtr(column_index)) |col| {
-        try sheet.setColWidth(col, column_index, col.width +| n, opts);
+    if (sheet.getColumnHandle(column_index)) |handle| {
+        const col = sheet.cols.get(handle).?;
+        try sheet.setColWidth(handle, column_index, col.width +| n, opts);
     }
 }
 
@@ -914,9 +922,10 @@ pub fn decWidth(
     n: u16,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    if (sheet.getColumnPtr(column_index)) |col| {
+    if (sheet.getColumnHandle(column_index)) |handle| {
+        const col = sheet.cols.get(handle).?;
         const new_width = @max(col.width -| n, 1);
-        try sheet.setColWidth(col, column_index, new_width, opts);
+        try sheet.setColWidth(handle, column_index, new_width, opts);
     }
 }
 
@@ -926,19 +935,21 @@ pub fn setPrecision(
     precision: u8,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    if (sheet.getColumnPtr(column_index)) |col| {
-        try sheet.setColPrecision(col, column_index, precision, opts);
+    if (sheet.getColumnHandle(column_index)) |handle| {
+        try sheet.setColPrecision(handle, column_index, precision, opts);
     }
 }
 
 pub fn setColPrecision(
     sheet: *Sheet,
-    col: *Column,
+    handle: Column.Handle,
     index: Position.Int,
     precision: u8,
     opts: UndoOpts,
 ) Allocator.Error!void {
+    const col = sheet.cols.getPtr(handle).?;
     if (precision == col.precision) return;
+
     const old_precision = col.precision;
     col.precision = precision;
     try sheet.pushUndo(
@@ -959,8 +970,9 @@ pub fn incPrecision(
     n: u8,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    if (sheet.getColumnPtr(column_index)) |col| {
-        try sheet.setColPrecision(col, column_index, col.precision +| n, opts);
+    if (sheet.getColumnHandle(column_index)) |handle| {
+        const col = sheet.cols.get(handle).?;
+        try sheet.setColPrecision(handle, column_index, col.precision +| n, opts);
     }
 }
 
@@ -970,8 +982,9 @@ pub fn decPrecision(
     n: u8,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    if (sheet.getColumnPtr(column_index)) |col| {
-        try sheet.setColPrecision(col, column_index, col.precision -| n, opts);
+    if (sheet.getColumnHandle(column_index)) |handle| {
+        const col = sheet.cols.get(handle).?;
+        try sheet.setColPrecision(handle, column_index, col.precision -| n, opts);
     }
 }
 
@@ -1026,7 +1039,7 @@ pub fn insertCellNode(
 ) Allocator.Error!void {
     // TODO: Change this position to be a relative cell reference to this cell
     const cell_ptr = &new_node.key;
-    const pos = new_node.key.position();
+    const pos = new_node.key.position(sheet);
     if (undo_opts.undo_type) |undo_type| {
         try sheet.ensureUndoCapacity(undo_type, 1);
     }
@@ -1152,8 +1165,8 @@ pub fn deleteCell(
     pos: Position,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
-    const row = sheet.getRowPtr(pos.y) orelse return;
-    const col = sheet.getColumnPtr(pos.x) orelse return;
+    const row = sheet.getRowHandle(pos.y) orelse return;
+    const col = sheet.getColumnHandle(pos.x) orelse return;
     return sheet.deleteCellByRef(.{ .row = row, .col = col }, undo_opts);
 }
 
@@ -1169,9 +1182,9 @@ pub noinline fn deleteCellsInRange(sheet: *Sheet, range: Rect) Allocator.Error!v
     }
 }
 
-pub fn getRowPtr(sheet: *Sheet, index: PosInt) ?*Row {
-    const entry = sheet.rows.getEntryFor(.{ .index = index });
-    return if (entry.node) |node| &node.key else null;
+pub fn getRowHandle(sheet: *Sheet, index: PosInt) ?Row.Handle {
+    const handle = sheet.rows.search(.{ .index = index });
+    return if (handle.isValid()) handle else null;
 }
 
 pub fn getCell(sheet: *Sheet, pos: Position) ?Cell {
@@ -1179,8 +1192,8 @@ pub fn getCell(sheet: *Sheet, pos: Position) ?Cell {
 }
 
 pub fn getCellPtr(sheet: *Sheet, pos: Position) ?*Cell {
-    const row = sheet.getRowPtr(pos.y) orelse return null;
-    const col = sheet.getColumnPtr(pos.x) orelse return null;
+    const row = sheet.getRowHandle(pos.y) orelse return null;
+    const col = sheet.getColumnHandle(pos.x) orelse return null;
     const key: Cell = .{
         .row = row,
         .col = col,
@@ -1250,7 +1263,7 @@ fn markDirty(
     try sheet.rtree.rtree.searchBuffer(
         sheet.allocator,
         &sheet.search_buffer,
-        Rect.initSinglePos(cell.position()),
+        Rect.initSinglePos(cell.position(sheet)),
     );
 
     for (sheet.search_buffer.items) |*list| {
@@ -1282,8 +1295,8 @@ pub fn setFilePath(sheet: *Sheet, filepath: []const u8) void {
 }
 
 pub const Cell = struct {
-    row: *Row,
-    col: *Column,
+    row: Row.Handle,
+    col: Column.Handle,
     value: Value = .{ .err = error.NotEvaluable },
     ast: Ast = .{},
     state: enum {
@@ -1311,10 +1324,10 @@ pub const Cell = struct {
         };
     }
 
-    pub inline fn position(cell: Cell) Position {
+    pub inline fn position(cell: Cell, sheet: *Sheet) Position {
         return .{
-            .x = cell.col.index,
-            .y = cell.row.index,
+            .x = sheet.cols.get(cell.col).?.index,
+            .y = sheet.rows.get(cell.row).?.index,
         };
     }
 
@@ -1322,10 +1335,10 @@ pub const Cell = struct {
         return a.row == b.row and a.col == b.col;
     }
 
-    pub inline fn rect(cell: Cell, _: *Sheet) Rect {
+    pub inline fn rect(cell: Cell, sheet: *Sheet) Rect {
         return .{
-            .tl = cell.position(),
-            .br = cell.position(),
+            .tl = cell.position(sheet),
+            .br = cell.position(sheet),
         };
     }
 
@@ -1339,9 +1352,12 @@ pub const Cell = struct {
         return std.math.order(a_key, b_key);
     }
 
-    fn key(row: *Row, col: *Column) Key {
-        const row_int = @intFromPtr(row);
-        const col_int = @intFromPtr(col);
+    // TODO: Make sure this is always unique
+    fn key(row: Row.Handle, col: Column.Handle) Key {
+        assert(row.isValid());
+        assert(col.isValid());
+        const row_int = row.n;
+        const col_int = col.n;
         const row_mul = comptime std.math.pow(Key, 2, @typeInfo(usize).int.bits);
         return row_int * row_mul + col_int;
     }
@@ -1452,9 +1468,13 @@ pub fn printCellExpression(sheet: *Sheet, pos: Position, writer: anytype) !void 
 pub const Row = struct {
     index: PosInt,
 
-    fn compare(a: Row, b: Row) std.math.Order {
-        return std.math.order(a.index, b.index);
-    }
+    pub const Handle = RowAxis.NodeIndex;
+
+    pub const Context = struct {
+        pub fn order(_: Context, a: Row, b: Row) std.math.Order {
+            return std.math.order(a.index, b.index);
+        }
+    };
 };
 
 pub const Column = struct {
@@ -1464,9 +1484,13 @@ pub const Column = struct {
     width: u16 = default_width,
     precision: u8 = 2,
 
-    fn compare(a: Column, b: Column) std.math.Order {
-        return std.math.order(a.index, b.index);
-    }
+    pub const Handle = ColumnAxis.NodeIndex;
+
+    pub const Context = struct {
+        pub fn order(_: Context, a: Column, b: Column) std.math.Order {
+            return std.math.order(a.index, b.index);
+        }
+    };
 };
 
 fn setRowOrColumn(
@@ -1486,41 +1510,34 @@ fn setRowOrColumn(
     return &entry.node.?.key;
 }
 
-/// Sets the column at `value.index` to `value`, creating it if it doesn't exist.
-pub fn setColumn(sheet: *Sheet, value: Column) !*Column {
-    return sheet.setRowOrColumn(Column, ColumnAxis, &sheet.cols, value);
-}
-
-pub fn createRow(sheet: *Sheet, index: PosInt) !*Row {
-    var entry = sheet.rows.getEntryFor(.{ .index = index });
-    if (entry.node == null) {
-        const new_node = try sheet.arenaCreate(RowAxis.Node);
-        entry.set(new_node);
+pub fn createRow(sheet: *Sheet, index: PosInt) !Row.Handle {
+    var handle = sheet.rows.search(.{ .index = index });
+    if (!handle.isValid()) {
+        handle = try sheet.rows.insert(sheet.allocator, .{ .index = index });
     }
-    return &entry.node.?.key;
+
+    assert(handle.isValid());
+    return handle;
 }
 
-pub fn createColumn(sheet: *Sheet, index: PosInt) !*Column {
-    var entry = sheet.cols.getEntryFor(.{ .index = index });
-    if (entry.node == null) {
-        const new_node = try sheet.arenaCreate(ColumnAxis.Node);
-        entry.set(new_node);
+pub fn createColumn(sheet: *Sheet, index: PosInt) !Column.Handle {
+    var handle = sheet.cols.search(.{ .index = index });
+    if (!handle.isValid()) {
+        handle = try sheet.cols.insert(sheet.allocator, .{ .index = index });
     }
-    return &entry.node.?.key;
-}
 
-pub fn setRow(sheet: *Sheet, value: Row) !*Row {
-    return sheet.setRowOrColumn(Row, RowAxis, &sheet.rows, value);
+    assert(handle.isValid());
+    return handle;
 }
 
 pub fn getColumn(sheet: *Sheet, index: PosInt) ?Column {
-    const entry = sheet.cols.getEntryFor(.{ .index = index });
-    return if (entry.node) |node| node.key else null;
+    const handle = sheet.cols.search(.{ .index = index });
+    return sheet.cols.get(handle);
 }
 
-pub fn getColumnPtr(sheet: *Sheet, index: PosInt) ?*Column {
-    const entry = sheet.cols.getEntryFor(.{ .index = index });
-    return if (entry.node) |node| &node.key else null;
+pub fn getColumnHandle(sheet: *Sheet, index: PosInt) ?Column.Handle {
+    const handle = sheet.cols.search(.{ .index = index });
+    return if (handle.isValid()) handle else null;
 }
 
 pub fn widthNeededForColumn(
@@ -1582,11 +1599,14 @@ const PositionContext = struct {
 pub const Reference = struct {
     relative_row: bool = false,
     relative_col: bool = false,
-    row: *Row,
-    col: *Column,
+    row: Row.Handle,
+    col: Column.Handle,
 
-    pub inline fn resolve(pos: Reference, _: *Sheet) Position {
-        return .{ .x = pos.col.index, .y = pos.row.index };
+    pub inline fn resolve(pos: Reference, sheet: *Sheet) Position {
+        return .{
+            .x = sheet.cols.get(pos.col).?.index,
+            .y = sheet.rows.get(pos.row).?.index,
+        };
     }
 
     pub inline fn rect(ref: Reference, sheet: *Sheet) Rect {
@@ -1619,12 +1639,12 @@ pub const Range = struct {
     pub fn fromRect(sheet: *Sheet, r: Rect) Range {
         return .{
             .tl = .{
-                .row = sheet.getRowPtr(r.tl.y).?,
-                .col = sheet.getColumnPtr(r.tl.x).?,
+                .row = sheet.getRowHandle(r.tl.y).?,
+                .col = sheet.getColumnHandle(r.tl.x).?,
             },
             .br = .{
-                .row = sheet.getRowPtr(r.br.y).?,
-                .col = sheet.getColumnPtr(r.br.x).?,
+                .row = sheet.getRowHandle(r.br.y).?,
+                .col = sheet.getColumnHandle(r.br.x).?,
             },
         };
     }

@@ -74,7 +74,7 @@ pub fn parseExpr(ast: *Self, allocator: Allocator, source: []const u8) ParseErro
 // TODO: sheet.allocator is not necessarily the same allocator as used for the AST nodes.
 
 /// Anchors the AST to the given sheet, by replacing all 'dumb' coordinate references with
-/// references to the row/column pointers in `sheet`.
+/// references to the row/column handles in `sheet`.
 pub fn anchor(ast: *Self, sheet: *Sheet) Allocator.Error!void {
     assert(ast.refs.len == 0);
 

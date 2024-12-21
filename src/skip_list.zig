@@ -8,7 +8,7 @@ pub fn SkipList(
 ) type {
     return struct {
         /// Head node of the highest (most sparse) level
-        head: NodeIndex,
+        heads: [levels]NodeIndex,
         nodes: std.MultiArrayList(Node).Slice,
         rand: std.Random.DefaultPrng,
         ctx: Context,
@@ -41,7 +41,7 @@ pub fn SkipList(
 
         pub fn clearRetainingCapacity(list: *@This()) void {
             list.nodes.len = 0;
-            list.head = .invalid;
+            list.heads = [_]NodeIndex{.invalid} ** levels;
         }
 
         pub fn get(list: *const @This(), index: NodeIndex) ?T {
@@ -51,16 +51,21 @@ pub fn SkipList(
                 null;
         }
 
+        /// Callers should NOT modify the returned value in such a way that changes the ordering.
+        pub fn getPtr(list: *const @This(), index: NodeIndex) ?*T {
+            return if (index.isValid())
+                &list.nodes.items(.value)[index.n]
+            else
+                null;
+        }
+
         pub fn insert(
             list: *@This(),
             allocator: std.mem.Allocator,
             value: T,
         ) !NodeIndex {
-            if (!list.head.isValid()) {
-                return list.insertEmpty(allocator, value);
-            }
-
-            if (list.ctx.order(value, list.nodes.items(.value)[list.head.n]) == .lt) {
+            const head = list.heads[list.heads.len - 1];
+            if (!head.isValid() or list.ctx.order(value, list.nodes.items(.value)[head.n]) == .lt) {
                 return list.insertAtBeggining(allocator, value);
             }
 
@@ -68,14 +73,7 @@ pub fn SkipList(
         }
 
         pub fn iterator(list: *@This()) Iterator {
-            assert(list.head.isValid());
-            const belows = list.nodes.items(.below);
-
-            var index = list.head;
-            while (belows[index.n].isValid())
-                index = belows[index.n];
-
-            return .{ .node = index, .nodes = list.nodes };
+            return .{ .node = list.heads[list.heads.len - 1], .nodes = list.nodes };
         }
 
         pub const Iterator = struct {
@@ -116,7 +114,7 @@ pub fn SkipList(
             comptime assert(@sizeOf(Context) == 0);
 
             return .{
-                .head = .invalid,
+                .heads = [_]NodeIndex{.invalid} ** levels,
                 .rand = .init(rand_seed),
                 .nodes = std.MultiArrayList(Node).empty.slice(),
                 .ctx = undefined,
@@ -138,36 +136,39 @@ pub fn SkipList(
         }
 
         pub fn search(list: *@This(), value: T) NodeIndex {
-            if (!list.head.isValid()) return .invalid;
-            var i = list.head;
-
             const values = list.nodes.items(.value);
             const nexts = list.nodes.items(.next);
 
-            for (0..levels) |_| {
-                while (nexts[i.n].isValid() and list.ctx.order(value, values[nexts[i.n].n]) != .lt)
-                    i = nexts[i.n];
+            for (list.heads) |head| {
+                if (!head.isValid()) continue;
+                if (list.ctx.order(value, values[head.n]) == .lt) continue;
 
-                i = list.nodes.items(.below)[i.n].orElse(i);
-            }
+                var i = head;
 
-            if (i.isValid() and std.math.order(value, values[i.n]) == .eq) {
-                return i;
+                for (0..levels) |_| {
+                    while (nexts[i.n].isValid() and list.ctx.order(value, values[nexts[i.n].n]) != .lt)
+                        i = nexts[i.n];
+
+                    i = list.nodes.items(.below)[i.n].orElse(i);
+                }
+
+                if (i.isValid() and list.ctx.order(value, values[i.n]) == .eq) {
+                    const belows = list.nodes.items(.below);
+                    while (belows[i.n].isValid()) i = belows[i.n];
+                    return i;
+                }
+
+                return .invalid;
             }
 
             return .invalid;
         }
 
-        /// Ensures enough space for at laest `n` inserted nodes. May over-allocate by a lot.
+        /// Ensures enough space for at least `n` inserted nodes.
         pub fn ensureUnusedCapacity(list: *@This(), allocator: std.mem.Allocator, n: usize) !void {
             var nodes = list.nodes.toMultiArrayList();
             try nodes.ensureUnusedCapacity(allocator, n * levels);
             list.nodes = nodes.slice();
-        }
-
-        fn freeNode(list: *@This(), node: NodeIndex) void {
-            list.nodes.items(.next)[node.n] = list.free;
-            list.free = node;
         }
 
         fn createNodeAssumeCapacity(list: *@This()) NodeIndex {
@@ -176,126 +177,86 @@ pub fn SkipList(
             return ret;
         }
 
-        fn insertEmpty(list: *@This(), allocator: std.mem.Allocator, value: T) !NodeIndex {
-            assert(!list.head.isValid());
-
-            try list.ensureUnusedCapacity(allocator, 1);
-            errdefer comptime unreachable;
-
-            var nodes: [levels]NodeIndex = undefined;
-            for (&nodes) |*node| node.* = list.createNodeAssumeCapacity();
-
-            inline for (nodes, 1..) |node, i| {
-                list.nodes.set(node.n, .{
-                    .value = value,
-                    .below = if (i >= nodes.len) .invalid else nodes[i],
-                });
-            }
-
-            list.head = nodes[0];
-            return nodes[nodes.len - 1];
-        }
-
-        /// Special case: Inserting at the beginning of the list
-        ///
-        /// The head of the list must be at the top level and have a node on each level below.
-        /// To preserve the performance of the list, we prepend by doing a normal insert after
-        /// the head and swapping the values with the head nodes.
         fn insertAtBeggining(list: *@This(), allocator: std.mem.Allocator, value: T) !NodeIndex {
-            assert(list.head.isValid());
-
             try list.ensureUnusedCapacity(allocator, 1);
             errdefer comptime unreachable;
 
             const level_count = randomLevelCount(list.rand.random());
             const level_start = levels - level_count;
 
-            const values = list.nodes.items(.value);
-            const nexts = list.nodes.items(.next);
-            const belows = list.nodes.items(.below);
+            for (list.heads[level_start..]) |*head| {
+                const node = list.createNodeAssumeCapacity();
 
-            // Collect the last `level_count` heads.
-            const heads = blk: {
-                var heads: std.BoundedArray(NodeIndex, levels) = .{};
-                var index = list.head;
-                for (0..level_start) |_| index = belows[index.n];
-                for (0..level_count) |_| {
-                    heads.appendAssumeCapacity(index);
-                    index = belows[index.orElse(.from(0)).n];
+                if (head.isValid()) {
+                    list.nodes.items(.prev)[head.n] = node;
                 }
-                break :blk heads;
-            };
 
-            var nodes: std.BoundedArray(NodeIndex, levels) = .{};
-            for (0..level_count) |_|
-                nodes.appendAssumeCapacity(list.createNodeAssumeCapacity());
-
-            // Populate and insert nodes
-            for (heads.slice(), nodes.slice(), 1..) |head, node, i| {
                 list.nodes.set(node.n, .{
-                    .value = values[head.n],
-                    .prev = head,
-                    .next = nexts[head.n],
-                    .below = if (i >= nodes.len) .invalid else nodes.get(i),
+                    .value = value,
+                    .next = head.*,
+                    .below = .from(node.n + 1),
                 });
-                nexts[head.n] = node;
+                head.* = node;
             }
 
-            // Overwrite values of head nodes
-            var index = list.head;
-            while (index.isValid()) : (index = belows[index.n])
-                values[index.n] = value;
-            return nodes.buffer[nodes.len - 1];
+            list.nodes.items(.below)[list.nodes.len - 1] = .invalid;
+
+            return .from(@intCast(list.nodes.len - 1));
         }
 
         fn insertCommon(list: *@This(), allocator: std.mem.Allocator, value: T) !NodeIndex {
-            assert(list.head.isValid());
+            assert(list.heads[list.heads.len - 1].isValid());
 
             try list.ensureUnusedCapacity(allocator, 1);
             errdefer comptime unreachable;
 
             const level_count = randomLevelCount(list.rand.random());
             const level_start = levels - level_count;
+            const values = list.nodes.items(.value);
 
+            // Index of the first head <= `value`.
+            const index = for (list.heads, 0..) |head, i| {
+                if (!head.isValid()) continue;
+                if (list.ctx.order(value, values[head.n]) != .lt)
+                    break i;
+            } else unreachable;
+
+            var prev_nodes: std.BoundedArray(NodeIndex, levels) = .{};
+            prev_nodes.appendNTimesAssumeCapacity(.invalid, index);
+            var start = list.heads[index];
             const belows = list.nodes.items(.below);
+
+            while (start.isValid()) : (start = belows[start.n]) {
+                const n = list.searchToGreater(start, value);
+                prev_nodes.appendAssumeCapacity(n);
+            }
+
             const nexts = list.nodes.items(.next);
             const prevs = list.nodes.items(.prev);
 
-            // The previous nodes for each level
-            const prev_nodes = blk: {
-                var start = list.head;
-                var prev_nodes: [levels]NodeIndex = undefined;
+            for (prev_nodes.constSlice()[level_start..]) |prev| {
+                const new_node = list.createNodeAssumeCapacity();
 
-                for (&prev_nodes) |*node| {
-                    const n = list.searchToGreater(start, value);
-                    node.* = n;
-                    start = belows[n.orElse(.from(0)).n];
-                }
-
-                break :blk prev_nodes;
-            };
-
-            var nodes: std.BoundedArray(NodeIndex, levels) = .{};
-            for (nodes.addManyAsSlice(level_count) catch unreachable) |*node|
-                node.* = list.createNodeAssumeCapacity();
-
-            // Create the new nodes to insert
-            for (
-                prev_nodes[level_start..],
-                nodes.constSlice(),
-                1..,
-            ) |prev, node, i| {
-                list.nodes.set(node.n, .{
+                list.nodes.set(new_node.n, .{
                     .value = value,
+                    .next = if (prev.isValid()) nexts[prev.n] else .invalid,
                     .prev = prev,
-                    .next = nexts[prev.n],
-                    .below = if (i < nodes.len) nodes.get(i) else .invalid,
+                    // NOTE: Needs to change if freeing nodes is implemented.
+                    .below = .from(new_node.n + 1),
                 });
-                if (nexts[prev.n].isValid())
-                    prevs[nexts[prev.n].n] = node;
-                nexts[prev.n] = node;
+
+                if (prev.isValid()) {
+                    if (nexts[prev.n].isValid()) {
+                        prevs[nexts[prev.n].n] = new_node;
+                    }
+
+                    nexts[prev.n] = new_node;
+                }
             }
-            return nodes.buffer[nodes.len - 1];
+
+            list.nodes.items(.below)[list.nodes.len - 1] = .invalid;
+
+            return .from(@intCast(list.nodes.len - 1));
         }
 
         fn randomLevelCount(rand: std.Random) usize {
@@ -307,6 +268,7 @@ pub fn SkipList(
                 if (f < 0.5) return level;
             }
 
+            assert(levels != 0);
             return levels;
         }
     };
@@ -324,13 +286,14 @@ const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 
 test "Skiplist something" {
-    var list: SkipList(u32, 4, IntContext(u32)) = .init(123);
+    var list: SkipList(u32, 1, IntContext(u32)) = .init(123);
     defer list.deinit(std.testing.allocator);
 
     _ = try list.insert(std.testing.allocator, 10);
 
-    try expect(list.head.isValid());
-    try expectEqual(10, list.nodes.items(.value)[list.head.n]);
+    const head = list.heads[list.heads.len - 1];
+    try expect(head.isValid());
+    try expectEqual(10, list.nodes.items(.value)[head.n]);
 
     const n = list.search(10);
     try expect(n.isValid());
