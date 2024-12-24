@@ -20,14 +20,22 @@ const Col = Sheet.Column;
 const Term = spoon.Term;
 
 term: Term,
-update: UpdateFlags = .{},
+update: UpdateFlags = .all,
 
 const UpdateFlags = packed struct {
-    command: bool = true,
-    column_headings: bool = true,
-    row_numbers: bool = true,
-    cells: bool = true,
-    cursor: bool = true,
+    command: bool,
+    column_headings: bool,
+    row_numbers: bool,
+    cells: bool,
+    cursor: bool,
+
+    pub const all: UpdateFlags = .{
+        .command = true,
+        .column_headings = true,
+        .row_numbers = true,
+        .cells = true,
+        .cursor = true,
+    };
 };
 
 const styles = blk: {
@@ -89,7 +97,7 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
     if (needs_resize) {
         try self.term.fetchSize();
         zc.clampScreenToCursor();
-        self.update = .{};
+        self.update = .all;
         needs_resize = false;
     }
 

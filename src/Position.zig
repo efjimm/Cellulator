@@ -15,6 +15,10 @@ pub const Position = extern struct {
     x: Int = 0,
     y: Int = 0,
 
+    pub fn init(x: Int, y: Int) Position {
+        return .{ .x = x, .y = y };
+    }
+
     /// Pushes the string representation of `pos` to the stack of the given Lua
     /// state. Also pushes a table containing the `x` and `y` values of `pos`.
     pub fn toLua(pos: Position, state: *Lua) !i32 {
@@ -176,6 +180,10 @@ pub const Position = extern struct {
                 error.InvalidCharacter => return error.InvalidCellAddress,
             },
         };
+    }
+
+    pub fn fromValidAddress(address: []const u8) Position {
+        return fromAddress(address) catch unreachable;
     }
 
     pub const Rect = extern struct {

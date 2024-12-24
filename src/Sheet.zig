@@ -166,10 +166,10 @@ pub const Undo = union(enum) {
         col: Position.Int,
         precision: u8,
     },
-    // insert_row: *RowAxis.Node,
-    // insert_col: *ColumnAxis.Node,
-    // delete_row: u32,
-    // delete_col: u32,
+    insert_row: PosInt,
+    insert_col: PosInt,
+    delete_row: PosInt,
+    delete_col: PosInt,
 
     pub fn deinit(u: Undo, sheet: *Sheet) void {
         switch (u) {
@@ -181,6 +181,10 @@ pub const Undo = union(enum) {
             .delete_cell,
             .set_column_width,
             .set_column_precision,
+            .insert_row,
+            .insert_col,
+            .delete_row,
+            .delete_col,
             => {},
         }
     }
@@ -279,6 +283,10 @@ pub fn clearRetainingCapacity(sheet: *Sheet, context: anytype) void {
             .delete_cell,
             .set_column_width,
             .set_column_precision,
+            .insert_row,
+            .insert_col,
+            .delete_row,
+            .delete_col,
             => {},
         }
     }
@@ -293,6 +301,10 @@ pub fn clearRetainingCapacity(sheet: *Sheet, context: anytype) void {
             .delete_cell,
             .set_column_width,
             .set_column_precision,
+            .insert_row,
+            .insert_col,
+            .delete_row,
+            .delete_col,
             => {},
         }
     }
@@ -797,32 +809,27 @@ pub fn pushUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
     }
 }
 
-// fn insertRow(sheet: *Sheet, y: u32) !void {
-//     try insertRowOrColumn(sheet.arena.allocator(), &sheet.rows, y);
-// }
+pub fn insertColumn(sheet: *Sheet, index: PosInt, undo_opts: UndoOpts) !void {
+    try sheet.pushUndo(.{ .delete_col = index }, undo_opts);
+    const values = sheet.cols.nodes.items(.value);
 
-// fn insertCol(sheet: *Sheet, x: u32) !void {
-//     try insertRowOrColumn(&sheet.cols, )
-// }
+    for (values) |*value| {
+        if (value.index >= index) {
+            value.index += 1;
+        }
+    }
+}
 
-// fn insertRowOrColumn(tree: anytype, new_node: *Axis.Node) void {
-//     const index = new_node.key;
+pub fn insertRow(sheet: *Sheet, index: PosInt, undo_opts: UndoOpts) !void {
+    try sheet.pushUndo(.{ .delete_row = index }, undo_opts);
+    const values = sheet.rows.nodes.items(.value);
 
-//     var entry = tree.getEntryFor(index);
-//     var n = entry.node;
-//     var p = entry.context.inserted_under;
-//     if (n) |node| node.key += 1;
-//     while (treapNextNode(Axis, entry.key, compareAnchor, n, p)) |node| {
-//         node.key += 1;
-//         n = node;
-//         p = node.parent;
-//         entry.key = node.key;
-//     }
-
-//     entry = tree.getEntryFor(index);
-//     entry.set(new_node);
-//     new_node.key = index;
-// }
+    for (values) |*value| {
+        if (value.index >= index) {
+            value.index += 1;
+        }
+    }
+}
 
 pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
     switch (u) {
@@ -830,7 +837,9 @@ pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
         .delete_cell => |pos| try sheet.deleteCell(pos, opts),
         .set_column_width => |t| try sheet.setWidth(t.col, t.width, opts),
         .set_column_precision => |t| try sheet.setPrecision(t.col, t.precision, opts),
-        // .insert_row => |node| sheet.insertRowNode(node),
+        .insert_row => |index| try sheet.insertRow(index, opts),
+        .insert_col => |index| try sheet.insertColumn(index, opts),
+        .delete_row, .delete_col => {},
     }
 }
 
@@ -892,6 +901,7 @@ pub fn setColWidth(
     if (width == col.width) return;
     const old_width = col.width;
     col.width = width;
+    // TODO: This should be done before the operation?
     try sheet.pushUndo(
         .{
             .set_column_width = .{
@@ -1007,15 +1017,15 @@ pub fn setCell(
     ast: Ast,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
-    const strings = try ast.dupeStrings(sheet.allocator, source);
-    errdefer sheet.allocator.free(strings);
+    // Create row and column if they don't exist
+    const row = try sheet.createRow(pos.y);
+    const col = try sheet.createColumn(pos.x);
 
     const new_node = try sheet.arenaCreate(CellNode);
     errdefer sheet.arenaDestroy(new_node);
 
-    // Create row and column if they don't exist
-    const row = try sheet.createRow(pos.y);
-    const col = try sheet.createColumn(pos.x);
+    const strings = try ast.dupeStrings(sheet.allocator, source);
+    errdefer sheet.allocator.free(strings);
 
     var a = ast;
     try a.anchor(sheet);
@@ -1029,6 +1039,7 @@ pub fn setCell(
     return sheet.insertCellNode(strings, new_node, undo_opts);
 }
 
+// TODO: This function *really, really* sucks. Clean it up.
 // TODO: null undo type causes a memory leak (not used anywhere)
 /// Inserts a pre-allocated Cell node. Does not attempt to create any row/column anchors.
 pub fn insertCellNode(
@@ -1038,6 +1049,7 @@ pub fn insertCellNode(
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
     // TODO: Change this position to be a relative cell reference to this cell
+    // This is done???
     const cell_ptr = &new_node.key;
     const pos = new_node.key.position(sheet);
     if (undo_opts.undo_type) |undo_type| {
@@ -1052,6 +1064,7 @@ pub fn insertCellNode(
 
     var entry = sheet.cell_treap.getEntryFor(new_node.key);
     const node = entry.node orelse {
+        log.debug("Creating cell {}", .{new_node.key.rect(sheet).tl});
         try sheet.addExpressionDependents(cell_ptr, new_node.key.ast);
         const u = Undo{ .delete_cell = pos };
 
@@ -1069,6 +1082,8 @@ pub fn insertCellNode(
         sheet.enqueueUpdate(cell_ptr) catch unreachable;
         return;
     };
+
+    log.debug("Overwriting cell {}", .{node.key.rect(sheet).tl});
 
     try sheet.removeExprDependents(cell_ptr, cell_ptr.ast);
     try sheet.addExpressionDependents(cell_ptr, cell_ptr.ast);
@@ -1234,13 +1249,18 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
             .col = cell.col,
         }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.CyclicalReference => {
+                log.info("Cyclical reference encountered while evaluating {}", .{
+                    cell.rect(sheet).tl,
+                });
+            },
             else => {},
         };
     }
 
     if (builtin.mode == .Debug) {
-        log.debug("Finished cell update in {d} seconds", .{
-            @as(f64, @floatFromInt(timer.read())) / std.time.ns_per_s,
+        log.debug("Finished cell update in {d} ms", .{
+            @as(f64, @floatFromInt(timer.read())) / std.time.ns_per_ms,
         });
     }
 }
@@ -1317,11 +1337,15 @@ pub const Cell = struct {
     pub const key_bits = @typeInfo(usize).int.bits * 2;
     pub const Key = std.meta.Int(.unsigned, key_bits);
 
-    pub fn reference(cell: Cell) Reference {
+    pub fn reference(cell: *const Cell) Reference {
         return .{
             .row = cell.row,
             .col = cell.col,
         };
+    }
+
+    pub fn range(cell: *const Cell) Range {
+        return .{ .tl = cell.reference(), .br = cell.reference() };
     }
 
     pub inline fn position(cell: Cell, sheet: *Sheet) Position {
@@ -1418,10 +1442,17 @@ pub const EvalContext = struct {
             .up_to_date => {},
             .computing => return error.CyclicalReference,
             .enqueued, .dirty => {
+                log.debug("Evaluating cell {}", .{cell.rect(
+                    context.sheet,
+                )});
                 cell.state = .computing;
 
                 // Get strings
                 const strings = context.sheet.strings.get(cell.node()) orelse "";
+
+                // Queue dependents before evaluating to ensure that errors are propagated to
+                // dependents.
+                try context.sheet.queueDependents(cell.reference());
 
                 // Evaluate
                 const res = cell.ast.eval(context.sheet, strings, context) catch |err| {
@@ -1436,8 +1467,6 @@ pub const EvalContext = struct {
                     .number => |n| .{ .number = n },
                 };
                 cell.state = .up_to_date;
-
-                try context.sheet.queueDependents(cell.reference());
             },
         }
 
@@ -1513,6 +1542,7 @@ fn setRowOrColumn(
 pub fn createRow(sheet: *Sheet, index: PosInt) !Row.Handle {
     var handle = sheet.rows.search(.{ .index = index });
     if (!handle.isValid()) {
+        log.debug("Creating row {}", .{index});
         handle = try sheet.rows.insert(sheet.allocator, .{ .index = index });
     }
 
@@ -1523,6 +1553,7 @@ pub fn createRow(sheet: *Sheet, index: PosInt) !Row.Handle {
 pub fn createColumn(sheet: *Sheet, index: PosInt) !Column.Handle {
     var handle = sheet.cols.search(.{ .index = index });
     if (!handle.isValid()) {
+        log.debug("Creating column {}", .{index});
         handle = try sheet.cols.insert(sheet.allocator, .{ .index = index });
     }
 
@@ -1597,6 +1628,7 @@ const PositionContext = struct {
 /// Reference to a specific cell in the sheet. References contain pointers to rows/columns and as
 /// such are 'automatically' adjusted when rows/columns are deleted.
 pub const Reference = struct {
+    // TODO: Remove these bools somehow.
     relative_row: bool = false,
     relative_col: bool = false,
     row: Row.Handle,
@@ -1616,6 +1648,10 @@ pub const Reference = struct {
         };
     }
 
+    pub fn range(ref: Reference) Range {
+        return .{ .tl = ref, .br = ref };
+    }
+
     pub inline fn eql(a: Reference, b: Reference) bool {
         return a.row == b.row and a.col == b.col;
     }
@@ -1625,15 +1661,19 @@ pub const Range = struct {
     tl: Reference,
     br: Reference,
 
-    pub inline fn rect(range: Range, sheet: *Sheet) Rect {
+    pub inline fn rect(r: Range, sheet: *Sheet) Rect {
         return .{
-            .tl = range.tl.resolve(sheet),
-            .br = range.br.resolve(sheet),
+            .tl = r.tl.resolve(sheet),
+            .br = r.br.resolve(sheet),
         };
     }
 
     pub inline fn eql(a: Range, b: Range) bool {
         return Reference.eql(a.tl, b.tl) and Reference.eql(a.br, b.br);
+    }
+
+    pub fn range(r: Range) Range {
+        return r;
     }
 
     pub fn fromRect(sheet: *Sheet, r: Rect) Range {
@@ -1658,7 +1698,7 @@ test "Sheet basics" {
     const sheet = try Sheet.create(t.allocator);
     defer sheet.destroy();
 
-    try t.expectEqual(@as(Position.HashInt, 0), sheet.cellCount());
+    try t.expectEqual(0, sheet.cellCount());
     try t.expectEqualStrings("", sheet.filepath.slice());
 
     const exprs: []const []const u8 = &.{ "50 + 5", "500 * 2 / 34 + 1", "a0", "a2 * a1" };
@@ -1671,7 +1711,7 @@ test "Sheet basics" {
         try sheet.setCell(.{ .x = 0, .y = @intCast(i) }, expr, ast, .{});
     }
 
-    try t.expectEqual(@as(Position.HashInt, 4), sheet.cellCount());
+    try t.expectEqual(4, sheet.cellCount());
     for (asts, 0..) |ast, i| {
         try t.expectEqual(ast.nodes, sheet.getCell(.{ .x = 0, .y = @intCast(i) }).?.ast.nodes);
     }
@@ -1680,7 +1720,7 @@ test "Sheet basics" {
 
     try sheet.deleteCell(.{ .x = 0, .y = 0 }, .{});
 
-    try t.expectEqual(@as(Position.HashInt, 3), sheet.cellCount());
+    try t.expectEqual(3, sheet.cellCount());
 }
 
 test "setCell allocations" {
@@ -2507,4 +2547,50 @@ test "Cell assignment, updating, evaluation" {
     }
 
     try std.testing.checkAllAllocationFailures(std.testing.allocator, testCellEvaluation, .{});
+}
+
+fn expectCellEquals(sheet: *Sheet, address: []const u8, expected_value: f64) !void {
+    const cell = sheet.getCellPtr(try .fromAddress(address)) orelse return error.CellNotFound;
+    try std.testing.expectApproxEqRel(expected_value, cell.value.number, 0.001);
+}
+
+fn expectCellError(sheet: *Sheet, address: []const u8) !void {
+    const cell = sheet.getCellPtr(try .fromAddress(address)) orelse return error.CellNotFound;
+    if (!cell.isError()) return error.UnexpectedValue;
+}
+
+test "Cell error propagation" {
+    const sheet = try Sheet.create(std.testing.allocator);
+    defer sheet.destroy();
+
+    try sheet.setCell(
+        .fromValidAddress("A0"),
+        "10",
+        try .fromExpression(std.testing.allocator, "10"),
+        .{},
+    );
+
+    try sheet.update();
+    try expectCellEquals(sheet, "A0", 10);
+
+    try sheet.setCell(
+        .fromValidAddress("B0"),
+        "A0",
+        try .fromExpression(std.testing.allocator, "A0"),
+        .{},
+    );
+
+    try sheet.update();
+    try expectCellEquals(sheet, "B0", 10);
+
+    try sheet.setCell(
+        .fromValidAddress("A0"),
+        "A0",
+        try .fromExpression(std.testing.allocator, "A0"),
+        .{},
+    );
+
+    try sheet.update();
+    try expectCellError(sheet, "A0");
+    try expectCellError(sheet, "B0");
 }

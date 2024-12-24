@@ -628,6 +628,7 @@ pub fn RTree(comptime K: type, comptime V: type, comptime min_children: usize) t
                     return new_node;
                 } else if (node.data.values.len == 1) {
                     // This was the first node added to this leaf
+                    // node.range = key.range();
                     node.range = Range.fromRect(tree.sheet, key.rect(tree.sheet)); // TODO: use range method on K
                 }
                 return null;

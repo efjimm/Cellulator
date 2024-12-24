@@ -114,6 +114,8 @@ pub const Action = union(enum) {
     assign_cell,
     assign_label,
     fit_text,
+    insert_column,
+    insert_row,
 
     visual_move_left,
     visual_move_right,
@@ -428,6 +430,8 @@ const sheet_keys = [_]KeyMaps{
             .{ "dd", .delete_cell },
             .{ ":", .enter_command_mode },
             .{ "v", .enter_visual_mode },
+            .{ "ic", .insert_column },
+            .{ "ir", .insert_row },
             .{ "u", .undo },
             .{ "U", .redo },
         },

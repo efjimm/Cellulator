@@ -65,7 +65,7 @@ pub fn SkipList(
             value: T,
         ) !NodeIndex {
             const head = list.heads[list.heads.len - 1];
-            if (!head.isValid() or list.ctx.order(value, list.nodes.items(.value)[head.n]) == .lt) {
+            if (!head.isValid() or list.ctx.order(value, list.nodes.items(.value)[head.n]) != .gt) {
                 return list.insertAtBeggining(allocator, value);
             }
 
@@ -93,7 +93,7 @@ pub fn SkipList(
         };
 
         /// From `start`, returns the first node that is >= `value`.
-        fn searchToGreater(
+        pub fn searchToGreater(
             list: *@This(),
             start: NodeIndex,
             value: T,
