@@ -33,6 +33,7 @@ refs_free: u64 = std.math.maxInt(u64),
 /// List of cells that need to be re-evaluated.
 queued_cells: std.ArrayListUnmanaged(*Cell) = .{},
 
+// TODO: Strings are stored as a part of command history, so index into that instead.
 strings: std.AutoHashMapUnmanaged(*CellNode, []const u8) = .{},
 
 /// True if there have been any changes since the last save

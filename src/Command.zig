@@ -4,7 +4,7 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 /// List of indices into the history buffer.
-history_indices: std.ArrayListUnmanaged(struct { start_index: usize, len: usize }) = .{},
+history_indices: std.ArrayListUnmanaged(u32) = .{},
 
 /// Append-only buffer of text, used for history items.
 history_buf: std.ArrayListUnmanaged(u8) = .{},
@@ -35,32 +35,31 @@ pub fn deinit(self: *Self, allocator: Allocator) void {
 
 /// Pushes the current command buffer to the history list and returns a slice
 /// of its contents.
-pub fn submit(self: *Self, allocator: Allocator) Allocator.Error![]const u8 {
+pub fn submit(self: *Self, allocator: Allocator) Allocator.Error![:0]const u8 {
     defer self.resetBuffer();
     try self.history_indices.ensureUnusedCapacity(allocator, 1);
 
     if (self.cow) {
-        const slice = self.history_indices.items[self.index];
-        self.history_indices.appendAssumeCapacity(slice);
-        return self.history_buf.items[slice.start_index..][0..slice.len];
+        const index = self.history_indices.items[self.index];
+        self.history_indices.appendAssumeCapacity(index);
+        const ptr: [*:0]const u8 = @ptrCast(self.history_buf.items[index..].ptr);
+        return std.mem.span(ptr);
     }
 
     try self.history_buf.ensureUnusedCapacity(allocator, self.buffer.len);
 
-    const start_index = self.history_buf.items.len;
+    const start_index: u32 = @intCast(self.history_buf.items.len);
     self.history_buf.appendSliceAssumeCapacity(self.buffer.items());
-    self.history_indices.appendAssumeCapacity(.{
-        .start_index = start_index,
-        .len = self.history_buf.items.len - start_index,
-    });
-
-    return self.history_buf.items[start_index..self.history_buf.items.len];
+    self.history_buf.appendAssumeCapacity(0);
+    self.history_indices.appendAssumeCapacity(start_index);
+    return self.history_buf.items[start_index .. self.history_buf.items.len - 1 :0];
 }
 
-pub fn getHistoryItem(self: Self, index: u32) []const u8 {
+pub fn getHistoryItem(self: Self, index: u32) [:0]const u8 {
     assert(self.cow);
     const i = self.history_indices.items[index];
-    return self.history_buf.items[i.start_index..][0..i.len];
+    const ptr: [*:0]const u8 = @ptrCast(self.history_buf.items[i..].ptr);
+    return std.mem.span(ptr);
 }
 
 pub fn resetBuffer(self: *Self) void {
@@ -83,7 +82,8 @@ pub fn prev(self: *Self, count: u32) void {
     if (self.index > 0) {
         self.index -|= count;
         self.cow = true;
-        self.cursor = @intCast(self.history_indices.items[self.index].len);
+        const len = self.getHistoryItem(self.index).len;
+        self.cursor = @intCast(len);
     }
 }
 

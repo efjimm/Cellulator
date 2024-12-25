@@ -128,13 +128,10 @@ pub fn dupeStrings(
     const len = blk: {
         var len: u32 = 0;
         for (slice.items(.tags), 0..) |tag, i| {
-            switch (tag) {
-                .string_literal => {
-                    const str = slice.items(.data)[i].string_literal;
-                    len += str.end - str.start;
-                    nstrings += 1;
-                },
-                else => {},
+            if (tag == .string_literal) {
+                const str = slice.items(.data)[i].string_literal;
+                len += str.end - str.start;
+                nstrings += 1;
             }
         }
         break :blk len;
@@ -142,16 +139,16 @@ pub fn dupeStrings(
 
     if (len == 0) {
         if (nstrings != 0) {
-            for (slice.items(.tags), 0..) |tag, i| switch (tag) {
-                .string_literal => {
+            for (slice.items(.tags), 0..) |tag, i| {
+                if (tag == .string_literal) {
                     slice.items(.data)[i].string_literal = .{
                         .start = 0,
                         .end = 0,
                     };
-                },
-                else => {},
-            };
+                }
+            }
         }
+
         return "";
     }
 
@@ -159,16 +156,15 @@ pub fn dupeStrings(
 
     // Append contents of all string literals to the list, and update their `start` and `end`
     // indices to be into this list.
-    for (slice.items(.tags), 0..) |tag, i| switch (tag) {
-        .string_literal => {
+    for (slice.items(.tags), 0..) |tag, i| {
+        if (tag == .string_literal) {
             const str = &slice.items(.data)[i].string_literal;
             const bytes = source[str.start..str.end];
             str.start = @intCast(list.items.len);
+            str.end = @intCast(str.start + bytes.len);
             list.appendSliceAssumeCapacity(bytes);
-            str.end = @intCast(list.items.len);
-        },
-        else => {},
-    };
+        }
+    }
     return list.toOwnedSlice(allocator);
 }
 
