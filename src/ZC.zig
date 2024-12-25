@@ -205,7 +205,7 @@ pub fn deinit(self: *Self) void {
     if (!std.debug.runtime_safety) return;
 
     for (self.asts.items) |*ast| {
-        ast.deinit(self.allocator);
+        ast.deinit(self.allocator, self.sheet);
     }
 
     self.lua_ptr.deinit();
@@ -1378,16 +1378,12 @@ pub fn createAst(self: *Self) Ast {
 pub fn delAst(self: *Self, ast: Ast) Allocator.Error!void {
     var temp = ast;
     temp.nodes.len = 0;
-    self.allocator.free(ast.refs);
-    temp.refs = &.{};
     try self.asts.append(self.allocator, temp);
 }
 
 pub fn destroyAst(self: *Self, ast: Ast) void {
     var temp = ast;
     temp.nodes.len = 0;
-    self.allocator.free(ast.refs);
-    temp.refs = &.{};
     self.asts.appendAssumeCapacity(temp);
 }
 

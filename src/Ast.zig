@@ -27,7 +27,7 @@ pub const Node = union(enum) {
     number: f64,
     column: PosInt,
     pos: Position,
-    ref: u32,
+    ref: u64,
     assignment: BinaryOperator,
     concat: BinaryOperator,
     add: BinaryOperator,
@@ -41,8 +41,6 @@ pub const Node = union(enum) {
 };
 
 nodes: MultiArrayList(Node) = .{},
-
-refs: []Reference = &.{},
 
 const Self = @This();
 
@@ -76,8 +74,6 @@ pub fn parseExpr(ast: *Self, allocator: Allocator, source: []const u8) ParseErro
 /// Anchors the AST to the given sheet, by replacing all 'dumb' coordinate references with
 /// references to the row/column handles in `sheet`.
 pub fn anchor(ast: *Self, sheet: *Sheet) Allocator.Error!void {
-    assert(ast.refs.len == 0);
-
     const tags = ast.nodes.items(.tags);
     const data = ast.nodes.items(.data);
 
@@ -90,29 +86,36 @@ pub fn anchor(ast: *Self, sheet: *Sheet) Allocator.Error!void {
 
     if (pos_count == 0) return;
 
-    var refs = try std.ArrayListUnmanaged(Reference).initCapacity(sheet.allocator, pos_count);
-    errdefer refs.clearAndFree(sheet.allocator);
+    try sheet.refs.ensureUnusedCapacity(sheet.allocator, pos_count);
+    try sheet.rows.ensureUnusedCapacity(sheet.allocator, pos_count);
+    try sheet.cols.ensureUnusedCapacity(sheet.allocator, pos_count);
 
-    var index: u32 = 0;
     for (tags, data) |*tag, *d| {
         if (tag.* == .pos) {
-            const row = try sheet.createRow(d.pos.y);
-            const col = try sheet.createColumn(d.pos.x);
+            const row = sheet.createRow(d.pos.y) catch unreachable;
+            const col = sheet.createColumn(d.pos.x) catch unreachable;
 
-            refs.appendAssumeCapacity(.{
+            const ref: Reference = .{
                 .relative_row = true, // TODO: Allow absolute
                 .relative_col = true,
                 .row = row,
                 .col = col,
-            });
-            tag.* = .ref;
-            d.* = .{ .ref = index };
-            index += 1;
+            };
+
+            if (sheet.refs_free != std.math.maxInt(u64)) {
+                const index = sheet.refs_free;
+                sheet.refs_free = sheet.refs.items[index].free;
+                sheet.refs.items[index] = .{ .ref = ref };
+                tag.* = .ref;
+                d.* = .{ .ref = index };
+            } else {
+                const ref_index: u32 = @intCast(sheet.refs.items.len);
+                sheet.refs.appendAssumeCapacity(.{ .ref = ref });
+                tag.* = .ref;
+                d.* = .{ .ref = ref_index };
+            }
         }
     }
-
-    assert(refs.capacity == refs.items.len);
-    ast.refs = refs.allocatedSlice();
 }
 
 pub fn dupeStrings(
@@ -171,7 +174,6 @@ pub fn dupeStrings(
 
 pub fn fromSource(allocator: Allocator, source: []const u8) ParseError!Self {
     var ast = Self{};
-    errdefer ast.deinit(allocator);
     try ast.parse(allocator, source);
     return ast;
 }
@@ -204,20 +206,25 @@ pub fn fromStringExpression(allocator: Allocator, source: []const u8) ParseError
     };
 }
 
-pub fn deinit(ast: *Self, allocator: Allocator) void {
+pub fn deinit(ast: *Self, allocator: Allocator, sheet: *Sheet) void {
+    const data = ast.nodes.items(.data);
+    for (ast.nodes.items(.tags), 0..) |tag, i| {
+        if (tag == .ref) {
+            const ref_index = data[i].ref;
+            sheet.refs.items[ref_index] = .{ .free = sheet.refs_free };
+            sheet.refs_free = ref_index;
+        }
+    }
     ast.nodes.deinit(allocator);
-    allocator.free(ast.refs);
     ast.* = .{};
 }
 
 pub const Slice = struct {
     nodes: MultiArrayList(Node).Slice,
-    refs: []Reference,
 
     pub fn toAst(ast: *Slice) Self {
         return .{
             .nodes = ast.nodes.toMultiArrayList(),
-            .refs = ast.refs,
         };
     }
 
@@ -317,7 +324,7 @@ pub const Slice = struct {
             .column => |col| try Position.writeColumnAddress(col, writer),
             .pos => |pos| try pos.writeCellAddress(writer),
             .ref => |ref_index| {
-                const ref = ast.refs[ref_index];
+                const ref = sheet.refs.items[ref_index].ref;
                 try ref.resolve(sheet).writeCellAddress(writer);
             },
 
@@ -579,7 +586,6 @@ pub fn splice(ast: *Self, new_root: u32) void {
 pub fn toSlice(ast: Self) Slice {
     return .{
         .nodes = ast.nodes.slice(),
-        .refs = ast.refs,
     };
 }
 
@@ -713,7 +719,7 @@ pub fn EvalContext(comptime Context: type) type {
                 .number => |n| .{ .number = n },
                 .pos => unreachable,
                 .ref => |ref_index| {
-                    const ref = self.slice.refs[ref_index];
+                    const ref = self.sheet.refs.items[ref_index].ref;
                     return try self.context.evalCell(ref);
                 },
                 .add => |op| {
@@ -809,8 +815,8 @@ pub fn EvalContext(comptime Context: type) type {
         /// Converts an ast range to a position range.
         fn toPosRange(self: @This(), r: BinaryOperator) Position.Rect {
             const data = self.slice.nodes.items(.data);
-            const ref1 = self.slice.refs[data[r.lhs].ref];
-            const ref2 = self.slice.refs[data[r.rhs].ref];
+            const ref1 = self.sheet.refs.items[data[r.lhs].ref].ref;
+            const ref2 = self.sheet.refs.items[data[r.rhs].ref].ref;
 
             const p1 = ref1.resolve(self.sheet);
             const p2 = ref2.resolve(self.sheet);
@@ -881,8 +887,8 @@ pub fn EvalContext(comptime Context: type) type {
                         const r1 = data[r.lhs].ref;
                         const r2 = data[r.rhs].ref;
                         break :blk .{
-                            self.slice.refs[r1].resolve(self.sheet),
-                            self.slice.refs[r2].resolve(self.sheet),
+                            self.sheet.refs.items[r1].ref.resolve(self.sheet),
+                            self.sheet.refs.items[r2].ref.resolve(self.sheet),
                         };
                     };
                     total_items += Position.area(p1, p2);
@@ -1036,7 +1042,7 @@ test "Parse and Eval Expression" {
             var ast = fromExpression(t.allocator, expr) catch |err| {
                 return if (err != expected) err else {};
             };
-            defer ast.deinit(t.allocator);
+            defer ast.deinit(t.allocator, undefined);
 
             const sheet = try Sheet.create(t.allocator);
             defer sheet.destroy();
@@ -1095,7 +1101,7 @@ test "Functions on Ranges" {
             try sheet.setCell(try Position.fromAddress("B1"), "333.33", try Self.fromExpression(t.allocator, "333.33"), .{});
 
             var ast = try fromExpression(t.allocator, expr);
-            defer ast.deinit(t.allocator);
+            defer ast.deinit(t.allocator, sheet);
 
             try ast.anchor(sheet);
 
@@ -1240,7 +1246,7 @@ test "DupeStrings" {
     {
         const source = "let a0 = 'this is epic' # 'nice' # 'string!'";
         var ast = try fromSource(t.allocator, source);
-        defer ast.deinit(t.allocator);
+        defer ast.deinit(t.allocator, undefined);
 
         const strings = try ast.dupeStrings(t.allocator, source);
         defer t.allocator.free(strings);
@@ -1251,7 +1257,7 @@ test "DupeStrings" {
     {
         const source = "let a0 = b0";
         var ast = try fromSource(t.allocator, source);
-        defer ast.deinit(t.allocator);
+        defer ast.deinit(t.allocator, undefined);
 
         try t.expectEqualStrings("", try ast.dupeStrings(t.allocator, source));
     }
@@ -1330,7 +1336,7 @@ test "Print" {
     inline for (data) |d| {
         const expr, const expected = d;
         var ast = try fromExpression(t.allocator, expr);
-        defer ast.deinit(t.allocator);
+        defer ast.deinit(t.allocator, sheet);
 
         var buf = std.BoundedArray(u8, 4096){};
         try ast.print(sheet, expr, buf.writer());

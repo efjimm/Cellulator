@@ -8,43 +8,43 @@ pub fn SkipList(
 ) type {
     return struct {
         /// Head node of the highest (most sparse) level
-        heads: [levels]NodeIndex,
+        heads: [levels]Handle,
         nodes: std.MultiArrayList(Node).Slice,
         rand: std.Random.DefaultPrng,
         ctx: Context,
 
         pub const Node = struct {
             value: T,
-            next: NodeIndex = .invalid,
-            prev: NodeIndex = .invalid,
-            below: NodeIndex = .invalid,
+            next: Handle = .invalid,
+            prev: Handle = .invalid,
+            below: Handle = .invalid,
         };
 
         // This is a packed struct so we can use equality operators on it.
-        pub const NodeIndex = packed struct {
+        pub const Handle = packed struct {
             n: u32,
 
-            pub const invalid: NodeIndex = .{ .n = std.math.maxInt(u32) };
+            pub const invalid: Handle = .{ .n = std.math.maxInt(u32) };
 
-            pub fn from(n: u32) NodeIndex {
+            pub fn from(n: u32) Handle {
                 return .{ .n = n };
             }
 
-            pub fn isValid(index: NodeIndex) bool {
+            pub fn isValid(index: Handle) bool {
                 return index != invalid;
             }
 
-            pub fn orElse(index: NodeIndex, n: NodeIndex) NodeIndex {
+            pub fn orElse(index: Handle, n: Handle) Handle {
                 return if (index.isValid()) index else n;
             }
         };
 
         pub fn clearRetainingCapacity(list: *@This()) void {
             list.nodes.len = 0;
-            list.heads = [_]NodeIndex{.invalid} ** levels;
+            list.heads = [_]Handle{.invalid} ** levels;
         }
 
-        pub fn get(list: *const @This(), index: NodeIndex) ?T {
+        pub fn get(list: *const @This(), index: Handle) ?T {
             return if (index.isValid())
                 list.nodes.items(.value)[index.n]
             else
@@ -52,7 +52,7 @@ pub fn SkipList(
         }
 
         /// Callers should NOT modify the returned value in such a way that changes the ordering.
-        pub fn getPtr(list: *const @This(), index: NodeIndex) ?*T {
+        pub fn getPtr(list: *const @This(), index: Handle) ?*T {
             return if (index.isValid())
                 &list.nodes.items(.value)[index.n]
             else
@@ -63,7 +63,7 @@ pub fn SkipList(
             list: *@This(),
             allocator: std.mem.Allocator,
             value: T,
-        ) !NodeIndex {
+        ) !Handle {
             const head = list.heads[list.heads.len - 1];
             if (!head.isValid() or list.ctx.order(value, list.nodes.items(.value)[head.n]) != .gt) {
                 return list.insertAtBeggining(allocator, value);
@@ -78,9 +78,9 @@ pub fn SkipList(
 
         pub const Iterator = struct {
             nodes: std.MultiArrayList(Node).Slice,
-            node: NodeIndex,
+            node: Handle,
 
-            pub fn next(iter: *Iterator) NodeIndex {
+            pub fn next(iter: *Iterator) Handle {
                 if (iter.node.isValid()) {
                     assert(!iter.nodes.items(.below)[iter.node.n].isValid());
                     const n = iter.node;
@@ -95,9 +95,9 @@ pub fn SkipList(
         /// From `start`, returns the first node that is >= `value`.
         pub fn searchToGreater(
             list: *@This(),
-            start: NodeIndex,
+            start: Handle,
             value: T,
-        ) NodeIndex {
+        ) Handle {
             const values = list.nodes.items(.value);
             const nexts = list.nodes.items(.next);
             assert(start.isValid());
@@ -114,7 +114,7 @@ pub fn SkipList(
             comptime assert(@sizeOf(Context) == 0);
 
             return .{
-                .heads = [_]NodeIndex{.invalid} ** levels,
+                .heads = [_]Handle{.invalid} ** levels,
                 .rand = .init(rand_seed),
                 .nodes = std.MultiArrayList(Node).empty.slice(),
                 .ctx = undefined,
@@ -135,7 +135,7 @@ pub fn SkipList(
             list.nodes.deinit(allocator);
         }
 
-        pub fn search(list: *@This(), value: T) NodeIndex {
+        pub fn search(list: *@This(), value: T) Handle {
             const values = list.nodes.items(.value);
             const nexts = list.nodes.items(.next);
 
@@ -171,13 +171,13 @@ pub fn SkipList(
             list.nodes = nodes.slice();
         }
 
-        fn createNodeAssumeCapacity(list: *@This()) NodeIndex {
-            const ret: NodeIndex = .from(@intCast(list.nodes.len));
+        fn createNodeAssumeCapacity(list: *@This()) Handle {
+            const ret: Handle = .from(@intCast(list.nodes.len));
             list.nodes.len += 1;
             return ret;
         }
 
-        fn insertAtBeggining(list: *@This(), allocator: std.mem.Allocator, value: T) !NodeIndex {
+        fn insertAtBeggining(list: *@This(), allocator: std.mem.Allocator, value: T) !Handle {
             try list.ensureUnusedCapacity(allocator, 1);
             errdefer comptime unreachable;
 
@@ -204,7 +204,7 @@ pub fn SkipList(
             return .from(@intCast(list.nodes.len - 1));
         }
 
-        fn insertCommon(list: *@This(), allocator: std.mem.Allocator, value: T) !NodeIndex {
+        fn insertCommon(list: *@This(), allocator: std.mem.Allocator, value: T) !Handle {
             assert(list.heads[list.heads.len - 1].isValid());
 
             try list.ensureUnusedCapacity(allocator, 1);
@@ -221,7 +221,7 @@ pub fn SkipList(
                     break i;
             } else unreachable;
 
-            var prev_nodes: std.BoundedArray(NodeIndex, levels) = .{};
+            var prev_nodes: std.BoundedArray(Handle, levels) = .{};
             prev_nodes.appendNTimesAssumeCapacity(.invalid, index);
             var start = list.heads[index];
             const belows = list.nodes.items(.below);

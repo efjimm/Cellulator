@@ -19,6 +19,17 @@ const SkipList = @import("skip_list.zig").SkipList;
 
 const Sheet = @This();
 
+comptime {
+    assert(@sizeOf(u64) <= @sizeOf(Reference));
+}
+
+refs: std.ArrayListUnmanaged(union {
+    free: u64,
+    ref: Reference,
+}),
+
+refs_free: u64 = std.math.maxInt(u64),
+
 /// List of cells that need to be re-evaluated.
 queued_cells: std.ArrayListUnmanaged(*Cell) = .{},
 
@@ -64,6 +75,7 @@ pub fn create(allocator: Allocator) !*Sheet {
     errdefer allocator.destroy(sheet);
 
     sheet.* = .{
+        .refs = .empty,
         .allocator = allocator,
         .cell_tree = .{ .sheet = sheet },
         .rtree = .init(sheet),
@@ -95,12 +107,13 @@ pub fn destroy(sheet: *Sheet) void {
 
     var node_iter = sheet.cell_treap.inorderIterator();
     while (node_iter.next()) |node| {
-        node.key.deinit(sheet.allocator);
+        node.key.deinit(sheet.allocator, sheet);
     }
     var arena = sheet.arena.promote(sheet.allocator);
     arena.deinit();
     sheet.rows.deinit(sheet.allocator);
     sheet.cols.deinit(sheet.allocator);
+    sheet.refs.deinit(sheet.allocator);
     sheet.allocator.destroy(sheet);
 }
 
@@ -175,7 +188,7 @@ pub const Undo = union(enum) {
         switch (u) {
             .set_cell => |data| {
                 var t = data;
-                t.node.key.ast.deinit(sheet.allocator);
+                t.node.key.ast.deinit(sheet.allocator, sheet);
                 sheet.allocator.free(t.strings);
             },
             .delete_cell,
@@ -400,13 +413,15 @@ pub fn writeFile(
 /// Iterator over the cells referenced by an expression, as ranges.
 /// Singular cell references are treated as a single-celled range.
 const ExprRangeIterator = struct {
+    sheet: *const Sheet,
     ast: Ast.Slice,
     i: u32,
 
-    fn init(ast: Ast) ExprRangeIterator {
+    fn init(sheet: *const Sheet, ast: Ast) ExprRangeIterator {
         return .{
             .ast = ast.toSlice(),
             .i = ast.nodes.len,
+            .sheet = sheet,
         };
     }
 
@@ -422,13 +437,13 @@ const ExprRangeIterator = struct {
         return while (iter.next()) |tag| switch (tag) {
             .ref => {
                 const index = data[iter.index].ref;
-                const ref = it.ast.refs[index];
+                const ref = it.sheet.refs.items[index].ref;
                 break .{ .tl = ref, .br = ref };
             },
             .range => {
                 const r = data[iter.index].range;
-                const ref1 = it.ast.refs[data[r.lhs].ref];
-                const ref2 = it.ast.refs[data[r.rhs].ref];
+                const ref1 = it.sheet.refs.items[data[r.lhs].ref].ref;
+                const ref2 = it.sheet.refs.items[data[r.rhs].ref].ref;
                 break .{ .tl = ref1, .br = ref2 };
             },
             else => continue,
@@ -450,7 +465,7 @@ fn addExpressionDependents(
     dependent: *Cell,
     expr: Ast,
 ) Allocator.Error!void {
-    var iter = ExprRangeIterator.init(expr);
+    var iter = ExprRangeIterator.init(sheet, expr);
     while (iter.next()) |range| {
         try sheet.addRangeDependents(dependent, range);
     }
@@ -471,7 +486,7 @@ fn removeExprDependents(
     dependent: *Cell,
     expr: Ast,
 ) Allocator.Error!void {
-    var iter = ExprRangeIterator.init(expr);
+    var iter = ExprRangeIterator.init(sheet, expr);
     while (iter.next()) |range| {
         try sheet.removeRangeDependents(dependent, range);
     }
@@ -1029,7 +1044,6 @@ pub fn setCell(
 
     var a = ast;
     try a.anchor(sheet);
-    errdefer sheet.allocator.free(a.refs);
 
     new_node.key = .{
         .row = row,
@@ -1390,8 +1404,9 @@ pub const Cell = struct {
         return .{ .ast = try Ast.fromExpression(a, expr) };
     }
 
-    pub fn deinit(cell: *Cell, a: Allocator) void {
-        cell.ast.deinit(a);
+    // TODO: Re-organise functions that take a sheet as not being methods.
+    pub fn deinit(cell: *Cell, a: Allocator, sheet: *Sheet) void {
+        cell.ast.deinit(a, sheet);
         if (cell.value == .string) a.free(std.mem.span(cell.value.string));
         cell.* = undefined;
     }
@@ -1497,7 +1512,7 @@ pub fn printCellExpression(sheet: *Sheet, pos: Position, writer: anytype) !void 
 pub const Row = struct {
     index: PosInt,
 
-    pub const Handle = RowAxis.NodeIndex;
+    pub const Handle = RowAxis.Handle;
 
     pub const Context = struct {
         pub fn order(_: Context, a: Row, b: Row) std.math.Order {
@@ -1513,7 +1528,7 @@ pub const Column = struct {
     width: u16 = default_width,
     precision: u8 = 2,
 
-    pub const Handle = ColumnAxis.NodeIndex;
+    pub const Handle = ColumnAxis.Handle;
 
     pub const Context = struct {
         pub fn order(_: Context, a: Column, b: Column) std.math.Order {
@@ -1690,8 +1705,6 @@ pub const Range = struct {
     }
 };
 
-// Tests //////////////////////////////////////////////////////////////////////////////////////////
-
 test "Sheet basics" {
     const t = std.testing;
 
@@ -1733,14 +1746,14 @@ test "setCell allocations" {
             {
                 const expr = "a4 * a1 * a3";
                 var ast = try Ast.fromExpression(a, expr);
-                errdefer ast.deinit(a);
+                errdefer ast.deinit(a, sheet);
                 try sheet.setCell(.{ .x = 0, .y = 0 }, expr, ast, .{});
             }
 
             {
                 const expr = "a2 * a1 * a3";
                 var ast = try Ast.fromExpression(a, expr);
-                errdefer ast.deinit(a);
+                errdefer ast.deinit(a, sheet);
                 try sheet.setCell(.{ .x = 1, .y = 0 }, expr, ast, .{});
             }
 
@@ -1806,6 +1819,7 @@ test "Update values" {
     try t.expectEqual(6.0, cell.value.number);
 }
 
+// TODO: This test is dumb, way too broad and slow.
 fn testCellEvaluation(a: Allocator) !void {
     const t = std.testing;
     const sheet = try Sheet.create(a);
