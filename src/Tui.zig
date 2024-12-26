@@ -474,18 +474,18 @@ pub fn renderCell(
     const writer = rpw.writer();
 
     if (zc.sheet.getCell(pos)) |cell| {
-        const tag: CellType = @enumFromInt(@intFromEnum(cell.value));
+        const tag: CellType = @enumFromInt(@intFromEnum(cell.value_type));
         try rc.setStyle(styles.get(tag)[@intFromBool(selected)]);
 
-        switch (cell.value) {
-            .number => |num| {
+        switch (cell.value_type) {
+            .number => {
                 try writer.print("{d: >[1].[2]}", .{
-                    num, width, col.precision,
+                    cell.value.number, width, col.precision,
                 });
                 try rpw.pad();
             },
-            .string => |ptr| {
-                const text = std.mem.span(ptr);
+            .string => {
+                const text = std.mem.span(cell.value.string);
                 const text_width = utils.strWidth(text, width);
                 const left_pad = (width - text_width) / 2;
                 try writer.writeByteNTimes(' ', left_pad);

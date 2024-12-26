@@ -1372,7 +1372,7 @@ pub fn cursorExpandWidth(self: *Self) Allocator.Error!void {
 }
 
 pub fn createAst(self: *Self) Ast {
-    return self.asts.popOrNull() orelse Ast{};
+    return self.asts.popOrNull() orelse .empty;
 }
 
 pub fn delAst(self: *Self, ast: Ast) Allocator.Error!void {

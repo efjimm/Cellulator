@@ -40,11 +40,12 @@ pub const Node = union(enum) {
     string_literal: String,
 };
 
-nodes: MultiArrayList(Node) = .{},
+nodes: MultiArrayList(Node),
 
-const Self = @This();
+const Ast = @This();
+pub const empty: Ast = .{ .nodes = .{} };
 
-pub fn parse(ast: *Self, allocator: Allocator, source: []const u8) ParseError!void {
+pub fn parse(ast: *Ast, allocator: Allocator, source: []const u8) ParseError!void {
     ast.nodes.len = 0;
     const tokenizer = Tokenizer.init(source);
 
@@ -55,7 +56,7 @@ pub fn parse(ast: *Self, allocator: Allocator, source: []const u8) ParseError!vo
     ast.nodes = parser.nodes;
 }
 
-pub fn parseExpr(ast: *Self, allocator: Allocator, source: []const u8) ParseError!void {
+pub fn parseExpr(ast: *Ast, allocator: Allocator, source: []const u8) ParseError!void {
     ast.nodes.len = 0;
     const tokenizer = Tokenizer.init(source);
 
@@ -73,7 +74,7 @@ pub fn parseExpr(ast: *Self, allocator: Allocator, source: []const u8) ParseErro
 
 /// Anchors the AST to the given sheet, by replacing all 'dumb' coordinate references with
 /// references to the row/column handles in `sheet`.
-pub fn anchor(ast: *Self, sheet: *Sheet) Allocator.Error!void {
+pub fn anchor(ast: *Ast, sheet: *Sheet) Allocator.Error!void {
     const tags = ast.nodes.items(.tags);
     const data = ast.nodes.items(.data);
 
@@ -119,7 +120,7 @@ pub fn anchor(ast: *Self, sheet: *Sheet) Allocator.Error!void {
 }
 
 pub fn dupeStrings(
-    ast: Self,
+    ast: Ast,
     allocator: Allocator,
     source: []const u8,
 ) Allocator.Error![]const u8 {
@@ -168,13 +169,13 @@ pub fn dupeStrings(
     return list.toOwnedSlice(allocator);
 }
 
-pub fn fromSource(allocator: Allocator, source: []const u8) ParseError!Self {
-    var ast = Self{};
+pub fn fromSource(allocator: Allocator, source: []const u8) ParseError!Ast {
+    var ast: Ast = .empty;
     try ast.parse(allocator, source);
     return ast;
 }
 
-pub fn fromExpression(allocator: Allocator, source: []const u8) ParseError!Self {
+pub fn fromExpression(allocator: Allocator, source: []const u8) ParseError!Ast {
     const tokenizer = Tokenizer.init(source);
 
     var parser = Parser.init(allocator, tokenizer, .{});
@@ -183,12 +184,12 @@ pub fn fromExpression(allocator: Allocator, source: []const u8) ParseError!Self 
     _ = try parser.parseExpression();
     _ = try parser.expectToken(.eof);
 
-    return Self{
+    return .{
         .nodes = parser.nodes,
     };
 }
 
-pub fn fromStringExpression(allocator: Allocator, source: []const u8) ParseError!Self {
+pub fn fromStringExpression(allocator: Allocator, source: []const u8) ParseError!Ast {
     const tokenizer = Tokenizer.init(source);
 
     var parser = Parser.init(allocator, tokenizer, .{});
@@ -197,12 +198,12 @@ pub fn fromStringExpression(allocator: Allocator, source: []const u8) ParseError
     _ = try parser.parseExpression();
     _ = try parser.expectToken(.eof);
 
-    return Self{
+    return .{
         .nodes = parser.nodes,
     };
 }
 
-pub fn deinit(ast: *Self, allocator: Allocator, sheet: *Sheet) void {
+pub fn deinit(ast: *Ast, allocator: Allocator, sheet: *Sheet) void {
     const data = ast.nodes.items(.data);
     for (ast.nodes.items(.tags), 0..) |tag, i| {
         if (tag == .ref) {
@@ -212,13 +213,13 @@ pub fn deinit(ast: *Self, allocator: Allocator, sheet: *Sheet) void {
         }
     }
     ast.nodes.deinit(allocator);
-    ast.* = .{};
+    ast.* = .empty;
 }
 
 pub const Slice = struct {
     nodes: MultiArrayList(Node).Slice,
 
-    pub fn toAst(ast: *Slice) Self {
+    pub fn toAst(ast: *Slice) Ast {
         return .{
             .nodes = ast.nodes.toMultiArrayList(),
         };
@@ -558,34 +559,34 @@ pub const Slice = struct {
     }
 };
 
-pub fn rootNode(ast: Self) Node {
+pub fn rootNode(ast: Ast) Node {
     return ast.nodes.get(ast.rootNodeIndex());
 }
 
-pub fn rootNodeIndex(ast: Self) u32 {
+pub fn rootNodeIndex(ast: Ast) u32 {
     return @as(u32, @intCast(ast.nodes.len)) - 1;
 }
 
-pub fn rootTag(ast: Self) std.meta.Tag(Node) {
+pub fn rootTag(ast: Ast) std.meta.Tag(Node) {
     return ast.nodes.items(.tags)[ast.nodes.len - 1];
 }
 
 /// Removes all nodes except for the given index and its children
 /// Nodes in the list are already sorted in reverse topological order which allows us to overwrite
 /// nodes sequentially without loss. This function preserves reverse topological order.
-pub fn splice(ast: *Self, new_root: u32) void {
+pub fn splice(ast: *Ast, new_root: u32) void {
     var slice = ast.toSlice();
     slice.splice(new_root);
     ast.* = slice.toAst();
 }
 
-pub fn toSlice(ast: Self) Slice {
+pub fn toSlice(ast: Ast) Slice {
     return .{
         .nodes = ast.nodes.slice(),
     };
 }
 
-pub fn print(ast: Self, sheet: *Sheet, strings: []const u8, writer: anytype) @TypeOf(writer).Error!void {
+pub fn print(ast: Ast, sheet: *Sheet, strings: []const u8, writer: anytype) @TypeOf(writer).Error!void {
     const slice = ast.toSlice();
     return slice.printFromIndex(sheet, slice.rootNodeIndex(), writer, strings);
 }
@@ -605,12 +606,12 @@ const TraverseOrder = enum {
 /// the function `fn evalCell(@TypeOf(context), u32) !bool`. This function is run on every leaf
 /// node in the tree, with `index` being the index of the node in the `nodes` array. If the
 /// function returns false, traversal stops immediately.
-pub fn traverse(ast: Self, order: TraverseOrder, context: anytype) !bool {
+pub fn traverse(ast: Ast, order: TraverseOrder, context: anytype) !bool {
     const slice = ast.toSlice();
     return slice.traverseFrom(slice.rootNodeIndex(), order, context);
 }
 
-pub fn leftMostChild(ast: Self, index: u32) u32 {
+pub fn leftMostChild(ast: Ast, index: u32) u32 {
     const slice = ast.toSlice();
     return slice.leftMostChild(index);
 }
@@ -984,7 +985,7 @@ pub const DynamicEvalResult = union(enum) {
 
 /// Dynamically typed evaluation of expressions.
 pub fn eval(
-    ast: Self,
+    ast: Ast,
     sheet: *Sheet,
     /// Strings required by the expression. String literal nodes contain offsets
     /// into this buffer. If the expression has no string literals then this
@@ -1091,10 +1092,10 @@ test "Functions on Ranges" {
             const sheet = try Sheet.create(t.allocator);
             defer sheet.destroy();
 
-            try sheet.setCell(try Position.fromAddress("A0"), "0", try Self.fromExpression(t.allocator, "0"), .{});
-            try sheet.setCell(try Position.fromAddress("B0"), "100", try Self.fromExpression(t.allocator, "100"), .{});
-            try sheet.setCell(try Position.fromAddress("A1"), "500", try Self.fromExpression(t.allocator, "500"), .{});
-            try sheet.setCell(try Position.fromAddress("B1"), "333.33", try Self.fromExpression(t.allocator, "333.33"), .{});
+            try sheet.setCell(try Position.fromAddress("A0"), "0", try Ast.fromExpression(t.allocator, "0"), .{});
+            try sheet.setCell(try Position.fromAddress("B0"), "100", try Ast.fromExpression(t.allocator, "100"), .{});
+            try sheet.setCell(try Position.fromAddress("A1"), "500", try Ast.fromExpression(t.allocator, "500"), .{});
+            try sheet.setCell(try Position.fromAddress("B1"), "333.33", try Ast.fromExpression(t.allocator, "333.33"), .{});
 
             var ast = try fromExpression(t.allocator, expr);
             defer ast.deinit(t.allocator, sheet);

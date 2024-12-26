@@ -33,7 +33,6 @@ refs_free: u64 = std.math.maxInt(u64),
 /// List of cells that need to be re-evaluated.
 queued_cells: std.ArrayListUnmanaged(*Cell) = .{},
 
-// TODO: Strings are stored as a part of command history, so index into that instead.
 strings: std.AutoHashMapUnmanaged(*CellNode, []const u8) = .{},
 
 /// True if there have been any changes since the last save
@@ -1138,7 +1137,7 @@ pub fn insertCellNode(
     sheet.pushUndo(u, undo_opts) catch unreachable;
 
     sheet.enqueueUpdate(cell_ptr) catch unreachable;
-    if (node.key.value == .string) {
+    if (node.key.value_type == .string) {
         sheet.allocator.free(std.mem.span(node.key.value.string));
     }
     sheet.has_changes = true;
@@ -1332,8 +1331,14 @@ pub fn setFilePath(sheet: *Sheet, filepath: []const u8) void {
 pub const Cell = struct {
     row: Row.Handle,
     col: Column.Handle,
+
+    /// Cached value of the cell
     value: Value = .{ .err = error.NotEvaluable },
-    ast: Ast = .{},
+
+    /// Tag denoting the type of value. A tagged union would add extra unnecessary padding.
+    value_type: std.meta.FieldEnum(Value) = .err,
+
+    /// State used for evaluating cells.
     state: enum {
         up_to_date,
         dirty,
@@ -1341,7 +1346,17 @@ pub const Cell = struct {
         computing,
     } = .up_to_date,
 
-    pub const Value = union(enum) {
+    // TODO: ASTs don't change after being constructed, so the `capacity` field of the underlying
+    // MultiArrayList is redundant. We could store just the pointer and length inline in the Cell
+    // struct to reduce memory usage.
+    //
+    // We could also store all AST nodes in a single array with a special `end` tag and just keep a
+    // u32 index into the array.
+
+    /// Abstract syntax tree representing the expression in the cell.
+    ast: Ast = .empty,
+
+    pub const Value = union {
         number: f64,
         string: [*:0]const u8,
         err: Error,
@@ -1408,26 +1423,25 @@ pub const Cell = struct {
     // TODO: Re-organise functions that take a sheet as not being methods.
     pub fn deinit(cell: *Cell, a: Allocator, sheet: *Sheet) void {
         cell.ast.deinit(a, sheet);
-        if (cell.value == .string) a.free(std.mem.span(cell.value.string));
+        if (cell.value_type == .string)
+            a.free(std.mem.span(cell.value.string));
         cell.* = undefined;
     }
 
     pub fn isError(cell: Cell) bool {
-        return cell.value == .err;
+        return cell.value_type == .err;
     }
 
     pub fn setError(cell: *Cell, a: Allocator) void {
-        if (cell.value == .string) {
+        if (cell.value_type == .string) {
             a.free(std.mem.span(cell.value.string));
         }
-        cell.value = .{ .err = error.NotEvaluable };
+        cell.setValue(.err, error.NotEvaluable);
     }
 
-    pub inline fn getValue(cell: Cell) ?f64 {
-        return switch (cell.value) {
-            .number => |n| n,
-            else => null,
-        };
+    pub fn setValue(cell: *Cell, comptime tag: std.meta.FieldEnum(Value), value: anytype) void {
+        cell.value = @unionInit(Value, @tagName(tag), value);
+        cell.value_type = tag;
     }
 };
 
@@ -1472,24 +1486,24 @@ pub const EvalContext = struct {
 
                 // Evaluate
                 const res = cell.ast.eval(context.sheet, strings, context) catch |err| {
-                    cell.value = .{ .err = err };
+                    cell.setValue(.err, err);
                     return err;
                 };
-                if (cell.value == .string)
+                if (cell.value_type == .string)
                     context.sheet.allocator.free(std.mem.span(cell.value.string));
-                cell.value = switch (res) {
-                    .none => .{ .number = 0 },
-                    .string => |str| .{ .string = str.ptr },
-                    .number => |n| .{ .number = n },
-                };
+                switch (res) {
+                    .none => cell.setValue(.number, 0),
+                    .string => |str| cell.setValue(.string, str.ptr),
+                    .number => |n| cell.setValue(.number, n),
+                }
                 cell.state = .up_to_date;
             },
         }
 
-        return switch (cell.value) {
-            .number => |n| .{ .number = n },
-            .string => |ptr| .{ .string = std.mem.span(ptr) },
-            .err => |err| err,
+        return switch (cell.value_type) {
+            .number => .{ .number = cell.value.number },
+            .string => .{ .string = std.mem.span(cell.value.string) },
+            .err => cell.value.err,
         };
     }
 
@@ -1605,9 +1619,10 @@ pub fn widthNeededForColumn(
     const writer = buf.writer();
     while (try iter.next()) |kv| {
         const cell = kv.key;
-        switch (cell.value) {
+        switch (cell.value_type) {
             .err => {},
-            .number => |n| {
+            .number => {
+                const n = cell.value.number;
                 buf.len = 0;
                 writer.print("{d:.[1]}", .{ n, precision }) catch unreachable;
                 // Numbers are all ASCII, so 1 byte = 1 column
@@ -1617,8 +1632,8 @@ pub fn widthNeededForColumn(
                     if (width >= max_width) return width;
                 }
             },
-            .string => |ptr| {
-                const str = std.mem.span(ptr);
+            .string => {
+                const str = std.mem.span(cell.value.string);
                 const w = utils.strWidth(str, max_width);
                 if (w > width) {
                     width = w;
