@@ -9,6 +9,8 @@ const Sheet = @import("Sheet.zig");
 const Range = Sheet.Range;
 const Cell = Sheet.Cell;
 
+// TODO: Keep all nodes in a single array and use indices instead of pointers.
+
 pub fn RTree(comptime K: type, comptime V: type, comptime min_children: usize) type {
     assert(min_children >= 2);
     return struct {

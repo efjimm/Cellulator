@@ -23,13 +23,6 @@ comptime {
     assert(@sizeOf(u64) <= @sizeOf(Reference));
 }
 
-refs: std.ArrayListUnmanaged(union {
-    free: u64,
-    ref: Reference,
-}),
-
-refs_free: u64 = std.math.maxInt(u64),
-
 /// List of cells that need to be re-evaluated.
 queued_cells: std.ArrayListUnmanaged(*Cell) = .{},
 
@@ -62,6 +55,8 @@ cell_treap: CellTreap = .{},
 rows: RowAxis,
 cols: ColumnAxis,
 
+// ast_nodes: std.ArrayListUnmanaged(Ast.Node),
+
 search_buffer: std.ArrayListUnmanaged(std.ArrayListUnmanaged(*Cell)) = .{},
 
 filepath: std.BoundedArray(u8, std.fs.max_path_bytes) = .{}, // TODO: Heap allocate this
@@ -75,7 +70,6 @@ pub fn create(allocator: Allocator) !*Sheet {
     errdefer allocator.destroy(sheet);
 
     sheet.* = .{
-        .refs = .empty,
         .allocator = allocator,
         .cell_tree = .{ .sheet = sheet },
         .rtree = .init(sheet),
@@ -107,13 +101,12 @@ pub fn destroy(sheet: *Sheet) void {
 
     var node_iter = sheet.cell_treap.inorderIterator();
     while (node_iter.next()) |node| {
-        node.key.deinit(sheet.allocator, sheet);
+        node.key.deinit(sheet.allocator);
     }
     var arena = sheet.arena.promote(sheet.allocator);
     arena.deinit();
     sheet.rows.deinit(sheet.allocator);
     sheet.cols.deinit(sheet.allocator);
-    sheet.refs.deinit(sheet.allocator);
     sheet.allocator.destroy(sheet);
 }
 
@@ -188,7 +181,7 @@ pub const Undo = union(enum) {
         switch (u) {
             .set_cell => |data| {
                 var t = data;
-                t.node.key.ast.deinit(sheet.allocator, sheet);
+                t.node.key.ast.deinit(sheet.allocator);
                 sheet.allocator.free(t.strings);
             },
             .delete_cell,
@@ -435,16 +428,15 @@ const ExprRangeIterator = struct {
         defer it.i = @intCast(iter.index);
 
         return while (iter.next()) |tag| switch (tag) {
-            .ref => {
-                const index = data[iter.index].ref;
-                const ref = it.sheet.refs.items[index].ref;
-                break .{ .tl = ref, .br = ref };
+            .ref_rel_rel, .ref_rel_abs, .ref_abs_rel, .ref_abs_abs => {
+                const ref: *const Reference = @ptrCast(&data[iter.index]);
+                break .{ .tl = ref.*, .br = ref.* };
             },
             .range => {
                 const r = data[iter.index].range;
-                const ref1 = it.sheet.refs.items[data[r.lhs].ref].ref;
-                const ref2 = it.sheet.refs.items[data[r.rhs].ref].ref;
-                break .{ .tl = ref1, .br = ref2 };
+                const ref1: *const Reference = @ptrCast(&data[r.lhs]);
+                const ref2: *const Reference = @ptrCast(&data[r.rhs]);
+                break .{ .tl = ref1.*, .br = ref2.* };
             },
             else => continue,
         } else null;
@@ -1062,8 +1054,6 @@ pub fn insertCellNode(
     new_node: *CellNode,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
-    // TODO: Change this position to be a relative cell reference to this cell
-    // This is done???
     const cell_ptr = &new_node.key;
     const pos = new_node.key.position(sheet);
     if (undo_opts.undo_type) |undo_type| {
@@ -1089,7 +1079,6 @@ pub fn insertCellNode(
 
         if (strings.len > 0) {
             // NoClobber because cell didn't exist in map, so strings shouldn't exist either
-            // TODO: Make relative
             sheet.strings.putAssumeCapacityNoClobber(new_node, strings);
         }
         errdefer _ = sheet.strings.remove(new_node);
@@ -1421,8 +1410,8 @@ pub const Cell = struct {
     }
 
     // TODO: Re-organise functions that take a sheet as not being methods.
-    pub fn deinit(cell: *Cell, a: Allocator, sheet: *Sheet) void {
-        cell.ast.deinit(a, sheet);
+    pub fn deinit(cell: *Cell, a: Allocator) void {
+        cell.ast.deinit(a);
         if (cell.value_type == .string)
             a.free(std.mem.span(cell.value.string));
         cell.* = undefined;
@@ -1659,9 +1648,6 @@ const PositionContext = struct {
 /// Reference to a specific cell in the sheet. References contain pointers to rows/columns and as
 /// such are 'automatically' adjusted when rows/columns are deleted.
 pub const Reference = struct {
-    // TODO: Remove these bools somehow.
-    relative_row: bool = false,
-    relative_col: bool = false,
     row: Row.Handle,
     col: Column.Handle,
 
@@ -1762,14 +1748,14 @@ test "setCell allocations" {
             {
                 const expr = "a4 * a1 * a3";
                 var ast = try Ast.fromExpression(a, expr);
-                errdefer ast.deinit(a, sheet);
+                errdefer ast.deinit(a);
                 try sheet.setCell(.{ .x = 0, .y = 0 }, expr, ast, .{});
             }
 
             {
                 const expr = "a2 * a1 * a3";
                 var ast = try Ast.fromExpression(a, expr);
-                errdefer ast.deinit(a, sheet);
+                errdefer ast.deinit(a);
                 try sheet.setCell(.{ .x = 1, .y = 0 }, expr, ast, .{});
             }
 

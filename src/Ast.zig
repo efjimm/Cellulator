@@ -27,7 +27,6 @@ pub const Node = union(enum) {
     number: f64,
     column: PosInt,
     pos: Position,
-    ref: u64,
     assignment: BinaryOperator,
     concat: BinaryOperator,
     add: BinaryOperator,
@@ -38,7 +37,32 @@ pub const Node = union(enum) {
     builtin: Builtin,
     range: BinaryOperator,
     string_literal: String,
+
+    ref_abs_abs: Reference,
+    ref_rel_abs: Reference,
+    ref_abs_rel: Reference,
+    ref_rel_rel: Reference,
+
+    pub fn isRef(n: Node) bool {
+        return isRefTag(n);
+    }
+
+    pub fn isRefTag(tag: std.meta.Tag(Node)) bool {
+        return switch (tag) {
+            .ref_abs_abs, .ref_rel_abs, .ref_abs_rel, .ref_rel_rel => true,
+            else => false,
+        };
+    }
 };
+
+comptime {
+    const u = @typeInfo(Node).@"union";
+    for (u.fields) |field| {
+        if (@sizeOf(field.type) > 8) {
+            @compileError("Ast.Node field greater than 8 bytes");
+        }
+    }
+}
 
 nodes: MultiArrayList(Node),
 
@@ -87,7 +111,6 @@ pub fn anchor(ast: *Ast, sheet: *Sheet) Allocator.Error!void {
 
     if (pos_count == 0) return;
 
-    try sheet.refs.ensureUnusedCapacity(sheet.allocator, pos_count);
     try sheet.rows.ensureUnusedCapacity(sheet.allocator, pos_count);
     try sheet.cols.ensureUnusedCapacity(sheet.allocator, pos_count);
 
@@ -97,24 +120,12 @@ pub fn anchor(ast: *Ast, sheet: *Sheet) Allocator.Error!void {
             const col = sheet.createColumn(d.pos.x) catch unreachable;
 
             const ref: Reference = .{
-                .relative_row = true, // TODO: Allow absolute
-                .relative_col = true,
                 .row = row,
                 .col = col,
             };
 
-            if (sheet.refs_free != std.math.maxInt(u64)) {
-                const index = sheet.refs_free;
-                sheet.refs_free = sheet.refs.items[index].free;
-                sheet.refs.items[index] = .{ .ref = ref };
-                tag.* = .ref;
-                d.* = .{ .ref = index };
-            } else {
-                const ref_index: u32 = @intCast(sheet.refs.items.len);
-                sheet.refs.appendAssumeCapacity(.{ .ref = ref });
-                tag.* = .ref;
-                d.* = .{ .ref = ref_index };
-            }
+            tag.* = .ref_rel_rel;
+            d.* = .{ .ref_rel_rel = ref };
         }
     }
 }
@@ -203,15 +214,7 @@ pub fn fromStringExpression(allocator: Allocator, source: []const u8) ParseError
     };
 }
 
-pub fn deinit(ast: *Ast, allocator: Allocator, sheet: *Sheet) void {
-    const data = ast.nodes.items(.data);
-    for (ast.nodes.items(.tags), 0..) |tag, i| {
-        if (tag == .ref) {
-            const ref_index = data[i].ref;
-            sheet.refs.items[ref_index] = .{ .free = sheet.refs_free };
-            sheet.refs_free = ref_index;
-        }
-    }
+pub fn deinit(ast: *Ast, allocator: Allocator) void {
     ast.nodes.deinit(allocator);
     ast.* = .empty;
 }
@@ -243,7 +246,17 @@ pub const Slice = struct {
         const node = ast.nodes.get(index);
 
         return switch (node) {
-            .string_literal, .number, .column, .pos, .ref => index,
+            // leaf nodes
+            .ref_abs_abs,
+            .ref_rel_abs,
+            .ref_abs_rel,
+            .ref_rel_rel,
+            .string_literal,
+            .number,
+            .column,
+            .pos,
+            => index,
+            // branch nodes
             .assignment,
             .concat,
             .add,
@@ -284,7 +297,15 @@ pub const Slice = struct {
                 .builtin => |*b| {
                     b.first_arg -= first_node;
                 },
-                .string_literal, .number, .column, .pos, .ref => {},
+                .string_literal,
+                .number,
+                .column,
+                .pos,
+                .ref_abs_abs,
+                .ref_rel_abs,
+                .ref_abs_rel,
+                .ref_rel_rel,
+                => {},
             }
             ast.nodes.set(@intCast(i), n);
         }
@@ -320,8 +341,7 @@ pub const Slice = struct {
             .number => |n| try writer.print("{d}", .{n}),
             .column => |col| try Position.writeColumnAddress(col, writer),
             .pos => |pos| try pos.writeCellAddress(writer),
-            .ref => |ref_index| {
-                const ref = sheet.refs.items[ref_index].ref;
+            .ref_abs_abs, .ref_rel_abs, .ref_abs_rel, .ref_rel_rel => |ref| {
                 try ref.resolve(sheet).writeCellAddress(writer);
             },
 
@@ -715,8 +735,7 @@ pub fn EvalContext(comptime Context: type) type {
             return switch (node) {
                 .number => |n| .{ .number = n },
                 .pos => unreachable,
-                .ref => |ref_index| {
-                    const ref = self.sheet.refs.items[ref_index].ref;
+                .ref_abs_abs, .ref_rel_abs, .ref_abs_rel, .ref_rel_rel => |ref| {
                     return try self.context.evalCell(ref);
                 },
                 .add => |op| {
@@ -812,8 +831,13 @@ pub fn EvalContext(comptime Context: type) type {
         /// Converts an ast range to a position range.
         fn toPosRange(self: @This(), r: BinaryOperator) Position.Rect {
             const data = self.slice.nodes.items(.data);
-            const ref1 = self.sheet.refs.items[data[r.lhs].ref].ref;
-            const ref2 = self.sheet.refs.items[data[r.rhs].ref].ref;
+
+            assert(self.slice.nodes.get(r.lhs).isRef());
+            assert(self.slice.nodes.get(r.rhs).isRef());
+
+            // We just want the reference data and we don't care about the relative/absolute tag.
+            const ref1: *const Reference = @ptrCast(&data[r.lhs]);
+            const ref2: *const Reference = @ptrCast(&data[r.rhs]);
 
             const p1 = ref1.resolve(self.sheet);
             const p2 = ref2.resolve(self.sheet);
@@ -881,11 +905,11 @@ pub fn EvalContext(comptime Context: type) type {
                     total += try self.sumRange(r);
 
                     const p1, const p2 = blk: {
-                        const r1 = data[r.lhs].ref;
-                        const r2 = data[r.rhs].ref;
+                        const r1: *const Reference = @ptrCast(&data[r.lhs]);
+                        const r2: *const Reference = @ptrCast(&data[r.rhs]);
                         break :blk .{
-                            self.sheet.refs.items[r1].ref.resolve(self.sheet),
-                            self.sheet.refs.items[r2].ref.resolve(self.sheet),
+                            r1.resolve(self.sheet),
+                            r2.resolve(self.sheet),
                         };
                     };
                     total_items += Position.area(p1, p2);
@@ -1039,7 +1063,7 @@ test "Parse and Eval Expression" {
             var ast = fromExpression(t.allocator, expr) catch |err| {
                 return if (err != expected) err else {};
             };
-            defer ast.deinit(t.allocator, undefined);
+            defer ast.deinit(t.allocator);
 
             const sheet = try Sheet.create(t.allocator);
             defer sheet.destroy();
@@ -1098,7 +1122,7 @@ test "Functions on Ranges" {
             try sheet.setCell(try Position.fromAddress("B1"), "333.33", try Ast.fromExpression(t.allocator, "333.33"), .{});
 
             var ast = try fromExpression(t.allocator, expr);
-            defer ast.deinit(t.allocator, sheet);
+            defer ast.deinit(t.allocator);
 
             try ast.anchor(sheet);
 
@@ -1243,7 +1267,7 @@ test "DupeStrings" {
     {
         const source = "let a0 = 'this is epic' # 'nice' # 'string!'";
         var ast = try fromSource(t.allocator, source);
-        defer ast.deinit(t.allocator, undefined);
+        defer ast.deinit(t.allocator);
 
         const strings = try ast.dupeStrings(t.allocator, source);
         defer t.allocator.free(strings);
@@ -1254,7 +1278,7 @@ test "DupeStrings" {
     {
         const source = "let a0 = b0";
         var ast = try fromSource(t.allocator, source);
-        defer ast.deinit(t.allocator, undefined);
+        defer ast.deinit(t.allocator);
 
         try t.expectEqualStrings("", try ast.dupeStrings(t.allocator, source));
     }
@@ -1333,7 +1357,7 @@ test "Print" {
     inline for (data) |d| {
         const expr, const expected = d;
         var ast = try fromExpression(t.allocator, expr);
-        defer ast.deinit(t.allocator, sheet);
+        defer ast.deinit(t.allocator);
 
         var buf = std.BoundedArray(u8, 4096){};
         try ast.print(sheet, expr, buf.writer());

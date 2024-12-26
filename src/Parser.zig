@@ -22,16 +22,16 @@ allocator: Allocator,
 const String = @import("Ast.zig").String;
 const Node = @import("Ast.zig").Node;
 
-pub const BinaryOperator = struct {
+pub const BinaryOperator = packed struct {
     lhs: u32,
     rhs: u32,
 };
 
-pub const Builtin = struct {
+pub const Builtin = packed struct {
     tag: Tag,
     first_arg: u32,
 
-    const Tag = enum {
+    const Tag = enum(u8) {
         sum,
         prod,
         avg,

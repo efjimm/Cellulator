@@ -2,7 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Lua = @import("ziglua").Lua;
 
-pub const Position = extern struct {
+pub const Position = packed struct {
     pub const Int = u32;
     pub const HashInt = u64;
     const MAX = std.math.maxInt(Int);

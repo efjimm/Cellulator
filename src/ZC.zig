@@ -205,7 +205,7 @@ pub fn deinit(self: *Self) void {
     if (!std.debug.runtime_safety) return;
 
     for (self.asts.items) |*ast| {
-        ast.deinit(self.allocator, self.sheet);
+        ast.deinit(self.allocator);
     }
 
     self.lua_ptr.deinit();
