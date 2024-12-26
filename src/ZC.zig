@@ -54,8 +54,6 @@ count: u32 = 0,
 command_screen_pos: u32 = 0,
 command: Command = .{},
 
-asts: std.ArrayListUnmanaged(Ast) = .{},
-
 keymaps: KeyMap(Action, MapType),
 command_keymaps: KeyMap(CommandAction, CommandMapType),
 
@@ -138,9 +136,6 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
 
     zc.allocator = allocator;
 
-    var ast_list = try std.ArrayListUnmanaged(Ast).initCapacity(allocator, 8);
-    errdefer ast_list.deinit(allocator);
-
     var keys = try input.createKeymaps(allocator);
     errdefer {
         keys.sheet_keys.deinit(allocator);
@@ -163,7 +158,6 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
         .sheet = sheet,
         .tui = tui,
         .allocator = allocator,
-        .asts = ast_list,
         .keymaps = keys.sheet_keys,
         .command_keymaps = keys.command_keys,
         .input_buf_sfa = std.heap.stackFallback(INPUT_BUF_LEN, allocator),
@@ -174,7 +168,7 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
     zc.emitEvent("Init", .{});
 
     if (options.filepath) |filepath| {
-        try zc.loadFile(zc.sheet, filepath);
+        try zc.sheet.loadFile(filepath);
     }
 
     log.debug("Finished init", .{});
@@ -204,10 +198,6 @@ pub fn deinit(self: *Self) void {
     // Don't need to free memory on exit, the OS will do it for us :^)
     if (!std.debug.runtime_safety) return;
 
-    for (self.asts.items) |*ast| {
-        ast.deinit(self.allocator);
-    }
-
     self.lua_ptr.deinit();
     self.command.deinit(self.allocator);
 
@@ -215,7 +205,6 @@ pub fn deinit(self: *Self) void {
     self.keymaps.deinit(self.allocator);
     self.command_keymaps.deinit(self.allocator);
 
-    self.asts.deinit(self.allocator);
     self.sheet.destroy();
     self.* = undefined;
 }
@@ -268,10 +257,9 @@ pub fn setCell(
 
 /// Sets the cell at `pos` to the expression represented by `expr`.
 pub fn setCellString(self: *Self, pos: Position, expr: []const u8, opts: ChangeCellOpts) !void {
-    var ast = self.createAst();
-    errdefer self.destroyAst(ast);
+    var ast: Ast = try .fromExpression(self.sheet.allocator, expr);
+    errdefer ast.deinit(self.sheet.allocator);
 
-    try ast.parseExpr(self.allocator, expr);
     try self.setCell(pos, expr, ast, opts);
 }
 
@@ -857,9 +845,8 @@ fn parseCommand(self: *Self, str: []const u8) !void {
         else => {},
     }
 
-    var ast = self.createAst();
-    errdefer self.destroyAst(ast);
-    try ast.parse(self.allocator, str);
+    var ast: Ast = try .fromSource(self.sheet.allocator, str);
+    errdefer ast.deinit(self.sheet.allocator);
 
     const op = ast.rootNode().assignment;
     const pos = ast.nodes.items(.data)[op.lhs].pos;
@@ -1037,10 +1024,10 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
             var i: f64 = value;
             for (range.tl.y..@as(usize, range.br.y) + 1) |y| {
                 for (range.tl.x..@as(usize, range.br.x) + 1) |x| {
-                    var ast = self.createAst();
-                    errdefer self.destroyAst(ast);
+                    var ast: Ast = .empty;
+                    errdefer ast.deinit(self.sheet.allocator);
 
-                    try ast.nodes.append(self.allocator, .{ .number = i });
+                    try ast.nodes.append(self.sheet.allocator, .{ .number = i });
                     try self.setCell(.{ .y = @intCast(y), .x = @intCast(x) }, "", ast, .{});
                     i += increment;
                 }
@@ -1052,28 +1039,13 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
 pub fn loadCmd(self: *Self, filepath: []const u8) !void {
     if (filepath.len == 0) return error.EmptyFileName;
 
-    self.clearSheet(self.sheet) catch |err| switch (err) {
-        error.OutOfMemory => {
-            self.setStatusMessage(.err, "Out of memory!", .{});
-            return;
-        },
-    };
+    self.sheet.clearRetainingCapacity();
     self.tui.update.cells = true;
 
-    self.loadFile(self.sheet, filepath) catch |err| {
+    self.sheet.loadFile(filepath) catch |err| {
         self.setStatusMessage(.err, "Could not open file: {s}", .{@errorName(err)});
         return;
     };
-}
-
-pub fn clearSheet(self: *Self, sheet: *Sheet) Allocator.Error!void {
-    const count = self.sheet.cellCount() + sheet.undos.len + sheet.redos.len;
-    try self.asts.ensureUnusedCapacity(self.allocator, count);
-    sheet.clearRetainingCapacity(self);
-}
-
-pub fn loadFile(self: *Self, sheet: *Sheet, filepath: []const u8) !void {
-    return sheet.loadFile(self.allocator, filepath, self);
 }
 
 pub fn writeFile(self: *Self, filepath: ?[]const u8) !void {
@@ -1369,22 +1341,6 @@ pub fn cursorExpandWidth(self: *Self) Allocator.Error!void {
     self.clampScreenToCursorX();
     self.tui.update.cells = true;
     self.tui.update.column_headings = true;
-}
-
-pub fn createAst(self: *Self) Ast {
-    return self.asts.popOrNull() orelse .empty;
-}
-
-pub fn delAst(self: *Self, ast: Ast) Allocator.Error!void {
-    var temp = ast;
-    temp.nodes.len = 0;
-    try self.asts.append(self.allocator, temp);
-}
-
-pub fn destroyAst(self: *Self, ast: Ast) void {
-    var temp = ast;
-    temp.nodes.len = 0;
-    self.asts.appendAssumeCapacity(temp);
 }
 
 pub fn cursorToFirstCellInRow(self: *Self) !void {

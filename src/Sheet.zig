@@ -259,9 +259,9 @@ pub fn treapPrevNode(key: Position, node: ?*CellNode, parent: ?*CellNode) ?*Cell
     return p;
 }
 
-pub fn clearRetainingCapacity(sheet: *Sheet, context: anytype) void {
+pub fn clearRetainingCapacity(sheet: *Sheet) void {
     var iter = sheet.cell_treap.inorderIterator();
-    while (iter.next()) |node| context.destroyAst(node.key.ast);
+    while (iter.next()) |node| node.key.ast.deinit(sheet.allocator);
     sheet.cell_treap.root = null;
     sheet.rows.clearRetainingCapacity();
     sheet.cols.clearRetainingCapacity();
@@ -284,7 +284,7 @@ pub fn clearRetainingCapacity(sheet: *Sheet, context: anytype) void {
         switch (tag) {
             .set_cell => {
                 sheet.allocator.free(data.set_cell.strings);
-                context.destroyAst(data.set_cell.node.key.ast);
+                data.set_cell.node.key.ast.deinit(sheet.allocator);
             },
             .delete_cell,
             .set_column_width,
@@ -302,7 +302,7 @@ pub fn clearRetainingCapacity(sheet: *Sheet, context: anytype) void {
         switch (tag) {
             .set_cell => {
                 sheet.allocator.free(data.set_cell.strings);
-                context.destroyAst(data.set_cell.node.key.ast);
+                data.set_cell.node.key.ast.deinit(sheet.allocator);
             },
             .delete_cell,
             .set_column_width,
@@ -322,7 +322,7 @@ pub fn clearRetainingCapacity(sheet: *Sheet, context: anytype) void {
     _ = sheet.arenaReset(.free_all);
 }
 
-pub fn loadFile(sheet: *Sheet, ast_allocator: Allocator, filepath: []const u8, context: anytype) !void {
+pub fn loadFile(sheet: *Sheet, filepath: []const u8) !void {
     const file = std.fs.cwd().openFile(filepath, .{}) catch |err| switch (err) {
         error.FileNotFound => {
             sheet.setFilePath(filepath);
@@ -349,17 +349,13 @@ pub fn loadFile(sheet: *Sheet, ast_allocator: Allocator, filepath: []const u8, c
             break;
         defer a.free(line);
 
-        var ast = context.createAst();
-        errdefer context.destroyAst(ast);
-        ast.parse(ast_allocator, line) catch |err| switch (err) {
+        var ast = Ast.fromSource(sheet.allocator, line) catch |err| switch (err) {
             error.UnexpectedToken,
             error.InvalidCellAddress,
-            => {
-                context.destroyAst(ast);
-                continue;
-            },
+            => continue,
             error.OutOfMemory => return error.OutOfMemory,
         };
+        errdefer ast.deinit(sheet.allocator);
 
         const data = ast.nodes.items(.data);
         const assignment = data[ast.rootNodeIndex()].assignment;
