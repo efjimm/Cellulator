@@ -43,6 +43,9 @@ pub const Node = union(enum) {
     ref_abs_rel: Reference,
     ref_rel_rel: Reference,
 
+    pub const Tag = std.meta.Tag(Node);
+    pub const Payload = MultiArrayList(Node).Elem.Bare;
+
     pub fn isRef(n: Node) bool {
         return isRefTag(n);
     }
@@ -53,6 +56,22 @@ pub const Node = union(enum) {
             else => false,
         };
     }
+};
+
+pub const NodeList = MultiArrayList(Node);
+pub const NodeSlice = NodeList.Slice;
+pub const Index = packed struct {
+    n: u32,
+
+    pub fn from(n: u32) Index {
+        return .{ .n = n };
+    }
+
+    pub fn isValid(n: Index) bool {
+        return n == .invalid;
+    }
+
+    pub const invalid: Index = .{ .n = std.math.maxInt(u32) };
 };
 
 comptime {
@@ -69,38 +88,12 @@ nodes: MultiArrayList(Node),
 const Ast = @This();
 pub const empty: Ast = .{ .nodes = .{} };
 
-pub fn parse(ast: *Ast, allocator: Allocator, source: []const u8) ParseError!void {
-    ast.nodes.len = 0;
-    const tokenizer = Tokenizer.init(source);
-
-    var parser = Parser.init(allocator, tokenizer, .{ .nodes = ast.nodes });
-    errdefer parser.deinit();
-    try parser.parse();
-
-    ast.nodes = parser.nodes;
-}
-
-pub fn parseExpr(ast: *Ast, allocator: Allocator, source: []const u8) ParseError!void {
-    ast.nodes.len = 0;
-    const tokenizer = Tokenizer.init(source);
-
-    var parser = Parser.init(allocator, tokenizer, .{ .nodes = ast.nodes });
-    errdefer {
-        parser.deinit();
-        ast.nodes = .{};
-    }
-    _ = try parser.parseExpression();
-
-    ast.nodes = parser.nodes;
-}
-
-// TODO: sheet.allocator is not necessarily the same allocator as used for the AST nodes.
-
 /// Anchors the AST to the given sheet, by replacing all 'dumb' coordinate references with
 /// references to the row/column handles in `sheet`.
-pub fn anchor(ast: *Ast, sheet: *Sheet) Allocator.Error!void {
-    const tags = ast.nodes.items(.tags);
-    const data = ast.nodes.items(.data);
+pub fn anchor(nodes: NodeSlice, root: Index, sheet: *Sheet) Allocator.Error!void {
+    const start = leftMostChild(nodes, root);
+    const tags = nodes.items(.tags)[start.n .. root.n + 1];
+    const data = nodes.items(.data)[start.n .. root.n + 1];
 
     const pos_count = blk: {
         var count: u32 = 0;
@@ -131,17 +124,23 @@ pub fn anchor(ast: *Ast, sheet: *Sheet) Allocator.Error!void {
 }
 
 pub fn dupeStrings(
-    ast: Ast,
     allocator: Allocator,
     source: []const u8,
+    nodes: NodeSlice,
+    root_node: Index,
 ) Allocator.Error![]const u8 {
-    const slice = ast.nodes.slice();
+    const start = leftMostChild(nodes, root_node);
+    assert(start.n <= root_node.n);
+
+    const tags = nodes.items(.tags)[start.n .. root_node.n + 1];
+    const data = nodes.items(.data)[start.n .. root_node.n + 1];
+
     var nstrings: u32 = 0;
     const len = blk: {
         var len: u32 = 0;
-        for (slice.items(.tags), 0..) |tag, i| {
+        for (tags, 0..) |tag, i| {
             if (tag == .string_literal) {
-                const str = slice.items(.data)[i].string_literal;
+                const str = data[i].string_literal;
                 len += str.end - str.start;
                 nstrings += 1;
             }
@@ -151,9 +150,9 @@ pub fn dupeStrings(
 
     if (len == 0) {
         if (nstrings != 0) {
-            for (slice.items(.tags), 0..) |tag, i| {
+            for (tags, 0..) |tag, i| {
                 if (tag == .string_literal) {
-                    slice.items(.data)[i].string_literal = .{
+                    data[i].string_literal = .{
                         .start = 0,
                         .end = 0,
                     };
@@ -168,9 +167,9 @@ pub fn dupeStrings(
 
     // Append contents of all string literals to the list, and update their `start` and `end`
     // indices to be into this list.
-    for (slice.items(.tags), 0..) |tag, i| {
+    for (tags, 0..) |tag, i| {
         if (tag == .string_literal) {
-            const str = &slice.items(.data)[i].string_literal;
+            const str = &data[i].string_literal;
             const bytes = source[str.start..str.end];
             str.start = @intCast(list.items.len);
             str.end = @intCast(str.start + bytes.len);
@@ -182,7 +181,16 @@ pub fn dupeStrings(
 
 pub fn fromSource(allocator: Allocator, source: []const u8) ParseError!Ast {
     var ast: Ast = .empty;
-    try ast.parse(allocator, source);
+    var parser = Parser.init(
+        allocator,
+        .init(source),
+        .{ .nodes = ast.nodes },
+    );
+    errdefer parser.deinit();
+
+    try parser.parse();
+
+    ast.nodes = parser.nodes;
     return ast;
 }
 
@@ -219,372 +227,238 @@ pub fn deinit(ast: *Ast, allocator: Allocator) void {
     ast.* = .empty;
 }
 
-pub const Slice = struct {
-    nodes: MultiArrayList(Node).Slice,
+pub inline fn printFromIndex(
+    nodes: NodeSlice,
+    sheet: *Sheet,
+    index: Index,
+    writer: anytype,
+    strings: []const u8,
+) @TypeOf(writer).Error!void {
+    const node = nodes.get(index.n);
+    return printFromNode(nodes, sheet, index, node, writer, strings);
+}
 
-    pub fn toAst(ast: *Slice) Ast {
-        return .{
-            .nodes = ast.nodes.toMultiArrayList(),
-        };
-    }
+pub fn printFromNode(
+    nodes: NodeSlice,
+    sheet: *Sheet,
+    index: Index,
+    node: Node,
+    writer: anytype,
+    strings: []const u8,
+) @TypeOf(writer).Error!void {
+    // On the left-hand side, expressions involving operators with lower precedence need
+    // parentheses.
 
-    pub fn rootNodeIndex(ast: Slice) u32 {
-        return @as(u32, @intCast(ast.nodes.len)) - 1;
-    }
+    // On the right-hand side, expressions involving operators with lower precedence, or
+    // non-commutative operators with the same precedence need to be surrounded by parentheses.
+    switch (node) {
+        .number => |n| try writer.print("{d}", .{n}),
+        .column => |col| try Position.writeColumnAddress(col, writer),
+        .pos => |pos| try pos.writeCellAddress(writer),
+        .ref_abs_abs, .ref_rel_abs, .ref_abs_rel, .ref_rel_rel => |ref| {
+            try ref.resolve(sheet).writeCellAddress(writer);
+        },
 
-    pub fn rootTag(ast: Slice) u32 {
-        return ast.nodes.items(.tags)[ast.nodes.len - 1];
-    }
-
-    pub fn rootNode(ast: Slice) Node {
-        return ast.nodes.get(ast.rootNodeIndex());
-    }
-
-    pub fn leftMostChild(ast: Slice, index: u32) u32 {
-        assert(index < ast.nodes.len);
-
-        const node = ast.nodes.get(index);
-
-        return switch (node) {
-            // leaf nodes
-            .ref_abs_abs,
-            .ref_rel_abs,
-            .ref_abs_rel,
-            .ref_rel_rel,
-            .string_literal,
-            .number,
-            .column,
-            .pos,
-            => index,
-            // branch nodes
-            .assignment,
-            .concat,
-            .add,
-            .sub,
-            .mul,
-            .div,
-            .mod,
-            .range,
-            => |b| ast.leftMostChild(b.lhs),
-            .builtin => |b| ast.leftMostChild(b.first_arg),
-        };
-    }
-
-    // TODO: Shrink refs allocation if needed
-
-    /// Removes all nodes except for the given index and its children
-    /// Nodes in the list are already sorted in reverse topological order which allows us to overwrite
-    /// nodes sequentially without loss. This function preserves reverse topological order.
-    pub fn splice(ast: *Slice, new_root: u32) void {
-        const first_node = ast.leftMostChild(new_root);
-        const new_len = new_root + 1 - first_node;
-
-        for (0..new_len, first_node..new_root + 1) |i, j| {
-            var n = ast.nodes.get(@intCast(j));
-            switch (n) {
-                .assignment,
-                .concat,
-                .add,
-                .sub,
-                .mul,
-                .div,
-                .mod,
-                .range,
-                => |*b| {
-                    b.lhs -= first_node;
-                    b.rhs -= first_node;
+        .string_literal => |str| {
+            try writer.print("\"{s}\"", .{strings[str.start..str.end]});
+        },
+        .concat => |b| {
+            try printFromIndex(nodes, sheet, b.lhs, writer, strings);
+            try writer.writeAll(" # ");
+            try printFromIndex(nodes, sheet, b.rhs, writer, strings);
+        },
+        .assignment => |b| {
+            try writer.writeAll("let ");
+            try printFromIndex(nodes, sheet, b.lhs, writer, strings);
+            try writer.writeAll(" = ");
+            try printFromIndex(nodes, sheet, b.rhs, writer, strings);
+        },
+        .add => |b| {
+            try printFromIndex(nodes, sheet, b.lhs, writer, strings);
+            try writer.writeAll(" + ");
+            const rhs = nodes.get(b.rhs.n);
+            switch (rhs) {
+                .sub => {
+                    try writer.writeByte('(');
+                    try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings);
+                    try writer.writeByte(')');
                 },
-                .builtin => |*b| {
-                    b.first_arg -= first_node;
+                else => {
+                    try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings);
                 },
-                .string_literal,
-                .number,
-                .column,
-                .pos,
-                .ref_abs_abs,
-                .ref_rel_abs,
-                .ref_abs_rel,
-                .ref_rel_rel,
-                => {},
             }
-            ast.nodes.set(@intCast(i), n);
-        }
+        },
+        .sub => |b| {
+            try printFromIndex(nodes, sheet, b.lhs, writer, strings);
+            try writer.writeAll(" - ");
 
-        ast.nodes.len = new_len;
-    }
-
-    pub inline fn printFromIndex(
-        ast: Slice,
-        sheet: *Sheet,
-        index: u32,
-        writer: anytype,
-        strings: []const u8,
-    ) @TypeOf(writer).Error!void {
-        const node = ast.nodes.get(index);
-        return ast.printFromNode(sheet, index, node, writer, strings);
-    }
-
-    pub fn printFromNode(
-        ast: Slice,
-        sheet: *Sheet,
-        index: u32,
-        node: Node,
-        writer: anytype,
-        strings: []const u8,
-    ) @TypeOf(writer).Error!void {
-        // On the left-hand side, expressions involving operators with lower precedence need
-        // parentheses.
-
-        // On the right-hand side, expressions involving operators with lower precedence, or
-        // non-commutative operators with the same precedence need to be surrounded by parentheses.
-        switch (node) {
-            .number => |n| try writer.print("{d}", .{n}),
-            .column => |col| try Position.writeColumnAddress(col, writer),
-            .pos => |pos| try pos.writeCellAddress(writer),
-            .ref_abs_abs, .ref_rel_abs, .ref_abs_rel, .ref_rel_rel => |ref| {
-                try ref.resolve(sheet).writeCellAddress(writer);
-            },
-
-            .string_literal => |str| {
-                try writer.print("\"{s}\"", .{strings[str.start..str.end]});
-            },
-            .concat => |b| {
-                try ast.printFromIndex(sheet, b.lhs, writer, strings);
-                try writer.writeAll(" # ");
-                try ast.printFromIndex(sheet, b.rhs, writer, strings);
-            },
-            .assignment => |b| {
-                try writer.writeAll("let ");
-                try ast.printFromIndex(sheet, b.lhs, writer, strings);
-                try writer.writeAll(" = ");
-                try ast.printFromIndex(sheet, b.rhs, writer, strings);
-            },
-            .add => |b| {
-                try ast.printFromIndex(sheet, b.lhs, writer, strings);
-                try writer.writeAll(" + ");
-                const rhs = ast.nodes.get(b.rhs);
-                switch (rhs) {
-                    .sub => {
-                        try writer.writeByte('(');
-                        try ast.printFromNode(sheet, b.rhs, rhs, writer, strings);
-                        try writer.writeByte(')');
-                    },
-                    else => {
-                        try ast.printFromNode(sheet, b.rhs, rhs, writer, strings);
-                    },
-                }
-            },
-            .sub => |b| {
-                try ast.printFromIndex(sheet, b.lhs, writer, strings);
-                try writer.writeAll(" - ");
-
-                const rhs = ast.nodes.get(b.rhs);
-                switch (rhs) {
-                    .add, .sub => {
-                        try writer.writeByte('(');
-                        try ast.printFromNode(sheet, b.rhs, rhs, writer, strings);
-                        try writer.writeByte(')');
-                    },
-                    else => {
-                        try ast.printFromNode(sheet, b.rhs, rhs, writer, strings);
-                    },
-                }
-            },
-            .mul => |b| {
-                const lhs = ast.nodes.get(b.lhs);
-                switch (lhs) {
-                    .add, .sub => {
-                        try writer.writeByte('(');
-                        try ast.printFromNode(sheet, b.lhs, lhs, writer, strings);
-                        try writer.writeByte(')');
-                    },
-                    else => try ast.printFromNode(sheet, b.lhs, lhs, writer, strings),
-                }
-                try writer.writeAll(" * ");
-                const rhs = ast.nodes.get(b.rhs);
-                switch (rhs) {
-                    .add, .sub, .div, .mod => {
-                        try writer.writeByte('(');
-                        try ast.printFromNode(sheet, b.rhs, rhs, writer, strings);
-                        try writer.writeByte(')');
-                    },
-                    else => try ast.printFromNode(sheet, b.rhs, rhs, writer, strings),
-                }
-            },
-            .div => |b| {
-                const lhs = ast.nodes.get(b.lhs);
-                switch (lhs) {
-                    .add, .sub => {
-                        try writer.writeByte('(');
-                        try ast.printFromNode(sheet, b.lhs, lhs, writer, strings);
-                        try writer.writeByte(')');
-                    },
-                    else => try ast.printFromNode(sheet, b.lhs, lhs, writer, strings),
-                }
-                try writer.writeAll(" / ");
-                const rhs = ast.nodes.get(b.rhs);
-                switch (rhs) {
-                    .add, .sub, .mul, .div, .mod => {
-                        try writer.writeByte('(');
-                        try ast.printFromNode(sheet, b.rhs, rhs, writer, strings);
-                        try writer.writeByte(')');
-                    },
-                    else => try ast.printFromNode(sheet, b.rhs, rhs, writer, strings),
-                }
-            },
-            .mod => |b| {
-                const lhs = ast.nodes.get(b.lhs);
-                switch (lhs) {
-                    .add, .sub => {
-                        try writer.writeByte('(');
-                        try ast.printFromNode(sheet, b.lhs, lhs, writer, strings);
-                        try writer.writeByte(')');
-                    },
-                    else => try ast.printFromNode(sheet, b.lhs, lhs, writer, strings),
-                }
-                try writer.writeAll(" % ");
-                const rhs = ast.nodes.get(b.rhs);
-                switch (rhs) {
-                    .add, .sub, .mul, .div, .mod => {
-                        try writer.writeByte('(');
-                        try ast.printFromNode(sheet, b.rhs, rhs, writer, strings);
-                        try writer.writeByte(')');
-                    },
-                    else => try ast.printFromNode(sheet, b.rhs, rhs, writer, strings),
-                }
-            },
-            .range => |b| {
-                try ast.printFromIndex(sheet, b.lhs, writer, strings);
-                try writer.writeByte(':');
-                try ast.printFromIndex(sheet, b.rhs, writer, strings);
-            },
-
-            .builtin => |b| {
-                switch (b.tag) {
-                    inline else => |tag| try writer.print("@{s}(", .{@tagName(tag)}),
-                }
-                var iter = ast.argIteratorForwards(b.first_arg, index);
-                if (iter.next()) |arg_index| {
-                    try ast.printFromIndex(sheet, arg_index, writer, strings);
-                }
-                while (iter.next()) |arg_index| {
-                    try writer.writeAll(", ");
-                    try ast.printFromIndex(sheet, arg_index, writer, strings);
-                }
-                try writer.writeByte(')');
-            },
-        }
-    }
-
-    /// Same as `traverse`, but starting from the node at the given index.
-    fn traverseFrom(ast: Slice, index: u32, order: TraverseOrder, context: anytype) !bool {
-        const node = ast.nodes.get(index);
-
-        switch (node) {
-            .assignment, .concat, .add, .sub, .mul, .div, .mod, .range => |b| {
-                switch (order) {
-                    .first => {
-                        if (!try context.evalCell(index)) return false;
-                        if (!try ast.traverseFrom(b.lhs, order, context)) return false;
-                        if (!try ast.traverseFrom(b.rhs, order, context)) return false;
-                    },
-                    .middle => {
-                        if (!try ast.traverseFrom(b.lhs, order, context)) return false;
-                        if (!try context.evalCell(index)) return false;
-                        if (!try ast.traverseFrom(b.rhs, order, context)) return false;
-                    },
-                    .last => {
-                        if (!try ast.traverseFrom(b.lhs, order, context)) return false;
-                        if (!try ast.traverseFrom(b.rhs, order, context)) return false;
-                        if (!try context.evalCell(index)) return false;
-                    },
-                }
-            },
-            .string_literal, .number, .pos, .column => {
-                if (!try context.evalCell(index)) return false;
-            },
-            .builtin => |b| {
-                var iter = ast.argIterator(b.first_arg, index);
-                if (order != .last and !try context.evalCell(index)) return false;
-                while (iter.next()) |arg| {
-                    if (!try ast.traverseFrom(arg, order, context)) return false;
-                }
-                if (order == .last and !try context.evalCell(index)) return false;
-            },
-        }
-
-        return true;
-    }
-
-    /// Iterates over expressions backwards
-    pub const ArgIterator = struct {
-        ast: *const Slice,
-        first_arg: u32,
-        index: u32,
-
-        pub fn next(iter: *ArgIterator) ?u32 {
-            if (iter.index <= iter.first_arg) return null;
-            const ret = iter.index - 1;
-            iter.index = iter.ast.leftMostChild(ret);
-            return ret;
-        }
-    };
-
-    pub fn argIterator(ast: *const Slice, start: u32, end: u32) ArgIterator {
-        return ArgIterator{
-            .ast = ast,
-            .first_arg = start,
-            .index = end,
-        };
-    }
-
-    /// Iterates over expressions forwards. Only use when the ordering is required.
-    pub const ArgIteratorForwards = struct {
-        ast: *const Slice,
-        end: u32,
-        index: u32,
-        backwards_iter: ArgIterator,
-        buffer: std.BoundedArray(u32, 32) = .{},
-
-        pub fn next(iter: *ArgIteratorForwards) ?u32 {
-            if (iter.index >= iter.end) return null;
-            const ret = iter.index;
-
-            if (iter.buffer.len == 0) {
-                const first_item = iter.backwards_iter.next() orelse {
-                    iter.index = iter.end;
-                    return ret;
-                };
-
-                iter.buffer.appendAssumeCapacity(first_item);
-
-                for (1..iter.buffer.capacity()) |_| {
-                    const item = iter.backwards_iter.next() orelse break;
-                    iter.buffer.appendAssumeCapacity(item);
-                }
+            const rhs = nodes.get(b.rhs.n);
+            switch (rhs) {
+                .add, .sub => {
+                    try writer.writeByte('(');
+                    try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings);
+                    try writer.writeByte(')');
+                },
+                else => {
+                    try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings);
+                },
             }
-            iter.index = iter.buffer.pop();
+        },
+        .mul => |b| {
+            const lhs = nodes.get(b.lhs.n);
+            switch (lhs) {
+                .add, .sub => {
+                    try writer.writeByte('(');
+                    try printFromNode(nodes, sheet, b.lhs, lhs, writer, strings);
+                    try writer.writeByte(')');
+                },
+                else => try printFromNode(nodes, sheet, b.lhs, lhs, writer, strings),
+            }
+            try writer.writeAll(" * ");
+            const rhs = nodes.get(b.rhs.n);
+            switch (rhs) {
+                .add, .sub, .div, .mod => {
+                    try writer.writeByte('(');
+                    try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings);
+                    try writer.writeByte(')');
+                },
+                else => try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings),
+            }
+        },
+        .div => |b| {
+            const lhs = nodes.get(b.lhs.n);
+            switch (lhs) {
+                .add, .sub => {
+                    try writer.writeByte('(');
+                    try printFromNode(nodes, sheet, b.lhs, lhs, writer, strings);
+                    try writer.writeByte(')');
+                },
+                else => try printFromNode(nodes, sheet, b.lhs, lhs, writer, strings),
+            }
+            try writer.writeAll(" / ");
+            const rhs = nodes.get(b.rhs.n);
+            switch (rhs) {
+                .add, .sub, .mul, .div, .mod => {
+                    try writer.writeByte('(');
+                    try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings);
+                    try writer.writeByte(')');
+                },
+                else => try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings),
+            }
+        },
+        .mod => |b| {
+            const lhs = nodes.get(b.lhs.n);
+            switch (lhs) {
+                .add, .sub => {
+                    try writer.writeByte('(');
+                    try printFromNode(nodes, sheet, b.lhs, lhs, writer, strings);
+                    try writer.writeByte(')');
+                },
+                else => try printFromNode(nodes, sheet, b.lhs, lhs, writer, strings),
+            }
+            try writer.writeAll(" % ");
+            const rhs = nodes.get(b.rhs.n);
+            switch (rhs) {
+                .add, .sub, .mul, .div, .mod => {
+                    try writer.writeByte('(');
+                    try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings);
+                    try writer.writeByte(')');
+                },
+                else => try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings),
+            }
+        },
+        .range => |b| {
+            try printFromIndex(nodes, sheet, b.lhs, writer, strings);
+            try writer.writeByte(':');
+            try printFromIndex(nodes, sheet, b.rhs, writer, strings);
+        },
 
-            return ret;
-        }
-    };
+        .builtin => |b| {
+            switch (b.tag) {
+                inline else => |tag| try writer.print("@{s}(", .{@tagName(tag)}),
+            }
+            var iter = argIteratorForwards(nodes, b.first_arg, index);
+            if (iter.next()) |arg_index| {
+                try printFromIndex(nodes, sheet, arg_index, writer, strings);
+            }
+            while (iter.next()) |arg_index| {
+                try writer.writeAll(", ");
+                try printFromIndex(nodes, sheet, arg_index, writer, strings);
+            }
+            try writer.writeByte(')');
+        },
+    }
+}
 
-    pub fn argIteratorForwards(ast: *const Slice, start: u32, end: u32) ArgIteratorForwards {
-        return ArgIteratorForwards{
-            .ast = ast,
-            .end = end,
-            .index = start,
-            .backwards_iter = ast.argIterator(start + 1, end),
-        };
+/// Returns the root index of each argument of a function, backwards.
+pub const ArgIterator = struct {
+    nodes: NodeSlice,
+    first_arg: Index,
+    index: Index,
+
+    pub fn next(iter: *ArgIterator) ?Index {
+        if (iter.index.n <= iter.first_arg.n) return null;
+        const ret: Index = .from(iter.index.n - 1);
+        iter.index = leftMostChild(iter.nodes, ret);
+        return ret;
     }
 };
 
-pub fn rootNode(ast: Ast) Node {
-    return ast.nodes.get(ast.rootNodeIndex());
+pub fn argIterator(nodes: NodeSlice, start: Index, end: Index) ArgIterator {
+    return ArgIterator{
+        .nodes = nodes,
+        .first_arg = start,
+        .index = end,
+    };
 }
 
-pub fn rootNodeIndex(ast: Ast) u32 {
-    return @as(u32, @intCast(ast.nodes.len)) - 1;
+/// Returns the root index of each argument of a function, forwards. Prefer to use `ArgIterator`
+/// for performance reasons.
+pub const ArgIteratorForwards = struct {
+    nodes: NodeSlice,
+    end: Index,
+    index: Index,
+    backwards_iter: ArgIterator,
+    buffer: std.BoundedArray(Index, 32) = .{},
+
+    pub fn next(iter: *ArgIteratorForwards) ?Index {
+        if (iter.index.n >= iter.end.n) return null;
+        const ret = iter.index;
+
+        if (iter.buffer.len == 0) {
+            const first_item = iter.backwards_iter.next() orelse {
+                iter.index = iter.end;
+                return ret;
+            };
+
+            iter.buffer.appendAssumeCapacity(first_item);
+
+            for (1..iter.buffer.capacity()) |_| {
+                const item = iter.backwards_iter.next() orelse break;
+                iter.buffer.appendAssumeCapacity(item);
+            }
+        }
+        iter.index = iter.buffer.pop();
+
+        return ret;
+    }
+};
+
+pub fn argIteratorForwards(nodes: NodeSlice, start: Index, end: Index) ArgIteratorForwards {
+    return ArgIteratorForwards{
+        .nodes = nodes,
+        .end = end,
+        .index = start,
+        .backwards_iter = argIterator(nodes, .from(start.n + 1), end),
+    };
+}
+
+pub fn rootNode(ast: Ast) Node {
+    return ast.nodes.get(ast.rootNodeIndex().n);
+}
+
+pub fn rootNodeIndex(ast: Ast) Index {
+    return .from(@intCast(ast.nodes.len - 1));
 }
 
 pub fn rootTag(ast: Ast) std.meta.Tag(Node) {
@@ -594,21 +468,60 @@ pub fn rootTag(ast: Ast) std.meta.Tag(Node) {
 /// Removes all nodes except for the given index and its children
 /// Nodes in the list are already sorted in reverse topological order which allows us to overwrite
 /// nodes sequentially without loss. This function preserves reverse topological order.
-pub fn splice(ast: *Ast, new_root: u32) void {
-    var slice = ast.toSlice();
-    slice.splice(new_root);
-    ast.* = slice.toAst();
+pub fn splice(nodes: *NodeSlice, new_root: Index) void {
+    const old_root: Index = .from(nodes.len - 1);
+    const old_first = leftMostChild(nodes.*, old_root);
+
+    const new_first = leftMostChild(nodes.*, new_root);
+    const new_len = new_root.n + 1 - new_first.n;
+
+    assert(old_first.n <= new_first.n);
+
+    for (
+        old_first.n..,
+        new_first.n..new_root.n + 1,
+    ) |i, j| {
+        var n = nodes.get(@intCast(j));
+        switch (n) {
+            .assignment,
+            .concat,
+            .add,
+            .sub,
+            .mul,
+            .div,
+            .mod,
+            .range,
+            => |*b| {
+                b.lhs.n -= new_first.n - old_first.n;
+                b.rhs.n -= new_first.n - old_first.n;
+            },
+            .builtin => |*b| {
+                b.first_arg.n -= new_first.n - old_first.n;
+            },
+            .string_literal,
+            .number,
+            .column,
+            .pos,
+            .ref_abs_abs,
+            .ref_rel_abs,
+            .ref_abs_rel,
+            .ref_rel_rel,
+            => {},
+        }
+        nodes.set(@intCast(i), n);
+    }
+
+    nodes.len = old_first.n + new_len;
 }
 
-pub fn toSlice(ast: Ast) Slice {
-    return .{
-        .nodes = ast.nodes.slice(),
-    };
-}
-
-pub fn print(ast: Ast, sheet: *Sheet, strings: []const u8, writer: anytype) @TypeOf(writer).Error!void {
-    const slice = ast.toSlice();
-    return slice.printFromIndex(sheet, slice.rootNodeIndex(), writer, strings);
+pub fn print(
+    nodes: NodeSlice,
+    root: Index,
+    sheet: *Sheet,
+    strings: []const u8,
+    writer: anytype,
+) @TypeOf(writer).Error!void {
+    return printFromIndex(nodes, sheet, root, writer, strings);
 }
 
 /// The order in which nodes are evaluated.
@@ -622,18 +535,37 @@ const TraverseOrder = enum {
     last,
 };
 
-/// Recursively visits every node in the tree. `context` is an instance of a type which must have
-/// the function `fn evalCell(@TypeOf(context), u32) !bool`. This function is run on every leaf
-/// node in the tree, with `index` being the index of the node in the `nodes` array. If the
-/// function returns false, traversal stops immediately.
-pub fn traverse(ast: Ast, order: TraverseOrder, context: anytype) !bool {
-    const slice = ast.toSlice();
-    return slice.traverseFrom(slice.rootNodeIndex(), order, context);
-}
+pub fn leftMostChild(
+    nodes: NodeSlice,
+    index: Index,
+) Index {
+    assert(index.n < nodes.len);
 
-pub fn leftMostChild(ast: Ast, index: u32) u32 {
-    const slice = ast.toSlice();
-    return slice.leftMostChild(index);
+    const node = nodes.get(index.n);
+
+    return switch (node) {
+        // leaf nodes
+        .ref_abs_abs,
+        .ref_rel_abs,
+        .ref_abs_rel,
+        .ref_rel_rel,
+        .string_literal,
+        .number,
+        .column,
+        .pos,
+        => index,
+        // branch nodes
+        .assignment,
+        .concat,
+        .add,
+        .sub,
+        .mul,
+        .div,
+        .mod,
+        .range,
+        => |b| leftMostChild(nodes, b.lhs),
+        .builtin => |b| leftMostChild(nodes, b.first_arg),
+    };
 }
 
 pub const EvalResult = union(enum) {
@@ -698,7 +630,7 @@ pub const EvalError = error{
 
 pub fn EvalContext(comptime Context: type) type {
     return struct {
-        slice: Slice,
+        nodes: NodeSlice,
         allocator: Allocator,
         strings: []const u8,
         sheet: *Sheet,
@@ -728,9 +660,9 @@ pub fn EvalContext(comptime Context: type) type {
         // TODO: Pass references to `context.evalCell` instead of positions
         fn eval(
             self: @This(),
-            index: u32,
+            index: Index,
         ) Error!EvalResult {
-            const node = self.slice.nodes.get(index);
+            const node = self.nodes.get(index.n);
 
             return switch (node) {
                 .number => |n| .{ .number = n },
@@ -796,29 +728,29 @@ pub fn EvalContext(comptime Context: type) type {
             };
         }
 
-        fn evalUpper(self: @This(), arg: u32) ![]const u8 {
+        fn evalUpper(self: @This(), arg: Index) ![]const u8 {
             const str = try (try self.eval(arg)).toStringAlloc(self.allocator);
             for (str) |*c| c.* = std.ascii.toUpper(c.*);
             return str;
         }
 
-        fn evalLower(self: @This(), arg: u32) ![]const u8 {
+        fn evalLower(self: @This(), arg: Index) ![]const u8 {
             const str = try (try self.eval(arg)).toStringAlloc(self.allocator);
             for (str) |*c| c.* = std.ascii.toLower(c.*);
             return str;
         }
 
-        fn evalSum(self: @This(), start: u32, end: u32) !f64 {
-            const tags = self.slice.nodes.items(.tags);
-            const data = self.slice.nodes.items(.data);
+        fn evalSum(self: @This(), start: Index, end: Index) !f64 {
+            const tags = self.nodes.items(.tags);
+            const data = self.nodes.items(.data);
 
-            var iter = self.slice.argIterator(start, end);
+            var iter = argIterator(self.nodes, start, end);
             var total: f64 = 0;
 
             while (iter.next()) |i| {
-                const tag = tags[i];
+                const tag = tags[i.n];
                 if (tag == .range) {
-                    total += try self.sumRange(data[i].range);
+                    total += try self.sumRange(data[i.n].range);
                 } else {
                     const res = try self.eval(i);
                     total += try res.toNumber(0);
@@ -830,14 +762,14 @@ pub fn EvalContext(comptime Context: type) type {
 
         /// Converts an ast range to a position range.
         fn toPosRange(self: @This(), r: BinaryOperator) Position.Rect {
-            const data = self.slice.nodes.items(.data);
+            const data = self.nodes.items(.data);
 
-            assert(self.slice.nodes.get(r.lhs).isRef());
-            assert(self.slice.nodes.get(r.rhs).isRef());
+            assert(self.nodes.get(r.lhs.n).isRef());
+            assert(self.nodes.get(r.rhs.n).isRef());
 
             // We just want the reference data and we don't care about the relative/absolute tag.
-            const ref1: *const Reference = @ptrCast(&data[r.lhs]);
-            const ref2: *const Reference = @ptrCast(&data[r.rhs]);
+            const ref1: *const Reference = @ptrCast(&data[r.lhs.n]);
+            const ref2: *const Reference = @ptrCast(&data[r.rhs.n]);
 
             const p1 = ref1.resolve(self.sheet);
             const p2 = ref2.resolve(self.sheet);
@@ -857,17 +789,17 @@ pub fn EvalContext(comptime Context: type) type {
             return total;
         }
 
-        fn evalProd(self: @This(), start: u32, end: u32) !f64 {
-            const tags = self.slice.nodes.items(.tags);
-            const data = self.slice.nodes.items(.data);
+        fn evalProd(self: @This(), start: Index, end: Index) !f64 {
+            const tags = self.nodes.items(.tags);
+            const data = self.nodes.items(.data);
 
-            var iter = self.slice.argIterator(start, end);
+            var iter = argIterator(self.nodes, start, end);
             var total: f64 = 1;
 
             while (iter.next()) |i| {
-                const tag = tags[i];
+                const tag = tags[i.n];
                 if (tag == .range) {
-                    total *= try self.prodRange(data[i].range);
+                    total *= try self.prodRange(data[i.n].range);
                 } else {
                     const res = try self.eval(i);
                     total *= try res.toNumber(0);
@@ -891,22 +823,22 @@ pub fn EvalContext(comptime Context: type) type {
             return total;
         }
 
-        fn evalAvg(self: @This(), start: u32, end: u32) !f64 {
-            const tags = self.slice.nodes.items(.tags);
-            const data = self.slice.nodes.items(.data);
+        fn evalAvg(self: @This(), start: Index, end: Index) !f64 {
+            const tags = self.nodes.items(.tags);
+            const data = self.nodes.items(.data);
 
-            var iter = self.slice.argIterator(start, end);
+            var iter = argIterator(self.nodes, start, end);
             var total: f64 = 0;
             var total_items: Position.HashInt = 0;
 
             while (iter.next()) |i| {
-                if (tags[i] == .range) {
-                    const r = data[i].range;
+                if (tags[i.n] == .range) {
+                    const r = data[i.n].range;
                     total += try self.sumRange(r);
 
                     const p1, const p2 = blk: {
-                        const r1: *const Reference = @ptrCast(&data[r.lhs]);
-                        const r2: *const Reference = @ptrCast(&data[r.rhs]);
+                        const r1: *const Reference = @ptrCast(&data[r.lhs.n]);
+                        const r2: *const Reference = @ptrCast(&data[r.rhs.n]);
                         break :blk .{
                             r1.resolve(self.sheet),
                             r2.resolve(self.sheet),
@@ -923,17 +855,17 @@ pub fn EvalContext(comptime Context: type) type {
             return total / @as(f64, @floatFromInt(total_items));
         }
 
-        fn evalMax(self: @This(), start: u32, end: u32) !f64 {
-            const tags = self.slice.nodes.items(.tags);
-            const data = self.slice.nodes.items(.data);
+        fn evalMax(self: @This(), start: Index, end: Index) !f64 {
+            const tags = self.nodes.items(.tags);
+            const data = self.nodes.items(.data);
 
-            var iter = self.slice.argIterator(start, end);
+            var iter = argIterator(self.nodes, start, end);
             var max: ?f64 = null;
 
             while (iter.next()) |i| {
                 const m = blk: {
-                    if (tags[i] == .range) {
-                        const r = data[i].range;
+                    if (tags[i.n] == .range) {
+                        const r = data[i.n].range;
                         break :blk try self.maxRange(r) orelse continue;
                     } else {
                         const res = try self.eval(i);
@@ -961,17 +893,17 @@ pub fn EvalContext(comptime Context: type) type {
             return max;
         }
 
-        fn evalMin(self: @This(), start: u32, end: u32) !f64 {
-            const tags = self.slice.nodes.items(.tags);
-            const data = self.slice.nodes.items(.data);
+        fn evalMin(self: @This(), start: Index, end: Index) !f64 {
+            const tags = self.nodes.items(.tags);
+            const data = self.nodes.items(.data);
 
-            var iter = self.slice.argIterator(start, end);
+            var iter = argIterator(self.nodes, start, end);
             var min: ?f64 = null;
 
             while (iter.next()) |i| {
                 const m = blk: {
-                    if (tags[i] == .range) {
-                        const r = data[i].range;
+                    if (tags[i.n] == .range) {
+                        const r = data[i.n].range;
                         break :blk try self.minRange(r) orelse continue;
                     } else {
                         const res = try self.eval(i);
@@ -1009,7 +941,8 @@ pub const DynamicEvalResult = union(enum) {
 
 /// Dynamically typed evaluation of expressions.
 pub fn eval(
-    ast: Ast,
+    nodes: NodeSlice,
+    root_node: Index,
     sheet: *Sheet,
     /// Strings required by the expression. String literal nodes contain offsets
     /// into this buffer. If the expression has no string literals then this
@@ -1024,13 +957,13 @@ pub fn eval(
 
     const ctx = EvalContext(@TypeOf(context)){
         .sheet = sheet,
-        .slice = ast.toSlice(),
+        .nodes = nodes,
         .allocator = arena.allocator(),
         .strings = strings,
         .context = context,
     };
 
-    const res = try ctx.eval(ast.rootNodeIndex());
+    const res = try ctx.eval(root_node);
 
     // TODO: Remove string allocation from arena list and shrink, rather than copying.
     return switch (res) {
@@ -1067,7 +1000,13 @@ test "Parse and Eval Expression" {
 
             const sheet = try Sheet.create(t.allocator);
             defer sheet.destroy();
-            const res = ast.eval(sheet, expr, Context{}) catch |err| {
+            const res = eval(
+                ast.nodes.slice(),
+                ast.rootNodeIndex(),
+                sheet,
+                expr,
+                Context{},
+            ) catch |err| {
                 return if (err != expected) err else {};
             };
             const n = res.number;
@@ -1124,10 +1063,16 @@ test "Functions on Ranges" {
             var ast = try fromExpression(t.allocator, expr);
             defer ast.deinit(t.allocator);
 
-            try ast.anchor(sheet);
+            try anchor(ast.nodes.slice(), .from(ast.nodes.len - 1), sheet);
 
             try sheet.update();
-            const res = try ast.eval(sheet, "", Sheet.EvalContext{ .sheet = sheet });
+            const res = try eval(
+                ast.nodes.slice(),
+                ast.rootNodeIndex(),
+                sheet,
+                "",
+                Sheet.EvalContext{ .sheet = sheet },
+            );
             try std.testing.expectApproxEqRel(expected, res.number, 0.0001);
         }
     };
@@ -1201,15 +1146,28 @@ test "Splice" {
 
     var ast = try fromSource(allocator, "let a0 = 100 * 3 + 5 / 2 + @avg(1, 10)");
 
-    ast.splice(ast.rootNode().assignment.rhs);
+    var slice = ast.nodes.slice();
+    splice(&slice, ast.rootNode().assignment.rhs);
+    ast.nodes = slice.toMultiArrayList();
     const sheet = try Sheet.create(t.allocator);
     defer sheet.destroy();
-    try t.expectApproxEqRel(@as(f64, 308), (try ast.eval(sheet, "", Context{})).number, 0.0001);
-    try t.expectEqual(@as(usize, 11), ast.nodes.len);
+    try t.expectApproxEqRel(
+        308,
+        (try eval(ast.nodes.slice(), ast.rootNodeIndex(), sheet, "", Context{})).number,
+        0.0001,
+    );
+    try t.expectEqual(11, ast.nodes.len);
 
-    ast.splice(ast.rootNode().add.rhs);
-    try t.expectApproxEqRel(@as(f64, 5.5), (try ast.eval(sheet, "", Context{})).number, 0.0001);
-    try t.expectEqual(@as(usize, 3), ast.nodes.len);
+    slice = ast.nodes.slice();
+    splice(&slice, ast.rootNode().add.rhs);
+    ast.nodes = slice.toMultiArrayList();
+
+    try t.expectApproxEqRel(
+        5.5,
+        (try eval(ast.nodes.slice(), ast.rootNodeIndex(), sheet, "", Context{})).number,
+        0.0001,
+    );
+    try t.expectEqual(3, ast.nodes.len);
 }
 
 // test "StringEval" {
@@ -1269,7 +1227,12 @@ test "DupeStrings" {
         var ast = try fromSource(t.allocator, source);
         defer ast.deinit(t.allocator);
 
-        const strings = try ast.dupeStrings(t.allocator, source);
+        const strings = try dupeStrings(
+            t.allocator,
+            source,
+            ast.nodes.slice(),
+            .from(ast.nodes.len - 1),
+        );
         defer t.allocator.free(strings);
 
         try t.expectEqualStrings("this is epicnicestring!", strings);
@@ -1280,7 +1243,12 @@ test "DupeStrings" {
         var ast = try fromSource(t.allocator, source);
         defer ast.deinit(t.allocator);
 
-        try t.expectEqualStrings("", try ast.dupeStrings(t.allocator, source));
+        try t.expectEqualStrings("", try dupeStrings(
+            t.allocator,
+            source,
+            ast.nodes.slice(),
+            .from(ast.nodes.len - 1),
+        ));
     }
 }
 
@@ -1360,7 +1328,7 @@ test "Print" {
         defer ast.deinit(t.allocator);
 
         var buf = std.BoundedArray(u8, 4096){};
-        try ast.print(sheet, expr, buf.writer());
+        try print(ast.nodes.slice(), ast.rootNodeIndex(), sheet, expr, buf.writer());
         try t.expectEqualStrings(expected, buf.constSlice());
     }
 }

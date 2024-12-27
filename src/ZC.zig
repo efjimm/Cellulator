@@ -849,8 +849,11 @@ fn parseCommand(self: *Self, str: []const u8) !void {
     errdefer ast.deinit(self.sheet.allocator);
 
     const op = ast.rootNode().assignment;
-    const pos = ast.nodes.items(.data)[op.lhs].pos;
-    ast.splice(op.rhs);
+    const pos = ast.nodes.items(.data)[op.lhs.n].pos;
+
+    var slice = ast.nodes.slice();
+    Ast.splice(&slice, op.rhs);
+    ast.nodes = slice.toMultiArrayList();
 
     try self.setCell(pos, str, ast, .{});
     self.sheet.endUndoGroup();

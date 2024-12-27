@@ -56,6 +56,8 @@ pub fn MultiArrayList(comptime T: type) type {
             else => @compileError("MultiArrayList only supports structs and tagged unions"),
         };
 
+        pub const empty: @This() = .{};
+
         pub const Field = meta.FieldEnum(Elem);
 
         /// A MultiArrayList.Slice contains cached start pointers for each field in the list.

@@ -21,15 +21,16 @@ allocator: Allocator,
 
 const String = @import("Ast.zig").String;
 const Node = @import("Ast.zig").Node;
+const Index = @import("Ast.zig").Index;
 
 pub const BinaryOperator = packed struct {
-    lhs: u32,
-    rhs: u32,
+    lhs: Index,
+    rhs: Index,
 };
 
 pub const Builtin = packed struct {
     tag: Tag,
-    first_arg: u32,
+    first_arg: Index,
 
     const Tag = enum(u8) {
         sum,
@@ -98,7 +99,7 @@ pub fn parse(parser: *Parser) ParseError!void {
 }
 
 /// Statement <- 'let' Assignment
-fn parseStatement(parser: *Parser) ParseError!u32 {
+fn parseStatement(parser: *Parser) ParseError!Index {
     const token = parser.eatTokenMulti(.{
         .keyword_let,
     }) orelse return error.UnexpectedToken;
@@ -108,7 +109,7 @@ fn parseStatement(parser: *Parser) ParseError!u32 {
     };
 }
 
-fn parseStringLiteral(parser: *Parser) ParseError!u32 {
+fn parseStringLiteral(parser: *Parser) ParseError!Index {
     const token = parser.eatTokenMulti(.{
         .double_string_literal,
         .single_string_literal,
@@ -126,7 +127,7 @@ fn parseStringLiteral(parser: *Parser) ParseError!u32 {
 }
 
 /// Assignment <- CellReference '=' Expression
-fn parseAssignment(parser: *Parser) ParseError!u32 {
+fn parseAssignment(parser: *Parser) ParseError!Index {
     const lhs = try parser.parseCellName();
     _ = try parser.expectToken(.equals_sign);
     const rhs = try parser.parseExpression();
@@ -140,12 +141,12 @@ fn parseAssignment(parser: *Parser) ParseError!u32 {
 }
 
 /// Expression <- AddExpr
-pub fn parseExpression(parser: *Parser) ParseError!u32 {
+pub fn parseExpression(parser: *Parser) ParseError!Index {
     return parser.parseAddExpr();
 }
 
 /// AddExpr <- MulExpr (('+' / '-' / '#') MulExpr)*
-fn parseAddExpr(parser: *Parser) !u32 {
+fn parseAddExpr(parser: *Parser) !Index {
     var index = try parser.parseMulExpr();
 
     while (parser.eatTokenMulti(.{ .plus, .minus, .hash })) |token| {
@@ -168,7 +169,7 @@ fn parseAddExpr(parser: *Parser) !u32 {
 }
 
 /// MulExpr <- PrimaryExpr (('*' / '/' / '%') PrimaryExpr)*
-fn parseMulExpr(parser: *Parser) !u32 {
+fn parseMulExpr(parser: *Parser) !Index {
     var index = try parser.parsePrimaryExpr();
 
     while (parser.eatTokenMulti(.{ .asterisk, .forward_slash, .percent })) |token| {
@@ -191,7 +192,7 @@ fn parseMulExpr(parser: *Parser) !u32 {
 }
 
 /// PrimaryExpr <- Number / Range / StsringLiteral / Builtin / '(' Expression ')'
-fn parsePrimaryExpr(parser: *Parser) !u32 {
+fn parsePrimaryExpr(parser: *Parser) !Index {
     return switch (parser.current_token.tag) {
         .minus, .plus, .number => parser.parseNumber(),
         .cell_name => parser.parseRange(),
@@ -210,7 +211,7 @@ fn parsePrimaryExpr(parser: *Parser) !u32 {
 }
 
 /// Range <- CellReference (':' CellReference)?
-fn parseRange(parser: *Parser) !u32 {
+fn parseRange(parser: *Parser) !Index {
     const lhs = try parser.parseCellName();
 
     if (parser.eatToken(.colon) == null) return lhs;
@@ -226,7 +227,7 @@ fn parseRange(parser: *Parser) !u32 {
 }
 
 /// Builtin <- builtin '(' ArgList? ')'
-fn parseFunction(parser: *Parser) !u32 {
+fn parseFunction(parser: *Parser) !Index {
     const token = try parser.expectToken(.builtin);
     _ = try parser.expectToken(.lparen);
 
@@ -257,7 +258,7 @@ fn parseFunction(parser: *Parser) !u32 {
 }
 
 /// ArgList <- Expression (',' Expression)*
-fn parseArgList(parser: *Parser) !u32 {
+fn parseArgList(parser: *Parser) !Index {
     const start = try parser.parseExpression();
 
     while (parser.eatToken(.comma)) |_| {
@@ -268,7 +269,7 @@ fn parseArgList(parser: *Parser) !u32 {
 }
 
 /// Number <- ('+' / '-')? ('0'-'9')+
-fn parseNumber(parser: *Parser) !u32 {
+fn parseNumber(parser: *Parser) !Index {
     const is_positive = parser.eatToken(.minus) == null;
     if (is_positive) _ = parser.eatToken(.plus);
 
@@ -285,7 +286,7 @@ fn parseNumber(parser: *Parser) !u32 {
 }
 
 /// CellReference <- ('a'-'z' / 'A'-'Z')+ ('0'-'9')+
-fn parseCellName(parser: *Parser) !u32 {
+fn parseCellName(parser: *Parser) !Index {
     const token = try parser.expectToken(.cell_name);
     const text = token.text(parser.source());
 
@@ -296,8 +297,8 @@ fn parseCellName(parser: *Parser) !u32 {
     });
 }
 
-fn addNode(parser: *Parser, data: Node) Allocator.Error!u32 {
-    const ret: u32 = @intCast(parser.nodes.len);
+fn addNode(parser: *Parser, data: Node) Allocator.Error!Index {
+    const ret: Index = .from(@intCast(parser.nodes.len));
     try parser.nodes.append(parser.allocator, data);
     return ret;
 }
@@ -451,13 +452,13 @@ test "Node contents" {
             .{ .number = 5.0 },
             .{ .number = 3.0 },
             .{ .number = 2.0 },
-            .{ .sub = .{ .lhs = 2, .rhs = 3 } },
-            .{ .mul = .{ .lhs = 1, .rhs = 4 } },
+            .{ .sub = .{ .lhs = .from(2), .rhs = .from(3) } },
+            .{ .mul = .{ .lhs = .from(1), .rhs = .from(4) } },
             .{ .number = 2.0 },
             .{ .number = 1.0 },
-            .{ .add = .{ .lhs = 6, .rhs = 7 } },
-            .{ .div = .{ .lhs = 5, .rhs = 8 } },
-            .{ .assignment = .{ .lhs = 0, .rhs = 9 } },
+            .{ .add = .{ .lhs = .from(6), .rhs = .from(7) } },
+            .{ .div = .{ .lhs = .from(5), .rhs = .from(8) } },
+            .{ .assignment = .{ .lhs = .from(0), .rhs = .from(9) } },
         },
     );
     try testNodes(
@@ -476,8 +477,8 @@ test "Node contents" {
                     .end = "let crxp65535 = 'this is epic' # 'nice".len,
                 },
             },
-            .{ .concat = .{ .lhs = 1, .rhs = 2 } },
-            .{ .assignment = .{ .lhs = 0, .rhs = 3 } },
+            .{ .concat = .{ .lhs = .from(1), .rhs = .from(2) } },
+            .{ .assignment = .{ .lhs = .from(0), .rhs = .from(3) } },
         },
     );
 }
