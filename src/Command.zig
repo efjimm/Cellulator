@@ -46,7 +46,7 @@ pub fn submit(self: *Self, allocator: Allocator) Allocator.Error![:0]const u8 {
         return std.mem.span(ptr);
     }
 
-    try self.history_buf.ensureUnusedCapacity(allocator, self.buffer.len);
+    try self.history_buf.ensureUnusedCapacity(allocator, self.buffer.len + 1);
 
     const start_index: u32 = @intCast(self.history_buf.items.len);
     self.history_buf.appendSliceAssumeCapacity(self.buffer.items());
