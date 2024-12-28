@@ -84,11 +84,6 @@ pub fn init(
     return ret;
 }
 
-pub fn deinit(parser: *Parser) void {
-    parser.nodes.deinit(parser.allocator);
-    parser.* = undefined;
-}
-
 pub fn source(parser: Parser) []const u8 {
     return parser.tokenizer.bytes;
 }
@@ -334,7 +329,7 @@ test "parser" {
     const testParser = struct {
         fn func(bytes: []const u8, node_tags: []const std.meta.Tag(Node)) !void {
             var parser = Parser.init(t.allocator, .{ .bytes = bytes }, .{});
-            defer parser.deinit();
+            defer parser.nodes.deinit(t.allocator);
             try parser.parse();
             for (node_tags, parser.nodes.items(.tags)) |expected, actual| {
                 t.expectEqual(expected, actual) catch |err| {
@@ -349,7 +344,7 @@ test "parser" {
     const testParseError = struct {
         fn func(bytes: []const u8, err: ?anyerror) !void {
             var parser = Parser.init(t.allocator, .{ .bytes = bytes }, .{});
-            defer parser.deinit();
+            defer parser.nodes.deinit(t.allocator);
             if (err) |e| {
                 try t.expectError(e, parser.parse());
             } else {
@@ -432,7 +427,7 @@ test "Node contents" {
     const testNodes = struct {
         fn func(bytes: []const u8, nodes: []const Node) !void {
             var parser = Parser.init(t.allocator, .{ .bytes = bytes }, .{});
-            defer parser.deinit();
+            defer parser.nodes.deinit(t.allocator);
 
             try parser.parse();
             const slice = parser.nodes.slice();

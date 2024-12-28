@@ -71,6 +71,12 @@ pub fn MultiArrayList(comptime T: type) type {
             len: u32,
             capacity: u32,
 
+            pub const empty: Slice = .{
+                .ptrs = undefined,
+                .len = 0,
+                .capacity = 0,
+            };
+
             pub fn items(self: Slice, comptime field: Field) []FieldType(field) {
                 const F = FieldType(field);
                 if (self.capacity == 0) {

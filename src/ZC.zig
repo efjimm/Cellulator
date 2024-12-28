@@ -245,10 +245,10 @@ pub fn setCell(
     self: *Self,
     pos: Position,
     source: []const u8,
-    ast: Ast,
+    expr_root: Ast.Index,
     opts: ChangeCellOpts,
 ) !void {
-    try self.sheet.setCell(pos, source, ast, .{});
+    try self.sheet.setCell(pos, source, expr_root, .{});
     self.tui.update.cursor = true;
     self.tui.update.cells = true;
     if (opts.emit_event)
@@ -257,10 +257,10 @@ pub fn setCell(
 
 /// Sets the cell at `pos` to the expression represented by `expr`.
 pub fn setCellString(self: *Self, pos: Position, expr: []const u8, opts: ChangeCellOpts) !void {
-    var ast: Ast = try .fromExpression(self.sheet.allocator, expr);
-    errdefer ast.deinit(self.sheet.allocator);
+    // TODO: This leaks memory if `setCell` fails, which can only happen on OOM.
+    const expr_root = try Ast.fromExpression(self.sheet, expr);
 
-    try self.setCell(pos, expr, ast, opts);
+    try self.setCell(pos, expr, expr_root, opts);
 }
 
 // TODO: merge this and `deleteCell`
@@ -845,17 +845,14 @@ fn parseCommand(self: *Self, str: []const u8) !void {
         else => {},
     }
 
-    var ast: Ast = try .fromSource(self.sheet.allocator, str);
-    errdefer ast.deinit(self.sheet.allocator);
+    const expr_root = try Ast.fromSource(self.sheet, str);
 
-    const op = ast.rootNode().assignment;
-    const pos = ast.nodes.items(.data)[op.lhs.n].pos;
+    const op = self.sheet.ast_nodes.items(.data)[expr_root.n].assignment;
+    const pos = self.sheet.ast_nodes.items(.data)[op.lhs.n].pos;
 
-    var slice = ast.nodes.slice();
-    Ast.splice(&slice, op.rhs);
-    ast.nodes = slice.toMultiArrayList();
+    const spliced_root = Ast.splice(&self.sheet.ast_nodes, op.rhs);
 
-    try self.setCell(pos, str, ast, .{});
+    try self.setCell(pos, str, spliced_root, .{});
     self.sheet.endUndoGroup();
 }
 
@@ -994,7 +991,7 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
         .fill => {
             // TODO: This parses differently than ranges in assignments, due to using a WordIterator
 
-            const range = blk: {
+            const range: Rect = blk: {
                 const string = iter.next() orelse return error.InvalidSyntax;
                 var range_iter = std.mem.splitScalar(u8, string, ':');
                 const lhs = range_iter.next() orelse return error.InvalidSyntax;
@@ -1024,14 +1021,16 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
             defer self.sheet.endUndoGroup();
 
             // TODO: pre-allocate
-            var i: f64 = value;
-            for (range.tl.y..@as(usize, range.br.y) + 1) |y| {
-                for (range.tl.x..@as(usize, range.br.x) + 1) |x| {
-                    var ast: Ast = .empty;
-                    errdefer ast.deinit(self.sheet.allocator);
+            var nodes = self.sheet.ast_nodes.toMultiArrayList();
+            defer self.sheet.ast_nodes = nodes.slice();
+            try nodes.ensureUnusedCapacity(self.sheet.allocator, @intCast(range.area()));
 
-                    try ast.nodes.append(self.sheet.allocator, .{ .number = i });
-                    try self.setCell(.{ .y = @intCast(y), .x = @intCast(x) }, "", ast, .{});
+            var i: f64 = value;
+            for (range.tl.y..@as(u64, range.br.y) + 1) |y| {
+                for (range.tl.x..@as(u64, range.br.x) + 1) |x| {
+                    const expr_root: Ast.Index = .from(nodes.len);
+                    nodes.appendAssumeCapacity(.{ .number = i });
+                    try self.setCell(.{ .y = @intCast(y), .x = @intCast(x) }, "", expr_root, .{});
                     i += increment;
                 }
             }

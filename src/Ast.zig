@@ -1,5 +1,6 @@
 //! Basic expression parser. Does not attempt error recovery and returns immediately on fatal
 //! errors. Contains a `MultiArrayList` of `Node`s that is sorted in reverse topological order.
+// TODO: Pretty much all of this file can be moved to Sheet.zig
 
 const std = @import("std");
 const Position = @import("Position.zig").Position;
@@ -83,52 +84,13 @@ comptime {
     }
 }
 
-nodes: MultiArrayList(Node),
-
-const Ast = @This();
-pub const empty: Ast = .{ .nodes = .{} };
-
-/// Anchors the AST to the given sheet, by replacing all 'dumb' coordinate references with
-/// references to the row/column handles in `sheet`.
-pub fn anchor(nodes: NodeSlice, root: Index, sheet: *Sheet) Allocator.Error!void {
-    const start = leftMostChild(nodes, root);
-    const tags = nodes.items(.tags)[start.n .. root.n + 1];
-    const data = nodes.items(.data)[start.n .. root.n + 1];
-
-    const pos_count = blk: {
-        var count: u32 = 0;
-        for (tags) |tag|
-            count += @intFromBool(tag == .pos);
-        break :blk count;
-    };
-
-    if (pos_count == 0) return;
-
-    try sheet.rows.ensureUnusedCapacity(sheet.allocator, pos_count);
-    try sheet.cols.ensureUnusedCapacity(sheet.allocator, pos_count);
-
-    for (tags, data) |*tag, *d| {
-        if (tag.* == .pos) {
-            const row = sheet.createRow(d.pos.y) catch unreachable;
-            const col = sheet.createColumn(d.pos.x) catch unreachable;
-
-            const ref: Reference = .{
-                .row = row,
-                .col = col,
-            };
-
-            tag.* = .ref_rel_rel;
-            d.* = .{ .ref_rel_rel = ref };
-        }
-    }
-}
-
 pub fn dupeStrings(
     allocator: Allocator,
     source: []const u8,
     nodes: NodeSlice,
     root_node: Index,
 ) Allocator.Error![]const u8 {
+    assert(root_node.n < nodes.len);
     const start = leftMostChild(nodes, root_node);
     assert(start.n <= root_node.n);
 
@@ -179,52 +141,43 @@ pub fn dupeStrings(
     return list.toOwnedSlice(allocator);
 }
 
-pub fn fromSource(allocator: Allocator, source: []const u8) ParseError!Ast {
-    var ast: Ast = .empty;
+pub fn fromSource(sheet: *Sheet, source: []const u8) ParseError!Index {
     var parser = Parser.init(
-        allocator,
+        sheet.allocator,
         .init(source),
-        .{ .nodes = ast.nodes },
+        .{ .nodes = sheet.ast_nodes.toMultiArrayList() },
     );
-    errdefer parser.deinit();
+
+    const old_len = sheet.ast_nodes.len;
+
+    // The parser could re-allocate the underlying nodes
+    defer sheet.ast_nodes = parser.nodes.slice();
+    errdefer sheet.ast_nodes.len = old_len;
 
     try parser.parse();
 
-    ast.nodes = parser.nodes;
-    return ast;
+    return .from(parser.nodes.len - 1);
 }
 
-pub fn fromExpression(allocator: Allocator, source: []const u8) ParseError!Ast {
+pub fn fromExpression(sheet: *Sheet, source: []const u8) ParseError!Index {
     const tokenizer = Tokenizer.init(source);
 
-    var parser = Parser.init(allocator, tokenizer, .{});
-    errdefer parser.deinit();
+    var parser = Parser.init(
+        sheet.allocator,
+        tokenizer,
+        .{ .nodes = sheet.ast_nodes.toMultiArrayList() },
+    );
+
+    const old_len = sheet.ast_nodes.len;
+
+    // The parser could re-allocate the underlying nodes
+    defer sheet.ast_nodes = parser.nodes.slice();
+    errdefer sheet.ast_nodes.len = old_len;
 
     _ = try parser.parseExpression();
     _ = try parser.expectToken(.eof);
 
-    return .{
-        .nodes = parser.nodes,
-    };
-}
-
-pub fn fromStringExpression(allocator: Allocator, source: []const u8) ParseError!Ast {
-    const tokenizer = Tokenizer.init(source);
-
-    var parser = Parser.init(allocator, tokenizer, .{});
-    errdefer parser.deinit();
-
-    _ = try parser.parseExpression();
-    _ = try parser.expectToken(.eof);
-
-    return .{
-        .nodes = parser.nodes,
-    };
-}
-
-pub fn deinit(ast: *Ast, allocator: Allocator) void {
-    ast.nodes.deinit(allocator);
-    ast.* = .empty;
+    return .from(parser.nodes.len - 1);
 }
 
 pub inline fn printFromIndex(
@@ -453,27 +406,15 @@ pub fn argIteratorForwards(nodes: NodeSlice, start: Index, end: Index) ArgIterat
     };
 }
 
-pub fn rootNode(ast: Ast) Node {
-    return ast.nodes.get(ast.rootNodeIndex().n);
-}
-
-pub fn rootNodeIndex(ast: Ast) Index {
-    return .from(@intCast(ast.nodes.len - 1));
-}
-
-pub fn rootTag(ast: Ast) std.meta.Tag(Node) {
-    return ast.nodes.items(.tags)[ast.nodes.len - 1];
-}
-
 /// Removes all nodes except for the given index and its children
 /// Nodes in the list are already sorted in reverse topological order which allows us to overwrite
 /// nodes sequentially without loss. This function preserves reverse topological order.
-pub fn splice(nodes: *NodeSlice, new_root: Index) void {
+pub fn splice(nodes: *NodeSlice, new_root: Index) Index {
     const old_root: Index = .from(nodes.len - 1);
     const old_first = leftMostChild(nodes.*, old_root);
 
     const new_first = leftMostChild(nodes.*, new_root);
-    const new_len = new_root.n + 1 - new_first.n;
+    const new_len = nodes.len - (new_first.n - old_first.n) - (old_root.n - new_root.n);
 
     assert(old_first.n <= new_first.n);
 
@@ -511,7 +452,8 @@ pub fn splice(nodes: *NodeSlice, new_root: Index) void {
         nodes.set(@intCast(i), n);
     }
 
-    nodes.len = old_first.n + new_len;
+    nodes.len = new_len;
+    return .from(nodes.len - 1);
 }
 
 pub fn print(
@@ -993,16 +935,16 @@ test "Parse and Eval Expression" {
 
     const testExpr = struct {
         fn func(expected: Error!f64, expr: []const u8) !void {
-            var ast = fromExpression(t.allocator, expr) catch |err| {
-                return if (err != expected) err else {};
-            };
-            defer ast.deinit(t.allocator);
-
             const sheet = try Sheet.create(t.allocator);
             defer sheet.destroy();
+
+            const expr_root = fromExpression(sheet, expr) catch |err| {
+                return if (err != expected) err else {};
+            };
+
             const res = eval(
-                ast.nodes.slice(),
-                ast.rootNodeIndex(),
+                sheet.ast_nodes,
+                expr_root,
                 sheet,
                 expr,
                 Context{},
@@ -1012,13 +954,7 @@ test "Parse and Eval Expression" {
             const n = res.number;
 
             const val = try expected;
-            std.testing.expectApproxEqRel(val, n, 0.0001) catch |err| {
-                for (0..ast.nodes.len) |i| {
-                    const u = ast.nodes.get(@intCast(i));
-                    std.debug.print("{}\n", .{u});
-                }
-                return err;
-            };
+            try std.testing.expectApproxEqRel(val, n, 0.0001);
         }
     }.func;
 
@@ -1055,20 +991,19 @@ test "Functions on Ranges" {
             const sheet = try Sheet.create(t.allocator);
             defer sheet.destroy();
 
-            try sheet.setCell(try Position.fromAddress("A0"), "0", try Ast.fromExpression(t.allocator, "0"), .{});
-            try sheet.setCell(try Position.fromAddress("B0"), "100", try Ast.fromExpression(t.allocator, "100"), .{});
-            try sheet.setCell(try Position.fromAddress("A1"), "500", try Ast.fromExpression(t.allocator, "500"), .{});
-            try sheet.setCell(try Position.fromAddress("B1"), "333.33", try Ast.fromExpression(t.allocator, "333.33"), .{});
+            try sheet.setCell(try Position.fromAddress("A0"), "0", try fromExpression(sheet, "0"), .{});
+            try sheet.setCell(try Position.fromAddress("B0"), "100", try fromExpression(sheet, "100"), .{});
+            try sheet.setCell(try Position.fromAddress("A1"), "500", try fromExpression(sheet, "500"), .{});
+            try sheet.setCell(try Position.fromAddress("B1"), "333.33", try fromExpression(sheet, "333.33"), .{});
 
-            var ast = try fromExpression(t.allocator, expr);
-            defer ast.deinit(t.allocator);
+            const expr_root = try fromExpression(sheet, expr);
 
-            try anchor(ast.nodes.slice(), .from(ast.nodes.len - 1), sheet);
+            try sheet.anchorAst(expr_root);
 
             try sheet.update();
             const res = try eval(
-                ast.nodes.slice(),
-                ast.rootNodeIndex(),
+                sheet.ast_nodes,
+                expr_root,
                 sheet,
                 "",
                 Sheet.EvalContext{ .sheet = sheet },
@@ -1130,9 +1065,6 @@ test "Functions on Ranges" {
 
 test "Splice" {
     const t = std.testing;
-    var arena = std.heap.ArenaAllocator.init(t.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
 
     const Context = struct {
         pub fn evalCell(_: @This(), _: Reference) !EvalResult {
@@ -1144,30 +1076,29 @@ test "Splice" {
         }
     };
 
-    var ast = try fromSource(allocator, "let a0 = 100 * 3 + 5 / 2 + @avg(1, 10)");
-
-    var slice = ast.nodes.slice();
-    splice(&slice, ast.rootNode().assignment.rhs);
-    ast.nodes = slice.toMultiArrayList();
     const sheet = try Sheet.create(t.allocator);
     defer sheet.destroy();
+
+    const expr_root = try fromSource(sheet, "let a0 = 100 * 3 + 5 / 2 + @avg(1, 10)");
+    const root_node = sheet.ast_nodes.get(expr_root.n);
+
+    var spliced_root = splice(&sheet.ast_nodes, root_node.assignment.rhs);
+
     try t.expectApproxEqRel(
         308,
-        (try eval(ast.nodes.slice(), ast.rootNodeIndex(), sheet, "", Context{})).number,
+        (try eval(sheet.ast_nodes, spliced_root, sheet, "", Context{})).number,
         0.0001,
     );
-    try t.expectEqual(11, ast.nodes.len);
+    try t.expectEqual(11, sheet.ast_nodes.len);
 
-    slice = ast.nodes.slice();
-    splice(&slice, ast.rootNode().add.rhs);
-    ast.nodes = slice.toMultiArrayList();
+    spliced_root = splice(&sheet.ast_nodes, sheet.ast_nodes.get(spliced_root.n).add.rhs);
 
     try t.expectApproxEqRel(
         5.5,
-        (try eval(ast.nodes.slice(), ast.rootNodeIndex(), sheet, "", Context{})).number,
+        (try eval(sheet.ast_nodes, spliced_root, sheet, "", Context{})).number,
         0.0001,
     );
-    try t.expectEqual(3, ast.nodes.len);
+    try t.expectEqual(3, sheet.ast_nodes.len);
 }
 
 // test "StringEval" {
@@ -1222,16 +1153,18 @@ test "Splice" {
 
 test "DupeStrings" {
     const t = std.testing;
+    const sheet = try Sheet.create(t.allocator);
+    defer sheet.destroy();
+
     {
         const source = "let a0 = 'this is epic' # 'nice' # 'string!'";
-        var ast = try fromSource(t.allocator, source);
-        defer ast.deinit(t.allocator);
+        const expr_root = try fromSource(sheet, source);
 
         const strings = try dupeStrings(
             t.allocator,
             source,
-            ast.nodes.slice(),
-            .from(ast.nodes.len - 1),
+            sheet.ast_nodes,
+            expr_root,
         );
         defer t.allocator.free(strings);
 
@@ -1240,14 +1173,13 @@ test "DupeStrings" {
 
     {
         const source = "let a0 = b0";
-        var ast = try fromSource(t.allocator, source);
-        defer ast.deinit(t.allocator);
+        const expr_root = try fromSource(sheet, source);
 
         try t.expectEqualStrings("", try dupeStrings(
             t.allocator,
             source,
-            ast.nodes.slice(),
-            .from(ast.nodes.len - 1),
+            sheet.ast_nodes,
+            expr_root,
         ));
     }
 }
@@ -1324,11 +1256,10 @@ test "Print" {
 
     inline for (data) |d| {
         const expr, const expected = d;
-        var ast = try fromExpression(t.allocator, expr);
-        defer ast.deinit(t.allocator);
+        const expr_root = try fromExpression(sheet, expr);
 
         var buf = std.BoundedArray(u8, 4096){};
-        try print(ast.nodes.slice(), ast.rootNodeIndex(), sheet, expr, buf.writer());
+        try print(sheet.ast_nodes, expr_root, sheet, expr, buf.writer());
         try t.expectEqualStrings(expected, buf.constSlice());
     }
 }
