@@ -722,7 +722,7 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var total: f64 = 0;
-            var iter = self.sheet.cell_tree.searchIterator(self.allocator, range);
+            var iter = try self.sheet.cell_tree.searchIterator(self.allocator, range);
             while (try iter.next()) |kv| {
                 const res = try self.context.evalCellByPtr(kv.key);
                 total += try res.toNumber(0);
@@ -755,7 +755,7 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var total: f64 = 1;
-            var iter = self.sheet.cell_tree.searchIterator(self.allocator, range);
+            var iter = try self.sheet.cell_tree.searchIterator(self.allocator, range);
 
             while (try iter.next()) |kv| {
                 const res = try self.context.evalCellByPtr(kv.key);
@@ -825,7 +825,7 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var max: ?f64 = null;
-            var iter = self.sheet.cell_tree.searchIterator(self.allocator, range);
+            var iter = try self.sheet.cell_tree.searchIterator(self.allocator, range);
             while (try iter.next()) |kv| {
                 const res = try self.context.evalCellByPtr(kv.key);
                 const n = try res.toNumberOrNull() orelse continue;
@@ -863,7 +863,7 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var min: ?f64 = null;
-            var iter = self.sheet.cell_tree.searchIterator(self.allocator, range);
+            var iter = try self.sheet.cell_tree.searchIterator(self.allocator, range);
             while (try iter.next()) |kv| {
                 const res = try self.context.evalCellByPtr(kv.key);
                 const n = try res.toNumberOrNull() orelse continue;

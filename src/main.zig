@@ -42,10 +42,10 @@ pub fn main() !void {
         }
     }
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    // defer _ = gpa.deinit();
 
-    try zc.init(gpa.allocator(), .{ .filepath = filepath });
+    try zc.init(std.heap.c_allocator, .{ .filepath = filepath });
     defer zc.deinit();
 
     try zc.run();

@@ -248,6 +248,11 @@ pub const Position = packed struct {
             return dx * dy;
         }
 
+        /// Returns true if any one of the coordinates in `r1` equals the corresponding coordinate in `r2`.
+        pub fn anyMatch(r1: Rect, r2: Rect) bool {
+            return Position.anyMatch(r1.tl, r2.tl) or Position.anyMatch(r1.br, r2.br);
+        }
+
         pub fn format(
             range: Rect,
             comptime _: []const u8,

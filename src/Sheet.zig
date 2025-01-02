@@ -39,7 +39,7 @@ undo_end_markers: std.AutoHashMapUnmanaged(u32, Marker) = .{},
 /// Range tree mapping ranges to a list of ranges that depend on the first.
 /// Used to query whether a cell belongs to a range and then update the cells
 /// that depend on that range.
-rtree: DependentTree(4),
+dependents: DependentTree(4),
 /// Range tree containing just the positions of extant cells.
 /// Used for quick lookup of all extant cells in a range.
 cell_tree: RTree(*Cell, void, 4),
@@ -72,7 +72,7 @@ pub fn create(allocator: Allocator) !*Sheet {
     sheet.* = .{
         .allocator = allocator,
         .cell_tree = .{ .sheet = sheet },
-        .rtree = .init(sheet),
+        .dependents = .init(sheet),
         .rows = .init(1),
         .cols = .init(1),
         .ast_nodes = .empty,
@@ -92,7 +92,7 @@ pub fn destroy(sheet: *Sheet) void {
 
     sheet.clearAndFreeUndos(.undo);
     sheet.clearAndFreeUndos(.redo);
-    sheet.rtree.deinit(sheet.allocator);
+    sheet.dependents.deinit(sheet.allocator);
     sheet.cell_tree.deinit(sheet.allocator);
 
     sheet.queued_cells.deinit(sheet.allocator);
@@ -267,8 +267,8 @@ pub fn clearRetainingCapacity(sheet: *Sheet) void {
     sheet.cell_tree.deinit(sheet.allocator);
     sheet.cell_tree = .{ .sheet = sheet };
 
-    sheet.rtree.deinit(sheet.allocator);
-    sheet.rtree = .init(sheet);
+    sheet.dependents.deinit(sheet.allocator);
+    sheet.dependents = .init(sheet);
 
     var strings_iter = sheet.strings.valueIterator();
     while (strings_iter.next()) |string_ptr| {
@@ -449,7 +449,7 @@ fn addRangeDependents(
         dependent.rect(sheet).tl,
         range.rect(sheet),
     });
-    return sheet.rtree.put(sheet, range, dependent);
+    return sheet.dependents.put(range, dependent);
 }
 
 fn addExpressionDependents(
@@ -469,7 +469,7 @@ fn removeRangeDependents(
     dependent: *Cell,
     range: Range,
 ) Allocator.Error!void {
-    return sheet.rtree.removeValue(sheet, range, dependent);
+    return sheet.dependents.removeValue(range, dependent);
 }
 
 /// Removes `cell` as a dependent of all ranges referenced by `expr`.
@@ -497,7 +497,7 @@ fn createAnchorsForExpression(sheet: *Sheet, expr: ast) Allocator.Error!void {
 }
 
 pub fn firstCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
-    var iter = sheet.cell_tree.searchIterator(sheet.allocator, .{
+    var iter = try sheet.cell_tree.searchIterator(sheet.allocator, .{
         .tl = .{ .x = 0, .y = row },
         .br = .{ .x = std.math.maxInt(PosInt), .y = row },
     });
@@ -513,7 +513,7 @@ pub fn firstCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
 }
 
 pub fn lastCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
-    var iter = sheet.cell_tree.searchIterator(sheet.allocator, .{
+    var iter = try sheet.cell_tree.searchIterator(sheet.allocator, .{
         .tl = .{ .x = 0, .y = row },
         .br = .{ .x = std.math.maxInt(PosInt), .y = row },
     });
@@ -531,7 +531,7 @@ pub fn lastCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
 // TODO: Optimize these
 
 pub fn firstCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
-    var iter = sheet.cell_tree.searchIterator(sheet.allocator, .{
+    var iter = try sheet.cell_tree.searchIterator(sheet.allocator, .{
         .tl = .{ .x = col, .y = 0 },
         .br = .{ .x = col, .y = std.math.maxInt(PosInt) },
     });
@@ -547,7 +547,7 @@ pub fn firstCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
 }
 
 pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
-    var iter = sheet.cell_tree.searchIterator(sheet.allocator, .{
+    var iter = try sheet.cell_tree.searchIterator(sheet.allocator, .{
         .tl = .{ .x = col, .y = 0 },
         .br = .{ .x = col, .y = std.math.maxInt(PosInt) },
     });
@@ -567,9 +567,12 @@ pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
 // the first side in two, and so on, until the range is one cell wide.
 
 /// Given a range, find the first row that contains a cell
-fn findExtantRow(sheet: *Sheet, range: Rect, p: enum { first, last }) !?PosInt {
-    var r = range;
-    var iter = sheet.cell_tree.searchIterator(sheet.allocator, r);
+fn findExtantRow(sheet: *Sheet, rect: Rect, p: enum { first, last }) !?PosInt {
+    var sfa = std.heap.stackFallback(1024, sheet.allocator);
+    const allocator = sfa.get();
+
+    var r = rect;
+    var iter = try sheet.cell_tree.searchIterator(allocator, r);
     defer iter.deinit();
 
     if (try iter.next() == null) return null; // Range does not contain any cells
@@ -594,15 +597,18 @@ fn findExtantRow(sheet: *Sheet, range: Rect, p: enum { first, last }) !?PosInt {
             .last => .{ right, left },
         };
 
-        iter.reset(first, &sheet.cell_tree);
+        try iter.reset(first, &sheet.cell_tree);
         r = if (try iter.next() != null) first else last;
     } else unreachable;
 }
 
 /// Given a range, find the first column that contains a cell
 fn findExtantCol(sheet: *Sheet, range: Rect, p: enum { first, last }) !?PosInt {
+    var sfa = std.heap.stackFallback(1024, sheet.allocator);
+    const allocator = sfa.get();
+
     var r = range;
-    var iter = sheet.cell_tree.searchIterator(sheet.allocator, r);
+    var iter = try sheet.cell_tree.searchIterator(allocator, r);
     defer iter.deinit();
 
     if (try iter.next() == null) return null; // Range does not contain any cells
@@ -627,7 +633,7 @@ fn findExtantCol(sheet: *Sheet, range: Rect, p: enum { first, last }) !?PosInt {
             .last => .{ right, left },
         };
 
-        iter.reset(first, &sheet.cell_tree);
+        try iter.reset(first, &sheet.cell_tree);
         r = if (try iter.next() != null) first else last;
     } else unreachable;
 }
@@ -1068,7 +1074,7 @@ pub fn insertCellNode(
 
     try sheet.strings.ensureUnusedCapacity(sheet.allocator, 1);
 
-    try sheet.cell_tree.put(sheet, cell_ptr, {});
+    try sheet.cell_tree.put(cell_ptr, {});
     errdefer sheet.cell_tree.remove(cell_ptr) catch {};
 
     var entry = sheet.cell_treap.getEntryFor(new_node.key);
@@ -1288,7 +1294,7 @@ fn markDirty(
     cell: *Cell,
 ) Allocator.Error!void {
     sheet.search_buffer.clearRetainingCapacity();
-    try sheet.rtree.rtree.searchBuffer(
+    try sheet.dependents.rtree.searchBuffer(
         sheet.allocator,
         &sheet.search_buffer,
         Rect.initSinglePos(cell.position(sheet)),
@@ -1441,7 +1447,7 @@ pub const Cell = struct {
 /// Queues the dependents of `ref` for update.
 fn queueDependents(sheet: *Sheet, ref: Reference) Allocator.Error!void {
     sheet.search_buffer.clearRetainingCapacity();
-    try sheet.rtree.rtree.searchBuffer(
+    try sheet.dependents.rtree.searchBuffer(
         sheet.allocator,
         &sheet.search_buffer,
         ref.rect(sheet),
@@ -1614,7 +1620,7 @@ pub fn widthNeededForColumn(
 ) !u16 {
     var width: u16 = Column.default_width;
 
-    var iter = sheet.cell_tree.searchIterator(sheet.allocator, .{
+    var iter = try sheet.cell_tree.searchIterator(sheet.allocator, .{
         .tl = .{ .x = column_index, .y = 0 },
         .br = .{ .x = column_index, .y = std.math.maxInt(PosInt) },
     });
