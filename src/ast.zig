@@ -666,8 +666,10 @@ pub fn EvalContext(comptime Context: type) type {
 
             var total: f64 = 0;
             var iter = try self.sheet.cell_tree.searchIterator(self.allocator, range);
+            std.log.debug("Summing rect {}", .{range});
             while (try iter.next()) |kv| {
-                const res = try self.context.evalCellByPtr(kv.key);
+                std.log.debug("  Cell handle {d}", .{kv.key.n});
+                const res = try self.context.evalCellByHandle(kv.key);
                 total += try res.toNumber(0);
             }
 
@@ -701,7 +703,7 @@ pub fn EvalContext(comptime Context: type) type {
             var iter = try self.sheet.cell_tree.searchIterator(self.allocator, range);
 
             while (try iter.next()) |kv| {
-                const res = try self.context.evalCellByPtr(kv.key);
+                const res = try self.context.evalCellByHandle(kv.key);
                 total *= try res.toNumber(1);
             }
 
@@ -770,7 +772,7 @@ pub fn EvalContext(comptime Context: type) type {
             var max: ?f64 = null;
             var iter = try self.sheet.cell_tree.searchIterator(self.allocator, range);
             while (try iter.next()) |kv| {
-                const res = try self.context.evalCellByPtr(kv.key);
+                const res = try self.context.evalCellByHandle(kv.key);
                 const n = try res.toNumberOrNull() orelse continue;
                 if (max == null or n > max.?) max = n;
             }
@@ -808,7 +810,7 @@ pub fn EvalContext(comptime Context: type) type {
             var min: ?f64 = null;
             var iter = try self.sheet.cell_tree.searchIterator(self.allocator, range);
             while (try iter.next()) |kv| {
-                const res = try self.context.evalCellByPtr(kv.key);
+                const res = try self.context.evalCellByHandle(kv.key);
                 const n = try res.toNumberOrNull() orelse continue;
                 if (min == null or n < min.?) min = n;
             }
@@ -869,7 +871,7 @@ test "Parse and Eval Expression" {
             unreachable;
         }
 
-        pub fn evalCellByPtr(_: @This(), _: *Sheet.Cell) !EvalResult {
+        pub fn evalCellByHandle(_: @This(), _: Sheet.CellHandle) !EvalResult {
             unreachable;
         }
     };
@@ -1014,7 +1016,7 @@ test "Splice" {
             return .none;
         }
 
-        pub fn evalCellByPtr(_: @This(), _: *Sheet.Cell) !EvalResult {
+        pub fn evalCellByHandle(_: @This(), _: Sheet.CellHandle) !EvalResult {
             return .none;
         }
     };

@@ -23,8 +23,20 @@ comptime {
     assert(@sizeOf(u64) <= @sizeOf(Reference));
 }
 
+pub fn rangeFromCellHandle(sheet: *Sheet, handle: CellHandle) Range {
+    return sheet.getCellFromHandle(handle).range();
+}
+
+pub fn rectFromCellHandle(sheet: *Sheet, handle: CellHandle) Rect {
+    return sheet.rangeFromCellHandle(handle).rect(sheet);
+}
+
+pub fn eqlCellHandles(sheet: *Sheet, a: CellHandle, b: CellHandle) bool {
+    return sheet.getCellFromHandle(a).eql(sheet.getCellFromHandle(b));
+}
+
 /// List of cells that need to be re-evaluated.
-queued_cells: std.ArrayListUnmanaged(*Cell) = .empty,
+queued_cells: std.ArrayListUnmanaged(CellHandle) = .empty,
 
 strings_buf: std.ArrayListUnmanaged(u8) = .empty,
 
@@ -40,12 +52,9 @@ redos: UndoList = .{},
 dependents: DependentTree(4),
 /// Range tree containing just the positions of extant cells.
 /// Used for quick lookup of all extant cells in a range.
-cell_tree: RTree(*Cell, void, 4),
+cell_tree: RTree(CellHandle, void, 4, rangeFromCellHandle, rectFromCellHandle, eqlCellHandles),
 
 allocator: Allocator,
-
-/// Arena used exclusively for allocating nodes in the cell treap.
-arena: Arena.State = .{},
 
 cell_treap: CellTreap = .{},
 
@@ -54,11 +63,12 @@ cols: ColumnAxis,
 
 ast_nodes: MultiArrayList(ast.Node).Slice,
 
-search_buffer: std.ArrayListUnmanaged(std.ArrayListUnmanaged(*Cell)) = .{},
+search_buffer: std.ArrayListUnmanaged(std.ArrayListUnmanaged(CellHandle)) = .{},
 
 filepath: std.BoundedArray(u8, std.fs.max_path_bytes) = .{}, // TODO: Heap allocate this
 
-pub const CellTreap = std.Treap(Cell, Cell.compare);
+pub const CellTreap = @import("treap.zig").Treap(Cell, Cell.compare);
+pub const CellHandle = CellTreap.Handle;
 pub const ColumnAxis = SkipList(Column, 4, Column.Context);
 pub const RowAxis = SkipList(Row, 4, Row.Context);
 
@@ -105,6 +115,12 @@ pub fn create(allocator: Allocator) !*Sheet {
 }
 
 pub fn destroy(sheet: *Sheet) void {
+    var iter = sheet.cell_treap.inorderIterator();
+    while (iter.next()) |handle| {
+        const cell = sheet.getCellFromHandle(handle);
+        cell.deinit(sheet.allocator);
+    }
+
     sheet.strings_buf.deinit(sheet.allocator);
     sheet.search_buffer.deinit(sheet.allocator);
 
@@ -117,43 +133,15 @@ pub fn destroy(sheet: *Sheet) void {
     sheet.undos.deinit(sheet.allocator);
     sheet.redos.deinit(sheet.allocator);
 
-    var node_iter = sheet.cell_treap.inorderIterator();
-    while (node_iter.next()) |node| {
-        node.key.deinit(sheet.allocator);
-    }
-    var arena = sheet.arena.promote(sheet.allocator);
-    arena.deinit();
+    sheet.cell_treap.nodes.deinit(sheet.allocator);
     sheet.rows.deinit(sheet.allocator);
     sheet.cols.deinit(sheet.allocator);
     sheet.ast_nodes.deinit(sheet.allocator);
     sheet.allocator.destroy(sheet);
 }
 
-const CellNode = CellTreap.Node;
-
-fn getArena(sheet: *Sheet) Arena {
-    return sheet.arena.promote(sheet.allocator);
-}
-
-fn arenaCreate(sheet: *Sheet, comptime T: type) !*T {
-    var arena = sheet.getArena();
-    defer sheet.arena = arena.state;
-
-    return arena.allocator().create(T);
-}
-
-fn arenaDestroy(sheet: *Sheet, ptr: anytype) void {
-    var arena = sheet.getArena();
-    defer sheet.arena = arena.state;
-
-    arena.allocator().destroy(ptr);
-}
-
-fn arenaReset(sheet: *Sheet, mode: Arena.ResetMode) bool {
-    var arena = sheet.getArena();
-    defer sheet.arena = arena.state;
-
-    return arena.reset(mode);
+pub fn getCellFromHandle(sheet: *Sheet, handle: CellHandle) *Cell {
+    return &sheet.cell_treap.node(handle).key;
 }
 
 const Marker = packed struct(u2) {
@@ -166,7 +154,7 @@ pub const UndoType = enum { undo, redo };
 
 pub const Undo = union(enum) {
     set_cell: struct {
-        node: *CellNode,
+        handle: CellHandle,
         strings: StringIndex,
     },
     delete_cell: Position,
@@ -191,69 +179,10 @@ pub fn isEmpty(sheet: *const Sheet) bool {
     return sheet.cell_treap.root == null;
 }
 
-fn treapMax(node: *CellNode) *CellNode {
-    var current = node;
-    while (current.children[1]) |right| current = right;
-    return current;
-}
-
-fn treapMin(comptime Tree: type, node: *Tree.Node) *Tree.Node {
-    var current = node;
-    while (current.children[0]) |left| current = left;
-    return current;
-}
-
-pub fn treapNextNode(
-    comptime Tree: type,
-    comptime compareFn: anytype,
-    entry: Tree.Entry,
-) ?*Tree.Node {
-    const key = entry.key;
-    const node = entry.node;
-    const parent = entry.context.inserted_under;
-
-    if (node) |n| {
-        if (n.children[1]) |right|
-            return treapMin(Tree, right);
-    }
-
-    if (parent) |p| {
-        if (p.children[0] == node and compareFn(key, p.key) == .lt)
-            return parent;
-    }
-
-    var p = parent;
-    var n = node;
-    while (p != null and n == p.?.children[1]) {
-        n = p;
-        p = p.?.parent;
-    }
-    return p;
-}
-
-pub fn treapPrevNode(key: Position, node: ?*CellNode, parent: ?*CellNode) ?*CellNode {
-    if (node) |n| {
-        if (n.children[0]) |left| return treapMax(left);
-    }
-
-    if (parent) |p| {
-        if (p.children[1] == node and Cell.compare(.{ .pos = key }, p.key) == .gt)
-            return parent;
-    }
-
-    var p = parent;
-    var n = node;
-    while (p != null and n == p.?.children[0]) {
-        n = p;
-        p = p.?.parent;
-    }
-    return p;
-}
-
 pub fn clearRetainingCapacity(sheet: *Sheet) void {
     // var iter = sheet.cell_treap.inorderIterator();
     // while (iter.next()) |node| node.key.ast.deinit(sheet.allocator);
-    sheet.cell_treap.root = null;
+    sheet.cell_treap.root = .invalid;
     sheet.rows.clearRetainingCapacity();
     sheet.cols.clearRetainingCapacity();
 
@@ -268,7 +197,7 @@ pub fn clearRetainingCapacity(sheet: *Sheet) void {
     sheet.undos.len = 0;
     sheet.redos.len = 0;
     sheet.strings_buf.clearRetainingCapacity();
-    _ = sheet.arenaReset(.free_all);
+    sheet.cell_treap.nodes.clearRetainingCapacity();
 }
 
 pub fn loadFile(sheet: *Sheet, filepath: []const u8) !void {
@@ -336,8 +265,9 @@ pub fn writeFile(
     const writer = buf.writer();
 
     var iter = sheet.cell_treap.inorderIterator();
-    while (iter.next()) |node| {
-        const pos = node.key.position(sheet);
+    while (iter.next()) |handle| {
+        const cell = sheet.getCellFromHandle(handle);
+        const pos = cell.position(sheet);
         try writer.print("let {} = ", .{pos});
         try sheet.printCellExpression(pos, writer);
         try writer.writeByte('\n');
@@ -395,19 +325,19 @@ const ExprRangeIterator = struct {
 /// Adds `dependent_range` as a dependent of all cells in `range`.
 fn addRangeDependents(
     sheet: *Sheet,
-    dependent: *Cell,
+    dependent: CellHandle,
     range: Range,
 ) Allocator.Error!void {
-    log.debug("Adding {} as a dependent of {}", .{
-        dependent.rect(sheet).tl,
-        range.rect(sheet),
-    });
+    // log.debug("Adding {} as a dependent of {}", .{
+    //     dependent.rect(sheet).tl,
+    //     range.rect(sheet),
+    // });
     return sheet.dependents.put(range, dependent);
 }
 
 fn addExpressionDependents(
     sheet: *Sheet,
-    dependent: *Cell,
+    dependent: CellHandle,
     expr_root: ast.Index,
 ) Allocator.Error!void {
     var iter: ExprRangeIterator = .init(sheet, expr_root);
@@ -419,7 +349,7 @@ fn addExpressionDependents(
 /// Removes `cell` as a dependent of all cells in `rect`
 fn removeRangeDependents(
     sheet: *Sheet,
-    dependent: *Cell,
+    dependent: CellHandle,
     range: Range,
 ) Allocator.Error!void {
     return sheet.dependents.removeValue(range, dependent);
@@ -428,7 +358,7 @@ fn removeRangeDependents(
 /// Removes `cell` as a dependent of all ranges referenced by `expr`.
 fn removeExprDependents(
     sheet: *Sheet,
-    dependent: *Cell,
+    dependent: CellHandle,
     expr_root: ast.Index,
 ) Allocator.Error!void {
     var iter = ExprRangeIterator.init(sheet, expr_root);
@@ -458,7 +388,8 @@ pub fn firstCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
 
     var min: ?PosInt = null;
     while (try iter.next()) |kv| {
-        const x = sheet.cols.get(kv.key.col).?.index;
+        const cell = sheet.getCellFromHandle(kv.key);
+        const x = sheet.cols.get(cell.col).?.index;
         if (min == null or x < min.?) min = x;
     }
 
@@ -474,7 +405,8 @@ pub fn lastCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
 
     var max: ?PosInt = null;
     while (try iter.next()) |kv| {
-        const x = sheet.cols.get(kv.key.col).?.index;
+        const cell = sheet.getCellFromHandle(kv.key);
+        const x = sheet.cols.get(cell.col).?.index;
         if (max == null or x > max.?) max = x;
     }
 
@@ -492,7 +424,8 @@ pub fn firstCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
 
     var min: ?PosInt = null;
     while (try iter.next()) |kv| {
-        const y = sheet.rows.get(kv.key.row).?.index;
+        const cell = sheet.getCellFromHandle(kv.key);
+        const y = sheet.rows.get(cell.row).?.index;
         if (min == null or y < min.?) min = y;
     }
 
@@ -508,7 +441,8 @@ pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
 
     var max: ?PosInt = null;
     while (try iter.next()) |kv| {
-        const y = sheet.rows.get(kv.key.row).?.index;
+        const cell = sheet.getCellFromHandle(kv.key);
+        const y = sheet.rows.get(cell.row).?.index;
         if (max == null or y > max.?) max = y;
     }
 
@@ -747,7 +681,7 @@ pub fn insertRow(sheet: *Sheet, index: PosInt, undo_opts: UndoOpts) !void {
 
 pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
     switch (u) {
-        .set_cell => |t| try sheet.insertCellNode(t.node, opts),
+        .set_cell => |t| try sheet.insertCellNode(t.handle, opts),
         .delete_cell => |pos| try sheet.deleteCell(pos, opts),
         .set_column_width => |t| try sheet.setWidth(t.col, t.width, opts),
         .set_column_precision => |t| try sheet.setPrecision(t.col, t.precision, opts),
@@ -971,19 +905,20 @@ pub fn setCell(
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
     // Create row and column if they don't exist
+    try sheet.cell_treap.nodes.ensureUnusedCapacity(sheet.allocator, 1);
     try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, source.len + 1);
     const row = try sheet.createRow(pos.y);
     const col = try sheet.createColumn(pos.x);
 
-    const new_node = try sheet.arenaCreate(CellNode);
-    errdefer sheet.arenaDestroy(new_node);
+    const new_node = sheet.cell_treap.createNodeAssumeCapacity();
+    errdefer sheet.cell_treap.nodes.items.len -= 1;
 
     const strings = sheet.dupeAstStrings(source, sheet.ast_nodes, expr_root);
     errdefer sheet.strings_buf.items.len = strings.n;
 
     try sheet.anchorAst(expr_root);
 
-    new_node.key = .{
+    sheet.cell_treap.node(new_node).key = .{
         .row = row,
         .col = col,
         .expr_root = expr_root,
@@ -997,9 +932,10 @@ pub fn setCell(
 /// Inserts a pre-allocated Cell node. Does not attempt to create any row/column anchors.
 pub fn insertCellNode(
     sheet: *Sheet,
-    new_node: *CellNode,
+    handle: CellHandle,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
+    const new_node = sheet.cell_treap.node(handle);
     const cell_ptr = &new_node.key;
     const pos = new_node.key.position(sheet);
     if (undo_opts.undo_type) |undo_type| {
@@ -1013,49 +949,51 @@ pub fn insertCellNode(
     // errdefer sheet.cell_tree.remove(cell_ptr) catch {};
 
     var entry = sheet.cell_treap.getEntryFor(new_node.key);
-    const node = entry.node orelse {
+    const existing_handle = entry.node.get() orelse {
         log.debug("Creating cell {}", .{new_node.key.rect(sheet).tl});
-        try sheet.addExpressionDependents(cell_ptr, new_node.key.expr_root);
+        try sheet.addExpressionDependents(handle, new_node.key.expr_root);
         errdefer comptime unreachable;
 
-        sheet.cell_tree.putContextAssumeCapacity(cell_ptr, {}, {});
+        sheet.cell_tree.putContextAssumeCapacity(handle, {}, {});
 
         const u = Undo{ .delete_cell = pos };
 
-        entry.set(new_node);
+        entry.set(handle);
 
         sheet.pushUndo(u, undo_opts) catch unreachable;
         sheet.has_changes = true;
 
-        sheet.enqueueUpdate(cell_ptr) catch unreachable;
+        sheet.enqueueUpdate(handle) catch unreachable;
         return;
     };
 
+    const node = sheet.cell_treap.node(existing_handle);
+
     log.debug("Overwriting cell {}", .{node.key.rect(sheet).tl});
 
-    try sheet.removeExprDependents(cell_ptr, cell_ptr.expr_root);
-    try sheet.addExpressionDependents(cell_ptr, cell_ptr.expr_root);
+    try sheet.removeExprDependents(handle, cell_ptr.expr_root);
+    try sheet.addExpressionDependents(handle, cell_ptr.expr_root);
     errdefer comptime unreachable;
 
-    sheet.cell_tree.putContextAssumeCapacity(cell_ptr, {}, {});
+    sheet.cell_tree.putContextAssumeCapacity(handle, {}, {});
 
     const old_strings = entry.key.strings;
 
     // Set value in tree to new node
     const cell = new_node.key;
-    entry.set(new_node);
+    entry.set(handle);
     // `entry.set` overwrites the .key field with the old value, for some reason.
     new_node.key = cell;
 
     const u: Undo = .{
         .set_cell = .{
-            .node = node,
+            .handle = handle,
             .strings = old_strings,
         },
     };
     sheet.pushUndo(u, undo_opts) catch unreachable;
 
-    sheet.enqueueUpdate(cell_ptr) catch unreachable;
+    sheet.enqueueUpdate(handle) catch unreachable;
     if (node.key.value_type == .string) {
         sheet.allocator.free(std.mem.span(node.key.value.string));
     }
@@ -1069,27 +1007,33 @@ pub fn deleteCellByPtr(
 ) Allocator.Error!void {
     // Assert that this cell actually exists in the cell treap.
     const node = cell.node();
-    assert(sheet.cell_treap.getEntryFor(cell.*).node == node);
+    const handle = sheet.cell_treap.handleFromNode(node);
+    // assert(sheet.cell_treap.getEntryFor(cell.*).node == node);
 
     if (undo_opts.undo_type) |undo_type| {
         try sheet.ensureUndoCapacity(undo_type, 1);
     }
-    try sheet.enqueueUpdate(cell);
-    try sheet.removeExprDependents(cell, cell.expr_root);
+    try sheet.enqueueUpdate(handle);
+    try sheet.removeExprDependents(handle, cell.expr_root);
 
     // TODO: If this allocation fails we are left with an inconsistent state.
     //        This is actually a pain in the ass to fix...
     //        Maybe an RTree function to calculate the amount of mem needed
     //        for a removal ahead of time?
     //
-    sheet.cell_tree.remove(cell) catch @panic("TODO"); // TODO: Probably save the current file before we panic
+    sheet.cell_tree.remove(handle) catch @panic("TODO"); // TODO: Probably save the current file before we panic
 
     // TODO: re-use string buffer
     cell.setError(sheet.allocator);
-    utils.treapRemove(CellTreap, &sheet.cell_treap, node);
+    sheet.cell_treap.remove(handle);
 
     sheet.pushUndo(
-        .{ .set_cell = .{ .node = node, .strings = node.key.strings } },
+        .{
+            .set_cell = .{
+                .handle = handle,
+                .strings = node.key.strings,
+            },
+        },
         undo_opts,
     ) catch unreachable;
     sheet.has_changes = true;
@@ -1101,8 +1045,8 @@ pub fn deleteCellByRef(
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
     const entry = sheet.cell_treap.getEntryFor(.{ .row = ref.row, .col = ref.col });
-    const node = entry.node orelse return;
-    return sheet.deleteCellByPtr(&node.key, undo_opts);
+    const handle = entry.node.get() orelse return;
+    return sheet.deleteCellByPtr(&sheet.cell_treap.node(handle).key, undo_opts);
 }
 
 pub fn deleteCell(
@@ -1123,7 +1067,7 @@ pub noinline fn deleteCellsInRange(sheet: *Sheet, range: Rect) Allocator.Error!v
     defer allocator.free(kvs);
 
     for (kvs) |kv| {
-        try sheet.deleteCellByPtr(kv.key, .{});
+        try sheet.deleteCellByPtr(&sheet.cell_treap.node(kv.key).key, .{});
     }
 }
 
@@ -1145,15 +1089,15 @@ pub fn getCellPtr(sheet: *Sheet, pos: Position) ?*Cell {
     };
 
     const entry = sheet.cell_treap.getEntryFor(key);
-    return if (entry.node) |n| &n.key else null;
+    return if (entry.node.get()) |n| &sheet.cell_treap.node(n).key else null;
 }
 
-pub fn getCellPtrByRef(sheet: *Sheet, ref: Reference) ?*Cell {
+pub fn getCellHandleByRef(sheet: *Sheet, ref: Reference) ?CellHandle {
     const entry = sheet.cell_treap.getEntryFor(.{
         .row = ref.row,
         .col = ref.col,
     });
-    return if (entry.node) |n| &n.key else null;
+    return entry.node.get();
 }
 
 pub fn update(sheet: *Sheet) Allocator.Error!void {
@@ -1173,7 +1117,8 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
 
     const context = EvalContext{ .sheet = sheet };
     // All dirty cells are reachable from the cells in queued_cells
-    while (sheet.queued_cells.popOrNull()) |cell| {
+    while (sheet.queued_cells.popOrNull()) |handle| {
+        const cell = &sheet.cell_treap.node(handle).key;
         _ = context.evalCell(.{
             .row = cell.row,
             .col = cell.col,
@@ -1198,17 +1143,18 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
 /// Marks the cell at `pos` as needing to be updated.
 pub fn enqueueUpdate(
     sheet: *Sheet,
-    cell: *Cell,
+    handle: CellHandle,
 ) Allocator.Error!void {
-    try sheet.queued_cells.append(sheet.allocator, cell);
-    cell.state = .enqueued;
+    try sheet.queued_cells.append(sheet.allocator, handle);
+    sheet.getCellFromHandle(handle).state = .enqueued;
 }
 
 /// Marks all of the dependents of `pos` as dirty.
 fn markDirty(
     sheet: *Sheet,
-    cell: *Cell,
+    handle: CellHandle,
 ) Allocator.Error!void {
+    const cell = &sheet.cell_treap.node(handle).key;
     sheet.search_buffer.clearRetainingCapacity();
     try sheet.dependents.rtree.searchBuffer(
         sheet.allocator,
@@ -1217,10 +1163,11 @@ fn markDirty(
     );
 
     for (sheet.search_buffer.items) |*list| {
-        for (list.items) |c| {
+        for (list.items) |h| {
+            const c = &sheet.cell_treap.node(h).key;
             if (c.state != .dirty) {
                 c.state = .dirty;
-                try sheet.markDirty(c);
+                try sheet.markDirty(h);
             }
         }
     }
@@ -1314,7 +1261,7 @@ pub const Cell = struct {
         };
     }
 
-    pub fn node(cell: *Cell) *CellNode {
+    pub fn node(cell: *Cell) *CellTreap.Node {
         return @fieldParentPtr("key", cell);
     }
 
@@ -1372,10 +1319,11 @@ fn queueDependents(sheet: *Sheet, ref: Reference) Allocator.Error!void {
     );
 
     for (sheet.search_buffer.items) |*value_list| {
-        for (value_list.items) |cell| {
+        for (value_list.items) |handle| {
+            const cell = &sheet.cell_treap.node(handle).key;
             if (cell.state == .dirty) {
                 cell.state = .enqueued;
-                try sheet.queued_cells.append(sheet.allocator, cell);
+                try sheet.queued_cells.append(sheet.allocator, handle);
             }
         }
     }
@@ -1384,7 +1332,8 @@ fn queueDependents(sheet: *Sheet, ref: Reference) Allocator.Error!void {
 pub const EvalContext = struct {
     sheet: *Sheet,
 
-    pub fn evalCellByPtr(context: EvalContext, cell: *Cell) ast.EvalError!ast.EvalResult {
+    pub fn evalCellByHandle(context: EvalContext, handle: CellHandle) ast.EvalError!ast.EvalResult {
+        const cell = context.sheet.getCellFromHandle(handle);
         switch (cell.state) {
             .up_to_date => {},
             .computing => return error.CyclicalReference,
@@ -1429,12 +1378,12 @@ pub const EvalContext = struct {
 
     /// Evaluates a cell and all of its dependencies.
     pub fn evalCell(context: EvalContext, ref: Reference) ast.EvalError!ast.EvalResult {
-        const cell = context.sheet.getCellPtrByRef(ref) orelse {
+        const cell = context.sheet.getCellHandleByRef(ref) orelse {
             try context.sheet.queueDependents(ref);
             return .none;
         };
 
-        return context.evalCellByPtr(cell);
+        return context.evalCellByHandle(cell);
     }
 };
 
@@ -1543,7 +1492,7 @@ pub fn widthNeededForColumn(
     var buf: std.BoundedArray(u8, 512) = .{};
     const writer = buf.writer();
     while (try iter.next()) |kv| {
-        const cell = kv.key;
+        const cell = &sheet.cell_treap.node(kv.key).key;
         switch (cell.value_type) {
             .err => {},
             .number => {

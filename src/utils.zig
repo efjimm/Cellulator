@@ -8,29 +8,6 @@ const assert = std.debug.assert;
 
 pub usingnamespace @import("buffer_utils.zig");
 
-/// Copy pasted from `std.Treap`, where this function is not public. Using this function
-/// directly allows us avoid an extra lookup when removing cells.
-pub fn treapRemove(comptime Treap: type, self: *Treap, node: *Treap.Node) void {
-    // rotate the node down to be a leaf of the tree for removal, respecting priorities.
-    while (node.children[0] orelse node.children[1]) |_| {
-        rotate(Treap, self, node, rotate_right: {
-            const right = node.children[1] orelse break :rotate_right true;
-            const left = node.children[0] orelse break :rotate_right false;
-            break :rotate_right (left.priority < right.priority);
-        });
-    }
-
-    // node is a now a leaf; remove by nulling out the parent's reference to it.
-    const link = if (node.parent) |p| &p.children[@intFromBool(p.children[1] == node)] else &self.root;
-    assert(link.* == node);
-    link.* = null;
-
-    // clean up after ourselves
-    node.priority = 0;
-    node.parent = null;
-    node.children = [_]?*Treap.Node{ null, null };
-}
-
 fn rotate(comptime Treap: type, self: *Treap, node: *Treap.Node, right: bool) void {
     // if right, converts the following:
     //      parent -> (node (target YY adjacent) XX)
