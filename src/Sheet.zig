@@ -71,7 +71,7 @@ pub fn create(allocator: Allocator) !*Sheet {
 
     sheet.* = .{
         .allocator = allocator,
-        .cell_tree = .{ .sheet = sheet },
+        .cell_tree = .init(sheet),
         .dependents = .init(sheet),
         .rows = .init(1),
         .cols = .init(1),
@@ -265,7 +265,7 @@ pub fn clearRetainingCapacity(sheet: *Sheet) void {
     sheet.queued_cells.clearRetainingCapacity();
 
     sheet.cell_tree.deinit(sheet.allocator);
-    sheet.cell_tree = .{ .sheet = sheet };
+    sheet.cell_tree = .init(sheet);
 
     sheet.dependents.deinit(sheet.allocator);
     sheet.dependents = .init(sheet);
@@ -457,7 +457,7 @@ fn addExpressionDependents(
     dependent: *Cell,
     expr_root: ast.Index,
 ) Allocator.Error!void {
-    var iter = ExprRangeIterator.init(sheet, expr_root);
+    var iter: ExprRangeIterator = .init(sheet, expr_root);
     while (iter.next()) |range| {
         try sheet.addRangeDependents(dependent, range);
     }
@@ -1070,17 +1070,22 @@ pub fn insertCellNode(
     if (undo_opts.undo_type) |undo_type| {
         try sheet.ensureUndoCapacity(undo_type, 1);
     }
+
     try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, 1);
-
     try sheet.strings.ensureUnusedCapacity(sheet.allocator, 1);
+    try sheet.cell_tree.ensureUnusedCapacity(1);
 
-    try sheet.cell_tree.put(cell_ptr, {});
-    errdefer sheet.cell_tree.remove(cell_ptr) catch {};
+    // try sheet.cell_tree.put(cell_ptr, {});
+    // errdefer sheet.cell_tree.remove(cell_ptr) catch {};
 
     var entry = sheet.cell_treap.getEntryFor(new_node.key);
     const node = entry.node orelse {
         log.debug("Creating cell {}", .{new_node.key.rect(sheet).tl});
         try sheet.addExpressionDependents(cell_ptr, new_node.key.expr_root);
+        errdefer comptime unreachable;
+
+        sheet.cell_tree.putContextAssumeCapacity(cell_ptr, {}, {});
+
         const u = Undo{ .delete_cell = pos };
 
         entry.set(new_node);
@@ -1101,12 +1106,9 @@ pub fn insertCellNode(
 
     try sheet.removeExprDependents(cell_ptr, cell_ptr.expr_root);
     try sheet.addExpressionDependents(cell_ptr, cell_ptr.expr_root);
-    errdefer {
-        var iter = ExprRangeIterator.init(cell_ptr.expr_root);
-        while (iter.next()) |r| {
-            sheet.removeRangeDependents(cell_ptr, r) catch {};
-        }
-    }
+    errdefer comptime unreachable;
+
+    sheet.cell_tree.putContextAssumeCapacity(cell_ptr, {}, {});
 
     // Set value in tree to new node
     const cell = new_node.key;
@@ -2655,4 +2657,26 @@ test "Cell error propagation" {
     try sheet.update();
     try expectCellError(sheet, "A0");
     try expectCellError(sheet, "B0");
+}
+
+test "Cell fuzzing" {
+    const static = struct {
+        fn fuzz(input: []const u8) anyerror!void {
+            const sheet = try create(std.testing.allocator);
+            defer sheet.destroy();
+
+            const T = [4]u32;
+            const coords = std.mem.bytesAsSlice(T, input[0 .. input.len - input.len % @sizeOf(T)]);
+            const mod = 5;
+            for (coords) |coord| {
+                const p1: Position = .init(coord[0] % mod, coord[1] % mod);
+                const p2: Position = .init(coord[2] % mod, coord[3] % mod);
+                var buf: std.BoundedArray(u8, 256) = .{};
+                buf.writer().print("{}", .{p2}) catch unreachable;
+                try sheet.setCell(p1, "", try ast.fromExpression(sheet, buf.slice()), .{});
+            }
+        }
+    };
+
+    try std.testing.fuzz(static.fuzz, .{});
 }

@@ -27,6 +27,7 @@ pub fn SkipList(
             pub const invalid: Handle = .{ .n = std.math.maxInt(u32) };
 
             pub fn from(n: u32) Handle {
+                assert(n < std.math.maxInt(u32));
                 return .{ .n = n };
             }
 
