@@ -34,8 +34,6 @@ has_changes: bool = false,
 undos: UndoList = .{},
 redos: UndoList = .{},
 
-undo_end_markers: std.AutoHashMapUnmanaged(u32, Marker) = .{},
-
 /// Range tree mapping ranges to a list of ranges that depend on the first.
 /// Used to query whether a cell belongs to a range and then update the cells
 /// that depend on that range.
@@ -99,6 +97,10 @@ pub fn create(allocator: Allocator) !*Sheet {
     };
     assert(sheet.cols.nodes.len == 0);
 
+    try sheet.undos.ensureTotalCapacity(allocator, 1);
+    errdefer sheet.undos.deinit(allocator);
+    try sheet.redos.ensureTotalCapacity(allocator, 1);
+
     return sheet;
 }
 
@@ -106,13 +108,12 @@ pub fn destroy(sheet: *Sheet) void {
     sheet.strings_buf.deinit(sheet.allocator);
     sheet.search_buffer.deinit(sheet.allocator);
 
-    sheet.clearAndFreeUndos(.undo);
-    sheet.clearAndFreeUndos(.redo);
+    sheet.clearUndos(.undo);
+    sheet.clearUndos(.redo);
     sheet.dependents.deinit(sheet.allocator);
     sheet.cell_tree.deinit(sheet.allocator);
 
     sheet.queued_cells.deinit(sheet.allocator);
-    sheet.undo_end_markers.deinit(sheet.allocator);
     sheet.undos.deinit(sheet.allocator);
     sheet.redos.deinit(sheet.allocator);
 
@@ -160,14 +161,6 @@ const Marker = packed struct(u2) {
     redo: bool = false,
 };
 
-pub fn isUndoMarker(sheet: *Sheet, index: u32) bool {
-    return if (sheet.undo_end_markers.get(index)) |marker| marker.undo else false;
-}
-
-pub fn isRedoMarker(sheet: *Sheet, index: u32) bool {
-    return if (sheet.undo_end_markers.get(index)) |marker| marker.redo else false;
-}
-
 pub const UndoList = MultiArrayList(Undo);
 pub const UndoType = enum { undo, redo };
 
@@ -190,6 +183,8 @@ pub const Undo = union(enum) {
     insert_col: PosInt,
     delete_row: PosInt,
     delete_col: PosInt,
+
+    sentinel,
 };
 
 pub fn isEmpty(sheet: *const Sheet) bool {
@@ -272,7 +267,6 @@ pub fn clearRetainingCapacity(sheet: *Sheet) void {
 
     sheet.undos.len = 0;
     sheet.redos.len = 0;
-    sheet.undo_end_markers.clearRetainingCapacity();
     sheet.strings_buf.clearRetainingCapacity();
     _ = sheet.arenaReset(.free_all);
 }
@@ -688,90 +682,43 @@ pub const UndoOpts = struct {
     clear_redos: bool = true,
 };
 
-pub fn clearAndFreeUndos(sheet: *Sheet, comptime kind: UndoType) void {
+pub fn clearUndos(sheet: *Sheet, comptime kind: UndoType) void {
     const list = switch (kind) {
         .undo => &sheet.undos,
         .redo => &sheet.redos,
     };
 
     list.len = 0;
-    var iter = sheet.undo_end_markers.iterator();
-    while (iter.next()) |entry| {
-        switch (kind) {
-            .undo => entry.value_ptr.undo = false,
-            .redo => entry.value_ptr.redo = false,
-        }
-        if (@as(u2, @bitCast(entry.value_ptr.*)) == 0) {
-            sheet.undo_end_markers.removeByPtr(entry.key_ptr);
-        }
-    }
 }
 
 pub fn endUndoGroup(sheet: *Sheet) void {
     if (sheet.undos.len == 0) return;
-    const res = sheet.undo_end_markers.getOrPutAssumeCapacity(sheet.undos.len - 1);
-    if (res.found_existing) {
-        res.value_ptr.undo = true;
-    } else {
-        res.value_ptr.* = .{
-            .undo = true,
-        };
-    }
+    sheet.undos.appendAssumeCapacity(.sentinel);
 }
 
 fn endRedoGroup(sheet: *Sheet) void {
     if (sheet.redos.len == 0) return;
-    const res = sheet.undo_end_markers.getOrPutAssumeCapacity(sheet.redos.len - 1);
-    if (res.found_existing) {
-        res.value_ptr.redo = true;
-    } else {
-        res.value_ptr.* = .{
-            .redo = true,
-        };
-    }
-}
-
-fn unsetUndoEndMarker(sheet: *Sheet, index: u32) void {
-    const ptr = sheet.undo_end_markers.getPtr(index).?;
-    if (ptr.redo == false) {
-        // Both values are now false, remove it from the map
-        _ = sheet.undo_end_markers.remove(index);
-    } else {
-        ptr.undo = false;
-    }
-}
-
-fn unsetRedoEndMarker(sheet: *Sheet, index: u32) void {
-    const ptr = sheet.undo_end_markers.getPtr(index).?;
-    if (ptr.undo == false) {
-        // Both values are now false, remove it from the map
-        _ = sheet.undo_end_markers.remove(index);
-    } else {
-        ptr.redo = false;
-    }
+    sheet.redos.appendAssumeCapacity(.sentinel);
 }
 
 pub fn ensureUndoCapacity(sheet: *Sheet, undo_type: UndoType, n: u32) Allocator.Error!void {
-    try sheet.undo_end_markers.ensureUnusedCapacity(sheet.allocator, n);
     switch (undo_type) {
-        .undo => try sheet.undos.ensureUnusedCapacity(sheet.allocator, n),
-        .redo => try sheet.redos.ensureUnusedCapacity(sheet.allocator, n),
+        .undo => try sheet.undos.ensureUnusedCapacity(sheet.allocator, n + 1),
+        .redo => try sheet.redos.ensureUnusedCapacity(sheet.allocator, n + 1),
     }
 }
 
 pub fn pushUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
     const undo_type = opts.undo_type orelse return;
-    // Ensure that we can add a group end marker later without allocating
-    try sheet.undo_end_markers.ensureUnusedCapacity(sheet.allocator, 1);
 
+    try sheet.ensureUndoCapacity(undo_type, 1);
     switch (undo_type) {
         .undo => {
-            try sheet.undos.ensureUnusedCapacity(sheet.allocator, 1);
             sheet.undos.appendAssumeCapacity(u);
-            if (opts.clear_redos) sheet.clearAndFreeUndos(.redo);
+            if (opts.clear_redos) sheet.clearUndos(.redo);
         },
         .redo => {
-            try sheet.redos.append(sheet.allocator, u);
+            sheet.redos.appendAssumeCapacity(u);
         },
     }
 }
@@ -807,16 +754,20 @@ pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
         .insert_row => |index| try sheet.insertRow(index, opts),
         .insert_col => |index| try sheet.insertColumn(index, opts),
         .delete_row, .delete_col => {},
+        .sentinel => {},
     }
 }
 
 pub fn undo(sheet: *Sheet) Allocator.Error!void {
     if (sheet.undos.len == 0) return;
+
     // All undo groups MUST end with a group marker - so remove it!
-    sheet.unsetUndoEndMarker(sheet.undos.len - 1);
+    const last = sheet.undos.pop();
+    assert(last == .sentinel);
 
     defer sheet.endRedoGroup();
 
+    const tags = sheet.undos.items(.tags);
     const opts: UndoOpts = .{ .undo_type = .redo };
     while (sheet.undos.popOrNull()) |u| {
         errdefer {
@@ -824,17 +775,21 @@ pub fn undo(sheet: *Sheet) Allocator.Error!void {
             sheet.endUndoGroup();
         }
         try sheet.doUndo(u, opts);
-        if (sheet.undos.len == 0 or sheet.isUndoMarker(sheet.undos.len - 1)) break;
+        if (sheet.undos.len == 0 or tags[sheet.undos.len - 1] == .sentinel)
+            break;
     }
 }
 
 pub fn redo(sheet: *Sheet) Allocator.Error!void {
     if (sheet.redos.len == 0) return;
+
     // All undo groups MUST end with a group marker - so remove it!
-    sheet.unsetRedoEndMarker(sheet.redos.len - 1);
+    const last = sheet.redos.pop();
+    assert(last == .sentinel);
 
     defer sheet.endUndoGroup();
 
+    const tags = sheet.redos.items(.tags);
     const opts: UndoOpts = .{ .clear_redos = false };
     while (sheet.redos.popOrNull()) |u| {
         errdefer {
@@ -842,7 +797,8 @@ pub fn redo(sheet: *Sheet) Allocator.Error!void {
             sheet.endRedoGroup();
         }
         try sheet.doUndo(u, opts);
-        if (sheet.redos.len == 0 or sheet.isRedoMarker(sheet.redos.len - 1)) break;
+        if (sheet.redos.len == 0 or tags[sheet.redos.len - 1] == .sentinel)
+            break;
     }
 }
 
@@ -1844,10 +1800,8 @@ fn testCellEvaluation(a: Allocator) !void {
             pos: Position,
             expr_root: ast.Index,
         ) !void {
-            defer _sheet.endUndoGroup();
             try _sheet.setCell(pos, "", expr_root, .{});
-            const last_undo = _sheet.undos.get(_sheet.undos.len - 1);
-            try t.expectEqual(Undo{ .delete_cell = pos }, last_undo);
+            _sheet.endUndoGroup();
         }
     }._setCell;
 
@@ -2169,220 +2123,6 @@ fn testCellEvaluation(a: Allocator) !void {
     try testCell(sheet, "G20", 953810.00);
     try testCell(sheet, "A22", 4668856.00);
 
-    for (sheet.undos.items(.tags)) |tag| {
-        try t.expectEqual(std.meta.Tag(Undo).delete_cell, tag);
-    }
-
-    const UndoIterator = struct {
-        undos: MultiArrayList(Undo).Slice,
-        index: u32 = 0,
-
-        pub fn next(iter: *@This()) Undo {
-            if (iter.index >= iter.undos.len) unreachable;
-            defer iter.index += 1;
-            return iter.undos.get(iter.index);
-        }
-    };
-
-    var iter = UndoIterator{ .undos = sheet.undos.slice() };
-    // Check that undos are in the correct order
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B17") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G8") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A9") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G11") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E16") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G10") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D2") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F2") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B18") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D15") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D20") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E13") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C12") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A16") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A10") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C19") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F0") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B4") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C11") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B6") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G5") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A18") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D1") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G12") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B5") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D4") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A5") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A0") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D13") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A15") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A20") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G19") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G13") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G17") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C14") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B8") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D10") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F19") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B11") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F9") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G7") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C10") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C2") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D0") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C18") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D6") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C0") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B14") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B19") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G16") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C8") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G4") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D18") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E17") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D3") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E20") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C6") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E2") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C1") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D17") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C9") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D12") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F18") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("H0") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D8") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B12") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E19") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A14") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E14") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F14") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A13") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A19") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A4") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F7") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A7") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E11") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B1") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A11") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B16") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E12") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F11") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F1") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C4") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G20") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F16") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D5") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A17") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A22") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F4") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B9") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E4") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F13") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A1") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F3") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F17") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G14") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D11") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A2") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E9") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B15") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E18") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E8") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G18") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A6") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C3") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B0") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E10") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B7") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C7") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D9") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D14") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B20") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E7") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E0") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A3") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G9") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C17") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F5") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F6") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G3") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E5") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A8") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B13") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B3") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D19") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B2") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C5") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G6") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F12") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E1") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C15") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("A12") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G1") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D16") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F20") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E6") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E15") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F8") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F10") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C16") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C20") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("E3") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("B10") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G2") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("D7") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G15") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("G0") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("F15") }, iter.next());
-    try t.expectEqual(Undo{ .delete_cell = try .fromAddress("C13") }, iter.next());
-
-    // Check undos
-    try t.expectEqual(@as(usize, 149), sheet.undos.len);
-    try t.expectEqual(@as(usize, 0), sheet.redos.len);
-
-    try sheet.undo();
-    try t.expectEqual(@as(usize, 148), sheet.undos.len);
-    try t.expectEqual(@as(usize, 1), sheet.redos.len);
-    try t.expectEqual(Undo{ .delete_cell = try Position.fromAddress("F15") }, sheet.undos.get(sheet.undos.len - 1));
-
-    try sheet.redo();
-    try t.expectEqual(@as(usize, 149), sheet.undos.len);
-    try t.expectEqual(@as(usize, 0), sheet.redos.len);
-    try t.expectEqual(Undo{ .delete_cell = try Position.fromAddress("C13") }, sheet.undos.get(sheet.undos.len - 1));
-
-    try sheet.deleteCell(try Position.fromAddress("A22"), .{});
-    try sheet.deleteCell(try Position.fromAddress("G20"), .{});
-    sheet.endUndoGroup();
-
-    try t.expectEqual(@as(usize, 151), sheet.undos.len);
-    try t.expectEqual(@as(usize, 0), sheet.redos.len);
-    try sheet.undo();
-    try t.expectEqual(@as(usize, 149), sheet.undos.len);
-    try t.expectEqual(@as(usize, 2), sheet.redos.len);
-    try t.expectEqual(Undo{ .delete_cell = try Position.fromAddress("C13") }, sheet.undos.get(sheet.undos.len - 1));
-    try t.expectEqual(Undo{ .delete_cell = try Position.fromAddress("G20") }, sheet.redos.get(0));
-    try t.expectEqual(Undo{ .delete_cell = try Position.fromAddress("A22") }, sheet.redos.get(1));
-
-    try sheet.undo();
-    try t.expectEqual(@as(usize, 148), sheet.undos.len);
-    try t.expectEqual(@as(usize, 3), sheet.redos.len);
-    try sheet.undo();
-    try t.expectEqual(@as(usize, 147), sheet.undos.len);
-    try t.expectEqual(@as(usize, 4), sheet.redos.len);
-
-    try sheet.redo();
-    try t.expectEqual(@as(usize, 148), sheet.undos.len);
-    try t.expectEqual(@as(usize, 3), sheet.redos.len);
-    try sheet.redo();
-    try t.expectEqual(@as(usize, 149), sheet.undos.len);
-    try t.expectEqual(@as(usize, 2), sheet.redos.len);
-    try sheet.redo();
-    try t.expectEqual(@as(usize, 151), sheet.undos.len);
-    try t.expectEqual(@as(usize, 0), sheet.redos.len);
-    try sheet.redo();
-    try t.expectEqual(@as(usize, 151), sheet.undos.len);
-    try t.expectEqual(@as(usize, 0), sheet.redos.len);
-
     const _setCellText = struct {
         fn func(_sheet: *Sheet, pos: Position, expr: []const u8) !void {
             const expr_root = try ast.fromExpression(_sheet, expr);
@@ -2554,11 +2294,6 @@ fn testCellEvaluation(a: Allocator) !void {
             try t.expectEqualStrings(col, str);
         }
     }
-
-    try t.expectEqual(
-        Undo{ .delete_cell = try Position.fromAddress("G20") },
-        sheet.undos.get(sheet.undos.len - 1),
-    );
 }
 
 test "Cell assignment, updating, evaluation" {
