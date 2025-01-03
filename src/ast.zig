@@ -84,63 +84,6 @@ comptime {
     }
 }
 
-pub fn dupeStrings(
-    allocator: Allocator,
-    source: []const u8,
-    nodes: NodeSlice,
-    root_node: Index,
-) Allocator.Error![]const u8 {
-    assert(root_node.n < nodes.len);
-    const start = leftMostChild(nodes, root_node);
-    assert(start.n <= root_node.n);
-
-    const tags = nodes.items(.tags)[start.n .. root_node.n + 1];
-    const data = nodes.items(.data)[start.n .. root_node.n + 1];
-
-    var nstrings: u32 = 0;
-    const len = blk: {
-        var len: u32 = 0;
-        for (tags, 0..) |tag, i| {
-            if (tag == .string_literal) {
-                const str = data[i].string_literal;
-                len += str.end - str.start;
-                nstrings += 1;
-            }
-        }
-        break :blk len;
-    };
-
-    if (len == 0) {
-        if (nstrings != 0) {
-            for (tags, 0..) |tag, i| {
-                if (tag == .string_literal) {
-                    data[i].string_literal = .{
-                        .start = 0,
-                        .end = 0,
-                    };
-                }
-            }
-        }
-
-        return "";
-    }
-
-    var list = try std.ArrayListUnmanaged(u8).initCapacity(allocator, len);
-
-    // Append contents of all string literals to the list, and update their `start` and `end`
-    // indices to be into this list.
-    for (tags, 0..) |tag, i| {
-        if (tag == .string_literal) {
-            const str = &data[i].string_literal;
-            const bytes = source[str.start..str.end];
-            str.start = @intCast(list.items.len);
-            str.end = @intCast(str.start + bytes.len);
-            list.appendSliceAssumeCapacity(bytes);
-        }
-    }
-    return list.toOwnedSlice(allocator);
-}
-
 pub fn fromSource(sheet: *Sheet, source: []const u8) ParseError!Index {
     var parser = Parser.init(
         sheet.allocator,
@@ -1150,39 +1093,6 @@ test "Splice" {
 //         }
 //     }
 // }
-
-test "DupeStrings" {
-    const t = std.testing;
-    const sheet = try Sheet.create(t.allocator);
-    defer sheet.destroy();
-
-    {
-        const source = "let a0 = 'this is epic' # 'nice' # 'string!'";
-        const expr_root = try fromSource(sheet, source);
-
-        const strings = try dupeStrings(
-            t.allocator,
-            source,
-            sheet.ast_nodes,
-            expr_root,
-        );
-        defer t.allocator.free(strings);
-
-        try t.expectEqualStrings("this is epicnicestring!", strings);
-    }
-
-    {
-        const source = "let a0 = b0";
-        const expr_root = try fromSource(sheet, source);
-
-        try t.expectEqualStrings("", try dupeStrings(
-            t.allocator,
-            source,
-            sheet.ast_nodes,
-            expr_root,
-        ));
-    }
-}
 
 test "Print" {
     const t = std.testing;

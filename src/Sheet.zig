@@ -11,7 +11,7 @@ const Position = @import("Position.zig").Position;
 const PosInt = Position.Int;
 const Rect = Position.Rect;
 
-const ast = @import("Ast.zig");
+const ast = @import("ast.zig");
 const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 const RTree = @import("tree.zig").RTree;
 const DependentTree = @import("tree.zig").DependentTree;
@@ -24,9 +24,9 @@ comptime {
 }
 
 /// List of cells that need to be re-evaluated.
-queued_cells: std.ArrayListUnmanaged(*Cell) = .{},
+queued_cells: std.ArrayListUnmanaged(*Cell) = .empty,
 
-strings: std.AutoHashMapUnmanaged(*CellNode, []const u8) = .{},
+strings_buf: std.ArrayListUnmanaged(u8) = .empty,
 
 /// True if there have been any changes since the last save
 has_changes: bool = false,
@@ -46,8 +46,7 @@ cell_tree: RTree(*Cell, void, 4),
 
 allocator: Allocator,
 
-/// Cells, rows, and columns must live for the entire life of the sheet in order to support undo/redo.
-/// So that means we can use an arena!
+/// Arena used exclusively for allocating nodes in the cell treap.
 arena: Arena.State = .{},
 
 cell_treap: CellTreap = .{},
@@ -64,6 +63,27 @@ filepath: std.BoundedArray(u8, std.fs.max_path_bytes) = .{}, // TODO: Heap alloc
 pub const CellTreap = std.Treap(Cell, Cell.compare);
 pub const ColumnAxis = SkipList(Column, 4, Column.Context);
 pub const RowAxis = SkipList(Row, 4, Row.Context);
+
+pub const StringIndex = packed struct {
+    n: u32,
+
+    pub fn from(n: u32) StringIndex {
+        assert(n < std.math.maxInt(u32));
+        return .{ .n = n };
+    }
+
+    pub fn isValid(index: StringIndex) bool {
+        return index != invalid;
+    }
+
+    pub const invalid: StringIndex = .{ .n = std.math.maxInt(u32) };
+};
+
+fn getStringSlice(sheet: *Sheet, index: StringIndex) [:0]const u8 {
+    if (!index.isValid()) return "";
+    const ptr: [*:0]const u8 = @ptrCast(sheet.strings_buf.items[index.n..].ptr);
+    return std.mem.span(ptr);
+}
 
 pub fn create(allocator: Allocator) !*Sheet {
     const sheet = try allocator.create(Sheet);
@@ -83,11 +103,7 @@ pub fn create(allocator: Allocator) !*Sheet {
 }
 
 pub fn destroy(sheet: *Sheet) void {
-    var strings_iter = sheet.strings.iterator();
-    while (strings_iter.next()) |kv| {
-        sheet.allocator.free(kv.value_ptr.*);
-    }
-    sheet.strings.deinit(sheet.allocator);
+    sheet.strings_buf.deinit(sheet.allocator);
     sheet.search_buffer.deinit(sheet.allocator);
 
     sheet.clearAndFreeUndos(.undo);
@@ -158,7 +174,7 @@ pub const UndoType = enum { undo, redo };
 pub const Undo = union(enum) {
     set_cell: struct {
         node: *CellNode,
-        strings: []const u8,
+        strings: StringIndex,
     },
     delete_cell: Position,
 
@@ -174,22 +190,6 @@ pub const Undo = union(enum) {
     insert_col: PosInt,
     delete_row: PosInt,
     delete_col: PosInt,
-
-    pub fn deinit(u: Undo, sheet: *Sheet) void {
-        switch (u) {
-            .set_cell => |data| {
-                sheet.allocator.free(data.strings);
-            },
-            .delete_cell,
-            .set_column_width,
-            .set_column_precision,
-            .insert_row,
-            .insert_col,
-            .delete_row,
-            .delete_col,
-            => {},
-        }
-    }
 };
 
 pub fn isEmpty(sheet: *const Sheet) bool {
@@ -270,51 +270,10 @@ pub fn clearRetainingCapacity(sheet: *Sheet) void {
     sheet.dependents.deinit(sheet.allocator);
     sheet.dependents = .init(sheet);
 
-    var strings_iter = sheet.strings.valueIterator();
-    while (strings_iter.next()) |string_ptr| {
-        sheet.allocator.free(string_ptr.*);
-    }
-
-    const undo_slice = sheet.undos.slice();
-    for (undo_slice.items(.tags), undo_slice.items(.data)) |tag, data| {
-        switch (tag) {
-            .set_cell => {
-                sheet.allocator.free(data.set_cell.strings);
-                // data.set_cell.node.key.ast.deinit(sheet.allocator);
-            },
-            .delete_cell,
-            .set_column_width,
-            .set_column_precision,
-            .insert_row,
-            .insert_col,
-            .delete_row,
-            .delete_col,
-            => {},
-        }
-    }
-
-    const redo_slice = sheet.redos.slice();
-    for (redo_slice.items(.tags), redo_slice.items(.data)) |tag, data| {
-        switch (tag) {
-            .set_cell => {
-                sheet.allocator.free(data.set_cell.strings);
-                // data.set_cell.node.key.ast.deinit(sheet.allocator);
-            },
-            .delete_cell,
-            .set_column_width,
-            .set_column_precision,
-            .insert_row,
-            .insert_col,
-            .delete_row,
-            .delete_col,
-            => {},
-        }
-    }
-
     sheet.undos.len = 0;
     sheet.redos.len = 0;
     sheet.undo_end_markers.clearRetainingCapacity();
-    sheet.strings.clearRetainingCapacity();
+    sheet.strings_buf.clearRetainingCapacity();
     _ = sheet.arenaReset(.free_all);
 }
 
@@ -735,11 +694,6 @@ pub fn clearAndFreeUndos(sheet: *Sheet, comptime kind: UndoType) void {
         .redo => &sheet.redos,
     };
 
-    const slice = list.slice();
-    var i: u32 = 0;
-    while (i < slice.len) : (i += 1) {
-        slice.get(i).deinit(sheet);
-    }
     list.len = 0;
     var iter = sheet.undo_end_markers.iterator();
     while (iter.next()) |entry| {
@@ -846,7 +800,7 @@ pub fn insertRow(sheet: *Sheet, index: PosInt, undo_opts: UndoOpts) !void {
 
 pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
     switch (u) {
-        .set_cell => |t| try sheet.insertCellNode(t.strings, t.node, opts),
+        .set_cell => |t| try sheet.insertCellNode(t.node, opts),
         .delete_cell => |pos| try sheet.deleteCell(pos, opts),
         .set_column_width => |t| try sheet.setWidth(t.col, t.width, opts),
         .set_column_precision => |t| try sheet.setPrecision(t.col, t.precision, opts),
@@ -1022,7 +976,37 @@ pub fn needsUpdate(sheet: *const Sheet) bool {
     return sheet.queued_cells.items.len > 0;
 }
 
-/// Creates the cell at `pos` using the given expression, duplicating it's string literals.
+fn dupeAstStrings(
+    sheet: *Sheet,
+    source: []const u8,
+    nodes: ast.NodeSlice,
+    root_node: ast.Index,
+) StringIndex {
+    assert(root_node.n < nodes.len);
+    const start = ast.leftMostChild(nodes, root_node);
+    assert(start.n <= root_node.n);
+
+    const tags = nodes.items(.tags)[start.n .. root_node.n + 1];
+    const data = nodes.items(.data)[start.n .. root_node.n + 1];
+
+    const ret: StringIndex = .from(@intCast(sheet.strings_buf.items.len));
+
+    // Append contents of all string literals to the list, and update their `start` and `end`
+    // indices to be into this list.
+    for (tags, 0..) |tag, i| {
+        if (tag == .string_literal) {
+            const str = &data[i].string_literal;
+            const bytes = source[str.start..str.end];
+            str.start = @intCast(sheet.strings_buf.items.len);
+            str.end = @intCast(str.start + bytes.len);
+            sheet.strings_buf.appendSliceAssumeCapacity(bytes);
+        }
+    }
+    sheet.strings_buf.appendAssumeCapacity(0);
+    return ret;
+}
+
+/// Creates the cell at `pos` using the given expression, duplicating its string literals.
 pub fn setCell(
     sheet: *Sheet,
     pos: Position,
@@ -1031,19 +1015,15 @@ pub fn setCell(
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
     // Create row and column if they don't exist
+    try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, source.len + 1);
     const row = try sheet.createRow(pos.y);
     const col = try sheet.createColumn(pos.x);
 
     const new_node = try sheet.arenaCreate(CellNode);
     errdefer sheet.arenaDestroy(new_node);
 
-    const strings = try ast.dupeStrings(
-        sheet.allocator,
-        source,
-        sheet.ast_nodes,
-        expr_root,
-    );
-    errdefer sheet.allocator.free(strings);
+    const strings = sheet.dupeAstStrings(source, sheet.ast_nodes, expr_root);
+    errdefer sheet.strings_buf.items.len = strings.n;
 
     try sheet.anchorAst(expr_root);
 
@@ -1051,17 +1031,16 @@ pub fn setCell(
         .row = row,
         .col = col,
         .expr_root = expr_root,
+        .strings = strings,
     };
-    return sheet.insertCellNode(strings, new_node, undo_opts);
+    return sheet.insertCellNode(new_node, undo_opts);
 }
 
-// TODO: Write an `ensureUnusedCapacity` function for RangeTree.
 // TODO: This function *really, really* sucks. Clean it up.
 // TODO: null undo type causes a memory leak (not used anywhere)
 /// Inserts a pre-allocated Cell node. Does not attempt to create any row/column anchors.
 pub fn insertCellNode(
     sheet: *Sheet,
-    strings: []const u8,
     new_node: *CellNode,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
@@ -1072,7 +1051,6 @@ pub fn insertCellNode(
     }
 
     try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, 1);
-    try sheet.strings.ensureUnusedCapacity(sheet.allocator, 1);
     try sheet.cell_tree.ensureUnusedCapacity(1);
 
     // try sheet.cell_tree.put(cell_ptr, {});
@@ -1093,11 +1071,6 @@ pub fn insertCellNode(
         sheet.pushUndo(u, undo_opts) catch unreachable;
         sheet.has_changes = true;
 
-        if (strings.len > 0) {
-            // NoClobber because cell didn't exist in map, so strings shouldn't exist either
-            sheet.strings.putAssumeCapacityNoClobber(new_node, strings);
-        }
-        errdefer _ = sheet.strings.remove(new_node);
         sheet.enqueueUpdate(cell_ptr) catch unreachable;
         return;
     };
@@ -1110,25 +1083,13 @@ pub fn insertCellNode(
 
     sheet.cell_tree.putContextAssumeCapacity(cell_ptr, {}, {});
 
+    const old_strings = entry.key.strings;
+
     // Set value in tree to new node
     const cell = new_node.key;
     entry.set(new_node);
     // `entry.set` overwrites the .key field with the old value, for some reason.
     new_node.key = cell;
-
-    const res = sheet.strings.getOrPutAssumeCapacity(new_node);
-    const old_strings = if (res.found_existing) res.value_ptr.* else "";
-    errdefer if (old_strings.len > 0) sheet.strings.putAssumeCapacity(new_node, old_strings);
-
-    // const uindex = sheet.createUndoAst(node.key.ast, old_strings) catch unreachable;
-    // errdefer sheet.undo_asts.destroy(uindex);
-
-    if (strings.len > 0) {
-        res.value_ptr.* = strings;
-    } else {
-        sheet.strings.removeByPtr(res.key_ptr);
-    }
-    errdefer _ = sheet.strings.removeByPtr(res.key_ptr);
 
     const u: Undo = .{
         .set_cell = .{
@@ -1160,22 +1121,19 @@ pub fn deleteCellByPtr(
     try sheet.enqueueUpdate(cell);
     try sheet.removeExprDependents(cell, cell.expr_root);
 
-    // FIXME: If this allocation fails we are left with an inconsistent state.
+    // TODO: If this allocation fails we are left with an inconsistent state.
     //        This is actually a pain in the ass to fix...
     //        Maybe an RTree function to calculate the amount of mem needed
     //        for a removal ahead of time?
     //
-    // TODO:  This is actually easy?
-    try sheet.cell_tree.remove(cell);
+    sheet.cell_tree.remove(cell) catch @panic("TODO"); // TODO: Probably save the current file before we panic
 
     // TODO: re-use string buffer
     cell.setError(sheet.allocator);
     utils.treapRemove(CellTreap, &sheet.cell_treap, node);
 
-    const strings = if (sheet.strings.fetchRemove(node)) |kv| kv.value else "";
-
     sheet.pushUndo(
-        .{ .set_cell = .{ .node = node, .strings = strings } },
+        .{ .set_cell = .{ .node = node, .strings = node.key.strings } },
         undo_opts,
     ) catch unreachable;
     sheet.has_changes = true;
@@ -1358,6 +1316,8 @@ pub const Cell = struct {
     /// Abstract syntax tree representing the expression in the cell.
     expr_root: ast.Index = .invalid,
 
+    strings: StringIndex = .invalid,
+
     pub const Value = union {
         number: f64,
         string: [*:0]const u8,
@@ -1478,9 +1438,6 @@ pub const EvalContext = struct {
                 )});
                 cell.state = .computing;
 
-                // Get strings
-                const strings = context.sheet.strings.get(cell.node()) orelse "";
-
                 // Queue dependents before evaluating to ensure that errors are propagated to
                 // dependents.
                 try context.sheet.queueDependents(cell.reference());
@@ -1490,7 +1447,7 @@ pub const EvalContext = struct {
                     context.sheet.ast_nodes,
                     cell.expr_root,
                     context.sheet,
-                    strings,
+                    context.sheet.strings_buf.items,
                     context,
                 ) catch |err| {
                     cell.setValue(.err, err);
@@ -1527,12 +1484,11 @@ pub const EvalContext = struct {
 
 pub fn printCellExpression(sheet: *Sheet, pos: Position, writer: anytype) !void {
     const cell = sheet.getCellPtr(pos) orelse return;
-    const strings = sheet.strings.get(cell.node()) orelse "";
     try ast.print(
         sheet.ast_nodes,
         cell.expr_root,
         sheet,
-        strings,
+        sheet.getStringSlice(cell.strings),
         writer,
     );
 }
@@ -2679,4 +2635,37 @@ test "Cell fuzzing" {
     };
 
     try std.testing.fuzz(static.fuzz, .{});
+}
+
+test "DupeStrings" {
+    const t = std.testing;
+    const sheet = try Sheet.create(t.allocator);
+    defer sheet.destroy();
+
+    {
+        const source = "let a0 = 'this is epic' # 'nice' # 'string!'";
+        const expr_root = try ast.fromSource(sheet, source);
+
+        try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, source.len);
+        const strings = sheet.dupeAstStrings(
+            source,
+            sheet.ast_nodes,
+            expr_root,
+        );
+
+        try t.expectEqualStrings("this is epicnicestring!", sheet.getStringSlice(strings));
+    }
+
+    {
+        const source = "let a0 = b0";
+        const expr_root = try ast.fromSource(sheet, source);
+
+        try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, source.len);
+        const strings = sheet.dupeAstStrings(
+            source,
+            sheet.ast_nodes,
+            expr_root,
+        );
+        try t.expectEqualStrings("", sheet.getStringSlice(strings));
+    }
 }

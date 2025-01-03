@@ -19,9 +19,9 @@ strings_len: u32 = 0,
 
 allocator: Allocator,
 
-const String = @import("Ast.zig").String;
-const Node = @import("Ast.zig").Node;
-const Index = @import("Ast.zig").Index;
+const String = @import("ast.zig").String;
+const Node = @import("ast.zig").Node;
+const Index = @import("ast.zig").Index;
 
 pub const BinaryOperator = packed struct {
     lhs: Index,

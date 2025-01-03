@@ -1,6 +1,6 @@
 const std = @import("std");
 const utils = @import("utils.zig");
-const Ast = @import("Ast.zig");
+const ast = @import("ast.zig");
 const spoon = @import("spoon");
 const Sheet = @import("Sheet.zig");
 const Tui = @import("Tui.zig");
@@ -245,7 +245,7 @@ pub fn setCell(
     self: *Self,
     pos: Position,
     source: []const u8,
-    expr_root: Ast.Index,
+    expr_root: ast.Index,
     opts: ChangeCellOpts,
 ) !void {
     try self.sheet.setCell(pos, source, expr_root, .{});
@@ -258,7 +258,7 @@ pub fn setCell(
 /// Sets the cell at `pos` to the expression represented by `expr`.
 pub fn setCellString(self: *Self, pos: Position, expr: []const u8, opts: ChangeCellOpts) !void {
     // TODO: This leaks memory if `setCell` fails, which can only happen on OOM.
-    const expr_root = try Ast.fromExpression(self.sheet, expr);
+    const expr_root = try ast.fromExpression(self.sheet, expr);
 
     try self.setCell(pos, expr, expr_root, opts);
 }
@@ -835,7 +835,7 @@ fn doVisualMode(self: *Self, action: Action) Allocator.Error!void {
     }
 }
 
-const ParseCommandError = Ast.ParseError || RunCommandError;
+const ParseCommandError = ast.ParseError || RunCommandError;
 
 fn parseCommand(self: *Self, str: []const u8) !void {
     if (str.len == 0) return;
@@ -845,12 +845,12 @@ fn parseCommand(self: *Self, str: []const u8) !void {
         else => {},
     }
 
-    const expr_root = try Ast.fromSource(self.sheet, str);
+    const expr_root = try ast.fromSource(self.sheet, str);
 
     const op = self.sheet.ast_nodes.items(.data)[expr_root.n].assignment;
     const pos = self.sheet.ast_nodes.items(.data)[op.lhs.n].pos;
 
-    const spliced_root = Ast.splice(&self.sheet.ast_nodes, op.rhs);
+    const spliced_root = ast.splice(&self.sheet.ast_nodes, op.rhs);
 
     try self.setCell(pos, str, spliced_root, .{});
     self.sheet.endUndoGroup();
@@ -1028,7 +1028,7 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
             var i: f64 = value;
             for (range.tl.y..@as(u64, range.br.y) + 1) |y| {
                 for (range.tl.x..@as(u64, range.br.x) + 1) |x| {
-                    const expr_root: Ast.Index = .from(nodes.len);
+                    const expr_root: ast.Index = .from(nodes.len);
                     nodes.appendAssumeCapacity(.{ .number = i });
                     try self.setCell(.{ .y = @intCast(y), .x = @intCast(x) }, "", expr_root, .{});
                     i += increment;

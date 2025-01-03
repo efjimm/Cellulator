@@ -8,10 +8,7 @@ const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 const Sheet = @import("Sheet.zig");
 const Range = Sheet.Range;
 const Cell = Sheet.Cell;
-const ast = @import("Ast.zig");
-
-// TODO: Add a free list for reclaiming deleted entries.
-//       The current implementation leaks a bunch of memory.
+const ast = @import("ast.zig");
 
 pub fn RTree(comptime K: type, comptime V: type, comptime min_children: usize) type {
     assert(min_children >= 2);
