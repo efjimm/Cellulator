@@ -603,7 +603,10 @@ pub fn EvalContext(comptime Context: type) type {
                     const lhs = try self.eval(op.lhs);
                     const rhs = try self.eval(op.rhs);
 
-                    return .{ .number = try lhs.toNumber(0) / try rhs.toNumber(0) };
+                    const rhs_number = try rhs.toNumberOrNull() orelse return error.DivideByZero;
+                    if (rhs_number == 0) return error.DivideByZero;
+
+                    return .{ .number = try lhs.toNumber(0) / rhs_number };
                 },
                 .mod => |op| {
                     const lhs = try self.eval(op.lhs);

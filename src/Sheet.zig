@@ -457,6 +457,8 @@ const ExprRangeIterator = struct {
                 const r = data[it.start.n + iter.index].range;
                 const ref1: *const Reference = @ptrCast(&data[r.lhs.n]);
                 const ref2: *const Reference = @ptrCast(&data[r.rhs.n]);
+                _ = iter.next().?;
+                _ = iter.next().?;
                 return .{ .tl = ref1.*, .br = ref2.* };
             },
             else => {},
@@ -496,6 +498,10 @@ fn removeRangeDependents(
     dependent: CellHandle,
     range: Range,
 ) Allocator.Error!void {
+    log.debug("Removing {} as a dependent of {}", .{
+        sheet.rectFromCellHandle(dependent),
+        range.rect(sheet),
+    });
     return sheet.dependents.removeValue(range, dependent);
 }
 
@@ -1505,13 +1511,13 @@ pub const EvalContext = struct {
 
     pub fn evalCellByHandle(context: EvalContext, handle: CellHandle) ast.EvalError!ast.EvalResult {
         const cell = context.sheet.getCellFromHandle(handle);
+        log.debug("Evaluating cell {}", .{cell.rect(
+            context.sheet,
+        )});
         switch (cell.state) {
             .up_to_date => {},
             .computing => return error.CyclicalReference,
             .enqueued, .dirty => {
-                log.debug("Evaluating cell {}", .{cell.rect(
-                    context.sheet,
-                )});
                 cell.state = .computing;
 
                 // Queue dependents before evaluating to ensure that errors are propagated to
@@ -2243,163 +2249,159 @@ fn testCellEvaluation(a: Allocator) !void {
     try testCell(sheet, "G20", 953810.00);
     try testCell(sheet, "A22", 4668856.00);
 
-    const _setCellText = struct {
-        fn func(_sheet: *Sheet, pos: Position, expr: []const u8) !void {
-            const expr_root = try ast.fromExpression(_sheet, expr);
-            try _sheet.setCell(pos, expr, expr_root, .{});
-            _sheet.endUndoGroup();
-        }
-    }.func;
+    const commands =
+        \\let A0 = '1'
+        \\let B0 = A0 # '2'
+        \\let C0 = B0 # '3'
+        \\let D0 = C0 # '4'
+        \\let E0 = D0 # '5'
+        \\let F0 = E0 # '6'
+        \\let G0 = F0 # '7'
+        \\let H0 = G0 # '8'
+        \\let A1 = A0 # '2'
+        \\let B1 = A1 # B0
+        \\let C1 = B1 # C0
+        \\let D1 = C1 # D0
+        \\let E1 = D1 # E0
+        \\let F1 = E1 # F0
+        \\let G1 = F1 # G0
+        \\let A2 = A1 # '3'
+        \\let B2 = A2 # B1
+        \\let C2 = B2 # C1
+        \\let D2 = C2 # D1
+        \\let E2 = D2 # E1
+        \\let F2 = E2 # F1
+        \\let G2 = F2 # G1
+        \\let A3 = A2 # '4'
+        \\let B3 = A3 # B2
+        \\let C3 = B3 # C2
+        \\let D3 = C3 # D2
+        \\let E3 = D3 # E2
+        \\let F3 = E3 # F2
+        \\let G3 = F3 # G2
+        \\let A4 = A3 # '5'
+        \\let B4 = A4 # B3
+        \\let C4 = B4 # C3
+        \\let D4 = C4 # D3
+        \\let E4 = D4 # E3
+        \\let F4 = E4 # F3
+        \\let G4 = F4 # G3
+        \\let A5 = A4 # '6'
+        \\let B5 = A5 # B4
+        \\let C5 = B5 # C4
+        \\let D5 = C5 # D4
+        \\let E5 = D5 # E4
+        \\let F5 = E5 # F4
+        \\let G5 = F5 # G4
+        \\let A6 = A5 # '7'
+        \\let B6 = A6 # B5
+        \\let C6 = B6 # C5
+        \\let D6 = C6 # D5
+        \\let E6 = D6 # E5
+        \\let F6 = E6 # F5
+        \\let G6 = F6 # G5
+        \\let A7 = A6 # '8'
+        \\let B7 = A7 # B6
+        \\let C7 = B7 # C6
+        \\let D7 = C7 # D6
+        \\let E7 = D7 # E6
+        \\let F7 = E7 # F6
+        \\let G7 = F7 # G6
+        \\let A8 = A7 # '9'
+        \\let B8 = A8 # B7
+        \\let C8 = B8 # C7
+        \\let D8 = C8 # D7
+        \\let E8 = D8 # E7
+        \\let F8 = E8 # F7
+        \\let G8 = F8 # G7
+        \\let A9 = A8 # '0'
+        \\let B9 = A9 # B8
+        \\let C9 = B9 # C8
+        \\let D9 = C9 # D8
+        \\let E9 = D9 # E8
+        \\let F9 = E9 # F8
+        \\let G9 = F9 # G8
+        \\let A10 = A9 # '1'
+        \\let B10 = A10 # B9
+        \\let C10 = B10 # C9
+        \\let D10 = C10 # D9
+        \\let E10 = D10 # E9
+        \\let F10 = E10 # F9
+        \\let G10 = F10 # G9
+        \\let A11 = A10 # '2'
+        \\let B11 = A11 # B10
+        \\let C11 = B11 # C10
+        \\let D11 = C11 # D10
+        \\let E11 = D11 # E10
+        \\let F11 = E11 # F10
+        \\let G11 = F11 # G10
+        \\let A12 = A11 # '3'
+        \\let B12 = A12 # B11
+        \\let C12 = B12 # C11
+        \\let D12 = C12 # D11
+        \\let E12 = D12 # E11
+        \\let F12 = E12 # F11
+        \\let G12 = F12 # G11
+        \\let A13 = A12 # '4'
+        \\let B13 = A13 # B12
+        \\let C13 = B13 # C12
+        \\let D13 = C13 # D12
+        \\let E13 = D13 # E12
+        \\let F13 = E13 # F12
+        \\let G13 = F13 # G12
+        \\let A14 = A13 # '5'
+        \\let B14 = A14 # B13
+        \\let C14 = B14 # C13
+        \\let D14 = C14 # D13
+        \\let E14 = D14 # E13
+        \\let F14 = E14 # F13
+        \\let G14 = F14 # G13
+        \\let A15 = A14 # '6'
+        \\let B15 = A15 # B14
+        \\let C15 = B15 # C14
+        \\let D15 = C15 # D14
+        \\let E15 = D15 # E14
+        \\let F15 = E15 # F14
+        \\let G15 = F15 # G14
+        \\let A16 = A15 # '7'
+        \\let B16 = A16 # B15
+        \\let C16 = B16 # C15
+        \\let D16 = C16 # D15
+        \\let E16 = D16 # E15
+        \\let F16 = E16 # F15
+        \\let G16 = F16 # G15
+        \\let A17 = A16 # '8'
+        \\let B17 = A17 # B16
+        \\let C17 = B17 # C16
+        \\let D17 = C17 # D16
+        \\let E17 = D17 # E16
+        \\let F17 = E17 # F16
+        \\let G17 = F17 # G16
+        \\let A18 = A17 # '9'
+        \\let B18 = A18 # B17
+        \\let C18 = B18 # C17
+        \\let D18 = C18 # D17
+        \\let E18 = D18 # E17
+        \\let F18 = E18 # F17
+        \\let G18 = F18 # G17
+        \\let A19 = A18 # '0'
+        \\let B19 = A19 # B18
+        \\let C19 = B19 # C18
+        \\let D19 = C19 # D18
+        \\let E19 = D19 # E18
+        \\let F19 = E19 # F18
+        \\let G19 = F19 # G18
+        \\let A20 = A19 # '1'
+        \\let B20 = A20 # B19
+        \\let C20 = B20 # C19
+        \\let D20 = C20 # D19
+        \\let E20 = D20 # E19
+        \\let F20 = E20 # F19
+        \\let G20 = F20 # G19
+    ;
 
-    try _setCellText(sheet, try .fromAddress("A0"), "'1'");
-    try _setCellText(sheet, try .fromAddress("B0"), "A0 # '2'");
-    try _setCellText(sheet, try .fromAddress("C0"), "B0 # '3'");
-    try _setCellText(sheet, try .fromAddress("D0"), "C0 # '4'");
-    try _setCellText(sheet, try .fromAddress("E0"), "D0 # '5'");
-    try _setCellText(sheet, try .fromAddress("F0"), "E0 # '6'");
-    try _setCellText(sheet, try .fromAddress("G0"), "F0 # '7'");
-    try _setCellText(sheet, try .fromAddress("H0"), "G0 # '8'");
-    try _setCellText(sheet, try .fromAddress("A1"), "A0 # '2'");
-    try _setCellText(sheet, try .fromAddress("B1"), "A1 # B0");
-    try _setCellText(sheet, try .fromAddress("C1"), "B1 # C0");
-    try _setCellText(sheet, try .fromAddress("D1"), "C1 # D0");
-    try _setCellText(sheet, try .fromAddress("E1"), "D1 # E0");
-    try _setCellText(sheet, try .fromAddress("F1"), "E1 # F0");
-    try _setCellText(sheet, try .fromAddress("G1"), "F1 # G0");
-    try _setCellText(sheet, try .fromAddress("A2"), "A1 # '3'");
-    try _setCellText(sheet, try .fromAddress("B2"), "A2 # B1");
-    try _setCellText(sheet, try .fromAddress("C2"), "B2 # C1");
-    try _setCellText(sheet, try .fromAddress("D2"), "C2 # D1");
-    try _setCellText(sheet, try .fromAddress("E2"), "D2 # E1");
-    try _setCellText(sheet, try .fromAddress("F2"), "E2 # F1");
-    try _setCellText(sheet, try .fromAddress("G2"), "F2 # G1");
-    try _setCellText(sheet, try .fromAddress("A3"), "A2 # '4'");
-    try _setCellText(sheet, try .fromAddress("B3"), "A3 # B2");
-    try _setCellText(sheet, try .fromAddress("C3"), "B3 # C2");
-    try _setCellText(sheet, try .fromAddress("D3"), "C3 # D2");
-    try _setCellText(sheet, try .fromAddress("E3"), "D3 # E2");
-    try _setCellText(sheet, try .fromAddress("F3"), "E3 # F2");
-    try _setCellText(sheet, try .fromAddress("G3"), "F3 # G2");
-    try _setCellText(sheet, try .fromAddress("A4"), "A3 # '5'");
-    try _setCellText(sheet, try .fromAddress("B4"), "A4 # B3");
-    try _setCellText(sheet, try .fromAddress("C4"), "B4 # C3");
-    try _setCellText(sheet, try .fromAddress("D4"), "C4 # D3");
-    try _setCellText(sheet, try .fromAddress("E4"), "D4 # E3");
-    try _setCellText(sheet, try .fromAddress("F4"), "E4 # F3");
-    try _setCellText(sheet, try .fromAddress("G4"), "F4 # G3");
-    try _setCellText(sheet, try .fromAddress("A5"), "A4 # '6'");
-    try _setCellText(sheet, try .fromAddress("B5"), "A5 # B4");
-    try _setCellText(sheet, try .fromAddress("C5"), "B5 # C4");
-    try _setCellText(sheet, try .fromAddress("D5"), "C5 # D4");
-    try _setCellText(sheet, try .fromAddress("E5"), "D5 # E4");
-    try _setCellText(sheet, try .fromAddress("F5"), "E5 # F4");
-    try _setCellText(sheet, try .fromAddress("G5"), "F5 # G4");
-    try _setCellText(sheet, try .fromAddress("A6"), "A5 # '7'");
-    try _setCellText(sheet, try .fromAddress("B6"), "A6 # B5");
-    try _setCellText(sheet, try .fromAddress("C6"), "B6 # C5");
-    try _setCellText(sheet, try .fromAddress("D6"), "C6 # D5");
-    try _setCellText(sheet, try .fromAddress("E6"), "D6 # E5");
-    try _setCellText(sheet, try .fromAddress("F6"), "E6 # F5");
-    try _setCellText(sheet, try .fromAddress("G6"), "F6 # G5");
-    try _setCellText(sheet, try .fromAddress("A7"), "A6 # '8'");
-    try _setCellText(sheet, try .fromAddress("B7"), "A7 # B6");
-    try _setCellText(sheet, try .fromAddress("C7"), "B7 # C6");
-    try _setCellText(sheet, try .fromAddress("D7"), "C7 # D6");
-    try _setCellText(sheet, try .fromAddress("E7"), "D7 # E6");
-    try _setCellText(sheet, try .fromAddress("F7"), "E7 # F6");
-    try _setCellText(sheet, try .fromAddress("G7"), "F7 # G6");
-    try _setCellText(sheet, try .fromAddress("A8"), "A7 # '9'");
-    try _setCellText(sheet, try .fromAddress("B8"), "A8 # B7");
-    try _setCellText(sheet, try .fromAddress("C8"), "B8 # C7");
-    try _setCellText(sheet, try .fromAddress("D8"), "C8 # D7");
-    try _setCellText(sheet, try .fromAddress("E8"), "D8 # E7");
-    try _setCellText(sheet, try .fromAddress("F8"), "E8 # F7");
-    try _setCellText(sheet, try .fromAddress("G8"), "F8 # G7");
-    try _setCellText(sheet, try .fromAddress("A9"), "A8 # '0'");
-    try _setCellText(sheet, try .fromAddress("B9"), "A9 # B8");
-    try _setCellText(sheet, try .fromAddress("C9"), "B9 # C8");
-    try _setCellText(sheet, try .fromAddress("D9"), "C9 # D8");
-    try _setCellText(sheet, try .fromAddress("E9"), "D9 # E8");
-    try _setCellText(sheet, try .fromAddress("F9"), "E9 # F8");
-    try _setCellText(sheet, try .fromAddress("G9"), "F9 # G8");
-    try _setCellText(sheet, try .fromAddress("A10"), "A9 # '1'");
-    try _setCellText(sheet, try .fromAddress("B10"), "A10 # B9");
-    try _setCellText(sheet, try .fromAddress("C10"), "B10 # C9");
-    try _setCellText(sheet, try .fromAddress("D10"), "C10 # D9");
-    try _setCellText(sheet, try .fromAddress("E10"), "D10 # E9");
-    try _setCellText(sheet, try .fromAddress("F10"), "E10 # F9");
-    try _setCellText(sheet, try .fromAddress("G10"), "F10 # G9");
-    try _setCellText(sheet, try .fromAddress("A11"), "A10 # '2'");
-    try _setCellText(sheet, try .fromAddress("B11"), "A11 # B10");
-    try _setCellText(sheet, try .fromAddress("C11"), "B11 # C10");
-    try _setCellText(sheet, try .fromAddress("D11"), "C11 # D10");
-    try _setCellText(sheet, try .fromAddress("E11"), "D11 # E10");
-    try _setCellText(sheet, try .fromAddress("F11"), "E11 # F10");
-    try _setCellText(sheet, try .fromAddress("G11"), "F11 # G10");
-    try _setCellText(sheet, try .fromAddress("A12"), "A11 # '3'");
-    try _setCellText(sheet, try .fromAddress("B12"), "A12 # B11");
-    try _setCellText(sheet, try .fromAddress("C12"), "B12 # C11");
-    try _setCellText(sheet, try .fromAddress("D12"), "C12 # D11");
-    try _setCellText(sheet, try .fromAddress("E12"), "D12 # E11");
-    try _setCellText(sheet, try .fromAddress("F12"), "E12 # F11");
-    try _setCellText(sheet, try .fromAddress("G12"), "F12 # G11");
-    try _setCellText(sheet, try .fromAddress("A13"), "A12 # '4'");
-    try _setCellText(sheet, try .fromAddress("B13"), "A13 # B12");
-    try _setCellText(sheet, try .fromAddress("C13"), "B13 # C12");
-    try _setCellText(sheet, try .fromAddress("D13"), "C13 # D12");
-    try _setCellText(sheet, try .fromAddress("E13"), "D13 # E12");
-    try _setCellText(sheet, try .fromAddress("F13"), "E13 # F12");
-    try _setCellText(sheet, try .fromAddress("G13"), "F13 # G12");
-    try _setCellText(sheet, try .fromAddress("A14"), "A13 # '5'");
-    try _setCellText(sheet, try .fromAddress("B14"), "A14 # B13");
-    try _setCellText(sheet, try .fromAddress("C14"), "B14 # C13");
-    try _setCellText(sheet, try .fromAddress("D14"), "C14 # D13");
-    try _setCellText(sheet, try .fromAddress("E14"), "D14 # E13");
-    try _setCellText(sheet, try .fromAddress("F14"), "E14 # F13");
-    try _setCellText(sheet, try .fromAddress("G14"), "F14 # G13");
-    try _setCellText(sheet, try .fromAddress("A15"), "A14 # '6'");
-    try _setCellText(sheet, try .fromAddress("B15"), "A15 # B14");
-    try _setCellText(sheet, try .fromAddress("C15"), "B15 # C14");
-    try _setCellText(sheet, try .fromAddress("D15"), "C15 # D14");
-    try _setCellText(sheet, try .fromAddress("E15"), "D15 # E14");
-    try _setCellText(sheet, try .fromAddress("F15"), "E15 # F14");
-    try _setCellText(sheet, try .fromAddress("G15"), "F15 # G14");
-    try _setCellText(sheet, try .fromAddress("A16"), "A15 # '7'");
-    try _setCellText(sheet, try .fromAddress("B16"), "A16 # B15");
-    try _setCellText(sheet, try .fromAddress("C16"), "B16 # C15");
-    try _setCellText(sheet, try .fromAddress("D16"), "C16 # D15");
-    try _setCellText(sheet, try .fromAddress("E16"), "D16 # E15");
-    try _setCellText(sheet, try .fromAddress("F16"), "E16 # F15");
-    try _setCellText(sheet, try .fromAddress("G16"), "F16 # G15");
-    try _setCellText(sheet, try .fromAddress("A17"), "A16 # '8'");
-    try _setCellText(sheet, try .fromAddress("B17"), "A17 # B16");
-    try _setCellText(sheet, try .fromAddress("C17"), "B17 # C16");
-    try _setCellText(sheet, try .fromAddress("D17"), "C17 # D16");
-    try _setCellText(sheet, try .fromAddress("E17"), "D17 # E16");
-    try _setCellText(sheet, try .fromAddress("F17"), "E17 # F16");
-    try _setCellText(sheet, try .fromAddress("G17"), "F17 # G16");
-    try _setCellText(sheet, try .fromAddress("A18"), "A17 # '9'");
-    try _setCellText(sheet, try .fromAddress("B18"), "A18 # B17");
-    try _setCellText(sheet, try .fromAddress("C18"), "B18 # C17");
-    try _setCellText(sheet, try .fromAddress("D18"), "C18 # D17");
-    try _setCellText(sheet, try .fromAddress("E18"), "D18 # E17");
-    try _setCellText(sheet, try .fromAddress("F18"), "E18 # F17");
-    try _setCellText(sheet, try .fromAddress("G18"), "F18 # G17");
-    try _setCellText(sheet, try .fromAddress("A19"), "A18 # '0'");
-    try _setCellText(sheet, try .fromAddress("B19"), "A19 # B18");
-    try _setCellText(sheet, try .fromAddress("C19"), "B19 # C18");
-    try _setCellText(sheet, try .fromAddress("D19"), "C19 # D18");
-    try _setCellText(sheet, try .fromAddress("E19"), "D19 # E18");
-    try _setCellText(sheet, try .fromAddress("F19"), "E19 # F18");
-    try _setCellText(sheet, try .fromAddress("G19"), "F19 # G18");
-    try _setCellText(sheet, try .fromAddress("A20"), "A19 # '1'");
-    try _setCellText(sheet, try .fromAddress("B20"), "A20 # B19");
-    try _setCellText(sheet, try .fromAddress("C20"), "B20 # C19");
-    try _setCellText(sheet, try .fromAddress("D20"), "C20 # D19");
-    try _setCellText(sheet, try .fromAddress("E20"), "D20 # E19");
-    try _setCellText(sheet, try .fromAddress("F20"), "E20 # F19");
-    try _setCellText(sheet, try .fromAddress("G20"), "F20 # G19");
-
+    var fbs = std.io.fixedBufferStream(commands);
+    try sheet.interpretFile(fbs.reader().any());
     try sheet.update();
 
     // Only checks the eval results of some of the cells, checking all is kinda slow
@@ -2424,14 +2426,57 @@ test "Cell assignment, updating, evaluation" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, testCellEvaluation, .{});
 }
 
-fn expectCellEquals(sheet: *Sheet, address: []const u8, expected_value: f64) !void {
-    const cell = sheet.getCellPtr(try .fromAddress(address)) orelse return error.CellNotFound;
-    try std.testing.expectApproxEqRel(expected_value, cell.value.number, 0.001);
+pub fn expectCellNonExtant(sheet: *Sheet, address: []const u8) !void {
+    const pos: Position = try .fromAddress(address);
+    if (sheet.getCellPtr(pos) != null) {
+        std.debug.print("Expected cell {} to not exist\n", .{pos});
+        return error.CellExists;
+    }
 }
 
-fn expectCellError(sheet: *Sheet, address: []const u8) !void {
-    const cell = sheet.getCellPtr(try .fromAddress(address)) orelse return error.CellNotFound;
-    if (!cell.isError()) return error.UnexpectedValue;
+pub fn expectCellEquals(sheet: *Sheet, address: []const u8, expected_value: f64) !void {
+    const pos: Position = try .fromAddress(address);
+    const cell = sheet.getCellPtr(pos) orelse return error.CellNotFound;
+    if (cell.value_type != .number) {
+        std.debug.print(
+            "Cell {} has value type {}, expected number\n",
+            .{ pos, cell.value_type },
+        );
+        return error.TestExpectedCellsEql;
+    }
+    if (!std.math.approxEqRel(f64, expected_value, cell.value.number, 0.001)) {
+        std.debug.print(
+            "Cell {} with value {d} not within tolerance of expected value {d}\n",
+            .{ pos, cell.value.number, expected_value },
+        );
+        return error.TestExpectedCellsEql;
+    }
+}
+
+pub fn expectCellEqualsString(sheet: *Sheet, address: []const u8, expected_value: []const u8) !void {
+    const pos: Position = try .fromAddress(address);
+    const cell = sheet.getCellPtr(pos) orelse return error.CellNotFound;
+    if (cell.value_type != .string) {
+        std.debug.print("Cell {} has value type {}, expected string '{s}'\n", .{
+            pos, cell.value_type, expected_value,
+        });
+        return error.TestExpectedCellsEqlStrings;
+    }
+    if (!std.mem.eql(u8, expected_value, std.mem.span(cell.value.string))) {
+        std.debug.print("Cell {} does not have expected string value\n", .{pos});
+        return std.testing.expectEqualStrings(expected_value, std.mem.span(cell.value.string));
+    }
+}
+
+pub fn expectCellError(sheet: *Sheet, address: []const u8) !void {
+    const pos: Position = try .fromAddress(address);
+    const cell = sheet.getCellPtr(pos) orelse return error.CellNotFound;
+    if (!cell.isError()) {
+        std.debug.print("Expected cell {} to have error, but has value type {}\n", .{
+            pos, cell.value_type,
+        });
+        return error.UnexpectedValue;
+    }
 }
 
 test "Cell error propagation" {
@@ -2559,14 +2604,13 @@ pub fn printCellDependents(sheet: *Sheet, address: []const u8) !void {
 
     while (try iter.next()) |item| {
         const slice = sheet.dependents.flat.items(item.value_ptr.*);
-        std.debug.print("{} is depended on by", .{pos});
+        log.debug("{} is depended on by", .{pos});
         for (slice) |handle| {
-            std.debug.print("    {} ({d})", .{
+            log.debug("    {} ({d})", .{
                 sheet.cell_treap.node(handle).key.rect(sheet),
                 handle.n,
             });
         }
-        std.debug.print("\n", .{});
     }
 }
 

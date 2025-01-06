@@ -1,0 +1,65 @@
+# Test basic string assignment
+let A0 = "Hello"
+let B0 = 'World'
+:expect-eql-string A0 "Hello"
+:expect-eql-string B0 "World"
+
+# Test string concatenation with other strings
+let C0 = A0 # " " # B0
+:expect-eql-string C0 "Hello World"
+
+# Test string concatenation with numbers (implicit conversion to string)
+let D0 = C0 # 123
+:expect-eql-string D0 "Hello World123"
+
+let E0 = 456 # " test"
+:expect-eql-string E0 "456 test"
+
+# Test string case conversion: lower and upper
+let F0 = @upper(A0)
+:expect-eql-string F0 "HELLO"
+
+let G0 = @lower(B0)
+:expect-eql-string G0 "world"
+
+# Case conversion with mixed case strings
+let H0 = "TeStInG 123"
+let I0 = @upper(H0)
+let J0 = @lower(H0)
+:expect-eql-string I0 "TESTING 123"
+:expect-eql-string J0 "testing 123"
+
+# Test implicit number-to-string conversion with case conversion
+let K0 = @upper(12345)
+:expect-eql-string K0 "12345"  # Numbers remain as strings but are unaffected by case.
+
+let L0 = @lower(67890)
+:expect-eql-string L0 "67890"  # Numbers remain as strings but are unaffected by case.
+
+# String concatenation with case-converted strings
+let M0 = @upper(A0) # " " # @lower(B0)
+:expect-eql-string M0 "HELLO world"
+
+# Undo/Redo operations with strings
+let N0 = "This is a test"
+let O0 = N0 # " of undo/redo"
+:expect-eql-string O0 "This is a test of undo/redo"
+
+:undo 1
+:expect-non-extant O0
+:expect-eql-string N0 "This is a test"
+
+:redo 1
+:expect-non-extant P0
+:expect-eql-string O0 "This is a test of undo/redo"
+
+# Large string concatenations
+let Q0 = "String " # "concatenation " # "test " # "with " # "multiple " # "parts"
+:expect-eql-string Q0 "String concatenation test with multiple parts"
+
+# Case conversions with numeric-strings and mixed types
+let R0 = "123abcDEF"
+let S0 = @upper(R0)
+let T0 = @lower(R0)
+:expect-eql-string S0 "123ABCDEF"
+:expect-eql-string T0 "123abcdef"

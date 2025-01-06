@@ -198,9 +198,10 @@ pub fn RTree(
 
         /// Finds the key/value pair whose key matches `key` and returns pointers
         /// to the key and value, or `null` if not found.
-        pub fn get(tree: *Self, key: K) ?struct { *K, *V } {
-            if (tree.nodeEntries(tree.rootNode()).len == 0)
-                return null;
+        pub fn get(tree: *Self, key: K) ?*KV {
+            // if (tree.isEmpty())
+            //     return null;
+            assert(!tree.isEmpty());
 
             return getSingle(tree, tree.rootNode(), key);
         }
@@ -295,6 +296,14 @@ pub fn RTree(
             if (tree.isEmpty()) {
                 assert(tree.unusedCapacity() >= 1 + max_children);
                 tree.putRootAssumeCapacity(key, value);
+                return;
+            }
+
+            if (tree.get(key)) |kv| {
+                kv.* = .{
+                    .key = key,
+                    .value = value,
+                };
                 return;
             }
 
@@ -435,7 +444,7 @@ pub fn RTree(
                         if (iter.rect.intersects(rectFromKey(iter.tree.sheet, entry.kv.key))) {
                             // We might have more matches in this leaf node, put it back on the
                             // stack
-                            try iter.stack.append(iter.allocator, node);
+                            iter.stack.appendAssumeCapacity(node);
                             iter.index = i + 1;
                             return .{
                                 .key = entry.kv.key,
@@ -535,11 +544,11 @@ pub fn RTree(
         }
 
         // TODO: Change return type to ?*KV
-        fn getSingleRecursive(tree: *Self, node: *Node, key: K) ?struct { *K, *V } {
+        fn getSingleRecursive(tree: *Self, node: *Node, key: K) ?*KV {
             if (node.isLeaf()) {
                 for (tree.nodeEntries(node)) |*entry| {
-                    if (entry.kv.key.eql(key))
-                        return .{ &entry.kv.key, &entry.kv.value };
+                    if (eqlKeys(tree.sheet, entry.kv.key, key))
+                        return &entry.kv;
                 }
                 return null;
             }
@@ -555,7 +564,7 @@ pub fn RTree(
             return null;
         }
 
-        fn getSingle(tree: *Self, node: *Node, key: K) ?struct { *K, *V } {
+        fn getSingle(tree: *Self, node: *Node, key: K) ?*KV {
             return if (node.range.rect(tree.sheet).contains(rectFromKey(tree.sheet, key)))
                 getSingleRecursive(tree, node, key)
             else
@@ -965,14 +974,6 @@ pub fn RTree(
 
         const PutError = error{ OutOfMemory, NotAdded };
 
-        // TODO: Make put operations atomic
-        //
-        //       Inserting has an upper bound of `n` node allocations, where `n` is the height of
-        //       the tree. Or maybe it's `n+1`, who knows.
-        //
-        //       This will be trivial to do once we switch to a DOD memory layout, where all nodes
-        //       are stored in an array.
-
         fn putLeafNode(tree: *Self, handle: Handle, key: K, value: V) ?Node {
             for (tree.handleEntries(handle)) |*entry| {
                 // Key already exists in tree
@@ -1162,7 +1163,7 @@ pub fn DependentTree(comptime min_children: usize) type {
             return ret;
         }
 
-        pub fn get(self: *Self, key: Range) ?struct { *Range, *ListIndex } {
+        pub fn get(self: *Self, key: Range) ?*KV {
             return self.rtree.get(key);
         }
 
@@ -1194,8 +1195,8 @@ pub fn DependentTree(comptime min_children: usize) type {
             }
 
             if (self.get(key)) |kv| {
-                const list = kv[1];
-                try self.flat.appendSlice(sheet.allocator, list.*, values);
+                const list = kv.value;
+                try self.flat.appendSlice(sheet.allocator, list, values);
                 return;
             }
 

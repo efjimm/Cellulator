@@ -1,0 +1,92 @@
+# Test basic cell assignment and arithmetic
+let A0 = 10
+:expect-eql-number A0 10
+:expect-non-extant B0
+
+let B0 = A0 + 5
+:expect-eql-number B0 15
+
+let C0 = B0 * 2
+:expect-eql-number C0 30
+
+# Test overwriting cells and updating dependent cells
+let A0 = 20
+:expect-eql-number A0 20
+:expect-eql-number B0 25  # B0 = A0 + 5
+:expect-eql-number C0 50  # C0 = B0 * 2
+
+# Test recursion error
+let D0 = D0
+:expect-error D0
+
+# Test single-argument built-in functions
+let A1 = 5
+let B1 = 15
+let C1 = @sum(A1)
+:expect-eql-number C1 5
+
+let D1 = @prod(A1)
+:expect-eql-number D1 5
+
+# Test multi-argument built-in functions
+let E1 = @sum(A1, B1)
+:expect-eql-number E1 20
+
+let F1 = @prod(A1, B1)
+:expect-eql-number F1 75
+
+let G1 = @avg(A1, B1)
+:expect-eql-number G1 10
+
+let H1 = @min(A1, B1)
+:expect-eql-number H1 5
+
+let I1 = @max(A1, B1)
+:expect-eql-number I1 15
+
+# Test range-based operations
+let A2 = 1
+let B2 = 2
+let C2 = 3
+let D2 = @sum(A2:C2)
+:expect-eql-number D2 6
+
+let E2 = @prod(A2:C2)
+:expect-eql-number E2 6
+
+# Test string values and concatenation
+let A3 = "Hello"
+let B3 = 'World'
+let C3 = A3 # " " # B3
+:expect-eql-string C3 "Hello World"
+
+let D3 = A3 # 123
+:expect-eql-string D3 "Hello123"
+
+let E3 = 123 # 456
+:expect-eql-string E3 "123456"
+
+# Test errors with built-ins on incompatible data types
+let F3 = @sum(A3, B3)
+:expect-error F3
+
+let G3 = @prod(A3)
+:expect-error G3
+
+# Test undo/redo functionality
+let A4 = 10
+let B4 = A4 * 2
+:expect-eql-number A4 10
+:expect-eql-number B4 20
+
+:undo 1
+:expect-non-extant B4
+:expect-eql-number A4 10
+
+:undo 1
+:expect-non-extant A4
+:expect-non-extant B4
+
+:redo 2
+:expect-eql-number A4 10
+:expect-eql-number B4 20

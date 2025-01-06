@@ -339,11 +339,11 @@ pub const Position = packed struct {
         }
 
         pub fn height(r: Rect) Int {
-            return r.br.y - r.tl.y;
+            return r.br.y - r.tl.y + 1;
         }
 
         pub fn width(r: Rect) Int {
-            return r.br.x - r.tl.x;
+            return r.br.x - r.tl.x + 1;
         }
 
         pub fn area(r: Rect) HashInt {

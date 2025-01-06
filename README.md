@@ -164,7 +164,7 @@ The following builtins take an arbitrary number of arguments and coerce them to 
 also take ranges as arguments.
 
 - `@sum` Returns the sum of its arguments
-- `@mul` Returns the product of its arguments
+- `@prod` Returns the product of its arguments
 - `@avg` Returns the average of its arguments.
 - `@min` Returns the smallest argument.
 - `@max` Returns the largest argument.

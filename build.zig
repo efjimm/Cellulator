@@ -60,6 +60,11 @@ pub fn build(b: *std.Build) void {
 
     const fast_tests = b.option(bool, "fast-tests", "Skip slow tests") orelse false;
     const opts = b.addOptions();
+    opts.addOption([]const []const u8, "test_files", &.{
+        "test/general.zc",
+        "test/undo-redo.zc",
+        "test/string.zc",
+    });
     opts.addOption(bool, "fast_tests", fast_tests);
     tests.root_module.addOptions("compile_opts", opts);
 

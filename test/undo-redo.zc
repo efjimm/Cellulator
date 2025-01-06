@@ -1,0 +1,108 @@
+# Initialize a grid of data
+let A0 = 1
+let B0 = 2
+let C0 = 3
+let D0 = 4
+let E0 = 5
+
+let A1 = 10
+let B1 = 20
+let C1 = 30
+let D1 = 40
+let E1 = 50
+
+# Perform arithmetic operations
+let F0 = A0 + B0 + C0 + D0 + E0
+let F1 = A1 * B1
+let F2 = F1 - F0
+:expect-eql-number F0 15  # A0 + B0 + C0 + D0 + E0 = 1 + 2 + 3 + 4 + 5
+:expect-eql-number F1 200  # A1 * B1 = 10 * 20
+:expect-eql-number F2 185  # F1 - F0 = 200 - 15
+
+# Update a few values and check the changes
+let A0 = 6
+let B0 = 7
+:expect-eql-number A0 6
+:expect-eql-number B0 7
+:expect-eql-number F0 25  # F0 = A0 + B0 + C0 + D0 + E0 = 6 + 7 + 3 + 4 + 5
+
+# Undo updates and validate original values
+:undo 2
+:expect-eql-number A0 1
+:expect-eql-number B0 2
+:expect-eql-number F0 15  # Back to original calculation
+
+# Perform string operations
+let G0 = "Spreadsheet"
+let H0 = G0 # " Program"
+let I0 = H0 # " Test"
+:expect-eql-string G0 "Spreadsheet"
+:expect-eql-string H0 "Spreadsheet Program"
+:expect-eql-string I0 "Spreadsheet Program Test"
+
+# Undo string concatenations
+:undo 1
+:expect-non-extant I0
+:expect-eql-string H0 "Spreadsheet Program"
+
+:undo 1
+:expect-non-extant H0
+:expect-eql-string G0 "Spreadsheet"
+
+# Redo string concatenations
+:redo 2
+:expect-eql-string H0 "Spreadsheet Program"
+:expect-eql-string I0 "Spreadsheet Program Test"
+
+# Mass undo/redo for grid-based operations
+let A2 = 100
+let B2 = 200
+let C2 = 300
+let D2 = 400
+let E2 = 500
+
+let F3 = @sum(A2:E2)
+let G3 = @avg(A2:E2)
+:expect-eql-number F3 1500  # Sum of A2:E2 = 100 + 200 + 300 + 400 + 500
+:expect-eql-number G3 300  # Average = 1500 / 5
+
+:undo 7
+:expect-non-extant F3
+:expect-non-extant G3
+:expect-non-extant A2
+:expect-non-extant B2
+:expect-non-extant C2
+:expect-non-extant D2
+:expect-non-extant E2
+
+:redo 7
+:expect-eql-number A2 100
+:expect-eql-number B2 200
+:expect-eql-number C2 300
+:expect-eql-number D2 400
+:expect-eql-number E2 500
+:expect-eql-number F3 1500
+:expect-eql-number G3 300
+
+# Undo with interleaving edits and branching
+:undo 3
+:expect-non-extant F3
+:expect-non-extant G3
+
+let H4 = "Final Test"
+:expect-eql-string H4 "Final Test"
+
+:redo 1
+:expect-non-extant F3  # Redo should not overwrite interleaving changes
+:expect-non-extant G3
+
+:undo 4
+:expect-non-extant H4
+:expect-non-extant B2
+
+:redo 4
+:expect-eql-number A2 100
+:expect-eql-number B2 200
+:expect-eql-number C2 300
+:expect-eql-number D2 400
+:expect-eql-string H4 "Final Test"

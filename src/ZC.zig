@@ -832,7 +832,7 @@ fn doVisualMode(self: *Self, action: Action) Allocator.Error!void {
 
         .delete_cell => {
             defer self.setMode(.normal);
-            try self.deleteCellsInRange();
+            try self.deleteCellsInRange(self.visualRange());
         },
         else => {},
     }
@@ -843,9 +843,15 @@ const ParseCommandError = ast.ParseError || RunCommandError;
 fn parseCommand(self: *Self, str: []const u8) !void {
     if (str.len == 0) return;
 
-    switch (str[0]) {
-        ':' => return self.runCommand(str[1..]),
-        else => {},
+    if (str[0] == ':')
+        return self.runCommand(str[1..]);
+
+    for (str) |c| {
+        if (!std.ascii.isWhitespace(c)) {
+            // If the first non-whitespace character is a # then this line is a comment
+            if (c == '#') return;
+            break;
+        }
     }
 
     const expr_root = try ast.fromSource(self.sheet, str);
@@ -857,6 +863,13 @@ fn parseCommand(self: *Self, str: []const u8) !void {
 
     try self.setCell(pos, str, spliced_root, .{});
     self.sheet.endUndoGroup();
+}
+
+fn interpretCommands(self: *Self, commands: []const u8) !void {
+    var lines = std.mem.tokenizeScalar(u8, commands, '\n');
+    while (lines.next()) |line| {
+        try self.parseCommand(line);
+    }
 }
 
 pub fn isSelectedCell(self: Self, pos: Position) bool {
@@ -943,6 +956,9 @@ const Cmd = enum {
     fill,
     binary_save,
     binary_load,
+    undo,
+    redo,
+    delete,
 };
 
 const cmds = std.StaticStringMap(Cmd).initComptime(.{
@@ -955,6 +971,23 @@ const cmds = std.StaticStringMap(Cmd).initComptime(.{
     .{ "fill", .fill },
     .{ "bw", .binary_save },
     .{ "be", .binary_load },
+    .{ "undo", .undo },
+    .{ "redo", .redo },
+    .{ "delete", .delete },
+});
+
+const DebugCmd = enum {
+    expect_eql_number,
+    expect_eql_string,
+    expect_non_extant,
+    expect_error,
+};
+
+const debug_cmds: std.StaticStringMap(DebugCmd) = .initComptime(.{
+    .{ "expect-eql-string", .expect_eql_string },
+    .{ "expect-eql-number", .expect_eql_number },
+    .{ "expect-non-extant", .expect_non_extant },
+    .{ "expect-error", .expect_error },
 });
 
 pub const RunCommandError = error{
@@ -964,12 +997,57 @@ pub const RunCommandError = error{
     EmptyFileName,
 } || Allocator.Error;
 
+// TODO: This parses differently than ranges in assignments, due to using a WordIterator
+fn parseRangeOrPoint(bytes: []const u8) !Rect {
+    var range_iter = std.mem.splitScalar(u8, bytes, ':');
+    const lhs = range_iter.next() orelse return error.InvalidSyntax;
+    const rhs = range_iter.next() orelse
+        return .initSinglePos(try Position.fromAddress(lhs));
+
+    const p1 = Position.fromAddress(lhs) catch return error.InvalidCellAddress;
+    const p2 = Position.fromAddress(rhs) catch return error.InvalidCellAddress;
+
+    return .initPos(
+        .topLeft(p1, p2),
+        .bottomRight(p1, p2),
+    );
+}
+
+fn runDebugCommand(self: *Self, cmd_str: []const u8, iter: *utils.WordIterator) !void {
+    const cmd = debug_cmds.get(cmd_str) orelse return error.InvalidCommand;
+    switch (cmd) {
+        .expect_eql_number => {
+            const arg1 = iter.next() orelse return error.InvalidSyntax;
+            const arg2 = iter.next() orelse return error.InvalidSyntax;
+            const n = try std.fmt.parseFloat(f64, arg2);
+            try self.sheet.expectCellEquals(arg1, n);
+        },
+        .expect_eql_string => {
+            const arg1 = iter.next() orelse return error.InvalidSyntax;
+            const arg2 = iter.next() orelse return error.InvalidSyntax;
+            try self.sheet.expectCellEqualsString(arg1, arg2);
+        },
+        .expect_non_extant => {
+            const arg1 = iter.next() orelse return error.InvalidSyntax;
+            try self.sheet.expectCellNonExtant(arg1);
+        },
+        .expect_error => {
+            const arg1 = iter.next() orelse return error.InvalidSyntax;
+            try self.sheet.expectCellError(arg1);
+        },
+    }
+}
+
 pub fn runCommand(self: *Self, str: []const u8) !void {
     var iter = utils.wordIterator(str);
     const cmd_str = iter.next() orelse return error.InvalidCommand;
     assert(cmd_str.len > 0);
 
-    const cmd = cmds.get(cmd_str) orelse return error.InvalidCommand;
+    const cmd = cmds.get(cmd_str) orelse {
+        if (@import("builtin").mode != .Debug) return error.InvalidCommand;
+
+        return self.runDebugCommand(cmd_str, &iter);
+    };
 
     switch (cmd) {
         .quit => {
@@ -1019,22 +1097,7 @@ pub fn runCommand(self: *Self, str: []const u8) !void {
         },
         .load_force => try self.loadCmd(iter.next() orelse ""),
         .fill => {
-            // TODO: This parses differently than ranges in assignments, due to using a WordIterator
-
-            const range: Rect = blk: {
-                const string = iter.next() orelse return error.InvalidSyntax;
-                var range_iter = std.mem.splitScalar(u8, string, ':');
-                const lhs = range_iter.next() orelse return error.InvalidSyntax;
-                const rhs = range_iter.next() orelse return error.InvalidSyntax;
-
-                const p1 = Position.fromAddress(lhs) catch return error.InvalidCellAddress;
-                const p2 = Position.fromAddress(rhs) catch return error.InvalidCellAddress;
-
-                break :blk .{
-                    .tl = Position.topLeft(p1, p2),
-                    .br = Position.bottomRight(p1, p2),
-                };
-            };
+            const range = try parseRangeOrPoint(iter.next() orelse return error.InvalidSyntax);
 
             const value = blk: {
                 const string = iter.next() orelse return error.InvalidSyntax;
@@ -1050,20 +1113,57 @@ pub fn runCommand(self: *Self, str: []const u8) !void {
 
             defer self.sheet.endUndoGroup();
 
-            // TODO: pre-allocate
-            var nodes = self.sheet.ast_nodes.toMultiArrayList();
-            defer self.sheet.ast_nodes = nodes.slice();
-            try nodes.ensureUnusedCapacity(self.sheet.allocator, @intCast(range.area()));
+            var i = self.sheet.ast_nodes.len;
+            const area = range.area();
+            {
+                var nodes = self.sheet.ast_nodes.toMultiArrayList();
+                try nodes.ensureUnusedCapacity(self.sheet.allocator, area);
+                nodes.len += area;
+                self.sheet.ast_nodes = nodes.slice();
+            }
 
-            var i: f64 = value;
+            var n: f64 = value;
             for (range.tl.y..@as(u64, range.br.y) + 1) |y| {
                 for (range.tl.x..@as(u64, range.br.x) + 1) |x| {
-                    const expr_root: ast.Index = .from(@intCast(nodes.len));
-                    nodes.appendAssumeCapacity(.init(.number, i));
+                    const expr_root: ast.Index = .from(@intCast(i));
+                    self.sheet.ast_nodes.set(i, .init(.number, n));
                     try self.setCell(.{ .y = @intCast(y), .x = @intCast(x) }, "", expr_root, .{});
-                    i += increment;
+                    n += increment;
+                    i += 1;
                 }
             }
+        },
+        inline .undo, .redo => |tag| {
+            const count = blk: {
+                const arg_string = iter.next() orelse break :blk 1;
+                const count = std.fmt.parseInt(u32, arg_string, 0) catch |err| {
+                    const err_msg = switch (err) {
+                        error.Overflow => "Must be between 1 and 4294967295",
+                        error.InvalidCharacter => "Expected integer",
+                    };
+                    self.setStatusMessage(.err, "Invalid argument '{s}'. {s}", .{
+                        arg_string,
+                        err_msg,
+                    });
+                    return;
+                };
+
+                break :blk @max(count, 1);
+            };
+
+            for (0..count) |_| switch (tag) {
+                .undo => try self.undo(),
+                .redo => try self.redo(),
+                else => comptime unreachable,
+            };
+        },
+        .delete => {
+            const range = if (iter.next()) |arg_string|
+                try parseRangeOrPoint(arg_string)
+            else
+                self.anyCursorRange();
+
+            try self.deleteCellsInRange(range);
         },
     }
 }
@@ -1119,7 +1219,13 @@ pub fn redo(self: *Self) Allocator.Error!void {
     }
 }
 
-fn visualRange(self: Self) Rect {
+fn anyCursorRange(self: *const Self) Rect {
+    if (self.mode == .visual or self.mode == .select)
+        return self.visualRange();
+    return .initSinglePos(self.cursor);
+}
+
+fn visualRange(self: *const Self) Rect {
     assert(self.mode == .visual or self.mode == .select);
     return Rect.initNormalizePos(self.cursor, self.anchor);
 }
@@ -1133,9 +1239,8 @@ pub fn deleteCell(self: *Self) Allocator.Error!void {
     self.tui.update.cursor = true;
 }
 
-pub fn deleteCellsInRange(self: *Self) Allocator.Error!void {
-    assert(self.mode == .visual);
-    try self.sheet.deleteCellsInRange(self.visualRange());
+pub fn deleteCellsInRange(self: *Self, rect: Rect) Allocator.Error!void {
+    try self.sheet.deleteCellsInRange(rect);
     self.sheet.endUndoGroup();
 
     self.tui.update.cells = true;
@@ -2011,4 +2116,39 @@ test "Motions visual mode" {
     try zc.doVisualMode(.visual_move_down);
     try t.expectEqual(Position{ .y = max - 10, .x = 0 }, zc.cursor);
     try t.expectEqual(Position{ .y = max, .x = 10 }, zc.anchor);
+}
+
+fn testCommands(self: *Self, commands: []const u8) !void {
+    var lines = std.mem.tokenizeScalar(u8, commands, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        try self.parseCommand(line);
+        try self.updateCells();
+    }
+}
+
+// Test files at runtime so no recompilation is needed if the data changes
+fn testFile(path: []const u8) !void {
+    var zc: Self = undefined;
+    try zc.init(std.testing.allocator, .{ .ui = false });
+    defer zc.deinit();
+
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+
+    const bytes = try file.readToEndAlloc(std.testing.allocator, 100_000_000);
+    defer std.testing.allocator.free(bytes);
+
+    try zc.testCommands(bytes);
+}
+
+const test_files = @import("compile_opts").test_files;
+
+test "Sheet operations" {
+    for (test_files) |path| {
+        testFile(path) catch |err| {
+            std.debug.print("Test file {s} failed\n", .{path});
+            return err;
+        };
+    }
 }
