@@ -1,5 +1,5 @@
 const std = @import("std");
-const GapBuffer = @import("GapBuffer.zig");
+const GapBuffer = @import("GapBuffer.zig").GapBuffer;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
@@ -14,7 +14,7 @@ cursor: u32 = 0,
 
 /// The command currently being edited. May be a pointer to an older command,
 /// which will have copy on write behaviour.
-buffer: GapBuffer = .{},
+buffer: GapBuffer(u8) = .{},
 
 /// What index of the `history` list the `current` buffer points to.
 /// If none, this is equal to history.items.len
@@ -25,7 +25,7 @@ index: u32 = 0,
 cow: bool = false,
 
 const Self = @This();
-pub const ElementType = u8;
+pub const ChildType = u8;
 
 pub fn deinit(self: *Self, allocator: Allocator) void {
     self.history_buf.deinit(allocator);

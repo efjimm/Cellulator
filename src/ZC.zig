@@ -8,7 +8,6 @@ const critbit = @import("critbit.zig");
 const text = @import("text.zig");
 const Motion = text.Motion;
 const wcWidth = @import("wcwidth").wcWidth;
-const GapBuffer = @import("GapBuffer.zig");
 const Command = @import("Command.zig");
 const Position = @import("Position.zig").Position;
 const Rect = Position.Rect;
@@ -372,6 +371,9 @@ fn getAction(self: Self, bytes: [:0]const u8) GetActionResult {
 }
 
 fn handleInput(self: *Self) !void {
+    assert(self.sheet.undos.len == 0 or self.sheet.undos.items(.tag)[self.sheet.undos.len - 1] == .sentinel);
+    assert(self.sheet.redos.len == 0 or self.sheet.redos.items(.tag)[self.sheet.redos.len - 1] == .sentinel);
+
     var buf: [INPUT_BUF_LEN / 2]u8 = undefined;
     const slice = try self.tui.term.readInput(&buf);
 
@@ -395,6 +397,7 @@ fn handleInput(self: *Self) !void {
             error.OutOfMemory => self.setStatusMessage(.err, "Out of memory!", .{}),
             error.UnexpectedToken => self.setStatusMessage(.err, "Unexpected token", .{}),
             error.InvalidSyntax => self.setStatusMessage(.err, "Invalid syntax", .{}),
+            else => self.setStatusMessage(.err, "Unhandled error {}", .{err}),
         },
         .prefix => return,
         .not_found => {
@@ -938,6 +941,8 @@ const Cmd = enum {
     quit,
     quit_force,
     fill,
+    binary_save,
+    binary_load,
 };
 
 const cmds = std.StaticStringMap(Cmd).initComptime(.{
@@ -948,6 +953,8 @@ const cmds = std.StaticStringMap(Cmd).initComptime(.{
     .{ "q", .quit },
     .{ "q!", .quit_force },
     .{ "fill", .fill },
+    .{ "bw", .binary_save },
+    .{ "be", .binary_load },
 });
 
 pub const RunCommandError = error{
@@ -957,7 +964,7 @@ pub const RunCommandError = error{
     EmptyFileName,
 } || Allocator.Error;
 
-pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
+pub fn runCommand(self: *Self, str: []const u8) !void {
     var iter = utils.wordIterator(str);
     const cmd_str = iter.next() orelse return error.InvalidCommand;
     assert(cmd_str.len > 0);
@@ -973,14 +980,37 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
             }
         },
         .quit_force => self.running = false,
-        .save, .save_force => { // save
+        .save, .save_force => {
             self.writeFile(iter.next()) catch |err| {
                 self.setStatusMessage(.warn, "Could not write file: {s}", .{@errorName(err)});
                 return;
             };
             self.sheet.has_changes = false;
         },
-        .load => { // load
+        .binary_save => {
+            const filepath = iter.next() orelse {
+                self.setStatusMessage(.err, "No filename provided", .{});
+                return;
+            };
+
+            const file = std.fs.cwd().createFile(filepath, .{}) catch |err| {
+                self.setStatusMessage(.warn, "Could not write binary file: {s}", .{
+                    @errorName(err),
+                });
+                return;
+            };
+            defer file.close();
+
+            try self.sheet.serialize(file);
+        },
+        .binary_load => {
+            if (self.sheet.has_changes) {
+                self.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
+            } else {
+                try self.loadCmdBinary(iter.next() orelse "");
+            }
+        },
+        .load => {
             if (self.sheet.has_changes) {
                 self.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
             } else {
@@ -1028,14 +1058,27 @@ pub fn runCommand(self: *Self, str: []const u8) RunCommandError!void {
             var i: f64 = value;
             for (range.tl.y..@as(u64, range.br.y) + 1) |y| {
                 for (range.tl.x..@as(u64, range.br.x) + 1) |x| {
-                    const expr_root: ast.Index = .from(nodes.len);
-                    nodes.appendAssumeCapacity(.{ .number = i });
+                    const expr_root: ast.Index = .from(@intCast(nodes.len));
+                    nodes.appendAssumeCapacity(.init(.number, i));
                     try self.setCell(.{ .y = @intCast(y), .x = @intCast(x) }, "", expr_root, .{});
                     i += increment;
                 }
             }
         },
     }
+}
+
+pub fn loadCmdBinary(self: *Self, filepath: []const u8) !void {
+    if (filepath.len == 0) return error.EmptyFileName;
+
+    self.tui.update.cells = true;
+
+    const file = try std.fs.cwd().openFile(filepath, .{});
+    defer file.close();
+
+    const old_sheet = self.sheet;
+    self.sheet = try .deserialize(self.allocator, file);
+    old_sheet.destroy();
 }
 
 pub fn loadCmd(self: *Self, filepath: []const u8) !void {
@@ -1284,16 +1327,19 @@ pub fn clampScreenToCursorX(self: *Self) void {
 
 pub fn setPrecision(self: *Self, column: PosInt, new_precision: u8) Allocator.Error!void {
     try self.sheet.setPrecision(column, new_precision, .{});
+    self.sheet.endUndoGroup();
     self.tui.update.cells = true;
 }
 
 pub fn incPrecision(self: *Self, column: PosInt, count: u8) Allocator.Error!void {
     try self.sheet.incPrecision(column, count, .{});
+    self.sheet.endUndoGroup();
     self.tui.update.cells = true;
 }
 
 pub fn decPrecision(self: *Self, column: PosInt, count: u8) Allocator.Error!void {
     try self.sheet.decPrecision(column, count, .{});
+    self.sheet.endUndoGroup();
     self.tui.update.cells = true;
 }
 
@@ -1311,12 +1357,14 @@ pub inline fn cursorDecPrecision(self: *Self) Allocator.Error!void {
 
 pub fn incWidth(self: *Self, column: PosInt, n: u8) Allocator.Error!void {
     try self.sheet.incWidth(column, n, .{});
+    self.sheet.endUndoGroup();
     self.tui.update.cells = true;
     self.tui.update.column_headings = true;
 }
 
 pub fn decWidth(self: *Self, column: PosInt, n: u8) Allocator.Error!void {
     try self.sheet.decWidth(column, n, .{});
+    self.sheet.endUndoGroup();
     self.tui.update.cells = true;
     self.tui.update.column_headings = true;
 }
@@ -1340,6 +1388,7 @@ pub fn cursorExpandWidth(self: *Self) Allocator.Error!void {
     const max_width = self.tui.term.width - self.leftReservedColumns();
     const width_needed = try self.sheet.widthNeededForColumn(self.cursor.x, col.precision, max_width);
     try self.sheet.setColWidth(handle, self.cursor.x, width_needed, .{});
+    self.sheet.endUndoGroup();
     self.clampScreenToCursorX();
     self.tui.update.cells = true;
     self.tui.update.column_headings = true;

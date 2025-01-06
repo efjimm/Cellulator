@@ -742,7 +742,7 @@ pub const Motion = union(enum(u8)) {
     }
 };
 
-const GapBuffer = @import("GapBuffer.zig");
+const GapBuffer = @import("GapBuffer.zig").GapBuffer;
 
 fn testMotion(
     text: []const u8,
@@ -752,7 +752,7 @@ fn testMotion(
     motion: Motion,
     count: u32,
 ) !void {
-    var buf = GapBuffer{};
+    var buf = GapBuffer(u8){};
     defer buf.deinit(std.testing.allocator);
 
     try buf.appendSlice(std.testing.allocator, text);

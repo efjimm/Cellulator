@@ -4,11 +4,11 @@ const Allocator = std.mem.Allocator;
 const Position = @import("Position.zig").Position;
 const Rect = Position.Rect;
 const PosInt = Position.Int;
-const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 const Sheet = @import("Sheet.zig");
 const Range = Sheet.Range;
 const Cell = Sheet.Cell;
 const ast = @import("ast.zig");
+const utils = @import("utils.zig");
 
 pub fn RTree(
     comptime K: type,
@@ -22,7 +22,6 @@ pub fn RTree(
     return struct {
         const max_children: comptime_int = min_children * 2;
 
-        root: Handle,
         entries: std.ArrayListUnmanaged(Entry),
         sheet: *Sheet,
         free: Handle,
@@ -44,7 +43,7 @@ pub fn RTree(
             }
         };
 
-        pub const Entry = union {
+        pub const Entry = extern union {
             kv: KV,
             node: Node,
 
@@ -56,7 +55,7 @@ pub fn RTree(
             }
         };
 
-        const KV = struct {
+        const KV = extern struct {
             key: K,
             /// List of cells that depend on the cells in `key`
             value: V,
@@ -67,7 +66,7 @@ pub fn RTree(
             value_ptr: *V,
         };
 
-        const Node = struct {
+        const Node = extern struct {
             level: u32,
             range: Range,
             children: Handle,
@@ -89,7 +88,6 @@ pub fn RTree(
             return &tree.entryPtr(handle).node;
         }
 
-        // These functions are trivial now but will make our life easier when we change the data layout.
         fn nodeEntries(tree: *Self, node: *const Node) []Entry {
             assert(node.children.isValid());
             assert(node.children_len <= max_children);
@@ -125,6 +123,7 @@ pub fn RTree(
             const entries = tree.nodeEntries(node);
             const ret = entries[index];
             entries[index] = entries[entries.len - 1];
+            entries[entries.len - 1] = undefined;
             node.children_len -= 1;
             return ret;
         }
@@ -138,13 +137,18 @@ pub fn RTree(
         }
 
         fn createNodeEntriesAssumeCapacity(tree: *Self) Handle {
+            assert(tree.entries.items.len > 0);
+
             if (tree.free.isValid()) {
                 return tree.popFree();
             }
 
-            assert(tree.unusedCapacity() >= max_children);
             const handle: Handle = .from(@intCast(tree.entries.items.len));
             tree.entries.items.len += max_children;
+
+            assert(tree.entries.items.len <= tree.entries.capacity);
+            assert(handle.n != 0);
+
             return handle;
         }
 
@@ -153,7 +157,6 @@ pub fn RTree(
                 return tree.popFree();
             }
 
-            // std.debug.print("REALLOCED ENTRIES\n", .{});
             try tree.entries.ensureUnusedCapacity(tree.sheet.allocator, max_children);
             return tree.createNodeEntriesAssumeCapacity();
         }
@@ -162,11 +165,14 @@ pub fn RTree(
             assert(tree.free.isValid());
             const ret = tree.free;
             tree.free = tree.entries.items[tree.free.n].node.children;
+            assert(ret.n != 0);
+            assert(!tree.free.isValid() or tree.free.n < tree.entries.items.len);
             return ret;
         }
 
         fn pushFree(tree: *Self, handle: Handle) void {
             assert(handle.isValid());
+            assert(handle.n != 0);
             tree.entries.items[handle.n] = .{
                 .node = .{
                     .level = undefined,
@@ -179,16 +185,13 @@ pub fn RTree(
         }
 
         fn rootNode(tree: *Self) *Node {
-            assert(tree.root.isValid());
-            assert(tree.root.n < tree.entries.items.len);
-            return &tree.entries.items[tree.root.n].node;
+            return &tree.entries.items[0].node;
         }
 
         pub fn init(sheet: *Sheet) Self {
             return .{
                 .sheet = sheet,
                 .entries = .empty,
-                .root = .invalid,
                 .free = .invalid,
             };
         }
@@ -216,14 +219,19 @@ pub fn RTree(
         }
 
         fn putRootAssumeCapacity(tree: *Self, key: K, value: V) void {
-            assert(tree.unusedCapacity() >= max_children + 1);
+            if (tree.entries.items.len == 0) {
+                tree.entries.items.len += 1;
+            } else {
+                assert(tree.rootNode().children_len == 0);
+            }
+            assert(tree.entries.items.len <= tree.entries.capacity);
 
-            tree.root = .from(@intCast(tree.entries.items.len));
-            tree.entries.items.len += max_children + 1;
-            tree.entries.items[tree.root.n] = .{ .node = .{
+            const children = tree.createNodeEntriesAssumeCapacity();
+
+            tree.entries.items[0] = .{ .node = .{
                 .level = 0,
                 .range = rangeFromKey(tree.sheet, key),
-                .children = .from(tree.root.n + 1),
+                .children = children,
                 .children_len = 0,
             } };
 
@@ -254,15 +262,16 @@ pub fn RTree(
                     handle = tree.entries.items[handle.n].node.children;
                 }
 
-                if (tree.root.isValid()) {
+                if (!tree.isEmpty()) {
                     // root.level + 1 is the height of the tree. Add one more for mergeRoots.
                     // In the worst case each `put` may increase the height of the tree by one.
                     const level = tree.rootNode().level;
-                    break :blk (level + 1 + (n * (n + 1) / 2) -| free_count) * max_children;
+                    // break :blk (level + 1 + (n * (n + 1) / 2) -| free_count) * max_children;
+                    break :blk (level + 1 + (n * (n + 1) / 2)) * max_children;
                 }
 
-                break :blk 1 + max_children + (n * (n + 1) / 2) * max_children -|
-                    (free_count * max_children);
+                break :blk 1 + max_children + (n * (n + 1) / 2) * max_children;
+                // (free_count * max_children);
             };
 
             try tree.entries.ensureUnusedCapacity(tree.sheet.allocator, len);
@@ -278,8 +287,12 @@ pub fn RTree(
             return tree.putContextAssumeCapacity(key, value, context);
         }
 
+        pub fn isEmpty(tree: *Self) bool {
+            return tree.entries.items.len == 0 or tree.rootNode().children_len == 0;
+        }
+
         pub fn putContextAssumeCapacity(tree: *Self, key: K, value: V, context: anytype) void {
-            if (!tree.root.isValid()) {
+            if (tree.isEmpty()) {
                 assert(tree.unusedCapacity() >= 1 + max_children);
                 tree.putRootAssumeCapacity(key, value);
                 return;
@@ -288,7 +301,7 @@ pub fn RTree(
             const required_capacity = (tree.rootNode().level + 2) * max_children;
             assert(tree.unusedCapacity() >= required_capacity);
 
-            var maybe_new_node = tree.putNode(tree.root, key, value);
+            var maybe_new_node = tree.putNode(.from(0), key, value);
 
             if (maybe_new_node) |*new_node| {
                 errdefer deinitNodeContext(tree, new_node, tree.sheet.allocator, context);
@@ -311,10 +324,10 @@ pub fn RTree(
             key: K,
             context: anytype,
         ) Allocator.Error!void {
-            var res = removeNode(tree, tree.rootNode(), key) orelse return;
+            const res = removeNode(tree, tree.rootNode(), key) orelse return;
 
             if (@TypeOf(context) != void)
-                context.deinit(tree.sheet.allocator, &res.kv.value);
+                context.deinit(tree.sheet.allocator, res.kv.value);
 
             const node_to_merge = blk: {
                 if (!tree.rootNode().isLeaf()) {
@@ -324,7 +337,12 @@ pub fn RTree(
                         @intFromBool(res.merge.parent == tree.rootNode());
                     if (root_len < min_children) {
                         const ret = tree.rootNode().*;
-                        tree.root = .invalid;
+                        tree.rootNode().* = .{
+                            .level = 0,
+                            .range = undefined,
+                            .children = .invalid,
+                            .children_len = 0,
+                        };
                         break :blk ret;
                     }
                 }
@@ -345,7 +363,7 @@ pub fn RTree(
             allocator: Allocator,
             context: anytype,
         ) void {
-            if (tree.root.isValid())
+            if (!tree.isEmpty())
                 tree.deinitNodeContext(tree.rootNode(), allocator, context);
             tree.entries.deinit(allocator);
             tree.* = undefined;
@@ -376,7 +394,7 @@ pub fn RTree(
                 .index = 0,
                 .stack = .empty,
             };
-            if (tree.root.isValid())
+            if (!tree.isEmpty())
                 try ret.stack.append(allocator, tree.rootNode());
             return ret;
         }
@@ -445,7 +463,7 @@ pub fn RTree(
             list: *std.ArrayListUnmanaged(V),
             range: Rect,
         ) Allocator.Error!void {
-            if (!tree.root.isValid()) return;
+            if (tree.isEmpty()) return;
             try searchValues(tree, tree.rootNode(), allocator, range, list);
         }
 
@@ -460,8 +478,8 @@ pub fn RTree(
             if (@TypeOf(context) == void) return;
 
             if (node.isLeaf()) {
-                for (tree.nodeEntries(node)) |*entry| {
-                    context.deinit(allocator, &entry.kv.value);
+                for (tree.nodeEntries(node)) |entry| {
+                    context.deinit(allocator, entry.kv.value);
                 }
             } else {
                 for (tree.nodeEntries(node)) |*entry|
@@ -1036,14 +1054,16 @@ pub fn RTree(
             root: Node,
             context: anytype,
         ) Allocator.Error!void {
+            assert(tree.entries.items.len > 0);
+
             var maybe_err: Allocator.Error!void = {};
             if (root.isLeaf()) {
                 var i: usize = 0;
                 while (i < tree.nodeEntries(&root).len) : (i += 1) {
-                    var entry = tree.nodeEntries(&root)[i];
+                    const entry = tree.nodeEntries(&root)[i];
                     tree.put(entry.kv.key, entry.kv.value) catch |err| {
                         if (@TypeOf(context) != void)
-                            context.deinit(tree.sheet.allocator, &entry.kv.value);
+                            context.deinit(tree.sheet.allocator, entry.kv.value);
                         maybe_err = err;
                     };
                 }
@@ -1060,63 +1080,89 @@ pub fn RTree(
             tree.pushFree(root.children);
             return maybe_err;
         }
+
+        // For serialization.
+
+        pub const Header = extern struct {
+            entries_len: u32,
+            free: Handle,
+        };
+
+        pub fn getHeader(tree: *const Self) Header {
+            return .{ .entries_len = @intCast(tree.entries.items.len), .free = tree.free };
+        }
+
+        pub fn fromHeader(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            header: Header,
+            sheet: *Sheet,
+        ) !std.posix.iovec {
+            self.* = .{
+                .entries = .empty,
+                .free = header.free,
+                .sheet = sheet,
+            };
+            _ = try self.entries.addManyAt(allocator, 0, header.entries_len);
+            return @bitCast(self.iovecs());
+        }
+
+        pub fn iovecs(tree: *Self) std.posix.iovec_const {
+            return utils.ptrToIoVec(tree.entries.items);
+        }
     };
 }
+
+const FlatListPool = @import("flat_list_pool.zig").FlatListPool;
 
 pub fn DependentTree(comptime min_children: usize) type {
     return struct {
         rtree: Tree,
+        flat: ListPool,
 
-        fn rangeFromRange(_: *Sheet, r: Range) Range {
-            return r;
-        }
-
-        fn rectFromRange(sheet: *Sheet, r: Range) Rect {
-            return r.rect(sheet);
-        }
-
-        fn eqlKeys(_: *Sheet, a: Range, b: Range) bool {
-            return a.eql(b);
-        }
+        pub const ListPool = FlatListPool(Sheet.CellHandle);
+        pub const ListIndex = ListPool.List.Index;
 
         const Self = @This();
-        const ValueList = std.ArrayListUnmanaged(Sheet.CellHandle);
-        const Tree = RTree(Range, ValueList, min_children, rangeFromRange, rectFromRange, eqlKeys);
+        const Tree = RTree(Range, ListIndex, min_children, rangeFromRange, rectFromRange, eqlKeys);
+        pub const Handle = Tree.Handle;
         pub const Node = Tree.Node;
         pub const KV = Tree.KV;
+
         const Context = struct {
-            capacity: usize = 1,
+            self: *Self,
 
-            fn init(self: Context, allocator: Allocator) !ValueList {
-                return ValueList.initCapacity(allocator, self.capacity);
-            }
-
-            fn deinit(_: Context, allocator: Allocator, value: *ValueList) void {
-                value.deinit(allocator);
+            fn deinit(ctx: Context, _: Allocator, list: ListIndex) void {
+                ctx.self.flat.destroyList(list);
             }
         };
 
         pub fn init(sheet: *Sheet) @This() {
-            return .{ .rtree = .init(sheet) };
+            return .{ .rtree = .init(sheet), .flat = .empty };
         }
 
         pub fn deinit(self: *Self, allocator: Allocator) void {
-            self.rtree.deinitContext(allocator, Context{});
+            self.rtree.deinitContext(allocator, Context{ .self = self });
+            self.flat.deinit(allocator);
             self.* = undefined;
         }
 
         pub const SearchIterator = Tree.SearchIterator;
 
-        pub fn searchIterator(tree: *Self, allocator: Allocator, rect: Rect) SearchIterator {
+        pub fn searchIterator(tree: *Self, allocator: Allocator, rect: Rect) !SearchIterator {
             var ret: SearchIterator = .{
-                .range = rect,
+                .rect = rect,
                 .allocator = allocator,
+                .tree = &tree.rtree,
+                .index = 0,
+                .stack = .empty,
             };
-            ret.stack.append(allocator, tree.rootNode()) catch unreachable;
+            if (!tree.rtree.isEmpty())
+                try ret.stack.append(allocator, tree.rtree.rootNode());
             return ret;
         }
 
-        pub fn get(self: *Self, key: Range) ?struct { *Range, *ValueList } {
+        pub fn get(self: *Self, key: Range) ?struct { *Range, *ListIndex } {
             return self.rtree.get(key);
         }
 
@@ -1136,25 +1182,29 @@ pub fn DependentTree(comptime min_children: usize) type {
             const sheet = self.rtree.sheet;
             try self.rtree.ensureUnusedCapacity(1);
 
-            if (!self.rtree.root.isValid()) {
-                var list = try ValueList.initCapacity(sheet.allocator, values.len);
+            if (self.rtree.isEmpty()) {
+                try self.flat.ensureUnusedCapacity(sheet.allocator, values.len);
+                const list = try self.flat.createList(sheet.allocator);
                 errdefer comptime unreachable;
-                list.appendSliceAssumeCapacity(values);
+
+                self.flat.appendSliceAssumeCapacity(list, values);
 
                 self.rtree.putRootAssumeCapacity(key, list);
                 return;
             }
 
             if (self.get(key)) |kv| {
-                try kv[1].appendSlice(sheet.allocator, values);
+                const list = kv[1];
+                try self.flat.appendSlice(sheet.allocator, list.*, values);
                 return;
             }
 
-            var list = try ValueList.initCapacity(sheet.allocator, values.len);
+            try self.flat.ensureUnusedCapacity(sheet.allocator, values.len);
+            const list = try self.flat.createList(sheet.allocator);
             errdefer comptime unreachable;
-            list.appendSliceAssumeCapacity(values);
+            self.flat.appendSliceAssumeCapacity(list, values);
 
-            var maybe_new_node = self.rtree.putNode(self.rtree.root, key, list);
+            var maybe_new_node = self.rtree.putNode(.from(0), key, list);
 
             if (maybe_new_node) |*new_node| {
                 errdefer self.rtree.deinitNodeContext(new_node, sheet.allocator, Context{});
@@ -1185,7 +1235,9 @@ pub fn DependentTree(comptime min_children: usize) type {
             key: Range,
             value: Sheet.CellHandle,
         ) Allocator.Error!void {
-            const res = removeNode(&self.rtree, self.rtree.rootNode(), key, value);
+            if (self.rtree.isEmpty()) return;
+
+            const res = self.removeNode(self.rtree.rootNode(), key, value);
             if (res != .merge) return;
 
             const node_to_merge = blk: {
@@ -1197,7 +1249,12 @@ pub fn DependentTree(comptime min_children: usize) type {
 
                     if (root_len < min_children) {
                         const ret = self.rtree.rootNode().*;
-                        self.rtree.root = .invalid;
+                        self.rtree.rootNode().* = .{
+                            .level = 0,
+                            .range = undefined,
+                            .children = .invalid,
+                            .children_len = 0,
+                        };
                         break :blk ret;
                     }
                 }
@@ -1215,7 +1272,7 @@ pub fn DependentTree(comptime min_children: usize) type {
             self: *Self,
             root: Tree.Node,
         ) Allocator.Error!void {
-            return self.rtree.reAddRecursive(root, Context{});
+            return self.rtree.reAddRecursive(root, Context{ .self = self });
         }
 
         const RemoveNodeResult = union(enum) {
@@ -1230,38 +1287,35 @@ pub fn DependentTree(comptime min_children: usize) type {
         /// Custom implementation of `remove` for the DependentTree
         /// Removes `value` from the entry with key `key`
         fn removeNode(
-            tree: *Tree,
+            self: *Self,
             node: *Tree.Node,
             key: Range,
             value: Sheet.CellHandle,
         ) RemoveNodeResult {
+            const tree = &self.rtree;
             const sheet = tree.sheet;
             const key_rect = key.rect(sheet);
             if (node.isLeaf()) {
                 const entries = tree.nodeEntries(node);
-                for (entries, 0..) |*entry, i| {
+                for (entries, 0..) |entry, i| {
                     if (!entry.kv.key.eql(key)) continue;
 
-                    const values = &entry.kv.value;
-                    errdefer if (values.items.len == 0) {
-                        var old_kv = tree.nodeEntriesSwapRemove(node, i);
-                        Context.deinit(.{}, sheet.allocator, &old_kv.value);
-                    };
+                    const list = entry.kv.value;
+                    const values_slice = self.flat.items(list);
 
                     // Found matching key
                     // Now find the matching value
-                    for (values.items, 0..) |v, j| {
+                    for (values_slice, 0..) |v, j| {
                         if (v == value) {
-                            _ = values.swapRemove(j);
+                            self.flat.swapRemove(list, j);
                             break;
                         }
                     }
 
-                    if (values.items.len == 0) {
+                    if (self.flat.len(list) == 0) {
                         // This KV has no more values, so remove it entirely
-                        var old_value = entry.kv.value;
                         _ = tree.nodeEntriesSwapRemove(node, i);
-                        Context.deinit(.{}, sheet.allocator, &old_value);
+                        Context.deinit(.{ .self = self }, sheet.allocator, list);
 
                         if (tree.nodeEntries(node).len > 0 and key_rect.anyMatch(node.range.rect(sheet))) {
                             Tree.recalcBoundingRange(tree, node);
@@ -1283,7 +1337,7 @@ pub fn DependentTree(comptime min_children: usize) type {
                 if (!child_rect.contains(key_rect))
                     continue;
 
-                const res = removeNode(tree, &entry.node, key, value);
+                const res = self.removeNode(&entry.node, key, value);
                 if (res == .none) continue;
 
                 // Determine if the child node now needs to be merged
@@ -1324,6 +1378,47 @@ pub fn DependentTree(comptime min_children: usize) type {
             }
 
             return .none;
+        }
+
+        fn rangeFromRange(_: *Sheet, r: Range) Range {
+            return r;
+        }
+
+        fn rectFromRange(sheet: *Sheet, r: Range) Rect {
+            return r.rect(sheet);
+        }
+
+        fn eqlKeys(_: *Sheet, a: Range, b: Range) bool {
+            return a.eql(b);
+        }
+
+        // For serialization.
+
+        pub const Header = extern struct {
+            rtree: Tree.Header,
+            flat: ListPool.Header,
+        };
+
+        pub fn getHeader(self: *const Self) Header {
+            return .{ .rtree = self.rtree.getHeader(), .flat = self.flat.getHeader() };
+        }
+
+        pub fn fromHeader(
+            self: *Self,
+            allocator: Allocator,
+            header: Header,
+            sheet: *Sheet,
+        ) ![3]std.posix.iovec {
+            self.* = .init(sheet);
+            errdefer self.deinit(allocator);
+
+            _ = try self.rtree.fromHeader(allocator, header.rtree, sheet);
+            _ = try self.flat.fromHeader(allocator, header.flat);
+            return @bitCast(self.iovecs());
+        }
+
+        pub fn iovecs(self: *Self) [3]std.posix.iovec_const {
+            return .{self.rtree.iovecs()} ++ self.flat.iovecs();
         }
     };
 }

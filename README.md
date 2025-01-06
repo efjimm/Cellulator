@@ -73,6 +73,9 @@ implemented commands. Values surrounded in {} are optional.
 - `fill (range) (value) {increment}`
   - Fills the given range with value, incrementing by increment each cell. Increment is applied
     left to right, top to bottom. Example: ":fill b1:d12 30 0.2"
+- `bw {filepath}` Save to the given filepath in a binary format. This format is significantly
+   faster to save/load. Filepath must be specified.
+- `be {filepath}` Load from the given filepath in a binary format.
 
 ## Expressions
 

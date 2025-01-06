@@ -1,4 +1,5 @@
 const std = @import("std");
+const utils = @import("utils.zig");
 const assert = std.debug.assert;
 
 pub fn SkipList(
@@ -19,6 +20,10 @@ pub fn SkipList(
             prev: Handle = .invalid,
             below: Handle = .invalid,
         };
+
+        pub fn iovecs(list: *const @This()) std.posix.iovec_const {
+            return utils.multiArrayListSliceIoVec(&list.nodes);
+        }
 
         // This is a packed struct so we can use equality operators on it.
         pub const Handle = packed struct {
@@ -271,6 +276,37 @@ pub fn SkipList(
 
             assert(levels != 0);
             return levels;
+        }
+
+        // For serialization.
+
+        pub const Header = extern struct {
+            heads: [levels]Handle,
+            nodes_len: u32,
+        };
+
+        pub fn getHeader(list: *const @This()) Header {
+            return .{
+                .heads = list.heads,
+                .nodes_len = @intCast(list.nodes.len),
+            };
+        }
+
+        pub fn fromHeader(
+            list: *@This(),
+            allocator: std.mem.Allocator,
+            header: Header,
+        ) !std.posix.iovec {
+            list.* = .init(1);
+            errdefer list.deinit(allocator);
+            {
+                var nodes = list.nodes.toMultiArrayList();
+                try nodes.setCapacity(allocator, header.nodes_len);
+                nodes.len = header.nodes_len;
+                list.nodes = nodes.slice();
+            }
+            list.heads = header.heads;
+            return @bitCast(list.iovecs());
         }
     };
 }

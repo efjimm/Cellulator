@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const Position = @import("Position.zig").Position;
 const wcWidth = @import("wcwidth").wcWidth;
 
@@ -8,31 +9,63 @@ const assert = std.debug.assert;
 
 pub usingnamespace @import("buffer_utils.zig");
 
-fn rotate(comptime Treap: type, self: *Treap, node: *Treap.Node, right: bool) void {
-    // if right, converts the following:
-    //      parent -> (node (target YY adjacent) XX)
-    //      parent -> (target YY (node adjacent XX))
-    //
-    // if left (!right), converts the following:
-    //      parent -> (node (target YY adjacent) XX)
-    //      parent -> (target YY (node adjacent XX))
-    const parent = node.parent;
-    const target = node.children[@intFromBool(!right)] orelse unreachable;
-    const adjacent = target.children[@intFromBool(right)];
+pub fn ptrToIoVec(ptr: anytype) std.posix.iovec_const {
+    const p = @typeInfo(@TypeOf(ptr)).pointer;
+    const bytes = blk: {
+        if (p.size == .Slice) break :blk std.mem.sliceAsBytes(ptr);
+        comptime assert(p.size == .One);
+        break :blk std.mem.asBytes(ptr);
+    };
+    return .{ .base = bytes.ptr, .len = bytes.len };
+}
 
-    // rotate the children
-    target.children[@intFromBool(right)] = node;
-    node.children[@intFromBool(!right)] = adjacent;
+pub fn arrayListIoVec(list: anytype) std.posix.iovec_const {
+    comptime assert(@typeInfo(@TypeOf(list)) == .pointer);
+    return ptrToIoVec(list.items);
+}
 
-    // rotate the parents
-    node.parent = target;
-    target.parent = parent;
-    if (adjacent) |adj| adj.parent = node;
+pub fn multiArrayListIoVec(list: anytype) std.posix.iovec_const {
+    const info = @typeInfo(@TypeOf(list));
+    comptime assert(info == .pointer);
+    assert(list.len == list.capacity);
+    const bytes = list.bytes[0..info.pointer.child.capacityInBytes(list.capacity)];
+    return ptrToIoVec(bytes);
+}
 
-    // fix the parent link
-    const link = if (parent) |p| &p.children[@intFromBool(p.children[1] == node)] else &self.root;
-    assert(link.* == node);
-    link.* = target;
+pub fn multiArrayListSliceIoVec(list: anytype) std.posix.iovec_const {
+    const info = @typeInfo(@TypeOf(list));
+    comptime assert(info == .pointer);
+    assert(list.len == list.capacity);
+
+    var m = list.toMultiArrayList();
+
+    const bytes = m.bytes[0..@TypeOf(m).capacityInBytes(list.capacity)];
+    return ptrToIoVec(bytes);
+}
+
+pub fn prepArrayList(list: anytype, allocator: Allocator, len: u32) !std.posix.iovec {
+    try list.ensureTotalCapacityPrecise(allocator, len);
+    list.items.len = len;
+    return @bitCast(arrayListIoVec(list));
+}
+
+pub fn prepMultiArrayList(list: anytype, allocator: Allocator, len: u32) !std.posix.iovec {
+    try list.setCapacity(allocator, len);
+    list.len = len;
+    return @bitCast(multiArrayListIoVec(list));
+}
+
+pub fn prepMultiArrayListSlice(list: anytype, allocator: Allocator, len: u32) !std.posix.iovec {
+    var m = list.toMultiArrayList();
+    const ret = try prepMultiArrayList(&m, allocator, len);
+    list.* = m.slice();
+    return ret;
+}
+
+pub fn shrinkMultiArrayListSlice(allocator: std.mem.Allocator, slice_ptr: anytype) void {
+    var m = slice_ptr.toMultiArrayList();
+    m.shrinkAndFree(allocator, m.len);
+    slice_ptr.* = m.slice();
 }
 
 /// Returns true if the passed type will coerce to []const u8.

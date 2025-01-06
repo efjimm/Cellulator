@@ -3,222 +3,244 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const mem = std.mem;
 
-ptr: [*]u8 = undefined,
-len: u32 = 0,
-gap_start: u32 = 0,
-gap_len: u32 = 0,
+pub fn GapBuffer(comptime T: type) type {
+    return struct {
+        ptr: [*]T = undefined,
+        len: u32 = 0,
+        gap_start: u32 = 0,
+        gap_len: u32 = 0,
 
-pub const ElementType = u8;
+        const Self = @This();
 
-const Self = @This();
+        pub const ChildType = T;
 
-pub fn deinit(self: *Self, allocator: Allocator) void {
-    allocator.free(self.allocatedSlice());
-}
+        /// Sets the gap to the end of the buffer. iovecs are invalidated by any operation that
+        /// modifies the buffer or the gap.
+        pub fn iovecs(self: *Self) std.posix.iovec_const {
+            const ptrToIoVec = @import("utils.zig").ptrToIoVec;
+            const slice = self.items();
+            return ptrToIoVec(slice);
+        }
 
-pub fn setGap(self: *Self, new_pos: u32) void {
-    if (new_pos == self.gap_start) return;
-    assert(new_pos <= self.len);
-    if (new_pos < self.gap_start) {
-        const src = self.ptr[new_pos..self.gap_start];
-        const dest = self.ptr[new_pos + self.gap_len .. self.gap_start + self.gap_len];
-        mem.copyBackwards(u8, dest, src);
-    } else {
-        const src = self.ptr[self.gap_start + self.gap_len .. new_pos + self.gap_len];
-        const dest = self.ptr[self.gap_start..new_pos];
-        mem.copyForwards(u8, dest, src);
-    }
-    self.gap_start = new_pos;
-}
+        pub fn deinit(self: *Self, allocator: Allocator) void {
+            allocator.free(self.allocatedSlice());
+        }
 
-pub fn allocatedSlice(self: Self) []u8 {
-    return self.ptr[0 .. self.len + self.gap_len];
-}
+        pub fn addManyAt(self: *Self, allocator: Allocator, pos: u32, count: u32) ![]T {
+            try self.ensureUnusedCapacity(allocator, count);
+            self.setGap(pos);
+            const ret = self.ptr[self.gap_start..][0..count];
+            self.gap_start += count;
+            self.gap_len -= count;
+            self.len += count;
+            return ret;
+        }
 
-pub fn capacity(self: Self) u32 {
-    return self.len + self.gap_len;
-}
+        pub fn setGap(self: *Self, new_pos: u32) void {
+            if (new_pos == self.gap_start) return;
+            assert(new_pos <= self.len);
+            if (new_pos < self.gap_start) {
+                const src = self.ptr[new_pos..self.gap_start];
+                const dest = self.ptr[new_pos + self.gap_len .. self.gap_start + self.gap_len];
+                mem.copyBackwards(T, dest, src);
+            } else {
+                const src = self.ptr[self.gap_start + self.gap_len .. new_pos + self.gap_len];
+                const dest = self.ptr[self.gap_start..new_pos];
+                mem.copyForwards(T, dest, src);
+            }
+            self.gap_start = new_pos;
+        }
 
-pub fn insertAtGap(self: *Self, item: u8) void {
-    assert(self.gap_len > 0);
-    self.ptr[self.gap_start] = item;
-    self.gap_start += 1;
-    self.gap_len -= 1;
-    self.len += 1;
-}
+        pub fn allocatedSlice(self: Self) []T {
+            return self.ptr[0 .. self.len + self.gap_len];
+        }
 
-pub fn insertSliceAtGap(self: *Self, slice: []const u8) void {
-    const len: u32 = @intCast(slice.len);
-    assert(self.gap_len >= len);
-    for (slice) |item| {
-        self.insertAtGap(item);
-    }
-}
+        pub fn capacity(self: Self) u32 {
+            return self.len + self.gap_len;
+        }
 
-pub fn insert(self: *Self, allocator: Allocator, n: u32, item: u8) Allocator.Error!void {
-    assert(n <= self.len);
-    self.setGap(n);
-    try self.ensureUnusedCapacity(allocator, 1);
-    self.insertAtGap(item);
-}
+        pub fn insertAtGap(self: *Self, item: T) void {
+            assert(self.gap_len > 0);
+            self.ptr[self.gap_start] = item;
+            self.gap_start += 1;
+            self.gap_len -= 1;
+            self.len += 1;
+        }
 
-pub fn insertAssumeCapacity(self: *Self, n: u32, item: u8) void {
-    assert(n <= self.len);
-    self.setGap(n);
-    self.insertAtGap(item);
-}
+        pub fn insertSliceAtGap(self: *Self, slice: []const T) void {
+            const len: u32 = @intCast(slice.len);
+            assert(self.gap_len >= len);
+            for (slice) |item| {
+                self.insertAtGap(item);
+            }
+        }
 
-pub fn insertSlice(
-    self: *Self,
-    allocator: Allocator,
-    n: u32,
-    slice: []const u8,
-) Allocator.Error!void {
-    assert(n <= self.len);
-    self.setGap(n);
-    try self.ensureUnusedCapacity(allocator, @intCast(slice.len));
-    self.insertSliceAtGap(slice);
-}
+        pub fn insert(self: *Self, allocator: Allocator, n: u32, item: T) Allocator.Error!void {
+            assert(n <= self.len);
+            self.setGap(n);
+            try self.ensureUnusedCapacity(allocator, 1);
+            self.insertAtGap(item);
+        }
 
-pub fn insertSliceAssumeCapacity(
-    self: *Self,
-    n: u32,
-    slice: []const u8,
-) void {
-    assert(n <= self.len);
-    self.setGap(n);
-    self.insertSliceAtGap(slice);
-}
+        pub fn insertAssumeCapacity(self: *Self, n: u32, item: T) void {
+            assert(n <= self.len);
+            self.setGap(n);
+            self.insertAtGap(item);
+        }
 
-pub fn append(self: *Self, allocator: Allocator, item: u8) Allocator.Error!void {
-    self.setGap(self.len);
-    try self.ensureUnusedCapacity(allocator, 1);
-    self.insertAtGap(item);
-}
+        pub fn insertSlice(
+            self: *Self,
+            allocator: Allocator,
+            n: u32,
+            slice: []const T,
+        ) Allocator.Error!void {
+            assert(n <= self.len);
+            self.setGap(n);
+            try self.ensureUnusedCapacity(allocator, @intCast(slice.len));
+            self.insertSliceAtGap(slice);
+        }
 
-pub fn appendAssumeCapacity(self: *Self, item: u8) void {
-    self.setGap(self.len);
-    self.insertAtGap(item);
-}
+        pub fn insertSliceAssumeCapacity(
+            self: *Self,
+            n: u32,
+            slice: []const T,
+        ) void {
+            assert(n <= self.len);
+            self.setGap(n);
+            self.insertSliceAtGap(slice);
+        }
 
-pub fn appendSlice(self: *Self, allocator: Allocator, slice: []const u8) Allocator.Error!void {
-    self.setGap(self.len);
-    try self.ensureUnusedCapacity(allocator, @intCast(slice.len));
-    self.insertSliceAtGap(slice);
-}
+        pub fn append(self: *Self, allocator: Allocator, item: T) Allocator.Error!void {
+            self.setGap(self.len);
+            try self.ensureUnusedCapacity(allocator, 1);
+            self.insertAtGap(item);
+        }
 
-pub fn appendSliceAssumeCapacity(self: *Self, slice: []const u8) void {
-    self.setGap(self.len);
-    self.insertSliceAtGap(slice);
-}
+        pub fn appendAssumeCapacity(self: *Self, item: T) void {
+            self.setGap(self.len);
+            self.insertAtGap(item);
+        }
 
-pub fn ensureUnusedCapacity(self: *Self, allocator: Allocator, n: u32) Allocator.Error!void {
-    try self.ensureTotalCapacity(allocator, self.len + n);
-}
+        pub fn appendSlice(self: *Self, allocator: Allocator, slice: []const T) Allocator.Error!void {
+            self.setGap(self.len);
+            try self.ensureUnusedCapacity(allocator, @intCast(slice.len));
+            self.insertSliceAtGap(slice);
+        }
 
-pub fn ensureTotalCapacity(self: *Self, allocator: Allocator, n: u32) Allocator.Error!void {
-    const cap = self.capacity();
-    if (n <= cap) return;
+        pub fn appendSliceAssumeCapacity(self: *Self, slice: []const T) void {
+            self.setGap(self.len);
+            self.insertSliceAtGap(slice);
+        }
 
-    var better_capacity = cap;
-    while (true) {
-        better_capacity +|= better_capacity / 2 + 8;
-        if (better_capacity >= n) break;
-    }
+        pub fn ensureUnusedCapacity(self: *Self, allocator: Allocator, n: u32) Allocator.Error!void {
+            try self.ensureTotalCapacity(allocator, self.len + n);
+        }
 
-    return self.ensureTotalCapacityPrecise(allocator, better_capacity);
-}
+        pub fn ensureTotalCapacity(self: *Self, allocator: Allocator, n: u32) Allocator.Error!void {
+            const cap = self.capacity();
+            if (n <= cap) return;
 
-pub fn ensureTotalCapacityPrecise(self: *Self, allocator: Allocator, n: u32) Allocator.Error!void {
-    const cap = self.capacity();
-    if (n <= cap) return;
+            var better_capacity = cap;
+            while (true) {
+                better_capacity +|= better_capacity / 2 + 8;
+                if (better_capacity >= n) break;
+            }
 
-    const old_mem = self.allocatedSlice();
-    const new_gap_len = n - self.len;
-    if (allocator.resize(old_mem, n)) {
-        assert(new_gap_len > self.gap_len);
-        const src = self.ptr[self.gap_start + self.gap_len .. cap];
-        const dest = self.ptr[self.gap_start + new_gap_len .. n];
-        mem.copyBackwards(u8, dest, src);
-        self.gap_len = new_gap_len;
-    } else {
-        const new_mem = try allocator.alloc(u8, n);
-        @memcpy(new_mem[0..self.gap_start], self.ptr[0..self.gap_start]);
-        @memcpy(new_mem[self.gap_start + new_gap_len ..], self.ptr[self.gap_start + self.gap_len .. cap]);
-        self.gap_len = new_gap_len;
-        self.ptr = new_mem.ptr;
-        allocator.free(old_mem);
-    }
-}
+            return self.ensureTotalCapacityPrecise(allocator, better_capacity);
+        }
 
-pub inline fn left(self: Self) []u8 {
-    return self.ptr[0..self.gap_start];
-}
+        pub fn ensureTotalCapacityPrecise(self: *Self, allocator: Allocator, n: u32) Allocator.Error!void {
+            const cap = self.capacity();
+            if (n <= cap) return;
 
-pub inline fn right(self: Self) []u8 {
-    return self.ptr[self.gap_start + self.gap_len .. self.capacity()];
-}
+            const old_mem = self.allocatedSlice();
+            const new_gap_len = n - self.len;
+            if (allocator.resize(old_mem, n)) {
+                assert(new_gap_len > self.gap_len);
+                const src = self.ptr[self.gap_start + self.gap_len .. cap];
+                const dest = self.ptr[self.gap_start + new_gap_len .. n];
+                mem.copyBackwards(T, dest, src);
+                self.gap_len = new_gap_len;
+            } else {
+                const new_mem = try allocator.alloc(T, n);
+                @memcpy(new_mem[0..self.gap_start], self.ptr[0..self.gap_start]);
+                @memcpy(new_mem[self.gap_start + new_gap_len ..], self.ptr[self.gap_start + self.gap_len .. cap]);
+                self.gap_len = new_gap_len;
+                self.ptr = new_mem.ptr;
+                allocator.free(old_mem);
+            }
+        }
 
-pub inline fn get(self: Self, index: u32) u8 {
-    assert(index < self.len);
-    return if (index < self.gap_start) self.ptr[index] else self.ptr[index + self.gap_len];
-}
+        pub inline fn left(self: Self) []T {
+            return self.ptr[0..self.gap_start];
+        }
 
-pub inline fn getPtr(self: Self, index: u32) u8 {
-    assert(index < self.len);
-    return if (index < self.gap_start) &self.ptr[index] else &self.ptr[index + self.gap_len];
-}
+        pub inline fn right(self: Self) []T {
+            return self.ptr[self.gap_start + self.gap_len .. self.capacity()];
+        }
 
-pub inline fn length(self: Self) u32 {
-    return self.len;
-}
+        pub inline fn get(self: Self, index: u32) T {
+            assert(index < self.len);
+            return if (index < self.gap_start) self.ptr[index] else self.ptr[index + self.gap_len];
+        }
 
-pub fn replaceRange(
-    self: *Self,
-    allocator: Allocator,
-    start: u32,
-    len: u32,
-    new_items: []const u8,
-) Allocator.Error!void {
-    if (start + len == self.gap_start) {
-        // Common case: deleting backwards
-        self.gap_start -= len;
-    } else {
-        self.setGap(start);
-    }
-    self.gap_len += len;
-    self.len -= len;
-    try self.ensureUnusedCapacity(allocator, @intCast(new_items.len));
-    self.insertSliceAtGap(new_items);
-}
+        pub inline fn getPtr(self: Self, index: u32) T {
+            assert(index < self.len);
+            return if (index < self.gap_start) &self.ptr[index] else &self.ptr[index + self.gap_len];
+        }
 
-pub fn clearRetainingCapacity(self: *Self) void {
-    self.gap_len = self.capacity();
-    self.len = 0;
-    self.gap_start = 0;
-}
+        pub inline fn length(self: Self) u32 {
+            return self.len;
+        }
 
-pub fn shrinkRetainingCapacity(self: *Self, n: u32) void {
-    const new_gap_len = self.capacity() - n;
+        pub fn replaceRange(
+            self: *Self,
+            allocator: Allocator,
+            start: u32,
+            len: u32,
+            new_items: []const T,
+        ) Allocator.Error!void {
+            if (start + len == self.gap_start) {
+                // Common case: deleting backwards
+                self.gap_start -= len;
+            } else {
+                self.setGap(start);
+            }
+            self.gap_len += len;
+            self.len -= len;
+            try self.ensureUnusedCapacity(allocator, @intCast(new_items.len));
+            self.insertSliceAtGap(new_items);
+        }
 
-    self.len = n;
-    self.gap_len = new_gap_len;
+        pub fn clearRetainingCapacity(self: *Self) void {
+            self.gap_len = self.capacity();
+            self.len = 0;
+            self.gap_start = 0;
+        }
 
-    if (n < self.gap_start) {
-        self.gap_start = n;
-    }
-}
+        pub fn shrinkRetainingCapacity(self: *Self, n: u32) void {
+            const new_gap_len = self.capacity() - n;
 
-/// Moves the gap to the end of the buffer, so that the contents are entirely contiguous.
-/// Avoid calling often.
-pub fn items(self: *Self) []u8 {
-    self.setGap(self.len);
-    return self.left();
+            self.len = n;
+            self.gap_len = new_gap_len;
+
+            if (n < self.gap_start) {
+                self.gap_start = n;
+            }
+        }
+
+        /// Moves the gap to the end of the buffer, so that the contents are entirely contiguous.
+        /// Avoid calling often.
+        pub fn items(self: *Self) []T {
+            self.setGap(self.len);
+            return self.left();
+        }
+    };
 }
 
 test "GapBuffer" {
     const t = std.testing;
-    var buf = Self{};
+    var buf: GapBuffer(u8) = .{};
     defer buf.deinit(t.allocator);
 
     try buf.appendSlice(t.allocator, "This is epic");
@@ -253,4 +275,18 @@ test "GapBuffer" {
 
     try t.expectEqualStrings("This is epicness and ep", buf.left());
     try t.expectEqualStrings("ic and nice :)", buf.right());
+}
+
+test "u32" {
+    const t = std.testing;
+    var buf: GapBuffer(u32) = .{};
+    defer buf.deinit(t.allocator);
+
+    try buf.appendSlice(t.allocator, &.{ 1, 2, 3, 4, 5 });
+    try t.expectEqualSlices(u32, &.{ 1, 2, 3, 4, 5 }, buf.left());
+    try t.expectEqualSlices(u32, &.{}, buf.right());
+
+    buf.setGap(2);
+    try t.expectEqualSlices(u32, &.{ 1, 2 }, buf.left());
+    try t.expectEqualSlices(u32, &.{ 3, 4, 5 }, buf.right());
 }

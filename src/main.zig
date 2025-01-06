@@ -42,10 +42,13 @@ pub fn main() !void {
         }
     }
 
-    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    // defer _ = gpa.deinit();
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
 
-    try zc.init(std.heap.c_allocator, .{ .filepath = filepath });
+    // const a = std.heap.c_allocator;
+
+    try zc.init(a, .{ .filepath = filepath, .ui = true });
     defer zc.deinit();
 
     try zc.run();
@@ -54,7 +57,7 @@ pub fn main() !void {
 pub const Panic = struct {
     pub fn call(msg: []const u8, trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
         @branchHint(.cold);
-        zc.tui.term.cook() catch {};
+        // zc.tui.term.cook() catch {};
         std.debug.defaultPanic(msg, trace, ret_addr);
     }
 

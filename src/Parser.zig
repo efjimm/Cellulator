@@ -1,10 +1,9 @@
 const std = @import("std");
 const Position = @import("Position.zig").Position;
-const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 const Tokenizer = @import("Tokenizer.zig");
 
 const Allocator = std.mem.Allocator;
-const NodeList = MultiArrayList(Node);
+const NodeList = std.MultiArrayList(Node);
 const assert = std.debug.assert;
 
 const Parser = @This();
@@ -23,12 +22,12 @@ const String = @import("ast.zig").String;
 const Node = @import("ast.zig").Node;
 const Index = @import("ast.zig").Index;
 
-pub const BinaryOperator = packed struct {
+pub const BinaryOperator = extern struct {
     lhs: Index,
     rhs: Index,
 };
 
-pub const Builtin = packed struct {
+pub const Builtin = extern struct {
     tag: Tag,
     first_arg: Index,
 
@@ -113,12 +112,10 @@ fn parseStringLiteral(parser: *Parser) ParseError!Index {
     parser.strings_len += token.end - token.start;
 
     // TODO: Handle escapes of quotes
-    return parser.addNode(.{
-        .string_literal = .{
-            .start = token.start,
-            .end = token.end,
-        },
-    });
+    return parser.addNode(.init(.string_literal, .{
+        .start = token.start,
+        .end = token.end,
+    }));
 }
 
 /// Assignment <- CellReference '=' Expression
@@ -127,12 +124,7 @@ fn parseAssignment(parser: *Parser) ParseError!Index {
     _ = try parser.expectToken(.equals_sign);
     const rhs = try parser.parseExpression();
 
-    return parser.addNode(.{
-        .assignment = .{
-            .lhs = lhs,
-            .rhs = rhs,
-        },
-    });
+    return parser.addNode(.init(.assignment, .{ .lhs = lhs, .rhs = rhs }));
 }
 
 /// Expression <- AddExpr
@@ -151,9 +143,9 @@ fn parseAddExpr(parser: *Parser) !Index {
         };
 
         const node: Node = switch (token.tag) {
-            .plus => .{ .add = op },
-            .minus => .{ .sub = op },
-            .hash => .{ .concat = op },
+            .plus => .init(.add, op),
+            .minus => .init(.sub, op),
+            .hash => .init(.concat, op),
             else => unreachable,
         };
 
@@ -174,9 +166,9 @@ fn parseMulExpr(parser: *Parser) !Index {
         };
 
         const node: Node = switch (token.tag) {
-            .asterisk => .{ .mul = op },
-            .forward_slash => .{ .div = op },
-            .percent => .{ .mod = op },
+            .asterisk => .init(.mul, op),
+            .forward_slash => .init(.div, op),
+            .percent => .init(.mod, op),
             else => unreachable,
         };
 
@@ -213,12 +205,7 @@ fn parseRange(parser: *Parser) !Index {
 
     const rhs = try parser.parseCellName();
 
-    return parser.addNode(.{
-        .range = .{
-            .lhs = lhs,
-            .rhs = rhs,
-        },
-    });
+    return parser.addNode(.init(.range, .{ .lhs = lhs, .rhs = rhs }));
 }
 
 /// Builtin <- builtin '(' ArgList? ')'
@@ -244,12 +231,10 @@ fn parseFunction(parser: *Parser) !Index {
     };
     _ = try parser.expectToken(.rparen);
 
-    return parser.addNode(.{
-        .builtin = .{
-            .tag = builtin,
-            .first_arg = args_start,
-        },
-    });
+    return parser.addNode(.init(.builtin, .{
+        .tag = builtin,
+        .first_arg = args_start,
+    }));
 }
 
 /// ArgList <- Expression (',' Expression)*
@@ -275,9 +260,7 @@ fn parseNumber(parser: *Parser) !Index {
     // number token on invalid format.
     const num = std.fmt.parseFloat(f64, text) catch unreachable;
 
-    return parser.addNode(.{
-        .number = if (is_positive) num else -num,
-    });
+    return parser.addNode(.init(.number, if (is_positive) num else -num));
 }
 
 /// CellReference <- ('a'-'z' / 'A'-'Z')+ ('0'-'9')+
@@ -287,9 +270,7 @@ fn parseCellName(parser: *Parser) !Index {
 
     const pos = Position.fromAddress(text) catch return error.InvalidCellAddress;
 
-    return parser.addNode(.{
-        .pos = pos,
-    });
+    return parser.addNode(.init(.pos, pos));
 }
 
 fn addNode(parser: *Parser, data: Node) Allocator.Error!Index {
@@ -327,17 +308,12 @@ fn nextToken(parser: *Parser) Tokenizer.Token {
 test "parser" {
     const t = std.testing;
     const testParser = struct {
-        fn func(bytes: []const u8, node_tags: []const std.meta.Tag(Node)) !void {
+        fn func(bytes: []const u8, node_tags: []const Node.Tag) !void {
             var parser = Parser.init(t.allocator, .{ .bytes = bytes }, .{});
             defer parser.nodes.deinit(t.allocator);
             try parser.parse();
-            for (node_tags, parser.nodes.items(.tags)) |expected, actual| {
-                t.expectEqual(expected, actual) catch |err| {
-                    for (parser.nodes.items(.tags)) |tag| {
-                        std.debug.print("{s}\n", .{@tagName(tag)});
-                    }
-                    return err;
-                };
+            for (node_tags, parser.nodes.items(.tag)) |expected, actual| {
+                try t.expectEqual(expected, actual);
             }
         }
     }.func;
@@ -431,11 +407,12 @@ test "Node contents" {
 
             try parser.parse();
             const slice = parser.nodes.slice();
-            for (nodes, slice.items(.tags), slice.items(.data)) |expected, tag, data| {
-                const actual = switch (tag) {
-                    inline else => |t_| @unionInit(Node, @tagName(t_), @field(data, @tagName(t_))),
+            for (nodes, slice.items(.tag), slice.items(.data)) |expected, tag, data| {
+                const actual: Node = .{
+                    .tag = tag,
+                    .data = data,
                 };
-                try t.expectEqual(expected, actual);
+                try t.expectEqual(expected.get(), actual.get());
             }
         }
     }.func;
@@ -443,37 +420,33 @@ test "Node contents" {
     try testNodes(
         "let b30 = 5 * (3 - 2) / (2 + 1)",
         &.{
-            .{ .pos = .{ .x = 1, .y = 30 } },
-            .{ .number = 5.0 },
-            .{ .number = 3.0 },
-            .{ .number = 2.0 },
-            .{ .sub = .{ .lhs = .from(2), .rhs = .from(3) } },
-            .{ .mul = .{ .lhs = .from(1), .rhs = .from(4) } },
-            .{ .number = 2.0 },
-            .{ .number = 1.0 },
-            .{ .add = .{ .lhs = .from(6), .rhs = .from(7) } },
-            .{ .div = .{ .lhs = .from(5), .rhs = .from(8) } },
-            .{ .assignment = .{ .lhs = .from(0), .rhs = .from(9) } },
+            .init(.pos, .{ .x = 1, .y = 30 }),
+            .init(.number, 5.0),
+            .init(.number, 3.0),
+            .init(.number, 2.0),
+            .init(.sub, .{ .lhs = .from(2), .rhs = .from(3) }),
+            .init(.mul, .{ .lhs = .from(1), .rhs = .from(4) }),
+            .init(.number, 2.0),
+            .init(.number, 1.0),
+            .init(.add, .{ .lhs = .from(6), .rhs = .from(7) }),
+            .init(.div, .{ .lhs = .from(5), .rhs = .from(8) }),
+            .init(.assignment, .{ .lhs = .from(0), .rhs = .from(9) }),
         },
     );
     try testNodes(
         "let crxp65535 = 'this is epic' # 'nice'",
         &.{
-            .{ .pos = .{ .x = 65535, .y = 65535 } },
-            .{
-                .string_literal = .{
-                    .start = "let crxp65535 = '".len,
-                    .end = "let crxp65535 = 'this is epic".len,
-                },
-            },
-            .{
-                .string_literal = .{
-                    .start = "let crxp65535 = 'this is epic' # '".len,
-                    .end = "let crxp65535 = 'this is epic' # 'nice".len,
-                },
-            },
-            .{ .concat = .{ .lhs = .from(1), .rhs = .from(2) } },
-            .{ .assignment = .{ .lhs = .from(0), .rhs = .from(3) } },
+            .init(.pos, .{ .x = 65535, .y = 65535 }),
+            .init(.string_literal, .{
+                .start = "let crxp65535 = '".len,
+                .end = "let crxp65535 = 'this is epic".len,
+            }),
+            .init(.string_literal, .{
+                .start = "let crxp65535 = 'this is epic' # '".len,
+                .end = "let crxp65535 = 'this is epic' # 'nice".len,
+            }),
+            .init(.concat, .{ .lhs = .from(1), .rhs = .from(2) }),
+            .init(.assignment, .{ .lhs = .from(0), .rhs = .from(3) }),
         },
     );
 }

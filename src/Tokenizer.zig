@@ -1,6 +1,5 @@
 const std = @import("std");
 const Position = @import("Sheet.zig").Position;
-const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;

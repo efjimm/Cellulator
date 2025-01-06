@@ -4,9 +4,9 @@
 //! These functions require a subset of declarations to be defined on their `anytype` parameter,
 //! depending on the function. They are:
 //!
-//! - `ElementType`
-//! - `fn get(Self, u32) ElementType` returns the element at the given index
-//! - `fn getPtr(*Self, u32) *ElementType` returns a pointer to the element at the given index
+//! - `ChildType`
+//! - `fn get(Self, u32) ChildType` returns the element at the given index
+//! - `fn getPtr(*Self, u32) *ChildType` returns a pointer to the element at the given index
 //! - `fn length(Self) u32` returns the number of elements
 
 const std = @import("std");
@@ -17,7 +17,7 @@ pub fn Slice(comptime T: type, comptime constant: bool) type {
         slice: if (constant) []const T else []T,
 
         const Self = @This();
-        pub const ElementType = T;
+        pub const ChildType = T;
         pub const ElementPtr = if (constant) *const T else *T;
 
         pub fn get(self: Self, pos: u32) T {
@@ -34,7 +34,7 @@ pub fn Slice(comptime T: type, comptime constant: bool) type {
     };
 }
 
-pub fn containsAt(t: anytype, pos: u32, needle: []const @TypeOf(t).ElementType) bool {
+pub fn containsAt(t: anytype, pos: u32, needle: []const @TypeOf(t).ChildType) bool {
     const len = t.length();
     const needle_len: u32 = @intCast(needle.len);
     if (len - pos < needle_len) return false;
@@ -45,9 +45,9 @@ pub fn containsAt(t: anytype, pos: u32, needle: []const @TypeOf(t).ElementType) 
     } else true;
 }
 
-/// Requires `ElementType`, `length` and `get` to be implemented by `@TypeOf(t)`.
+/// Requires `ChildType`, `length` and `get` to be implemented by `@TypeOf(t)`.
 /// Returns the index of the first occurence of `needle` after `pos` in `t`.
-pub fn indexOfPos(t: anytype, pos: u32, needle: []const @TypeOf(t).ElementType) ?u32 {
+pub fn indexOfPos(t: anytype, pos: u32, needle: []const @TypeOf(t).ChildType) ?u32 {
     const len = t.length();
     const needle_len: u32 = @intCast(needle.len);
     assert(pos <= len);
@@ -64,7 +64,7 @@ pub fn indexOfPos(t: anytype, pos: u32, needle: []const @TypeOf(t).ElementType) 
     return null;
 }
 
-pub fn indexOfPosScalar(t: anytype, pos: u32, needle: @TypeOf(t).ElementType) ?u32 {
+pub fn indexOfPosScalar(t: anytype, pos: u32, needle: @TypeOf(t).ChildType) ?u32 {
     const len = t.length();
     assert(pos < len);
     var i = pos;
@@ -74,7 +74,7 @@ pub fn indexOfPosScalar(t: anytype, pos: u32, needle: @TypeOf(t).ElementType) ?u
 }
 
 /// Returns the index of the first instance of `needle` before `pos` in `t`.
-pub fn lastIndexOfPos(t: anytype, pos: u32, needle: []const @TypeOf(t).ElementType) ?u32 {
+pub fn lastIndexOfPos(t: anytype, pos: u32, needle: []const @TypeOf(t).ChildType) ?u32 {
     const len = t.length();
     const needle_len: u32 = @intCast(needle.len);
     if (needle_len > len or pos == 0) return null;
@@ -87,7 +87,7 @@ pub fn lastIndexOfPos(t: anytype, pos: u32, needle: []const @TypeOf(t).ElementTy
     } else null;
 }
 
-pub fn lastIndexOfPosScalar(t: anytype, pos: u32, needle: @TypeOf(t).ElementType) ?u32 {
+pub fn lastIndexOfPosScalar(t: anytype, pos: u32, needle: @TypeOf(t).ChildType) ?u32 {
     assert(pos <= t.length());
     var i = pos;
     return while (i > 0) {
@@ -109,7 +109,7 @@ pub fn Iterator(comptime T: type) type {
 
         const Self = @This();
 
-        pub fn next(self: *Self) ?T.ElementType {
+        pub fn next(self: *Self) ?T.ChildType {
             if (self.index >= self.data.length()) return null;
             const ret = self.data.get(self.index);
             self.index += 1;
@@ -132,7 +132,7 @@ pub fn ReverseIterator(comptime T: type) type {
 
         const Self = @This();
 
-        pub fn next(self: *Self) ?T.ElementType {
+        pub fn next(self: *Self) ?T.ChildType {
             if (self.index == 0) return null;
             self.index -= 1;
             return self.data.get(self.index);
@@ -147,8 +147,8 @@ pub fn utf8Iterator(t: anytype) Utf8Iterator(@TypeOf(t)) {
 }
 
 pub fn Utf8Iterator(comptime T: type) type {
-    if (T.ElementType != u8)
-        @compileError("Utf8Iterator can only be used on types with ElementType == u8");
+    if (T.ChildType != u8)
+        @compileError("Utf8Iterator can only be used on types with ChildType == u8");
 
     return struct {
         data: T,

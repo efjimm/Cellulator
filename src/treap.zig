@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
 const Order = std.math.Order;
+const utils = @import("utils.zig");
 
 pub fn Treap(comptime Key: type, comptime compareFn: anytype) type {
     return struct {
@@ -15,7 +16,7 @@ pub fn Treap(comptime Key: type, comptime compareFn: anytype) type {
 
         nodes: std.ArrayListUnmanaged(Node) = .empty,
         root: Handle = .invalid,
-        prng: std.Random.DefaultPrng = .init(1_000_000),
+        prng: std.Random.DefaultPrng = .init(1_000_000), // TODO: Don't hardcode this
 
         pub const Handle = packed struct {
             n: u32,
@@ -39,7 +40,7 @@ pub fn Treap(comptime Key: type, comptime compareFn: anytype) type {
         };
 
         /// A Node represents an item or point in the treap with a uniquely associated key.
-        pub const Node = struct {
+        pub const Node = extern struct {
             key: Key,
             priority: usize,
             parent: Handle,
@@ -82,7 +83,7 @@ pub fn Treap(comptime Key: type, comptime compareFn: anytype) type {
 
         pub fn handleFromNode(treap: *const Self, n: *const Node) Handle {
             const nodes_ptr = treap.nodes.items.ptr;
-            const index = @intFromPtr(n) - @intFromPtr(nodes_ptr);
+            const index = @divExact(@intFromPtr(n) - @intFromPtr(nodes_ptr), @sizeOf(Node));
             return .from(@intCast(index));
         }
 
@@ -347,6 +348,34 @@ pub fn Treap(comptime Key: type, comptime compareFn: anytype) type {
 
         pub fn inorderIterator(self: *Self) InorderIterator {
             return .{ .current = self.getMin(), .treap = self };
+        }
+
+        // For serialization
+
+        pub const Header = extern struct {
+            nodes_len: u32,
+            root: Handle,
+        };
+
+        pub fn iovecs(treap: *Self) std.posix.iovec_const {
+            return utils.ptrToIoVec(treap.nodes.items);
+        }
+
+        pub fn getHeader(treap: *const Self) Header {
+            return .{ .nodes_len = @intCast(treap.nodes.items.len), .root = treap.root };
+        }
+
+        pub fn fromHeader(
+            treap: *Self,
+            allocator: std.mem.Allocator,
+            header: Header,
+        ) !std.posix.iovec {
+            treap.* = .{ .root = header.root };
+            errdefer treap.nodes.deinit(allocator);
+
+            _ = try treap.nodes.addManyAt(allocator, 0, header.nodes_len);
+
+            return @bitCast(treap.iovecs());
         }
     };
 }

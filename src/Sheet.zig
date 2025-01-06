@@ -12,7 +12,6 @@ const PosInt = Position.Int;
 const Rect = Position.Rect;
 
 const ast = @import("ast.zig");
-const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
 const RTree = @import("tree.zig").RTree;
 const DependentTree = @import("tree.zig").DependentTree;
 const SkipList = @import("skip_list.zig").SkipList;
@@ -21,18 +20,6 @@ const Sheet = @This();
 
 comptime {
     assert(@sizeOf(u64) <= @sizeOf(Reference));
-}
-
-pub fn rangeFromCellHandle(sheet: *Sheet, handle: CellHandle) Range {
-    return sheet.getCellFromHandle(handle).range();
-}
-
-pub fn rectFromCellHandle(sheet: *Sheet, handle: CellHandle) Rect {
-    return sheet.rangeFromCellHandle(handle).rect(sheet);
-}
-
-pub fn eqlCellHandles(sheet: *Sheet, a: CellHandle, b: CellHandle) bool {
-    return sheet.getCellFromHandle(a).eql(sheet.getCellFromHandle(b));
 }
 
 /// List of cells that need to be re-evaluated.
@@ -52,7 +39,7 @@ redos: UndoList = .{},
 dependents: DependentTree(4),
 /// Range tree containing just the positions of extant cells.
 /// Used for quick lookup of all extant cells in a range.
-cell_tree: RTree(CellHandle, void, 4, rangeFromCellHandle, rectFromCellHandle, eqlCellHandles),
+cell_tree: CellTree,
 
 allocator: Allocator,
 
@@ -61,12 +48,13 @@ cell_treap: CellTreap = .{},
 rows: RowAxis,
 cols: ColumnAxis,
 
-ast_nodes: MultiArrayList(ast.Node).Slice,
+ast_nodes: std.MultiArrayList(ast.Node).Slice,
 
-search_buffer: std.ArrayListUnmanaged(std.ArrayListUnmanaged(CellHandle)) = .{},
+search_buffer: std.ArrayListUnmanaged(DependentTree(4).ListIndex) = .{},
 
 filepath: std.BoundedArray(u8, std.fs.max_path_bytes) = .{}, // TODO: Heap allocate this
 
+pub const CellTree = RTree(CellHandle, void, 4, rangeFromCellHandle, rectFromCellHandle, eqlCellHandles);
 pub const CellTreap = @import("treap.zig").Treap(Cell, Cell.compare);
 pub const CellHandle = CellTreap.Handle;
 pub const ColumnAxis = SkipList(Column, 4, Column.Context);
@@ -93,6 +81,18 @@ fn getStringSlice(sheet: *Sheet, index: StringIndex) [:0]const u8 {
     return std.mem.span(ptr);
 }
 
+pub fn rangeFromCellHandle(sheet: *Sheet, handle: CellHandle) Range {
+    return sheet.getCellFromHandle(handle).range();
+}
+
+pub fn rectFromCellHandle(sheet: *Sheet, handle: CellHandle) Rect {
+    return sheet.rangeFromCellHandle(handle).rect(sheet);
+}
+
+pub fn eqlCellHandles(sheet: *Sheet, a: CellHandle, b: CellHandle) bool {
+    return sheet.getCellFromHandle(a).eql(sheet.getCellFromHandle(b));
+}
+
 pub fn create(allocator: Allocator) !*Sheet {
     const sheet = try allocator.create(Sheet);
     errdefer allocator.destroy(sheet);
@@ -110,6 +110,22 @@ pub fn create(allocator: Allocator) !*Sheet {
     try sheet.undos.ensureTotalCapacity(allocator, 1);
     errdefer sheet.undos.deinit(allocator);
     try sheet.redos.ensureTotalCapacity(allocator, 1);
+
+    return sheet;
+}
+
+pub fn createNoAlloc(allocator: Allocator) !*Sheet {
+    const sheet = try allocator.create(Sheet);
+    errdefer allocator.destroy(sheet);
+
+    sheet.* = .{
+        .allocator = allocator,
+        .cell_tree = .init(sheet),
+        .dependents = .init(sheet),
+        .rows = .init(1),
+        .cols = .init(1),
+        .ast_nodes = .empty,
+    };
 
     return sheet;
 }
@@ -149,31 +165,156 @@ const Marker = packed struct(u2) {
     redo: bool = false,
 };
 
-pub const UndoList = MultiArrayList(Undo);
+pub const UndoList = std.MultiArrayList(Undo);
 pub const UndoType = enum { undo, redo };
 
-pub const Undo = union(enum) {
-    set_cell: struct {
-        handle: CellHandle,
-        strings: StringIndex,
-    },
-    delete_cell: Position,
+/// This is an extern struct instead of a tagged union for serialization purposes.
+pub const Undo = extern struct {
+    tag: Tag,
+    payload: Payload,
 
-    set_column_width: struct {
-        col: Position.Int,
-        width: u16,
-    },
-    set_column_precision: struct {
-        col: Position.Int,
-        precision: u8,
-    },
-    insert_row: PosInt,
-    insert_col: PosInt,
-    delete_row: PosInt,
-    delete_col: PosInt,
+    pub inline fn init(comptime tag: Tag, payload: @FieldType(Payload, @tagName(tag))) Undo {
+        return .{
+            .tag = tag,
+            .payload = @unionInit(Payload, @tagName(tag), payload),
+        };
+    }
 
-    sentinel,
+    pub const sentinel: Undo = .{ .tag = .sentinel, .payload = undefined };
+
+    pub const Tag = enum(u8) {
+        set_cell,
+        delete_cell,
+        set_column_width,
+        set_column_precision,
+        insert_row,
+        insert_col,
+        delete_row,
+        delete_col,
+        sentinel,
+    };
+
+    pub const Payload = extern union {
+        set_cell: extern struct {
+            handle: CellHandle,
+            strings: StringIndex,
+        },
+        delete_cell: Position,
+
+        // TODO: Make these use column/row handles instead of positions
+        set_column_width: extern struct {
+            col: Position.Int,
+            width: u16,
+        },
+        set_column_precision: extern struct {
+            col: Position.Int,
+            precision: u8,
+        },
+        insert_row: PosInt,
+        insert_col: PosInt,
+        delete_row: PosInt,
+        delete_col: PosInt,
+    };
 };
+
+const SerializeHeader = extern struct {
+    /// Magic number identifying a binary file as a cellulator file.
+    magic: u32 = magic_number,
+    /// A version field for when the binary output changes.
+    version: u32 = binary_version,
+
+    strings_buf_len: u32,
+
+    undos_len: u32,
+    redos_len: u32,
+
+    dependents: DependentTree(4).Header,
+    cell_tree: CellTree.Header,
+
+    cell_treap: CellTreap.Header,
+
+    rows: RowAxis.Header,
+    cols: ColumnAxis.Header,
+
+    ast_nodes_len: u32,
+
+    const magic_number: u32 = @bitCast([4]u8{ 'Z', 'C', 'Z', 'C' });
+    const binary_version = 0;
+};
+
+pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
+    assert(sheet.queued_cells.items.len == 0);
+
+    sheet.undos.shrinkAndFree(sheet.allocator, sheet.undos.len);
+    sheet.redos.shrinkAndFree(sheet.allocator, sheet.redos.len);
+    utils.shrinkMultiArrayListSlice(sheet.allocator, &sheet.ast_nodes);
+    utils.shrinkMultiArrayListSlice(sheet.allocator, &sheet.cols.nodes);
+    utils.shrinkMultiArrayListSlice(sheet.allocator, &sheet.rows.nodes);
+
+    const header: SerializeHeader = .{
+        .strings_buf_len = @intCast(sheet.strings_buf.items.len),
+        .undos_len = @intCast(sheet.undos.len),
+        .redos_len = @intCast(sheet.redos.len),
+        .dependents = sheet.dependents.getHeader(),
+        .cell_tree = sheet.cell_tree.getHeader(),
+        .cell_treap = sheet.cell_treap.getHeader(),
+        .rows = sheet.rows.getHeader(),
+        .cols = sheet.cols.getHeader(),
+        .ast_nodes_len = @intCast(sheet.ast_nodes.len),
+    };
+
+    var iovecs = .{
+        utils.ptrToIoVec(&header),
+        utils.arrayListIoVec(&sheet.strings_buf),
+        utils.multiArrayListIoVec(&sheet.undos),
+        utils.multiArrayListIoVec(&sheet.redos),
+    } ++ sheet.dependents.iovecs() ++ .{
+        sheet.cell_tree.iovecs(),
+        sheet.cell_treap.iovecs(),
+        sheet.rows.iovecs(),
+        sheet.cols.iovecs(),
+        utils.multiArrayListSliceIoVec(&sheet.ast_nodes),
+    };
+
+    try file.writevAll(&iovecs);
+}
+
+pub fn deserialize(allocator: Allocator, file: std.fs.File) !*Sheet {
+    const header = try file.reader().readStruct(SerializeHeader);
+
+    if (header.magic != SerializeHeader.magic_number) return error.InvalidFile;
+    if (header.version != SerializeHeader.binary_version) return error.InvalidVersion;
+
+    const sheet = try createNoAlloc(allocator);
+    errdefer sheet.destroy();
+
+    var iovecs = [_]std.posix.iovec{
+        try utils.prepArrayList(&sheet.strings_buf, allocator, header.strings_buf_len),
+        try utils.prepMultiArrayList(&sheet.undos, allocator, header.undos_len),
+        try utils.prepMultiArrayList(&sheet.redos, allocator, header.redos_len),
+    } ++ try sheet.dependents.fromHeader(allocator, header.dependents, sheet) ++ .{
+        try sheet.cell_tree.fromHeader(allocator, header.cell_tree, sheet),
+        try sheet.cell_treap.fromHeader(allocator, header.cell_treap),
+        try sheet.rows.fromHeader(allocator, header.rows),
+        try sheet.cols.fromHeader(allocator, header.cols),
+        try utils.prepMultiArrayListSlice(&sheet.ast_nodes, allocator, header.ast_nodes_len),
+    };
+
+    _ = try file.readvAll(&iovecs);
+
+    // TODO: This is necessary due to cached cell string values being stored as individually
+    //       allocated slices that can't be efficiently serialized. It would be better to
+    //       store cached string values as a FlatListPool instance.
+    try sheet.queued_cells.ensureUnusedCapacity(allocator, sheet.cell_treap.nodes.items.len);
+    for (sheet.cell_treap.nodes.items) |*node| {
+        const cell = &node.key;
+        cell.setValue(.err, .fromError(error.NotEvaluable));
+        sheet.queued_cells.appendAssumeCapacity(sheet.cell_treap.handleFromNode(node));
+        cell.state = .enqueued;
+    }
+
+    return sheet;
+}
 
 pub fn isEmpty(sheet: *const Sheet) bool {
     return sheet.cell_treap.root == null;
@@ -200,6 +341,35 @@ pub fn clearRetainingCapacity(sheet: *Sheet) void {
     sheet.cell_treap.nodes.clearRetainingCapacity();
 }
 
+pub fn interpretFile(sheet: *Sheet, reader: std.io.AnyReader) !void {
+    defer sheet.endUndoGroup();
+    while (true) {
+        var sfa = std.heap.stackFallback(8192, sheet.allocator);
+        const a = sfa.get();
+
+        const line = try reader.readUntilDelimiterOrEofAlloc(a, '\n', std.math.maxInt(u30)) orelse
+            break;
+        defer a.free(line);
+
+        const expr_root = ast.fromSource(sheet, line) catch |err| {
+            switch (err) {
+                error.UnexpectedToken,
+                error.InvalidCellAddress,
+                => continue,
+                error.OutOfMemory => return error.OutOfMemory,
+            }
+        };
+
+        const data = sheet.ast_nodes.items(.data);
+        const assignment = data[expr_root.n].assignment;
+        const pos = data[assignment.lhs.n].pos;
+
+        const spliced_root = ast.splice(&sheet.ast_nodes, assignment.rhs);
+
+        try sheet.setCell(pos, line, spliced_root, .{});
+    }
+}
+
 pub fn loadFile(sheet: *Sheet, filepath: []const u8) !void {
     const file = std.fs.cwd().openFile(filepath, .{}) catch |err| switch (err) {
         error.FileNotFound => {
@@ -218,33 +388,7 @@ pub fn loadFile(sheet: *Sheet, filepath: []const u8) !void {
     const reader = buf.reader();
     log.debug("Loading file {s}", .{filepath});
 
-    defer sheet.endUndoGroup();
-    while (true) {
-        var sfa = std.heap.stackFallback(8192, sheet.allocator);
-        const a = sfa.get();
-
-        const line = try reader.readUntilDelimiterOrEofAlloc(a, '\n', std.math.maxInt(u30)) orelse
-            break;
-        defer a.free(line);
-
-        log.debug("Len: {d}", .{sheet.ast_nodes.len});
-        const expr_root = ast.fromSource(sheet, line) catch |err| {
-            switch (err) {
-                error.UnexpectedToken,
-                error.InvalidCellAddress,
-                => continue,
-                error.OutOfMemory => return error.OutOfMemory,
-            }
-        };
-
-        const data = sheet.ast_nodes.items(.data);
-        const assignment = data[expr_root.n].assignment;
-        const pos = data[assignment.lhs.n].pos;
-
-        const spliced_root = ast.splice(&sheet.ast_nodes, assignment.rhs);
-
-        try sheet.setCell(pos, line, spliced_root, .{});
-    }
+    try sheet.interpretFile(reader.any());
 }
 
 pub fn writeFile(
@@ -301,7 +445,7 @@ const ExprRangeIterator = struct {
 
         const data = it.sheet.ast_nodes.items(.data);
 
-        var iter = std.mem.reverseIterator(it.sheet.ast_nodes.items(.tags)[it.start.n..it.i.n]);
+        var iter = std.mem.reverseIterator(it.sheet.ast_nodes.items(.tag)[it.start.n..it.i.n]);
         defer it.i = .from(@intCast(it.start.n + iter.index));
 
         while (iter.next()) |tag| switch (tag) {
@@ -328,10 +472,10 @@ fn addRangeDependents(
     dependent: CellHandle,
     range: Range,
 ) Allocator.Error!void {
-    // log.debug("Adding {} as a dependent of {}", .{
-    //     dependent.rect(sheet).tl,
-    //     range.rect(sheet),
-    // });
+    log.debug("Adding {} as a dependent of {}", .{
+        sheet.rectFromCellHandle(dependent).tl,
+        range.rect(sheet),
+    });
     return sheet.dependents.put(range, dependent);
 }
 
@@ -658,7 +802,7 @@ pub fn pushUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
 }
 
 pub fn insertColumn(sheet: *Sheet, index: PosInt, undo_opts: UndoOpts) !void {
-    try sheet.pushUndo(.{ .delete_col = index }, undo_opts);
+    try sheet.pushUndo(.init(.delete_col, index), undo_opts);
     const values = sheet.cols.nodes.items(.value);
 
     for (values) |*value| {
@@ -669,7 +813,7 @@ pub fn insertColumn(sheet: *Sheet, index: PosInt, undo_opts: UndoOpts) !void {
 }
 
 pub fn insertRow(sheet: *Sheet, index: PosInt, undo_opts: UndoOpts) !void {
-    try sheet.pushUndo(.{ .delete_row = index }, undo_opts);
+    try sheet.pushUndo(.init(.delete_row, index), undo_opts);
     const values = sheet.rows.nodes.items(.value);
 
     for (values) |*value| {
@@ -680,13 +824,19 @@ pub fn insertRow(sheet: *Sheet, index: PosInt, undo_opts: UndoOpts) !void {
 }
 
 pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
-    switch (u) {
-        .set_cell => |t| try sheet.insertCellNode(t.handle, opts),
-        .delete_cell => |pos| try sheet.deleteCell(pos, opts),
-        .set_column_width => |t| try sheet.setWidth(t.col, t.width, opts),
-        .set_column_precision => |t| try sheet.setPrecision(t.col, t.precision, opts),
-        .insert_row => |index| try sheet.insertRow(index, opts),
-        .insert_col => |index| try sheet.insertColumn(index, opts),
+    switch (u.tag) {
+        .set_cell => try sheet.insertCellNode(u.payload.set_cell.handle, opts),
+        .delete_cell => try sheet.deleteCell(u.payload.delete_cell, opts),
+        .set_column_width => {
+            const p = u.payload.set_column_width;
+            try sheet.setWidth(p.col, p.width, opts);
+        },
+        .set_column_precision => {
+            const p = u.payload.set_column_precision;
+            try sheet.setPrecision(p.col, p.precision, opts);
+        },
+        .insert_row => try sheet.insertRow(u.payload.insert_row, opts),
+        .insert_col => try sheet.insertColumn(u.payload.insert_col, opts),
         .delete_row, .delete_col => {},
         .sentinel => {},
     }
@@ -696,12 +846,12 @@ pub fn undo(sheet: *Sheet) Allocator.Error!void {
     if (sheet.undos.len == 0) return;
 
     // All undo groups MUST end with a group marker - so remove it!
-    const last = sheet.undos.pop();
-    assert(last == .sentinel);
+    const last_undo = sheet.undos.pop();
+    assert(last_undo.tag == .sentinel);
 
     defer sheet.endRedoGroup();
 
-    const tags = sheet.undos.items(.tags);
+    const tags = sheet.undos.items(.tag);
     const opts: UndoOpts = .{ .undo_type = .redo };
     while (sheet.undos.popOrNull()) |u| {
         errdefer {
@@ -719,11 +869,11 @@ pub fn redo(sheet: *Sheet) Allocator.Error!void {
 
     // All undo groups MUST end with a group marker - so remove it!
     const last = sheet.redos.pop();
-    assert(last == .sentinel);
+    assert(last.tag == .sentinel);
 
     defer sheet.endUndoGroup();
 
-    const tags = sheet.redos.items(.tags);
+    const tags = sheet.redos.items(.tag);
     const opts: UndoOpts = .{ .clear_redos = false };
     while (sheet.redos.popOrNull()) |u| {
         errdefer {
@@ -754,21 +904,15 @@ pub fn setColWidth(
     width: u16,
     opts: UndoOpts,
 ) Allocator.Error!void {
+    try sheet.ensureUndoCapacity(.undo, 1);
     const col = sheet.cols.getPtr(handle).?;
     if (width == col.width) return;
     const old_width = col.width;
     col.width = width;
-    // TODO: This should be done before the operation?
-    try sheet.pushUndo(
-        .{
-            .set_column_width = .{
-                .col = index,
-                .width = old_width,
-            },
-        },
-        opts,
-    );
-    sheet.endUndoGroup();
+    sheet.pushUndo(.init(.set_column_width, .{
+        .col = index,
+        .width = old_width,
+    }), opts) catch unreachable;
 }
 
 pub fn incWidth(
@@ -819,16 +963,10 @@ pub fn setColPrecision(
 
     const old_precision = col.precision;
     col.precision = precision;
-    try sheet.pushUndo(
-        .{
-            .set_column_precision = .{
-                .col = index,
-                .precision = old_precision,
-            },
-        },
-        opts,
-    );
-    sheet.endUndoGroup();
+    try sheet.pushUndo(.init(.set_column_precision, .{
+        .col = index,
+        .precision = old_precision,
+    }), opts);
 }
 
 pub fn incPrecision(
@@ -876,7 +1014,7 @@ fn dupeAstStrings(
     const start = ast.leftMostChild(nodes, root_node);
     assert(start.n <= root_node.n);
 
-    const tags = nodes.items(.tags)[start.n .. root_node.n + 1];
+    const tags = nodes.items(.tag)[start.n .. root_node.n + 1];
     const data = nodes.items(.data)[start.n .. root_node.n + 1];
 
     const ret: StringIndex = .from(@intCast(sheet.strings_buf.items.len));
@@ -945,9 +1083,6 @@ pub fn insertCellNode(
     try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, 1);
     try sheet.cell_tree.ensureUnusedCapacity(1);
 
-    // try sheet.cell_tree.put(cell_ptr, {});
-    // errdefer sheet.cell_tree.remove(cell_ptr) catch {};
-
     var entry = sheet.cell_treap.getEntryFor(new_node.key);
     const existing_handle = entry.node.get() orelse {
         log.debug("Creating cell {}", .{new_node.key.rect(sheet).tl});
@@ -956,7 +1091,7 @@ pub fn insertCellNode(
 
         sheet.cell_tree.putContextAssumeCapacity(handle, {}, {});
 
-        const u = Undo{ .delete_cell = pos };
+        const u: Undo = .init(.delete_cell, pos);
 
         entry.set(handle);
 
@@ -985,18 +1120,14 @@ pub fn insertCellNode(
     // `entry.set` overwrites the .key field with the old value, for some reason.
     new_node.key = cell;
 
-    const u: Undo = .{
-        .set_cell = .{
-            .handle = handle,
-            .strings = old_strings,
-        },
-    };
+    const u: Undo = .init(.set_cell, .{
+        .handle = existing_handle,
+        .strings = old_strings,
+    });
     sheet.pushUndo(u, undo_opts) catch unreachable;
 
     sheet.enqueueUpdate(handle) catch unreachable;
-    if (node.key.value_type == .string) {
-        sheet.allocator.free(std.mem.span(node.key.value.string));
-    }
+    node.key.setError(sheet.allocator);
     sheet.has_changes = true;
 }
 
@@ -1005,10 +1136,8 @@ pub fn deleteCellByPtr(
     cell: *Cell,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
-    // Assert that this cell actually exists in the cell treap.
     const node = cell.node();
     const handle = sheet.cell_treap.handleFromNode(node);
-    // assert(sheet.cell_treap.getEntryFor(cell.*).node == node);
 
     if (undo_opts.undo_type) |undo_type| {
         try sheet.ensureUndoCapacity(undo_type, 1);
@@ -1027,15 +1156,10 @@ pub fn deleteCellByPtr(
     cell.setError(sheet.allocator);
     sheet.cell_treap.remove(handle);
 
-    sheet.pushUndo(
-        .{
-            .set_cell = .{
-                .handle = handle,
-                .strings = node.key.strings,
-            },
-        },
-        undo_opts,
-    ) catch unreachable;
+    sheet.pushUndo(.init(.set_cell, .{
+        .handle = handle,
+        .strings = node.key.strings,
+    }), undo_opts) catch unreachable;
     sheet.has_changes = true;
 }
 
@@ -1111,9 +1235,19 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
     defer sheet.queued_cells.clearRetainingCapacity();
 
     log.debug("Marking dirty cells", .{});
+
+    var sfa = std.heap.stackFallback(16384, sheet.allocator);
+    var dirty_cells: std.ArrayList(CellHandle) = .init(sfa.get());
+    defer dirty_cells.deinit();
+
     for (sheet.queued_cells.items) |cell| {
-        try sheet.markDirty(cell);
+        try sheet.markDirty(cell, &dirty_cells);
     }
+
+    while (dirty_cells.popOrNull()) |cell| {
+        try sheet.markDirty(cell, &dirty_cells);
+    }
+    log.debug("Finished marking", .{});
 
     const context = EvalContext{ .sheet = sheet };
     // All dirty cells are reachable from the cells in queued_cells
@@ -1149,10 +1283,13 @@ pub fn enqueueUpdate(
     sheet.getCellFromHandle(handle).state = .enqueued;
 }
 
-/// Marks all of the dependents of `pos` as dirty.
+/// Marks all of the dependents of `pos` as dirty. Any children that also need to be marked dirty
+/// are appended to `dirty_cells`. This was previously done recursively which resulted in a stack
+/// overflow on large sheets.
 fn markDirty(
     sheet: *Sheet,
     handle: CellHandle,
+    dirty_cells: *std.ArrayList(CellHandle),
 ) Allocator.Error!void {
     const cell = &sheet.cell_treap.node(handle).key;
     sheet.search_buffer.clearRetainingCapacity();
@@ -1162,12 +1299,14 @@ fn markDirty(
         Rect.initSinglePos(cell.position(sheet)),
     );
 
-    for (sheet.search_buffer.items) |*list| {
-        for (list.items) |h| {
+    for (sheet.search_buffer.items) |list_index| {
+        const items = sheet.dependents.flat.items(list_index);
+        for (items) |h| {
             const c = &sheet.cell_treap.node(h).key;
             if (c.state != .dirty) {
+                log.debug("Marked {} as dirty", .{c.position(sheet)});
                 c.state = .dirty;
-                try sheet.markDirty(h);
+                try dirty_cells.append(h);
             }
         }
     }
@@ -1191,43 +1330,74 @@ pub fn setFilePath(sheet: *Sheet, filepath: []const u8) void {
     sheet.filepath.appendSliceAssumeCapacity(filepath);
 }
 
-pub const Cell = struct {
+pub const Cell = extern struct {
     row: Row.Handle,
     col: Column.Handle,
 
     /// Cached value of the cell
-    value: Value = .{ .err = error.NotEvaluable },
+    value: Value = .{ .err = .fromError(error.NotEvaluable) },
 
     /// Tag denoting the type of value. A tagged union would add extra unnecessary padding.
-    value_type: std.meta.FieldEnum(Value) = .err,
+    value_type: Value.Tag = .err,
 
     /// State used for evaluating cells.
-    state: enum {
+    state: enum(u8) {
         up_to_date,
         dirty,
         enqueued,
         computing,
     } = .up_to_date,
 
-    // TODO: ASTs don't change after being constructed, so the `capacity` field of the underlying
-    // MultiArrayList is redundant. We could store just the pointer and length inline in the Cell
-    // struct to reduce memory usage.
-    //
-    // We could also store all AST nodes in a single array with a special `end` tag and just keep a
-    // u32 index into the array.
-
     /// Abstract syntax tree representing the expression in the cell.
     expr_root: ast.Index = .invalid,
 
     strings: StringIndex = .invalid,
 
-    pub const Value = union {
+    // Non-extern unions get a hidden tag in safe builds which makes serialising them annoying.
+    // So we use an extern union here.
+    pub const Value = extern union {
         number: f64,
         string: [*:0]const u8,
         err: Error,
+
+        pub const Tag = blk: {
+            const t = @typeInfo(std.meta.FieldEnum(Value)).@"enum";
+            break :blk @Type(.{ .@"enum" = .{
+                .tag_type = u8,
+                .fields = t.fields,
+                .decls = &.{},
+                .is_exhaustive = t.is_exhaustive,
+            } });
+        };
     };
 
-    pub const Error = ast.EvalError;
+    pub const Error = extern struct {
+        tag: Tag,
+
+        pub const Tag = blk: {
+            const t = @typeInfo(std.meta.FieldEnum(ast.EvalError));
+            break :blk @Type(.{
+                .@"enum" = .{
+                    .tag_type = u8,
+                    .fields = t.@"enum".fields,
+                    .decls = &.{},
+                    .is_exhaustive = true,
+                },
+            });
+        };
+
+        pub fn fromError(err: ast.EvalError) Error {
+            return switch (err) {
+                inline else => |e| .{ .tag = @field(Tag, @errorName(e)) },
+            };
+        }
+
+        pub fn getError(e: Error) ast.EvalError {
+            return switch (e.tag) {
+                inline else => |tag| @field(ast.EvalError, @tagName(tag)),
+            };
+        }
+    };
 
     pub const key_bits = @typeInfo(usize).int.bits * 2;
     pub const Key = std.meta.Int(.unsigned, key_bits);
@@ -1300,10 +1470,10 @@ pub const Cell = struct {
         if (cell.value_type == .string) {
             a.free(std.mem.span(cell.value.string));
         }
-        cell.setValue(.err, error.NotEvaluable);
+        cell.setValue(.err, Error.fromError(error.NotEvaluable));
     }
 
-    pub fn setValue(cell: *Cell, comptime tag: std.meta.FieldEnum(Value), value: anytype) void {
+    pub fn setValue(cell: *Cell, comptime tag: Value.Tag, value: @FieldType(Value, @tagName(tag))) void {
         cell.value = @unionInit(Value, @tagName(tag), value);
         cell.value_type = tag;
     }
@@ -1318,8 +1488,9 @@ fn queueDependents(sheet: *Sheet, ref: Reference) Allocator.Error!void {
         ref.rect(sheet),
     );
 
-    for (sheet.search_buffer.items) |*value_list| {
-        for (value_list.items) |handle| {
+    for (sheet.search_buffer.items) |list_index| {
+        const values = sheet.dependents.flat.items(list_index);
+        for (values) |handle| {
             const cell = &sheet.cell_treap.node(handle).key;
             if (cell.state == .dirty) {
                 cell.state = .enqueued;
@@ -1355,7 +1526,7 @@ pub const EvalContext = struct {
                     context.sheet.strings_buf.items,
                     context,
                 ) catch |err| {
-                    cell.setValue(.err, err);
+                    cell.setValue(.err, Cell.Error.fromError(err));
                     return err;
                 };
                 if (cell.value_type == .string)
@@ -1372,7 +1543,7 @@ pub const EvalContext = struct {
         return switch (cell.value_type) {
             .number => .{ .number = cell.value.number },
             .string => .{ .string = std.mem.span(cell.value.string) },
-            .err => cell.value.err,
+            .err => cell.value.err.getError(),
         };
     }
 
@@ -1393,7 +1564,7 @@ pub fn printCellExpression(sheet: *Sheet, pos: Position, writer: anytype) !void 
         sheet.ast_nodes,
         cell.expr_root,
         sheet,
-        sheet.getStringSlice(cell.strings),
+        sheet.strings_buf.items,
         writer,
     );
 }
@@ -1525,7 +1696,7 @@ pub fn widthNeededForColumn(
 pub fn anchorAst(sheet: *Sheet, root: ast.Index) Allocator.Error!void {
     const nodes = sheet.ast_nodes;
     const start = ast.leftMostChild(nodes, root);
-    const tags = nodes.items(.tags)[start.n .. root.n + 1];
+    const tags = nodes.items(.tag)[start.n .. root.n + 1];
     const data = nodes.items(.data)[start.n .. root.n + 1];
 
     const pos_count = blk: {
@@ -1568,7 +1739,7 @@ const PositionContext = struct {
 
 /// Reference to a specific cell in the sheet. References contain pointers to rows/columns and as
 /// such are 'automatically' adjusted when rows/columns are deleted.
-pub const Reference = struct {
+pub const Reference = extern struct {
     row: Row.Handle,
     col: Column.Handle,
 
@@ -1595,7 +1766,7 @@ pub const Reference = struct {
     }
 };
 
-pub const Range = struct {
+pub const Range = extern struct {
     tl: Reference,
     br: Reference,
 
@@ -2299,28 +2470,6 @@ test "Cell error propagation" {
     try expectCellError(sheet, "B0");
 }
 
-test "Cell fuzzing" {
-    const static = struct {
-        fn fuzz(input: []const u8) anyerror!void {
-            const sheet = try create(std.testing.allocator);
-            defer sheet.destroy();
-
-            const T = [4]u32;
-            const coords = std.mem.bytesAsSlice(T, input[0 .. input.len - input.len % @sizeOf(T)]);
-            const mod = 5;
-            for (coords) |coord| {
-                const p1: Position = .init(coord[0] % mod, coord[1] % mod);
-                const p2: Position = .init(coord[2] % mod, coord[3] % mod);
-                var buf: std.BoundedArray(u8, 256) = .{};
-                buf.writer().print("{}", .{p2}) catch unreachable;
-                try sheet.setCell(p1, "", try ast.fromExpression(sheet, buf.slice()), .{});
-            }
-        }
-    };
-
-    try std.testing.fuzz(static.fuzz, .{});
-}
-
 test "DupeStrings" {
     const t = std.testing;
     const sheet = try Sheet.create(t.allocator);
@@ -2352,4 +2501,195 @@ test "DupeStrings" {
         );
         try t.expectEqualStrings("", sheet.getStringSlice(strings));
     }
+}
+
+test "Overwrite with string" {
+    const t = std.testing;
+    const sheet = try Sheet.create(t.allocator);
+    defer sheet.destroy();
+
+    inline for (.{
+        .{ "A0", "'one'" },
+        .{ "A0", "'two'" },
+    }) |data| {
+        const address, const source = data;
+        try sheet.setCell(
+            .fromValidAddress(address),
+            source,
+            try ast.fromExpression(sheet, source),
+            .{},
+        );
+
+        try sheet.update();
+        sheet.endUndoGroup();
+    }
+
+    try sheet.undo();
+    try sheet.update();
+
+    try sheet.redo();
+    try sheet.update();
+}
+
+test "Overwrite with reference" {
+    const t = std.testing;
+    const sheet = try Sheet.create(t.allocator);
+    defer sheet.destroy();
+
+    inline for (.{
+        .{ "A0", "'one'" },
+        .{ "A0", "B0" },
+    }) |data| {
+        const address, const source = data;
+        try sheet.setCell(
+            .fromValidAddress(address),
+            source,
+            try ast.fromExpression(sheet, source),
+            .{},
+        );
+
+        try sheet.update();
+    }
+}
+
+pub fn printCellDependents(sheet: *Sheet, address: []const u8) !void {
+    const pos = Position.fromValidAddress(address);
+    var iter = try sheet.dependents.searchIterator(sheet.allocator, .{ .tl = pos, .br = pos });
+    defer iter.deinit();
+
+    while (try iter.next()) |item| {
+        const slice = sheet.dependents.flat.items(item.value_ptr.*);
+        std.debug.print("{} is depended on by", .{pos});
+        for (slice) |handle| {
+            std.debug.print("    {} ({d})", .{
+                sheet.cell_treap.node(handle).key.rect(sheet),
+                handle.n,
+            });
+        }
+        std.debug.print("\n", .{});
+    }
+}
+
+fn testSetCell(sheet: *Sheet, address: []const u8, expr: []const u8) !void {
+    try sheet.setCell(.fromValidAddress(address), expr, try ast.fromExpression(sheet, expr), .{});
+}
+
+fn testSetCellPos(sheet: *Sheet, pos: Position, expr: []const u8) !void {
+    try sheet.setCell(pos, expr, try ast.fromExpression(sheet, expr), .{});
+}
+
+test "Dependencies" {
+    const bytes =
+        \\ let A0 = 10
+        \\ let B0 = 20
+        \\ let A1 = A0 * 2
+        \\ let B1 = B0 * 2
+    ;
+
+    var fbs = std.io.fixedBufferStream(bytes);
+
+    const sheet = try create(std.testing.allocator);
+    defer sheet.destroy();
+
+    try sheet.interpretFile(fbs.reader().any());
+    try sheet.update();
+
+    try testSetCell(sheet, "A2", "A0 * 3");
+    try sheet.update();
+
+    try testSetCell(sheet, "b0", "2");
+    try sheet.update();
+
+    try expectCellEquals(sheet, "A0", 10);
+    try expectCellEquals(sheet, "A1", 20);
+    try expectCellEquals(sheet, "A2", 30);
+    try expectCellEquals(sheet, "B0", 2);
+    try expectCellEquals(sheet, "B1", 4);
+}
+
+test "Fuzzer input" {
+    if (true) return error.SkipZigTest;
+    const file = std.fs.cwd().openFile("sheet-fuzz-out", .{ .mode = .read_write }) catch
+        return error.SkipZigTest;
+    defer file.close();
+
+    const len = try file.reader().readInt(u64, .little);
+    var buf: [4096]u8 = undefined;
+    const bytes_read = try file.readAll(buf[0..len]);
+    if (bytes_read != len) return error.BadFile;
+
+    try fuzzNumbers(buf[0..len]);
+}
+
+fn fuzzNumbers(input: []const u8) !void {
+    if (map) |m| {
+        const len: *u64 = @ptrCast(m.ptr);
+        len.* = input.len;
+        @memcpy(m[8..][0..input.len], input);
+    }
+
+    const sheet = try create(std.testing.allocator);
+    defer sheet.destroy();
+
+    const Operation = union(enum(u1)) {
+        insert: extern struct {
+            pos: Position,
+            number_or_ref: extern union { f: u64, pos: Position },
+            rand: bool,
+        } align(1),
+        delete: Position align(1),
+    };
+
+    const slice: []align(1) const Operation = std.mem.bytesAsSlice(
+        Operation,
+        input[0 .. input.len - input.len % @sizeOf(Operation)],
+    );
+
+    for (slice) |t| {
+        switch (t) {
+            // Insert a random expression
+            .insert => |data| {
+                const pos: Position = .init(data.pos.x % 5, data.pos.y % 5);
+
+                var buf: std.BoundedArray(u8, 1024) = .{};
+                if (data.rand) {
+                    try buf.writer().print("{d}", .{data.number_or_ref.f});
+                } else {
+                    const p: Position = .init(
+                        data.number_or_ref.pos.x % 5,
+                        data.number_or_ref.pos.y % 5,
+                    );
+                    try buf.writer().print("{}", .{p});
+                }
+
+                const a = try ast.fromExpression(sheet, buf.constSlice());
+                try sheet.setCell(pos, buf.constSlice(), a, .{});
+            },
+            .delete => |pos| {
+                try sheet.deleteCell(pos, .{});
+            },
+        }
+
+        try sheet.update();
+    }
+}
+
+var map: ?[]align(std.mem.page_size) u8 = null;
+
+test "Fuzz sheet" {
+    {
+        const file = try std.fs.cwd().createFile("sheet-fuzz-out", .{ .read = true });
+        defer file.close();
+
+        try std.posix.ftruncate(file.handle, 4096);
+        map = try std.posix.mmap(
+            null,
+            4096,
+            std.posix.PROT.READ | std.posix.PROT.WRITE,
+            .{ .TYPE = .SHARED },
+            file.handle,
+            0,
+        );
+    }
+    try std.testing.fuzz(fuzzNumbers, .{});
 }
