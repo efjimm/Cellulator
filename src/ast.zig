@@ -484,6 +484,10 @@ pub const EvalResult = union(enum) {
     none,
     number: f64,
     string: []const u8,
+    cell_string: struct {
+        sheet: *Sheet,
+        list_index: @FieldType(Sheet, "string_values").List.Index,
+    },
 
     /// Attempts to coerce `res` to an integer.
     fn toNumber(res: EvalResult, none_value: f64) !f64 {
@@ -491,6 +495,10 @@ pub const EvalResult = union(enum) {
             .none => none_value,
             .number => |n| n,
             .string => |str| std.fmt.parseFloat(f64, str) catch error.InvalidCoercion,
+            .cell_string => |i| {
+                const str = i.sheet.string_values.items(i.list_index);
+                return std.fmt.parseFloat(f64, str) catch error.InvalidCoercion;
+            },
         };
     }
 
@@ -499,6 +507,10 @@ pub const EvalResult = union(enum) {
             .none => null,
             .number => |n| n,
             .string => |str| std.fmt.parseFloat(f64, str) catch error.InvalidCoercion,
+            .cell_string => |i| {
+                const str = i.sheet.string_values.items(i.list_index);
+                return std.fmt.parseFloat(f64, str) catch error.InvalidCoercion;
+            },
         };
     }
 
@@ -507,6 +519,10 @@ pub const EvalResult = union(enum) {
             .none => "",
             .number => |n| std.fmt.allocPrint(allocator, "{d}", .{n}),
             .string => |str| allocator.dupe(u8, str),
+            .cell_string => |i| {
+                const str = i.sheet.string_values.items(i.list_index);
+                return allocator.dupe(u8, str);
+            },
         };
     }
 
@@ -515,6 +531,10 @@ pub const EvalResult = union(enum) {
             .none => {},
             .number => |n| try writer.print("{d}", .{n}),
             .string => |str| try writer.writeAll(str),
+            .cell_string => |i| {
+                const str = i.sheet.string_values.items(i.list_index);
+                try writer.writeAll(str);
+            },
         }
     }
 
@@ -529,6 +549,7 @@ pub const EvalResult = union(enum) {
                 return @intCast(counting_writer.bytes_written);
             },
             .string => |str| str.len,
+            .cell_string => |i| i.sheet.string_values.len(i.list_index),
         };
     }
 };
@@ -885,6 +906,9 @@ pub fn eval(
         .none => .none,
         .number => |n| .{ .number = n },
         .string => |str| .{ .string = try sheet.allocator.dupeZ(u8, str) },
+        .cell_string => |i| .{
+            .string = try sheet.allocator.dupeZ(u8, i.sheet.string_values.items(i.list_index)),
+        },
     };
 }
 
@@ -979,7 +1003,7 @@ test "Functions on Ranges" {
                 expr_root,
                 sheet,
                 "",
-                Sheet.EvalContext{ .sheet = sheet },
+                sheet,
             );
             try std.testing.expectApproxEqRel(expected, res.number, 0.0001);
         }

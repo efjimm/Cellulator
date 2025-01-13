@@ -14,9 +14,17 @@ pub fn Treap(comptime Key: type, comptime compareFn: anytype) type {
             return compareFn(a, b);
         }
 
-        nodes: std.ArrayListUnmanaged(Node) = .empty,
-        root: Handle = .invalid,
-        prng: std.Random.DefaultPrng = .init(1_000_000), // TODO: Don't hardcode this
+        nodes: std.ArrayListUnmanaged(Node),
+        root: Handle,
+        prng: std.Random.DefaultPrng,
+
+        pub fn init(seed: u64) Self {
+            return .{
+                .nodes = .empty,
+                .root = .invalid,
+                .prng = .init(seed),
+            };
+        }
 
         pub const Handle = packed struct {
             n: u32,
@@ -369,10 +377,12 @@ pub fn Treap(comptime Key: type, comptime compareFn: anytype) type {
             treap: *Self,
             allocator: std.mem.Allocator,
             header: Header,
+            seed: u64,
         ) !std.posix.iovec {
-            treap.* = .{ .root = header.root };
+            treap.* = .init(seed);
             errdefer treap.nodes.deinit(allocator);
 
+            treap.root = header.root;
             _ = try treap.nodes.addManyAt(allocator, 0, header.nodes_len);
 
             return @bitCast(treap.iovecs());
@@ -384,7 +394,7 @@ const TestTreap = Treap(u64, std.math.order);
 const TestNode = TestTreap.Node;
 
 test "getMin, getMax, simple" {
-    var treap = TestTreap{};
+    var treap: TestTreap = .init(1);
     try treap.nodes.ensureUnusedCapacity(testing.allocator, 3);
     defer treap.nodes.deinit(testing.allocator);
 
@@ -462,7 +472,7 @@ fn SliceIterRandomOrder(comptime T: type) type {
 }
 
 test "insert, find, replace, remove" {
-    var treap = TestTreap{};
+    var treap: TestTreap = .init(1);
 
     try treap.nodes.ensureUnusedCapacity(testing.allocator, 10);
     defer treap.nodes.deinit(testing.allocator);

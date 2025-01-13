@@ -15,44 +15,46 @@ const ast = @import("ast.zig");
 const RTree = @import("tree.zig").RTree;
 const DependentTree = @import("tree.zig").DependentTree;
 const SkipList = @import("skip_list.zig").SkipList;
+const FlatListPool = @import("flat_list_pool.zig").FlatListPool;
 
 const Sheet = @This();
 
-comptime {
-    assert(@sizeOf(u64) <= @sizeOf(Reference));
-}
-
-/// List of cells that need to be re-evaluated.
-queued_cells: std.ArrayListUnmanaged(CellHandle) = .empty,
-
-strings_buf: std.ArrayListUnmanaged(u8) = .empty,
+allocator: Allocator,
 
 /// True if there have been any changes since the last save
-has_changes: bool = false,
+has_changes: bool,
 
-undos: UndoList = .{},
-redos: UndoList = .{},
+/// List of cells that need to be re-evaluated.
+queued_cells: std.ArrayListUnmanaged(CellHandle),
+
+/// Stores the null terminated text of string literals. Cells contain an index into this buffer.
+strings_buf: std.ArrayListUnmanaged(u8),
 
 /// Range tree mapping ranges to a list of ranges that depend on the first.
 /// Used to query whether a cell belongs to a range and then update the cells
 /// that depend on that range.
 dependents: DependentTree(4),
+
 /// Range tree containing just the positions of extant cells.
 /// Used for quick lookup of all extant cells in a range.
 cell_tree: CellTree,
 
-allocator: Allocator,
+/// Treap containing cell information. Used for fast lookups of cell references.
+cell_treap: CellTreap,
 
-cell_treap: CellTreap = .{},
+ast_nodes: std.MultiArrayList(ast.Node).Slice,
+
+string_values: FlatListPool(u8),
 
 rows: RowAxis,
 cols: ColumnAxis,
 
-ast_nodes: std.MultiArrayList(ast.Node).Slice,
+undos: UndoList,
+redos: UndoList,
 
-search_buffer: std.ArrayListUnmanaged(DependentTree(4).ListIndex) = .{},
+search_buffer: std.ArrayListUnmanaged(DependentTree(4).ListIndex),
 
-filepath: std.BoundedArray(u8, std.fs.max_path_bytes) = .{}, // TODO: Heap allocate this
+filepath: std.BoundedArray(u8, std.fs.max_path_bytes),
 
 pub const CellTree = RTree(CellHandle, void, 4, rangeFromCellHandle, rectFromCellHandle, eqlCellHandles);
 pub const CellTreap = @import("treap.zig").Treap(Cell, Cell.compare);
@@ -99,11 +101,26 @@ pub fn create(allocator: Allocator) !*Sheet {
 
     sheet.* = .{
         .allocator = allocator,
+        .has_changes = false,
+
+        .queued_cells = .empty,
+        .strings_buf = .empty,
+
+        .undos = .empty,
+        .redos = .empty,
+
         .cell_tree = .init(sheet),
         .dependents = .init(sheet),
+        .cell_treap = .init(1_000_000),
+        .ast_nodes = .empty,
+        .string_values = .empty,
+
         .rows = .init(1),
         .cols = .init(1),
-        .ast_nodes = .empty,
+
+        .search_buffer = .empty,
+
+        .filepath = .{},
     };
     assert(sheet.cols.nodes.len == 0);
 
@@ -120,23 +137,32 @@ pub fn createNoAlloc(allocator: Allocator) !*Sheet {
 
     sheet.* = .{
         .allocator = allocator,
+        .has_changes = false,
+
+        .queued_cells = .empty,
+        .strings_buf = .empty,
+
+        .undos = .empty,
+        .redos = .empty,
+
         .cell_tree = .init(sheet),
         .dependents = .init(sheet),
+        .cell_treap = .init(1_000_000),
+        .ast_nodes = .empty,
+        .string_values = .empty,
+
         .rows = .init(1),
         .cols = .init(1),
-        .ast_nodes = .empty,
+
+        .search_buffer = .empty,
+
+        .filepath = .{},
     };
 
     return sheet;
 }
 
 pub fn destroy(sheet: *Sheet) void {
-    var iter = sheet.cell_treap.inorderIterator();
-    while (iter.next()) |handle| {
-        const cell = sheet.getCellFromHandle(handle);
-        cell.deinit(sheet.allocator);
-    }
-
     sheet.strings_buf.deinit(sheet.allocator);
     sheet.search_buffer.deinit(sheet.allocator);
 
@@ -153,6 +179,7 @@ pub fn destroy(sheet: *Sheet) void {
     sheet.rows.deinit(sheet.allocator);
     sheet.cols.deinit(sheet.allocator);
     sheet.ast_nodes.deinit(sheet.allocator);
+    sheet.string_values.deinit(sheet.allocator);
     sheet.allocator.destroy(sheet);
 }
 
@@ -201,7 +228,6 @@ pub const Undo = extern struct {
         },
         delete_cell: Position,
 
-        // TODO: Make these use column/row handles instead of positions
         set_column_width: extern struct {
             col: Position.Int,
             width: u16,
@@ -225,21 +251,23 @@ const SerializeHeader = extern struct {
 
     strings_buf_len: u32,
 
-    undos_len: u32,
-    redos_len: u32,
-
     dependents: DependentTree(4).Header,
     cell_tree: CellTree.Header,
 
     cell_treap: CellTreap.Header,
 
+    ast_nodes_len: u32,
+
+    string_values: FlatListPool(u8).Header,
+
     rows: RowAxis.Header,
     cols: ColumnAxis.Header,
 
-    ast_nodes_len: u32,
+    undos_len: u32,
+    redos_len: u32,
 
     const magic_number: u32 = @bitCast([4]u8{ 'Z', 'C', 'Z', 'C' });
-    const binary_version = 0;
+    const binary_version = 1;
 };
 
 pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
@@ -253,27 +281,29 @@ pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
 
     const header: SerializeHeader = .{
         .strings_buf_len = @intCast(sheet.strings_buf.items.len),
-        .undos_len = @intCast(sheet.undos.len),
-        .redos_len = @intCast(sheet.redos.len),
         .dependents = sheet.dependents.getHeader(),
         .cell_tree = sheet.cell_tree.getHeader(),
         .cell_treap = sheet.cell_treap.getHeader(),
+        .ast_nodes_len = @intCast(sheet.ast_nodes.len),
+        .string_values = sheet.string_values.getHeader(),
         .rows = sheet.rows.getHeader(),
         .cols = sheet.cols.getHeader(),
-        .ast_nodes_len = @intCast(sheet.ast_nodes.len),
+        .undos_len = @intCast(sheet.undos.len),
+        .redos_len = @intCast(sheet.redos.len),
     };
 
     var iovecs = .{
         utils.ptrToIoVec(&header),
         utils.arrayListIoVec(&sheet.strings_buf),
-        utils.multiArrayListIoVec(&sheet.undos),
-        utils.multiArrayListIoVec(&sheet.redos),
     } ++ sheet.dependents.iovecs() ++ .{
         sheet.cell_tree.iovecs(),
         sheet.cell_treap.iovecs(),
+        utils.multiArrayListSliceIoVec(&sheet.ast_nodes),
+    } ++ sheet.string_values.iovecs() ++ .{
         sheet.rows.iovecs(),
         sheet.cols.iovecs(),
-        utils.multiArrayListSliceIoVec(&sheet.ast_nodes),
+        utils.multiArrayListIoVec(&sheet.undos),
+        utils.multiArrayListIoVec(&sheet.redos),
     };
 
     try file.writevAll(&iovecs);
@@ -290,28 +320,18 @@ pub fn deserialize(allocator: Allocator, file: std.fs.File) !*Sheet {
 
     var iovecs = [_]std.posix.iovec{
         try utils.prepArrayList(&sheet.strings_buf, allocator, header.strings_buf_len),
-        try utils.prepMultiArrayList(&sheet.undos, allocator, header.undos_len),
-        try utils.prepMultiArrayList(&sheet.redos, allocator, header.redos_len),
     } ++ try sheet.dependents.fromHeader(allocator, header.dependents, sheet) ++ .{
         try sheet.cell_tree.fromHeader(allocator, header.cell_tree, sheet),
-        try sheet.cell_treap.fromHeader(allocator, header.cell_treap),
+        try sheet.cell_treap.fromHeader(allocator, header.cell_treap, 1_000_000),
+        try utils.prepMultiArrayListSlice(&sheet.ast_nodes, allocator, header.ast_nodes_len),
+    } ++ try sheet.string_values.fromHeader(sheet.allocator, header.string_values) ++ .{
         try sheet.rows.fromHeader(allocator, header.rows),
         try sheet.cols.fromHeader(allocator, header.cols),
-        try utils.prepMultiArrayListSlice(&sheet.ast_nodes, allocator, header.ast_nodes_len),
+        try utils.prepMultiArrayList(&sheet.undos, allocator, header.undos_len),
+        try utils.prepMultiArrayList(&sheet.redos, allocator, header.redos_len),
     };
 
     _ = try file.readvAll(&iovecs);
-
-    // TODO: This is necessary due to cached cell string values being stored as individually
-    //       allocated slices that can't be efficiently serialized. It would be better to
-    //       store cached string values as a FlatListPool instance.
-    try sheet.queued_cells.ensureUnusedCapacity(allocator, sheet.cell_treap.nodes.items.len);
-    for (sheet.cell_treap.nodes.items) |*node| {
-        const cell = &node.key;
-        cell.setValue(.err, .fromError(error.NotEvaluable));
-        sheet.queued_cells.appendAssumeCapacity(sheet.cell_treap.handleFromNode(node));
-        cell.state = .enqueued;
-    }
 
     return sheet;
 }
@@ -1133,7 +1153,7 @@ pub fn insertCellNode(
     sheet.pushUndo(u, undo_opts) catch unreachable;
 
     sheet.enqueueUpdate(handle) catch unreachable;
-    node.key.setError(sheet.allocator);
+    sheet.setCellError(&node.key);
     sheet.has_changes = true;
 }
 
@@ -1159,7 +1179,7 @@ pub fn deleteCellByPtr(
     sheet.cell_tree.remove(handle) catch @panic("TODO"); // TODO: Probably save the current file before we panic
 
     // TODO: re-use string buffer
-    cell.setError(sheet.allocator);
+    sheet.setCellError(cell);
     sheet.cell_treap.remove(handle);
 
     sheet.pushUndo(.init(.set_cell, .{
@@ -1211,15 +1231,29 @@ pub fn getCell(sheet: *Sheet, pos: Position) ?Cell {
 }
 
 pub fn getCellPtr(sheet: *Sheet, pos: Position) ?*Cell {
-    const row = sheet.getRowHandle(pos.y) orelse return null;
-    const col = sheet.getColumnHandle(pos.x) orelse return null;
+    log.debug("GET {}", .{pos});
+    const row = sheet.getRowHandle(pos.y) orelse {
+        log.debug("NO ROW", .{});
+        return null;
+    };
+    const col = sheet.getColumnHandle(pos.x) orelse {
+        log.debug("NO COL", .{});
+        return null;
+    };
     const key: Cell = .{
         .row = row,
         .col = col,
     };
 
     const entry = sheet.cell_treap.getEntryFor(key);
-    return if (entry.node.get()) |n| &sheet.cell_treap.node(n).key else null;
+    if (entry.node.get()) |n|
+        return &sheet.cell_treap.node(n).key;
+
+    log.debug(
+        "NO NODE FOR {}, HAVE {}",
+        .{ pos, sheet.cell_treap.nodes.items[0].key.position(sheet) },
+    );
+    return null;
 }
 
 pub fn getCellHandleByRef(sheet: *Sheet, ref: Reference) ?CellHandle {
@@ -1255,16 +1289,12 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
     }
     log.debug("Finished marking", .{});
 
-    const context = EvalContext{ .sheet = sheet };
     // All dirty cells are reachable from the cells in queued_cells
     while (sheet.queued_cells.popOrNull()) |handle| {
-        const cell = &sheet.cell_treap.node(handle).key;
-        _ = context.evalCell(.{
-            .row = cell.row,
-            .col = cell.col,
-        }) catch |err| switch (err) {
+        _ = sheet.evalCellByHandle(handle) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.CyclicalReference => {
+                const cell = sheet.getCellFromHandle(handle);
                 log.info("Cyclical reference encountered while evaluating {}", .{
                     cell.rect(sheet).tl,
                 });
@@ -1336,6 +1366,23 @@ pub fn setFilePath(sheet: *Sheet, filepath: []const u8) void {
     sheet.filepath.appendSliceAssumeCapacity(filepath);
 }
 
+pub fn cellStringValue(sheet: *Sheet, cell: *const Cell) []const u8 {
+    assert(cell.value_type == .string);
+    return sheet.string_values.items(cell.value.string);
+}
+
+pub fn freeCellString(sheet: *Sheet, cell: *Cell) void {
+    assert(cell.value_type == .string);
+    sheet.string_values.destroyList(cell.value.string);
+}
+
+pub fn setCellError(sheet: *Sheet, cell: *Cell) void {
+    if (cell.value_type == .string)
+        sheet.string_values.destroyList(cell.value.string);
+
+    cell.setValue(.err, .fromError(error.NotEvaluable));
+}
+
 pub const Cell = extern struct {
     row: Row.Handle,
     col: Column.Handle,
@@ -1363,7 +1410,7 @@ pub const Cell = extern struct {
     // So we use an extern union here.
     pub const Value = extern union {
         number: f64,
-        string: [*:0]const u8,
+        string: FlatListPool(u8).List.Index,
         err: Error,
 
         pub const Tag = blk: {
@@ -1405,9 +1452,6 @@ pub const Cell = extern struct {
         }
     };
 
-    pub const key_bits = @typeInfo(usize).int.bits * 2;
-    pub const Key = std.meta.Int(.unsigned, key_bits);
-
     pub fn reference(cell: *const Cell) Reference {
         return .{
             .row = cell.row,
@@ -1442,41 +1486,17 @@ pub const Cell = extern struct {
     }
 
     fn compare(a: Cell, b: Cell) std.math.Order {
-        const a_key = key(a.row, a.col);
-        const b_key = key(b.row, b.col);
+        const a_key: u64 = @bitCast(a.reference());
+        const b_key: u64 = @bitCast(b.reference());
         return std.math.order(a_key, b_key);
-    }
-
-    // TODO: Make sure this is always unique
-    fn key(row: Row.Handle, col: Column.Handle) Key {
-        assert(row.isValid());
-        assert(col.isValid());
-        const row_int = row.n;
-        const col_int = col.n;
-        const row_mul = comptime std.math.pow(Key, 2, @typeInfo(usize).int.bits);
-        return row_int * row_mul + col_int;
     }
 
     pub fn fromExpression(sheet: *Sheet, expr: []const u8) !Cell {
         return .{ .expr_root = try ast.fromExpression(sheet, expr) };
     }
 
-    // TODO: Re-organise functions that take a sheet as not being methods.
-    pub fn deinit(cell: *Cell, a: Allocator) void {
-        if (cell.value_type == .string)
-            a.free(std.mem.span(cell.value.string));
-        cell.* = undefined;
-    }
-
     pub fn isError(cell: Cell) bool {
         return cell.value_type == .err;
-    }
-
-    pub fn setError(cell: *Cell, a: Allocator) void {
-        if (cell.value_type == .string) {
-            a.free(std.mem.span(cell.value.string));
-        }
-        cell.setValue(.err, Error.fromError(error.NotEvaluable));
     }
 
     pub fn setValue(cell: *Cell, comptime tag: Value.Tag, value: @FieldType(Value, @tagName(tag))) void {
@@ -1505,64 +1525,68 @@ fn queueDependents(sheet: *Sheet, ref: Reference) Allocator.Error!void {
         }
     }
 }
+pub fn evalCellByHandle(sheet: *Sheet, handle: CellHandle) ast.EvalError!ast.EvalResult {
+    const cell = sheet.getCellFromHandle(handle);
+    log.debug("Evaluating cell {}", .{cell.rect(sheet)});
+    switch (cell.state) {
+        .up_to_date => {},
+        .computing => return error.CyclicalReference,
+        .enqueued, .dirty => {
+            cell.state = .computing;
 
-pub const EvalContext = struct {
-    sheet: *Sheet,
+            // Queue dependents before evaluating to ensure that errors are propagated to
+            // dependents.
+            try sheet.queueDependents(cell.reference());
 
-    pub fn evalCellByHandle(context: EvalContext, handle: CellHandle) ast.EvalError!ast.EvalResult {
-        const cell = context.sheet.getCellFromHandle(handle);
-        log.debug("Evaluating cell {}", .{cell.rect(
-            context.sheet,
-        )});
-        switch (cell.state) {
-            .up_to_date => {},
-            .computing => return error.CyclicalReference,
-            .enqueued, .dirty => {
-                cell.state = .computing;
+            // Evaluate
+            const res = ast.eval(
+                sheet.ast_nodes,
+                cell.expr_root,
+                sheet,
+                sheet.strings_buf.items,
+                sheet,
+            ) catch |err| {
+                cell.setValue(.err, Cell.Error.fromError(err));
+                return err;
+            };
 
-                // Queue dependents before evaluating to ensure that errors are propagated to
-                // dependents.
-                try context.sheet.queueDependents(cell.reference());
+            if (cell.value_type == .string)
+                sheet.string_values.destroyList(cell.value.string);
 
-                // Evaluate
-                const res = ast.eval(
-                    context.sheet.ast_nodes,
-                    cell.expr_root,
-                    context.sheet,
-                    context.sheet.strings_buf.items,
-                    context,
-                ) catch |err| {
-                    cell.setValue(.err, Cell.Error.fromError(err));
-                    return err;
-                };
-                if (cell.value_type == .string)
-                    context.sheet.allocator.free(std.mem.span(cell.value.string));
-                switch (res) {
-                    .none => cell.setValue(.number, 0),
-                    .string => |str| cell.setValue(.string, str.ptr),
-                    .number => |n| cell.setValue(.number, n),
-                }
-                cell.state = .up_to_date;
-            },
-        }
-
-        return switch (cell.value_type) {
-            .number => .{ .number = cell.value.number },
-            .string => .{ .string = std.mem.span(cell.value.string) },
-            .err => cell.value.err.getError(),
-        };
+            switch (res) {
+                .none => cell.setValue(.number, 0),
+                .number => |n| cell.setValue(.number, n),
+                .string => |str| {
+                    defer sheet.allocator.free(str);
+                    try sheet.string_values.ensureUnusedCapacity(sheet.allocator, str.len);
+                    const list = try sheet.string_values.createList(sheet.allocator);
+                    sheet.string_values.appendSliceAssumeCapacity(list, str);
+                    cell.setValue(.string, list);
+                },
+            }
+            cell.state = .up_to_date;
+        },
     }
 
-    /// Evaluates a cell and all of its dependencies.
-    pub fn evalCell(context: EvalContext, ref: Reference) ast.EvalError!ast.EvalResult {
-        const cell = context.sheet.getCellHandleByRef(ref) orelse {
-            try context.sheet.queueDependents(ref);
-            return .none;
-        };
+    return switch (cell.value_type) {
+        .number => .{ .number = cell.value.number },
+        .string => .{ .cell_string = .{
+            .sheet = sheet,
+            .list_index = cell.value.string,
+        } },
+        .err => cell.value.err.getError(),
+    };
+}
 
-        return context.evalCellByHandle(cell);
-    }
-};
+/// Evaluates a cell and all of its dependencies.
+pub fn evalCell(sheet: *Sheet, ref: Reference) ast.EvalError!ast.EvalResult {
+    const cell = sheet.getCellHandleByRef(ref) orelse {
+        try sheet.queueDependents(ref);
+        return .none;
+    };
+
+    return sheet.evalCellByHandle(cell);
+}
 
 pub fn printCellExpression(sheet: *Sheet, pos: Position, writer: anytype) !void {
     const cell = sheet.getCellPtr(pos) orelse return;
@@ -1684,7 +1708,7 @@ pub fn widthNeededForColumn(
                 }
             },
             .string => {
-                const str = std.mem.span(cell.value.string);
+                const str = sheet.cellStringValue(cell);
                 const w = utils.strWidth(str, max_width);
                 if (w > width) {
                     width = w;
@@ -1748,6 +1772,10 @@ const PositionContext = struct {
 pub const Reference = extern struct {
     row: Row.Handle,
     col: Column.Handle,
+
+    pub fn init(row: Row.Handle, col: Column.Handle) Reference {
+        return .{ .row = row, .col = col };
+    }
 
     pub inline fn resolve(pos: Reference, sheet: *Sheet) Position {
         return .{
@@ -2412,7 +2440,8 @@ fn testCellEvaluation(a: Allocator) !void {
         var col_iter = std.mem.tokenizeScalar(u8, line, ',');
         var x: PosInt = 0;
         while (col_iter.next()) |col| : (x += 1) {
-            const str = std.mem.span(sheet.getCell(.{ .x = x, .y = y }).?.value.string);
+            const cell = sheet.getCell(.init(x, y)).?;
+            const str = sheet.cellStringValue(&cell);
             try t.expectEqualStrings(col, str);
         }
     }
@@ -2462,9 +2491,10 @@ pub fn expectCellEqualsString(sheet: *Sheet, address: []const u8, expected_value
         });
         return error.TestExpectedCellsEqlStrings;
     }
-    if (!std.mem.eql(u8, expected_value, std.mem.span(cell.value.string))) {
+    const str = sheet.string_values.items(cell.value.string);
+    if (!std.mem.eql(u8, expected_value, str)) {
         std.debug.print("Cell {} does not have expected string value\n", .{pos});
-        return std.testing.expectEqualStrings(expected_value, std.mem.span(cell.value.string));
+        return std.testing.expectEqualStrings(expected_value, str);
     }
 }
 

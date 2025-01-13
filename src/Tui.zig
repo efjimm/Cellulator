@@ -485,7 +485,7 @@ pub fn renderCell(
                 try rpw.pad();
             },
             .string => {
-                const text = std.mem.span(cell.value.string);
+                const text = zc.sheet.cellStringValue(&cell);
                 const text_width = utils.strWidth(text, width);
                 const left_pad = (width - text_width) / 2;
                 try writer.writeByteNTimes(' ', left_pad);
