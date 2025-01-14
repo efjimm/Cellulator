@@ -1,0 +1,101 @@
+# Test simple string save/load
+let A0 = "Hello"
+let B0 = A0 # " World"
+:w $BUILD_TEMP_DIR/test_simple.zc
+:delete A0:B0
+:expect-non-extant A0:B0
+:e! $BUILD_TEMP_DIR/test_simple.zc
+:expect-eql-string A0 "Hello"
+:expect-eql-string B0 "Hello World"
+:undo 2
+:expect-non-extant A0:B0
+
+# Test numeric data save/load
+let A1 = 10
+let B1 = 20
+let C1 = A1 + B1
+:w $BUILD_TEMP_DIR/test_numbers.zc
+:delete A1:C1
+:expect-non-extant A1:C1
+:e! $BUILD_TEMP_DIR/test_numbers.zc
+:expect-eql-number A1 10
+:expect-eql-number B1 20
+:expect-eql-number C1 30
+:undo 2
+:expect-non-extant A1:C1
+
+# Test complex dependencies and built-in functions
+let A2 = 1
+let B2 = 2
+let C2 = @sum(A2, B2)
+let D2 = @prod(A2:B2)
+:w $BUILD_TEMP_DIR/test_functions.zc
+:delete A2:D2
+:expect-non-extant A2:D2
+:e! $BUILD_TEMP_DIR/test_functions.zc
+:expect-eql-number A2 1
+:expect-eql-number B2 2
+:expect-eql-number C2 3  # 1 + 2
+:expect-eql-number D2 2  # 1 * 2
+
+# Test after loading text file operations
+let E2 = C2 + D2
+:expect-eql-number E2 5
+:undo 1
+:expect-non-extant E2
+
+# Test fill command with save/load
+:fill A3:C4 0 2
+:w $BUILD_TEMP_DIR/test_fill.zc
+:delete A3:C4
+:expect-non-extant A3:C4
+:e! $BUILD_TEMP_DIR/test_fill.zc
+:expect-eql-number A3 0
+:expect-eql-number B3 2
+:expect-eql-number C3 4
+:expect-eql-number A4 6
+:expect-eql-number B4 8
+:expect-eql-number C4 10
+
+# Test undo and redo with text save/load
+:undo 2
+:expect-non-extant A3:C4
+:redo 2
+:expect-eql-number A3 0
+:expect-eql-number C4 10
+
+# Test mixed string and number data
+let F0 = "Test"
+let F1 = 123
+let F2 = F0 # F1
+:w $BUILD_TEMP_DIR/test_mixed.zc
+:delete F0:F2
+:expect-non-extant F0:F2
+:e! $BUILD_TEMP_DIR/test_mixed.zc
+:expect-eql-string F0 "Test"
+:expect-eql-number F1 123
+:expect-eql-string F2 "Test123"
+
+# Test interleaved operations before and after loading
+let G0 = "Pre-load"
+:w $BUILD_TEMP_DIR/test_interleaved.zc
+let G1 = "Interim"
+:delete G0:G1
+:expect-non-extant G0:G1
+:e! $BUILD_TEMP_DIR/test_interleaved.zc
+:expect-eql-string G0 "Pre-load"
+:undo 1
+:expect-non-extant G0
+
+# Test large grid
+:fill A10:C12 1 1
+:w $BUILD_TEMP_DIR/test_large_grid.zc
+:delete A10:C12
+:expect-non-extant A10:C12
+:e! $BUILD_TEMP_DIR/test_large_grid.zc
+:expect-eql-number A10 1
+:expect-eql-number B10 2
+:expect-eql-number C10 3
+:expect-eql-number A11 4
+:expect-eql-number C12 9
+
