@@ -1,4 +1,5 @@
 const std = @import("std");
+const build = @import("build");
 const utils = @import("utils.zig");
 const ast = @import("ast.zig");
 const spoon = @import("spoon");
@@ -869,6 +870,7 @@ fn interpretCommands(self: *Self, commands: []const u8) !void {
     var lines = std.mem.tokenizeScalar(u8, commands, '\n');
     while (lines.next()) |line| {
         try self.parseCommand(line);
+        try self.updateCells();
     }
 }
 
@@ -956,6 +958,7 @@ const Cmd = enum {
     fill,
     binary_save,
     binary_load,
+    binary_load_force,
     undo,
     redo,
     delete,
@@ -971,6 +974,7 @@ const cmds = std.StaticStringMap(Cmd).initComptime(.{
     .{ "fill", .fill },
     .{ "bw", .binary_save },
     .{ "be", .binary_load },
+    .{ "be!", .binary_load_force },
     .{ "undo", .undo },
     .{ "redo", .redo },
     .{ "delete", .delete },
@@ -1029,7 +1033,12 @@ fn runDebugCommand(self: *Self, cmd_str: []const u8, iter: *utils.WordIterator) 
         },
         .expect_non_extant => {
             const arg1 = iter.next() orelse return error.InvalidSyntax;
-            try self.sheet.expectCellNonExtant(arg1);
+            if (std.mem.containsAtLeast(u8, arg1, 1, ":")) {
+                // Argument is a range
+                try self.sheet.expectRangeNonExtant(arg1);
+            } else {
+                try self.sheet.expectCellNonExtant(arg1);
+            }
         },
         .expect_error => {
             const arg1 = iter.next() orelse return error.InvalidSyntax;
@@ -1087,6 +1096,9 @@ pub fn runCommand(self: *Self, str: []const u8) !void {
             } else {
                 try self.loadCmdBinary(iter.next() orelse "");
             }
+        },
+        .binary_load_force => {
+            try self.loadCmdBinary(iter.next() orelse "");
         },
         .load => {
             if (self.sheet.has_changes) {
@@ -2139,10 +2151,13 @@ fn testFile(path: []const u8) !void {
     const bytes = try file.readToEndAlloc(std.testing.allocator, 100_000_000);
     defer std.testing.allocator.free(bytes);
 
-    try zc.testCommands(bytes);
+    const content = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "$BUILD_TEMP_DIR", build.temp_dir);
+    defer std.testing.allocator.free(content);
+
+    try zc.testCommands(content);
 }
 
-const test_files = @import("compile_opts").test_files;
+const test_files = build.test_files;
 
 test "Sheet operations" {
     for (test_files) |path| {

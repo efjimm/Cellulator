@@ -1,0 +1,76 @@
+# Test filling a simple range
+:fill A0:C0 0 2
+:expect-eql-number A0 0
+:expect-eql-number B0 2
+:expect-eql-number C0 4
+
+# Test filling multiple rows
+:fill A1:C2 5 3
+:expect-eql-number A1 5
+:expect-eql-number B1 8
+:expect-eql-number C1 11
+:expect-eql-number A2 14
+:expect-eql-number B2 17
+:expect-eql-number C2 20
+
+# Test filling a single cell
+:fill D0 10 0
+:expect-eql-number D0 10
+
+# Test filling with a negative increment
+:fill A3:C3 100 -10
+:expect-eql-number A3 100
+:expect-eql-number B3 90
+:expect-eql-number C3 80
+
+# Test filling with a zero increment (constant value)
+:fill A4:C4 42 0
+:expect-eql-number A4 42
+:expect-eql-number B4 42
+:expect-eql-number C4 42
+
+# Test filling a large range
+:fill A5:D6 1 1
+:expect-eql-number A5 1
+:expect-eql-number B5 2
+:expect-eql-number C5 3
+:expect-eql-number D5 4
+:expect-eql-number A6 5
+:expect-eql-number B6 6
+:expect-eql-number C6 7
+:expect-eql-number D6 8
+
+# Undo fill and validate undo behavior
+:undo 1
+:expect-non-extant A5
+:expect-non-extant D6
+
+# Redo fill and validate redo behavior
+:redo 1
+:expect-eql-number A5 1
+:expect-eql-number D6 8
+
+# Test interleaving operations with fill
+let E0 = "Test"
+:fill E1:E3 50 10
+:expect-eql-string E0 "Test"
+:expect-eql-number E1 50
+:expect-eql-number E2 60
+:expect-eql-number E3 70
+
+# Undo interleaved operations
+:undo 1
+:expect-non-extant E1
+:expect-non-extant E3
+:expect-eql-string E0 "Test"
+
+# Test fill with non-standard ranges
+:fill F1:H1 0 5
+:expect-eql-number F1 0
+:expect-eql-number G1 5
+:expect-eql-number H1 10
+
+:fill F2:F4 100 50
+:expect-eql-number F2 100
+:expect-eql-number F3 150
+:expect-eql-number F4 200

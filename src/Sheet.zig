@@ -1,4 +1,5 @@
 const std = @import("std");
+const build = @import("build");
 const assert = std.debug.assert;
 const log = std.log.scoped(.sheet);
 const Arena = std.heap.ArenaAllocator;
@@ -2448,7 +2449,7 @@ fn testCellEvaluation(a: Allocator) !void {
 }
 
 test "Cell assignment, updating, evaluation" {
-    if (@import("compile_opts").fast_tests) {
+    if (build.fast_tests) {
         return error.SkipZigTest;
     }
 
@@ -2459,6 +2460,36 @@ pub fn expectCellNonExtant(sheet: *Sheet, address: []const u8) !void {
     const pos: Position = try .fromAddress(address);
     if (sheet.getCellPtr(pos) != null) {
         std.debug.print("Expected cell {} to not exist\n", .{pos});
+        return error.CellExists;
+    }
+}
+
+pub fn expectRangeNonExtant(sheet: *Sheet, address: []const u8) !void {
+    var iter = std.mem.tokenizeScalar(u8, address, ':');
+    const tl = iter.next() orelse return error.MalformedAddress;
+    const br = iter.next() orelse return error.MalformedAddress;
+    const rect: Rect = .initPos(
+        try .fromAddress(tl),
+        try .fromAddress(br),
+    );
+
+    var sfa = std.heap.stackFallback(4096, sheet.allocator);
+    const a = sfa.get();
+
+    const items = try sheet.cell_tree.search(a, rect);
+    defer a.free(items);
+
+    if (items.len != 0) {
+        var bw = std.io.bufferedWriter(std.io.getStdErr().writer());
+        const w = bw.writer();
+        try w.print("Expected cells {} to not exist, found", .{rect});
+        for (items) |item| {
+            const handle = item.key;
+            const cell = sheet.getCellFromHandle(handle);
+            try w.print(" {}", .{cell.position(sheet)});
+        }
+        try w.writeByte('\n');
+        try bw.flush();
         return error.CellExists;
     }
 }

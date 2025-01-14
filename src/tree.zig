@@ -378,7 +378,7 @@ pub fn RTree(
             tree.* = undefined;
         }
 
-        /// Returns an unorded list of key-value pairs whose keys intersect `range`
+        /// Returns an unordered list of key-value pairs whose keys intersect `range`
         pub fn search(
             tree: *Self,
             allocator: Allocator,
