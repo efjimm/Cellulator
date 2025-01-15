@@ -1,6 +1,7 @@
 const std = @import("std");
 const Position = @import("Position.zig").Position;
 const Tokenizer = @import("Tokenizer.zig");
+const Token = Tokenizer.Token;
 
 const Allocator = std.mem.Allocator;
 const NodeList = std.MultiArrayList(Node);
@@ -8,13 +9,13 @@ const assert = std.debug.assert;
 
 const Parser = @This();
 
-current_token: Tokenizer.Token,
+token_tags: []const Token.Tag,
+token_starts: []const u32,
+tok_i: u32,
 
-tokenizer: Tokenizer,
+src: [:0]const u8,
+
 nodes: NodeList,
-
-/// Total length of all string literals parsed
-strings_len: u32 = 0,
 
 allocator: Allocator,
 
@@ -69,59 +70,54 @@ const InitOptions = struct {
 
 pub fn init(
     allocator: Allocator,
-    tokenizer: Tokenizer,
+    src: [:0]const u8,
+    token_tags: []const Token.Tag,
+    token_starts: []const u32,
     options: InitOptions,
 ) Parser {
-    var ret = Parser{
-        .tokenizer = tokenizer,
+    return .{
         .nodes = options.nodes,
         .allocator = allocator,
-        .current_token = undefined,
+        .token_tags = token_tags,
+        .token_starts = token_starts,
+        .tok_i = 0,
+        .src = src,
     };
-
-    ret.current_token = ret.tokenizer.next() orelse Tokenizer.eofToken();
-    return ret;
-}
-
-pub fn source(parser: Parser) []const u8 {
-    return parser.tokenizer.bytes;
 }
 
 pub fn parse(parser: *Parser) ParseError!void {
     _ = try parser.parseStatement();
-    _ = try parser.expectToken(.eof);
+    try parser.expectToken(.eof);
 }
 
 /// Statement <- 'let' Assignment
 fn parseStatement(parser: *Parser) ParseError!Index {
-    const token = parser.eatTokenMulti(.{
-        .keyword_let,
-    }) orelse return error.UnexpectedToken;
-    return switch (token.tag) {
-        .keyword_let => parser.parseAssignment(),
-        else => unreachable,
-    };
+    try parser.expectToken(.keyword_let);
+    return parser.parseAssignment();
 }
 
-fn parseStringLiteral(parser: *Parser) ParseError!Index {
-    const token = parser.eatTokenMulti(.{
-        .double_string_literal,
-        .single_string_literal,
-    }) orelse return error.UnexpectedToken;
-
-    parser.strings_len += token.end - token.start;
+fn parseStringLiteral(parser: *Parser, comptime expected_tag: Token.Tag) ParseError!Index {
+    const start = try parser.expectTokenGet(expected_tag);
+    const end_tag = switch (expected_tag) {
+        .single_string_literal_start => .single_string_literal_end,
+        .double_string_literal_start => .double_string_literal_end,
+        else => comptime unreachable,
+    };
+    const end = try parser.expectTokenGet(end_tag);
 
     // TODO: Handle escapes of quotes
-    return parser.addNode(.init(.string_literal, .{
-        .start = token.start,
-        .end = token.end,
-    }));
+    return parser.addNode(
+        .init(.string_literal, .{
+            .start = start + 1,
+            .end = end,
+        }),
+    );
 }
 
 /// Assignment <- CellReference '=' Expression
 fn parseAssignment(parser: *Parser) ParseError!Index {
     const lhs = try parser.parseCellName();
-    _ = try parser.expectToken(.equals_sign);
+    try parser.expectToken(.equals_sign);
     const rhs = try parser.parseExpression();
 
     return parser.addNode(.init(.assignment, .{ .lhs = lhs, .rhs = rhs }));
@@ -136,21 +132,25 @@ pub fn parseExpression(parser: *Parser) ParseError!Index {
 fn parseAddExpr(parser: *Parser) !Index {
     var index = try parser.parseMulExpr();
 
-    while (parser.eatTokenMulti(.{ .plus, .minus, .hash })) |token| {
-        const op = BinaryOperator{
-            .lhs = index,
-            .rhs = try parser.parseMulExpr(),
-        };
+    while (true) switch (parser.token_tags[parser.tok_i]) {
+        inline .plus, .minus, .hash => |tag| {
+            parser.tok_i += 1;
+            const op = BinaryOperator{
+                .lhs = index,
+                .rhs = try parser.parseMulExpr(),
+            };
 
-        const node: Node = switch (token.tag) {
-            .plus => .init(.add, op),
-            .minus => .init(.sub, op),
-            .hash => .init(.concat, op),
-            else => unreachable,
-        };
+            const node: Node = switch (tag) {
+                .plus => .init(.add, op),
+                .minus => .init(.sub, op),
+                .hash => .init(.concat, op),
+                else => comptime unreachable,
+            };
 
-        index = try parser.addNode(node);
-    }
+            index = try parser.addNode(node);
+        },
+        else => break,
+    };
 
     return index;
 }
@@ -159,40 +159,44 @@ fn parseAddExpr(parser: *Parser) !Index {
 fn parseMulExpr(parser: *Parser) !Index {
     var index = try parser.parsePrimaryExpr();
 
-    while (parser.eatTokenMulti(.{ .asterisk, .forward_slash, .percent })) |token| {
-        const op = BinaryOperator{
-            .lhs = index,
-            .rhs = try parser.parsePrimaryExpr(),
-        };
+    while (true) switch (parser.token_tags[parser.tok_i]) {
+        inline .asterisk, .forward_slash, .percent => |tag| {
+            parser.tok_i += 1;
+            const op = BinaryOperator{
+                .lhs = index,
+                .rhs = try parser.parsePrimaryExpr(),
+            };
 
-        const node: Node = switch (token.tag) {
-            .asterisk => .init(.mul, op),
-            .forward_slash => .init(.div, op),
-            .percent => .init(.mod, op),
-            else => unreachable,
-        };
+            const node: Node = switch (tag) {
+                .asterisk => .init(.mul, op),
+                .forward_slash => .init(.div, op),
+                .percent => .init(.mod, op),
+                else => comptime unreachable,
+            };
 
-        index = try parser.addNode(node);
-    }
+            index = try parser.addNode(node);
+        },
+        else => break,
+    };
 
     return index;
 }
 
 /// PrimaryExpr <- Number / Range / StsringLiteral / Builtin / '(' Expression ')'
 fn parsePrimaryExpr(parser: *Parser) !Index {
-    return switch (parser.current_token.tag) {
+    return switch (parser.token_tags[parser.tok_i]) {
         .minus, .plus, .number => parser.parseNumber(),
         .cell_name => parser.parseRange(),
         .lparen => {
-            _ = try parser.expectToken(.lparen);
+            try parser.expectToken(.lparen);
             const ret = parser.parseExpression();
-            _ = try parser.expectToken(.rparen);
+            try parser.expectToken(.rparen);
             return ret;
         },
         .builtin => parser.parseFunction(),
-        .single_string_literal,
-        .double_string_literal,
-        => parser.parseStringLiteral(),
+        inline .single_string_literal_start,
+        .double_string_literal_start,
+        => |tag| parser.parseStringLiteral(tag),
         else => error.UnexpectedToken,
     };
 }
@@ -210,10 +214,10 @@ fn parseRange(parser: *Parser) !Index {
 
 /// Builtin <- builtin '(' ArgList? ')'
 fn parseFunction(parser: *Parser) !Index {
-    const token = try parser.expectToken(.builtin);
-    _ = try parser.expectToken(.lparen);
+    const start = try parser.expectTokenGet(.builtin);
+    const end = try parser.expectTokenGet(.lparen);
 
-    const identifier = token.text(parser.source());
+    const identifier = parser.src[start..end];
     const builtin = builtins.get(identifier) orelse return error.UnexpectedToken;
 
     const args_start = switch (builtin) {
@@ -229,7 +233,7 @@ fn parseFunction(parser: *Parser) !Index {
         .min,
         => try parser.parseArgList(),
     };
-    _ = try parser.expectToken(.rparen);
+    try parser.expectToken(.rparen);
 
     return parser.addNode(.init(.builtin, .{
         .tag = builtin,
@@ -253,8 +257,9 @@ fn parseNumber(parser: *Parser) !Index {
     const is_positive = parser.eatToken(.minus) == null;
     if (is_positive) _ = parser.eatToken(.plus);
 
-    const token = try parser.expectToken(.number);
-    const text = token.text(parser.source());
+    const start = try parser.expectTokenGet(.number);
+    const raw = parser.src[start..parser.token_starts[parser.tok_i]];
+    const text = std.mem.trimRight(u8, raw, " \t\r\n");
 
     // Correctness of the number is guaranteed because the tokenizer wouldn't have generated a
     // number token on invalid format.
@@ -265,51 +270,66 @@ fn parseNumber(parser: *Parser) !Index {
 
 /// CellReference <- ('a'-'z' / 'A'-'Z')+ ('0'-'9')+
 fn parseCellName(parser: *Parser) !Index {
-    const token = try parser.expectToken(.cell_name);
-    const text = token.text(parser.source());
+    const start = try parser.expectTokenGet(.cell_name);
+    const raw = parser.src[start..parser.token_starts[parser.tok_i]];
+    const text = std.mem.trimRight(u8, raw, " \t\r\n");
 
     const pos = Position.fromAddress(text) catch return error.InvalidCellAddress;
 
     return parser.addNode(.init(.pos, pos));
 }
 
-fn addNode(parser: *Parser, data: Node) Allocator.Error!Index {
+fn addNode(noalias parser: *Parser, node: Node) Allocator.Error!Index {
     const ret: Index = .from(@intCast(parser.nodes.len));
-    try parser.nodes.append(parser.allocator, data);
+    try parser.nodes.append(parser.allocator, node);
     return ret;
 }
 
-pub fn expectToken(parser: *Parser, expected_tag: Tokenizer.Token.Tag) !Tokenizer.Token {
-    return parser.eatToken(expected_tag) orelse error.UnexpectedToken;
+pub fn expectTokenGet(parser: *Parser, expected_tag: Token.Tag) !u32 {
+    if (parser.token_tags[parser.tok_i] != expected_tag) {
+        @branchHint(.unlikely);
+        return error.UnexpectedToken;
+    }
+    const ret = parser.token_starts[parser.tok_i];
+    parser.tok_i += 1;
+    return ret;
 }
 
-fn eatToken(parser: *Parser, expected_tag: Tokenizer.Token.Tag) ?Tokenizer.Token {
-    return if (parser.current_token.tag == expected_tag)
-        parser.nextToken()
-    else
-        null;
+pub fn expectToken(parser: *Parser, expected_tag: Token.Tag) !void {
+    if (parser.token_tags[parser.tok_i] != expected_tag) {
+        @branchHint(.unlikely);
+        return error.UnexpectedToken;
+    }
+    parser.tok_i += 1;
 }
 
-fn eatTokenMulti(parser: *Parser, tags: anytype) ?Tokenizer.Token {
-    inline for (tags) |tag| {
-        if (parser.eatToken(tag)) |token|
-            return token;
+fn eatToken(parser: *Parser, expected_tag: Token.Tag) ?Token {
+    if (parser.token_tags[parser.tok_i] == expected_tag) {
+        const ret: Token = .{
+            .tag = parser.token_tags[parser.tok_i],
+            .start = parser.token_starts[parser.tok_i],
+        };
+        parser.tok_i += 1;
+        return ret;
     }
 
     return null;
 }
 
-fn nextToken(parser: *Parser) Tokenizer.Token {
-    const ret = parser.current_token;
-    parser.current_token = parser.tokenizer.next() orelse Tokenizer.eofToken();
-    return ret;
-}
-
 test "parser" {
     const t = std.testing;
     const testParser = struct {
-        fn func(bytes: []const u8, node_tags: []const Node.Tag) !void {
-            var parser = Parser.init(t.allocator, .{ .bytes = bytes }, .{});
+        fn func(bytes: [:0]const u8, node_tags: []const Node.Tag) !void {
+            var tokens = try Tokenizer.collectTokens(t.allocator, bytes, 0);
+            defer tokens.deinit(t.allocator);
+
+            var parser = Parser.init(
+                t.allocator,
+                bytes,
+                tokens.items(.tag),
+                tokens.items(.start),
+                .{},
+            );
             defer parser.nodes.deinit(t.allocator);
             try parser.parse();
             for (node_tags, parser.nodes.items(.tag)) |expected, actual| {
@@ -318,8 +338,17 @@ test "parser" {
         }
     }.func;
     const testParseError = struct {
-        fn func(bytes: []const u8, err: ?anyerror) !void {
-            var parser = Parser.init(t.allocator, .{ .bytes = bytes }, .{});
+        fn func(bytes: [:0]const u8, err: ?anyerror) !void {
+            var tokens = try Tokenizer.collectTokens(t.allocator, bytes, @intCast(bytes.len / 2));
+            defer tokens.deinit(t.allocator);
+
+            var parser = Parser.init(
+                t.allocator,
+                bytes,
+                tokens.items(.tag),
+                tokens.items(.start),
+                .{},
+            );
             defer parser.nodes.deinit(t.allocator);
             if (err) |e| {
                 try t.expectError(e, parser.parse());
@@ -401,8 +430,17 @@ test "parser" {
 test "Node contents" {
     const t = std.testing;
     const testNodes = struct {
-        fn func(bytes: []const u8, nodes: []const Node) !void {
-            var parser = Parser.init(t.allocator, .{ .bytes = bytes }, .{});
+        fn func(bytes: [:0]const u8, nodes: []const Node) !void {
+            var tokens = try Tokenizer.collectTokens(t.allocator, bytes, @intCast(bytes.len / 2));
+            defer tokens.deinit(t.allocator);
+
+            var parser: Parser = .init(
+                t.allocator,
+                bytes,
+                tokens.items(.tag),
+                tokens.items(.start),
+                .{},
+            );
             defer parser.nodes.deinit(t.allocator);
 
             try parser.parse();
@@ -412,7 +450,10 @@ test "Node contents" {
                     .tag = tag,
                     .data = data,
                 };
-                try t.expectEqual(expected.get(), actual.get());
+                t.expectEqual(expected.get(), actual.get()) catch |err| {
+                    std.debug.print("Expected {}, got {}\n", .{ expected.get(), actual.get() });
+                    return err;
+                };
             }
         }
     }.func;

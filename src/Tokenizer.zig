@@ -5,8 +5,9 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Tokenizer = @This();
 
-bytes: []const u8,
+bytes: [:0]const u8,
 pos: u32 = 0,
+state: State = .start,
 
 const log = std.log.scoped(.tokenizer);
 
@@ -21,14 +22,29 @@ const State = enum {
     double_string_literal,
 };
 
+pub fn collectTokens(
+    allocator: std.mem.Allocator,
+    src: [:0]const u8,
+    pre_alloc: u32,
+) !std.MultiArrayList(Token) {
+    var tokenizer: Tokenizer = .init(src);
+    var list: std.MultiArrayList(Token) = .empty;
+    errdefer list.deinit(allocator);
+
+    try list.ensureTotalCapacity(allocator, pre_alloc);
+
+    while (true) {
+        const token = tokenizer.next();
+        try list.append(allocator, token);
+        if (token.tag == .eof) break;
+    }
+
+    return list;
+}
+
 pub const Token = struct {
     tag: Tag,
     start: u32,
-    end: u32,
-
-    pub fn text(ast: Token, source: []const u8) []const u8 {
-        return source[ast.start..ast.end];
-    }
 
     pub const Tag = enum {
         number,
@@ -50,8 +66,10 @@ pub const Token = struct {
         cell_name,
         builtin,
 
-        single_string_literal,
-        double_string_literal,
+        single_string_literal_start,
+        single_string_literal_end,
+        double_string_literal_start,
+        double_string_literal_end,
 
         keyword_let,
 
@@ -64,208 +82,204 @@ const keywords = std.StaticStringMap(Token.Tag).initComptime(.{
     .{ "let", .keyword_let },
 });
 
-pub fn init(bytes: []const u8) Tokenizer {
+pub fn init(bytes: [:0]const u8) Tokenizer {
     return .{
         .bytes = bytes,
     };
 }
 
-pub fn next(tokenizer: *Tokenizer) ?Token {
-    if (tokenizer.pos >= tokenizer.bytes.len) return null;
-    var start = tokenizer.pos;
+pub fn next(tokenizer: *Tokenizer) Token {
+    const eof: Token = .{
+        .tag = .eof,
+        .start = @intCast(tokenizer.bytes.len),
+    };
 
-    var state: State = .start;
+    if (tokenizer.pos >= tokenizer.bytes.len)
+        return eof;
+
+    var start = tokenizer.pos;
     var tag = Token.Tag.unknown;
 
-    while (tokenizer.pos < tokenizer.bytes.len) : (tokenizer.pos += 1) {
-        const c = tokenizer.bytes[tokenizer.pos];
-
-        switch (state) {
-            .start => switch (c) {
-                '0'...'9' => {
-                    state = .integer_number;
-                    tag = .number;
-                },
-                '.' => {
-                    state = .decimal_number;
-                    tag = .number;
-                },
-                '=' => {
-                    tag = .equals_sign;
-                    tokenizer.pos += 1;
-                    break;
-                },
-                ' ', '\t', '\r', '\n' => {
-                    start += 1;
-                },
-                'a'...'z', 'A'...'Z' => {
-                    state = .word;
-                },
-                '@' => {
-                    state = .builtin;
-                    tag = .builtin;
-                    start += 1;
-                },
-                ',' => {
-                    tag = .comma;
-                    tokenizer.pos += 1;
-                    break;
-                },
-                '+' => {
-                    tag = .plus;
-                    tokenizer.pos += 1;
-                    break;
-                },
-                '-' => {
-                    tag = .minus;
-                    tokenizer.pos += 1;
-                    break;
-                },
-                '*' => {
-                    tag = .asterisk;
-                    tokenizer.pos += 1;
-                    break;
-                },
-                '/' => {
-                    tag = .forward_slash;
-                    tokenizer.pos += 1;
-                    break;
-                },
-                '%' => {
-                    tag = .percent;
-                    tokenizer.pos += 1;
-                    break;
-                },
-                '(' => {
-                    tag = .lparen;
-                    tokenizer.pos += 1;
-                    break;
-                },
-                ')' => {
-                    tag = .rparen;
-                    tokenizer.pos += 1;
-                    break;
-                },
-                ':' => {
-                    tag = .colon;
-                    tokenizer.pos += 1;
-                    break;
-                },
-                '#' => {
-                    tag = .hash;
-                    tokenizer.pos += 1;
-                    break;
-                },
-                '\'' => {
-                    state = .single_string_literal;
-                },
-                '"' => {
-                    state = .double_string_literal;
+    state: switch (tokenizer.state) {
+        .start => switch (tokenizer.bytes[tokenizer.pos]) {
+            0 => return eof,
+            '0'...'9' => {
+                tag = .number;
+                continue :state .integer_number;
+            },
+            '.' => {
+                tag = .number;
+                continue :state .decimal_number;
+            },
+            '=' => {
+                tag = .equals_sign;
+                tokenizer.pos += 1;
+            },
+            ' ', '\t', '\r', '\n' => {
+                start += 1;
+                tokenizer.pos += 1;
+                continue :state .start;
+            },
+            'a'...'z', 'A'...'Z' => {
+                continue :state .word;
+            },
+            '@' => {
+                tag = .builtin;
+                start += 1;
+                continue :state .builtin;
+            },
+            ',' => {
+                tag = .comma;
+                tokenizer.pos += 1;
+            },
+            '+' => {
+                tag = .plus;
+                tokenizer.pos += 1;
+            },
+            '-' => {
+                tag = .minus;
+                tokenizer.pos += 1;
+            },
+            '*' => {
+                tag = .asterisk;
+                tokenizer.pos += 1;
+            },
+            '/' => {
+                tag = .forward_slash;
+                tokenizer.pos += 1;
+            },
+            '%' => {
+                tag = .percent;
+                tokenizer.pos += 1;
+            },
+            '(' => {
+                tag = .lparen;
+                tokenizer.pos += 1;
+            },
+            ')' => {
+                tag = .rparen;
+                tokenizer.pos += 1;
+            },
+            ':' => {
+                tag = .colon;
+                tokenizer.pos += 1;
+            },
+            '#' => {
+                tag = .hash;
+                tokenizer.pos += 1;
+            },
+            '\'' => {
+                tag = .single_string_literal_start;
+                tokenizer.state = .single_string_literal;
+                tokenizer.pos += 1;
+            },
+            '"' => {
+                tag = .double_string_literal_start;
+                tokenizer.state = .double_string_literal;
+                tokenizer.pos += 1;
+            },
+            else => {
+                defer tokenizer.pos += 1;
+                return .{
+                    .tag = .unknown,
+                    .start = start,
+                };
+            },
+        },
+        .integer_number => {
+            tokenizer.pos += 1;
+            switch (tokenizer.bytes[tokenizer.pos]) {
+                '0'...'9', '_' => continue :state .integer_number,
+                '.' => continue :state .decimal_number,
+                else => {},
+            }
+        },
+        .decimal_number => {
+            tokenizer.pos += 1;
+            switch (tokenizer.bytes[tokenizer.pos]) {
+                '0'...'9', '_' => continue :state .decimal_number,
+                else => {},
+            }
+        },
+        .word => {
+            tokenizer.pos += 1;
+            switch (tokenizer.bytes[tokenizer.pos]) {
+                'a'...'z', 'A'...'Z' => continue :state .word,
+                '0'...'9', '_' => {
+                    tag = .cell_name;
+                    continue :state .cell_address;
                 },
                 else => {
-                    defer tokenizer.pos += 1;
-                    return .{
-                        .tag = .unknown,
-                        .start = start,
-                        .end = tokenizer.pos,
-                    };
+                    const str = tokenizer.bytes[start..tokenizer.pos];
+                    tag = keywords.get(str) orelse .column_name;
                 },
-            },
-            .integer_number => switch (c) {
-                '0'...'9', '_' => {},
-                '.' => state = .decimal_number,
-                else => break,
-            },
-            .decimal_number => switch (c) {
-                '0'...'9', '_' => {},
-                else => break,
-            },
-            .word => switch (c) {
-                'a'...'z', 'A'...'Z' => {},
-                '0'...'9', '_' => {
-                    state = .cell_address;
-                    tag = .cell_name;
-                },
-                else => break,
-            },
-            .cell_address => switch (c) {
-                '0'...'9', '_' => {},
-                else => break,
-            },
-            .builtin => switch (c) {
-                'a'...'z', 'A'...'Z', '_' => {},
-                else => break,
-            },
-            .single_string_literal => switch (c) {
-                '\'' => {
-                    tag = .single_string_literal;
-                    break;
-                },
-                else => {},
-            },
-            .double_string_literal => switch (c) {
-                '"' => {
-                    tag = .double_string_literal;
-                    break;
-                },
-                else => {},
-            },
-        }
-    }
-
-    switch (state) {
-        .word => {
-            const str = tokenizer.bytes[start..tokenizer.pos];
-            tag = keywords.get(str) orelse .column_name;
+            }
         },
-        .single_string_literal, .double_string_literal => {
+        .cell_address => {
             tokenizer.pos += 1;
-            return Token{
-                .tag = tag,
-                .start = start + 1,
-                .end = tokenizer.pos - 1,
-            };
+            switch (tokenizer.bytes[tokenizer.pos]) {
+                '0'...'9', '_' => continue :state .cell_address,
+                else => {},
+            }
         },
-        else => {},
+        .builtin => {
+            tokenizer.pos += 1;
+            switch (tokenizer.bytes[tokenizer.pos]) {
+                'a'...'z', 'A'...'Z', '_' => continue :state .builtin,
+                else => {},
+            }
+        },
+        .single_string_literal => {
+            tokenizer.pos += 1;
+            switch (tokenizer.bytes[tokenizer.pos]) {
+                '\'' => {
+                    tag = .single_string_literal_end;
+                    start = tokenizer.pos;
+                    tokenizer.pos += 1;
+                    tokenizer.state = .start;
+                },
+                0 => {},
+                else => continue :state .single_string_literal,
+            }
+        },
+        .double_string_literal => {
+            tokenizer.pos += 1;
+            switch (tokenizer.bytes[tokenizer.pos]) {
+                '"' => {
+                    tag = .double_string_literal_end;
+                    start = tokenizer.pos;
+                    tokenizer.pos += 1;
+                    tokenizer.state = .start;
+                },
+                0 => {},
+                else => continue :state .double_string_literal,
+            }
+        },
     }
 
-    return Token{
+    return .{
         .tag = tag,
         .start = start,
-        .end = tokenizer.pos,
-    };
-}
-
-pub fn eofToken() Token {
-    return Token{
-        .tag = .eof,
-        .start = undefined,
-        .end = undefined,
     };
 }
 
 test "Tokens" {
     const t = std.testing;
     const testTokens = struct {
-        fn func(bytes: []const u8, tokens: []const Token.Tag) !void {
+        fn func(bytes: [:0]const u8, tokens: []const Token.Tag) !void {
             var tokenizer = Tokenizer.init(bytes);
             for (tokens) |tag| {
-                if (tag == .eof) {
-                    try t.expectEqual(@as(?Token, null), tokenizer.next());
-                } else {
-                    try t.expectEqual(tag, tokenizer.next().?.tag);
-                }
+                try t.expectEqual(tag, tokenizer.next().tag);
             }
-            try t.expectEqual(@as(?Token, null), tokenizer.next());
         }
     }.func;
 
     const data = .{
         .{ "", .{.eof} },
-        .{ "'what'", .{ .single_string_literal, .eof } },
-        .{ "\"what\"", .{ .double_string_literal, .eof } },
-        .{ "'what", .{ .unknown, .eof } },
-        .{ "what'", .{ .column_name, .unknown, .eof } },
+        .{ "'what'", .{ .single_string_literal_start, .single_string_literal_end, .eof } },
+        .{ "\"what\"", .{ .double_string_literal_start, .double_string_literal_end, .eof } },
+        .{ "'what", .{ .single_string_literal_start, .unknown, .eof } },
+        .{ "what'", .{ .column_name, .single_string_literal_start, .eof } },
         .{ "123", .{ .number, .eof } },
         .{ "123.123", .{ .number, .eof } },
         .{ "123.123.123", .{ .number, .number, .eof } },
@@ -283,21 +297,17 @@ test "Tokens" {
 
 test "Token text range" {
     const t = std.testing;
-    var tokenizer = Tokenizer{ .bytes = "let a0 = 'this is epic'" };
-    var token = tokenizer.next().?;
-    try t.expectEqual(Token.Tag.keyword_let, token.tag);
-    try t.expectEqual(@as(u32, 0), token.start);
-    try t.expectEqual(@as(u32, "let".len), token.end);
-    token = tokenizer.next().?;
-    try t.expectEqual(Token.Tag.cell_name, token.tag);
-    try t.expectEqual(@as(u32, "let ".len), token.start);
-    try t.expectEqual(@as(u32, "let a0".len), token.end);
-    token = tokenizer.next().?;
-    try t.expectEqual(Token.Tag.equals_sign, token.tag);
-    try t.expectEqual(@as(u32, "let a0 ".len), token.start);
-    try t.expectEqual(@as(u32, "let a0 =".len), token.end);
-    token = tokenizer.next().?;
-    try t.expectEqual(Token.Tag.single_string_literal, token.tag);
-    try t.expectEqual(@as(u32, "let a0 = '".len), token.start);
-    try t.expectEqual(@as(u32, "let a0 = 'this is epic".len), token.end);
+    var tokenizer: Tokenizer = .init("let a0 = 'this is epic'");
+    var token = tokenizer.next();
+    try t.expectEqual(.keyword_let, token.tag);
+    try t.expectEqual(0, token.start);
+    token = tokenizer.next();
+    try t.expectEqual(.cell_name, token.tag);
+    try t.expectEqual("let ".len, token.start);
+    token = tokenizer.next();
+    try t.expectEqual(.equals_sign, token.tag);
+    try t.expectEqual("let a0 ".len, token.start);
+    token = tokenizer.next();
+    try t.expectEqual(.single_string_literal_start, token.tag);
+    try t.expectEqual("let a0 = ".len, token.start);
 }

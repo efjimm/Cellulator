@@ -364,15 +364,23 @@ pub fn clearRetainingCapacity(sheet: *Sheet) void {
 
 pub fn interpretFile(sheet: *Sheet, reader: std.io.AnyReader) !void {
     defer sheet.endUndoGroup();
+
+    var sfa = std.heap.stackFallback(8192, sheet.allocator);
+    const a = sfa.get();
+    var buf: std.ArrayList(u8) = .init(a);
+    defer buf.deinit();
+
     while (true) {
-        var sfa = std.heap.stackFallback(8192, sheet.allocator);
-        const a = sfa.get();
+        buf.clearRetainingCapacity();
+        reader.streamUntilDelimiter(buf.writer(), '\n', null) catch |err| switch (err) {
+            error.EndOfStream => if (buf.items.len == 0) break,
+            else => |e| return e,
+        };
+        try buf.append(0);
 
-        const line = try reader.readUntilDelimiterOrEofAlloc(a, '\n', std.math.maxInt(u30)) orelse
-            break;
-        defer a.free(line);
+        const null_terminated_line = buf.items.ptr[0 .. buf.items.len - 1 :0];
 
-        const expr_root = ast.fromSource(sheet, line) catch |err| {
+        const expr_root = ast.fromSource(sheet, null_terminated_line) catch |err| {
             switch (err) {
                 error.UnexpectedToken,
                 error.InvalidCellAddress,
@@ -387,7 +395,7 @@ pub fn interpretFile(sheet: *Sheet, reader: std.io.AnyReader) !void {
 
         const spliced_root = ast.splice(&sheet.ast_nodes, assignment.rhs);
 
-        try sheet.setCell(pos, line, spliced_root, .{});
+        try sheet.setCell(pos, null_terminated_line, spliced_root, .{});
     }
 }
 
@@ -1843,7 +1851,7 @@ test "Sheet basics" {
     try t.expectEqual(0, sheet.cellCount());
     try t.expectEqualStrings("", sheet.filepath.slice());
 
-    const exprs: []const []const u8 = &.{ "50 + 5", "500 * 2 / 34 + 1", "a0", "a2 * a1" };
+    const exprs: []const [:0]const u8 = &.{ "50 + 5", "500 * 2 / 34 + 1", "a0", "a2 * a1" };
     var roots: [4]ast.Index = undefined;
     for (&roots, exprs) |*root, expr| {
         root.* = try ast.fromExpression(sheet, expr);
@@ -2515,7 +2523,10 @@ pub fn expectCellEquals(sheet: *Sheet, address: []const u8, expected_value: f64)
 
 pub fn expectCellEqualsString(sheet: *Sheet, address: []const u8, expected_value: []const u8) !void {
     const pos: Position = try .fromAddress(address);
-    const cell = sheet.getCellPtr(pos) orelse return error.CellNotFound;
+    const cell = sheet.getCellPtr(pos) orelse {
+        std.debug.print("Could not find cell '{s}'\n", .{address});
+        return error.CellNotFound;
+    };
     if (cell.value_type != .string) {
         std.debug.print("Cell {} has value type {}, expected string '{s}'\n", .{
             pos, cell.value_type, expected_value,
@@ -2675,7 +2686,7 @@ pub fn printCellDependents(sheet: *Sheet, address: []const u8) !void {
     }
 }
 
-fn testSetCell(sheet: *Sheet, address: []const u8, expr: []const u8) !void {
+fn testSetCell(sheet: *Sheet, address: []const u8, expr: [:0]const u8) !void {
     try sheet.setCell(.fromValidAddress(address), expr, try ast.fromExpression(sheet, expr), .{});
 }
 
@@ -2766,8 +2777,10 @@ fn fuzzNumbers(input: []const u8) !void {
                     );
                     try buf.writer().print("{}", .{p});
                 }
+                try buf.append(0);
+                const null_terminated_expr = buf.buffer[0..buf.len :0];
 
-                const a = try ast.fromExpression(sheet, buf.constSlice());
+                const a = try ast.fromExpression(sheet, null_terminated_expr);
                 try sheet.setCell(pos, buf.constSlice(), a, .{});
             },
             .delete => |pos| {

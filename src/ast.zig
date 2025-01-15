@@ -111,10 +111,15 @@ pub const Index = packed struct {
     pub const invalid: Index = .{ .n = std.math.maxInt(u32) };
 };
 
-pub fn fromSource(sheet: *Sheet, source: []const u8) ParseError!Index {
-    var parser = Parser.init(
+pub fn fromSource(sheet: *Sheet, source: [:0]const u8) ParseError!Index {
+    var tokens = try Tokenizer.collectTokens(sheet.allocator, source, @intCast(source.len / 2));
+    defer tokens.deinit(sheet.allocator);
+
+    var parser: Parser = .init(
         sheet.allocator,
-        .init(source),
+        source,
+        tokens.items(.tag),
+        tokens.items(.start),
         .{ .nodes = sheet.ast_nodes.toMultiArrayList() },
     );
 
@@ -129,12 +134,15 @@ pub fn fromSource(sheet: *Sheet, source: []const u8) ParseError!Index {
     return .from(@intCast(parser.nodes.len - 1));
 }
 
-pub fn fromExpression(sheet: *Sheet, source: []const u8) ParseError!Index {
-    const tokenizer = Tokenizer.init(source);
+pub fn fromExpression(sheet: *Sheet, source: [:0]const u8) ParseError!Index {
+    var tokens = try Tokenizer.collectTokens(sheet.allocator, source, @intCast(source.len / 2));
+    defer tokens.deinit(sheet.allocator);
 
-    var parser = Parser.init(
+    var parser: Parser = .init(
         sheet.allocator,
-        tokenizer,
+        source,
+        tokens.items(.tag),
+        tokens.items(.start),
         .{ .nodes = sheet.ast_nodes.toMultiArrayList() },
     );
 
@@ -931,7 +939,7 @@ test "Parse and Eval Expression" {
     const Error = EvalContext(void).Error || Parser.ParseError;
 
     const testExpr = struct {
-        fn func(expected: Error!f64, expr: []const u8) !void {
+        fn func(expected: Error!f64, expr: [:0]const u8) !void {
             const sheet = try Sheet.create(t.allocator);
             defer sheet.destroy();
 
@@ -984,7 +992,7 @@ test "Parse and Eval Expression" {
 test "Functions on Ranges" {
     const t = std.testing;
     const Test = struct {
-        fn testSheetExpr(expected: f64, expr: []const u8) !void {
+        fn testSheetExpr(expected: f64, expr: [:0]const u8) !void {
             const sheet = try Sheet.create(t.allocator);
             defer sheet.destroy();
 

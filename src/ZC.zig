@@ -256,7 +256,7 @@ pub fn setCell(
 }
 
 /// Sets the cell at `pos` to the expression represented by `expr`.
-pub fn setCellString(self: *Self, pos: Position, expr: []const u8, opts: ChangeCellOpts) !void {
+pub fn setCellString(self: *Self, pos: Position, expr: [:0]const u8, opts: ChangeCellOpts) !void {
     // TODO: This leaks memory if `setCell` fails, which can only happen on OOM.
     const expr_root = try ast.fromExpression(self.sheet, expr);
 
@@ -841,7 +841,7 @@ fn doVisualMode(self: *Self, action: Action) Allocator.Error!void {
 
 const ParseCommandError = ast.ParseError || RunCommandError;
 
-fn parseCommand(self: *Self, str: []const u8) !void {
+fn parseCommand(self: *Self, str: [:0]const u8) !void {
     if (str.len == 0) return;
 
     if (str[0] == ':')
@@ -2130,15 +2130,6 @@ test "Motions visual mode" {
     try t.expectEqual(Position{ .y = max, .x = 10 }, zc.anchor);
 }
 
-fn testCommands(self: *Self, commands: []const u8) !void {
-    var lines = std.mem.tokenizeScalar(u8, commands, '\n');
-    while (lines.next()) |line| {
-        if (line.len == 0) continue;
-        try self.parseCommand(line);
-        try self.updateCells();
-    }
-}
-
 // Test files at runtime so no recompilation is needed if the data changes
 fn testFile(path: []const u8) !void {
     var zc: Self = undefined;
@@ -2154,7 +2145,16 @@ fn testFile(path: []const u8) !void {
     const content = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "$BUILD_TEMP_DIR", build.temp_dir);
     defer std.testing.allocator.free(content);
 
-    try zc.testCommands(content);
+    for (content) |*c| {
+        if (c.* == '\n') c.* = 0;
+    }
+
+    var lines = std.mem.tokenizeScalar(u8, content, 0);
+    while (lines.next()) |line| {
+        const null_terminated_line = line.ptr[0..line.len :0];
+        try zc.parseCommand(null_terminated_line);
+        try zc.updateCells();
+    }
 }
 
 const test_files = build.test_files;

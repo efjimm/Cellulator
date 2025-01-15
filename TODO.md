@@ -4,11 +4,10 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 - Eliminate recursion
   - Will run into stack overflows with big data. An older implementation of `markDirty` caused
-  - one on a large input sheet.
-- Commands for every sheet operation
-  - Allows for writing "scripts" for unit tests!
+    one on a large input sheet.
 - Support for justifying strings
 - Generate fuzzer output files from the build system
+- Replace RTree with PH-Tree
 - Reconsider using ranges that store references to rows/cols, instead reverting back to using u32
   x/y positions.
   - Original intent was to avoid having to update the x/y value of every position in the r-tree
