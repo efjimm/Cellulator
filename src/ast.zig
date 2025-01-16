@@ -4,8 +4,8 @@
 const std = @import("std");
 const Position = @import("Position.zig").Position;
 const Sheet = @import("Sheet.zig");
-const Reference = Sheet.Reference;
 const PosInt = Position.Int;
+const Rect = Position.Rect;
 
 const Tokenizer = @import("Tokenizer.zig");
 const Parser = @import("Parser.zig");
@@ -50,11 +50,6 @@ pub const Node = extern struct {
         builtin: Builtin,
         range: BinaryOperator,
         string_literal: String,
-
-        ref_abs_abs: Reference,
-        ref_rel_abs: Reference,
-        ref_abs_rel: Reference,
-        ref_rel_rel: Reference,
     };
 
     pub fn init(comptime tag: Tag, data: @FieldType(Payload, @tagName(tag))) Node {
@@ -186,9 +181,6 @@ pub fn printFromNode(
         .number => |n| try writer.print("{d}", .{n}),
         .column => |col| try Position.writeColumnAddress(col, writer),
         .pos => |pos| try pos.writeCellAddress(writer),
-        .ref_abs_abs, .ref_rel_abs, .ref_abs_rel, .ref_rel_rel => |ref| {
-            try ref.resolve(sheet).writeCellAddress(writer);
-        },
 
         .string_literal => |str| {
             try writer.print("\"{s}\"", .{strings[str.start..str.end]});
@@ -463,10 +455,6 @@ pub fn leftMostChild(
 
     return switch (node.get()) {
         // leaf nodes
-        .ref_abs_abs,
-        .ref_rel_abs,
-        .ref_abs_rel,
-        .ref_rel_rel,
         .string_literal,
         .number,
         .column,
@@ -590,7 +578,7 @@ pub fn EvalContext(comptime Context: type) type {
             else
                 Context;
 
-            const func = @field(C, "evalCell");
+            const func = @field(C, "evalCellByHandle");
             const info = @typeInfo(@TypeOf(func));
             const ret_info = @typeInfo(info.@"fn".return_type.?);
             break :blk E || ret_info.error_union.error_set;
@@ -605,9 +593,8 @@ pub fn EvalContext(comptime Context: type) type {
 
             return switch (node.get()) {
                 .number => |n| .{ .number = n },
-                .pos => unreachable,
-                .ref_abs_abs, .ref_rel_abs, .ref_abs_rel, .ref_rel_rel => |ref| {
-                    return try self.context.evalCell(ref);
+                .pos => |pos| {
+                    return self.context.evalCellByPos(pos);
                 },
                 .add => |op| {
                     const lhs = try self.eval(op.lhs);
@@ -706,16 +693,13 @@ pub fn EvalContext(comptime Context: type) type {
         fn toPosRange(self: @This(), r: BinaryOperator) Position.Rect {
             const data = self.nodes.items(.data);
 
-            assert(self.nodes.get(r.lhs.n).isRef());
-            assert(self.nodes.get(r.rhs.n).isRef());
+            assert(self.nodes.items(.tag)[r.lhs.n] == .pos);
+            assert(self.nodes.items(.tag)[r.rhs.n] == .pos);
 
-            // We just want the reference data and we don't care about the relative/absolute tag.
-            const ref1: *const Reference = @ptrCast(&data[r.lhs.n]);
-            const ref2: *const Reference = @ptrCast(&data[r.rhs.n]);
-
-            const p1 = ref1.resolve(self.sheet);
-            const p2 = ref2.resolve(self.sheet);
-            return Position.Rect.initPos(p1, p2);
+            return .initPos(
+                data[r.lhs.n].pos,
+                data[r.rhs.n].pos,
+            );
         }
 
         fn sumRange(self: @This(), r: BinaryOperator) !f64 {
@@ -765,6 +749,7 @@ pub fn EvalContext(comptime Context: type) type {
             return total;
         }
 
+        // TODO: This function assumes that ranges do not overlap?
         fn evalAvg(self: @This(), start: Index, end: Index) !f64 {
             const tags = self.nodes.items(.tag);
             const data = self.nodes.items(.data);
@@ -778,15 +763,12 @@ pub fn EvalContext(comptime Context: type) type {
                     const r = data[i.n].range;
                     total += try self.sumRange(r);
 
-                    const p1, const p2 = blk: {
-                        const r1: *const Reference = @ptrCast(&data[r.lhs.n]);
-                        const r2: *const Reference = @ptrCast(&data[r.rhs.n]);
-                        break :blk .{
-                            r1.resolve(self.sheet),
-                            r2.resolve(self.sheet),
-                        };
-                    };
-                    total_items += Position.area(p1, p2);
+                    const rect: Rect = .initPos(
+                        data[r.lhs.n].pos,
+                        data[r.rhs.n].pos,
+                    );
+
+                    total_items += rect.area();
                 } else {
                     const res = try self.eval(i);
                     total += try res.toNumber(0);
@@ -925,11 +907,11 @@ const EvalDynamicError = error{
 test "Parse and Eval Expression" {
     const t = std.testing;
     const Context = struct {
-        pub fn evalCell(_: @This(), _: Reference) !EvalResult {
+        pub fn evalCellByHandle(_: @This(), _: Sheet.CellHandle) !EvalResult {
             unreachable;
         }
 
-        pub fn evalCellByHandle(_: @This(), _: Sheet.CellHandle) !EvalResult {
+        pub fn evalCellByPos(_: @This(), _: Position) !EvalResult {
             unreachable;
         }
     };
@@ -1000,8 +982,6 @@ test "Functions on Ranges" {
             try sheet.setCell(try Position.fromAddress("B1"), "333.33", try fromExpression(sheet, "333.33"), .{});
 
             const expr_root = try fromExpression(sheet, expr);
-
-            try sheet.anchorAst(expr_root);
 
             try sheet.update();
             const res = try eval(

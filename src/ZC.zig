@@ -754,16 +754,8 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
         .cell_cursor_col_last => try self.cursorToLastCellInRow(),
         .goto_col => self.cursorGotoCol(),
         .goto_row => self.cursorGotoRow(),
-        .insert_column => {
-            try self.sheet.insertColumn(self.cursor.x, .{});
-            self.tui.update.column_headings = true;
-            self.tui.update.cells = true;
-        },
-        .insert_row => {
-            try self.sheet.insertRow(self.cursor.y, .{});
-            self.tui.update.column_headings = true;
-            self.tui.update.cells = true;
-        },
+        .insert_column => {},
+        .insert_row => {},
 
         .delete_cell => self.deleteCell() catch |err| switch (err) {
             error.OutOfMemory => self.setStatusMessage(.err, "Out of memory!", .{}),

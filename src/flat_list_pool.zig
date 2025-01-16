@@ -1,14 +1,12 @@
 const std = @import("std");
-const GapBuffer = @import("GapBuffer.zig").GapBuffer;
+const utils = @import("utils.zig");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
-const utils = @import("utils.zig");
+const log = std.log.scoped(.flat_list_pool);
 
-/// A data structure for storing many ArrayLists inside a single flat list. Useful if iterating over
-/// the value of every list needs to be quick, or for serialisation.
 pub fn FlatListPool(comptime T: type) type {
     return struct {
-        values: GapBuffer(T),
+        buf: std.ArrayListUnmanaged(T),
         entries: std.ArrayListUnmanaged(Entry),
         free_entries_head: List.Index,
 
@@ -20,175 +18,191 @@ pub fn FlatListPool(comptime T: type) type {
         pub const List = extern struct {
             len: usize,
             offset: usize,
+            capacity: usize,
 
             pub const Index = packed struct {
                 n: u32,
 
+                pub const invalid: Index = .{ .n = std.math.maxInt(u32) };
+
                 pub fn from(n: u32) Index {
+                    assert(n != std.math.maxInt(u32));
                     return .{ .n = n };
                 }
 
                 pub fn isValid(index: Index) bool {
                     return index != invalid;
                 }
-
-                pub const invalid: Index = .{ .n = std.math.maxInt(u32) };
             };
         };
 
-        const Self = @This();
+        const Pool = @This();
 
-        pub const empty: Self = .{
-            .values = .{},
+        pub const empty: Pool = .{
+            .buf = .empty,
             .entries = .empty,
             .free_entries_head = .invalid,
         };
 
-        pub fn deinit(self: *Self, allocator: Allocator) void {
-            self.values.deinit(allocator);
-            self.entries.deinit(allocator);
-            self.* = undefined;
+        pub fn deinit(pool: *Pool, allocator: Allocator) void {
+            pool.buf.deinit(allocator);
+            pool.entries.deinit(allocator);
         }
 
-        pub fn createList(self: *Self, allocator: Allocator) Allocator.Error!List.Index {
-            if (!self.free_entries_head.isValid())
-                try self.entries.ensureUnusedCapacity(allocator, 1);
-            return self.createListAssumeCapacity();
+        pub fn createList(pool: *Pool, allocator: Allocator) !List.Index {
+            if (!pool.free_entries_head.isValid())
+                try pool.entries.ensureUnusedCapacity(allocator, 1);
+            return pool.createListAssumeCapacity();
         }
 
-        pub fn createListAssumeCapacity(self: *Self) List.Index {
-            if (self.free_entries_head.isValid()) {
-                const ret = self.free_entries_head;
-                self.free_entries_head = self.entries.items[ret.n].free;
-                self.entries.items[ret.n] = .{ .list = .{
-                    .offset = self.values.len,
-                    .len = 0,
-                } };
+        pub fn createListAssumeCapacity(pool: *Pool) List.Index {
+            assert(pool.free_entries_head.isValid() or pool.entries.items.len < pool.entries.capacity);
+            if (pool.free_entries_head.isValid()) {
+                const ret = pool.free_entries_head;
+                pool.free_entries_head = pool.entries.items[ret.n].free;
+                pool.entries.items[ret.n].list.len = 0;
                 return ret;
             }
 
-            const index: List.Index = .from(@intCast(self.entries.items.len));
-            self.entries.appendAssumeCapacity(.{ .list = .{
-                .offset = self.values.len,
+            const ret: List.Index = .from(@intCast(pool.entries.items.len));
+            const list = &pool.entries.addOneAssumeCapacity().list;
+            const offset = pool.buf.items.len;
+            pool.buf.expandToCapacity();
+            list.* = .{
+                .offset = offset,
                 .len = 0,
-            } });
-            return index;
+                .capacity = pool.buf.items.len - offset,
+            };
+            return ret;
         }
 
-        pub fn destroyList(self: *Self, list: List.Index) void {
-            assert(list.isValid());
-            self.entries.items[list.n] = .{ .free = self.free_entries_head };
-            self.free_entries_head = list;
+        pub fn destroyList(pool: *Pool, list_index: List.Index) void {
+            assert(list_index.isValid());
+            pool.entries.items[list_index.n].free = pool.free_entries_head;
+            pool.free_entries_head = list_index;
         }
 
-        pub fn appendSlice(
-            self: *Self,
-            allocator: Allocator,
-            index: List.Index,
-            slice: []const T,
-        ) !void {
-            try self.ensureUnusedCapacity(allocator, slice.len);
-            return self.appendSliceAssumeCapacity(index, slice);
+        pub fn items(pool: *Pool, list_index: List.Index) []T {
+            const list = pool.entries.items[list_index.n].list;
+            return pool.buf.items[list.offset..][0..list.len];
         }
 
-        pub fn appendSliceAssumeCapacity(self: *Self, index: List.Index, slice: []const T) void {
-            const list = &self.entries.items[index.n].list;
-            self.values.insertSliceAssumeCapacity(@intCast(list.offset + list.len), slice);
-            list.len += slice.len;
-            for (self.entries.items) |*entry| {
-                if (entry.list.offset > list.offset) {
-                    entry.list.offset += slice.len;
-                }
-            }
-        }
-
-        pub fn insert(
-            self: *Self,
+        pub fn append(
+            pool: *Pool,
             allocator: Allocator,
             list_index: List.Index,
             item: T,
-            index: usize,
-        ) !void {
-            try self.ensureUnusedCapacity(allocator, 1);
-            return self.insertAssumeCapacity(list_index, item, index);
+        ) Allocator.Error!void {
+            try pool.ensureUnusedCapacity(allocator, list_index, 1);
+            pool.appendAssumeCapacity(list_index, item);
         }
 
-        pub fn insertAssumeCapacity(self: *Self, list_index: List.Index, item: T, index: usize) void {
-            assert(list_index.isValid());
-            const list = &self.entries.items[list_index.n].list;
-            assert(index <= list.len);
-            self.values.insertAssumeCapacity(@intCast(list.offset + index), item);
+        pub fn appendAssumeCapacity(pool: *Pool, list_index: List.Index, item: T) void {
+            const list = &pool.entries.items[list_index.n].list;
+
+            assert(list.len < list.capacity);
+            pool.buf.items[list.offset + list.len] = item;
             list.len += 1;
         }
 
-        pub fn ensureUnusedCapacity(self: *Self, allocator: Allocator, n: usize) !void {
-            try self.values.ensureUnusedCapacity(allocator, @intCast(n));
+        pub fn appendSlice(
+            pool: *Pool,
+            allocator: Allocator,
+            list_index: List.Index,
+            slice: []const T,
+        ) Allocator.Error!void {
+            try pool.ensureUnusedCapacity(allocator, list_index, slice.len);
+            pool.appendSliceAssumeCapacity(list_index, slice);
         }
 
-        pub fn swapRemove(self: *Self, index: List.Index, n: usize) void {
-            assert(index.isValid());
-            const list = &self.entries.items[index.n].list;
-            assert(n < list.len);
-            assert(list.len <= self.values.len - list.offset);
+        pub fn appendSliceAssumeCapacity(pool: *Pool, list_index: List.Index, slice: []const T) void {
+            const list = &pool.entries.items[list_index.n].list;
 
-            self.values.replaceRange(
-                undefined,
-                @intCast(list.offset + n),
-                1,
-                &.{self.values.get(@intCast(list.len - 1))},
-            ) catch unreachable;
+            const dest = pool.buf.items[list.offset + list.len ..][0..slice.len];
+            @memcpy(dest, slice);
+            list.len += slice.len;
+        }
 
-            self.values.setGap(@intCast(list.offset + list.len));
-            self.values.gap_start -= 1;
+        pub fn ensureUnusedCapacity(noalias pool: *Pool, allocator: Allocator, list_index: List.Index, n: usize) !void {
+            const list = &pool.entries.items[list_index.n].list;
+            if (list.capacity - list.len < n) {
+                const new_capacity = growCapacity(list.capacity, list.len + n);
+                try pool.buf.ensureTotalCapacityPrecise(
+                    allocator,
+                    pool.buf.items.len + new_capacity,
+                );
 
+                const new_offset = pool.buf.items.len;
+                pool.buf.expandToCapacity();
+
+                const new_slice = pool.buf.items[new_offset..][0..list.len];
+                @memcpy(new_slice, pool.items(list_index));
+
+                list.offset = new_offset;
+                list.capacity = @intCast(pool.buf.items.len - new_offset);
+            }
+        }
+
+        pub fn swapRemove(pool: *Pool, list_index: List.Index, index: usize) void {
+            const list = &pool.entries.items[list_index.n].list;
+            assert(index < list.len);
+            pool.buf.items[list.offset..][index] = pool.buf.items[list.offset..][list.len - 1];
             list.len -= 1;
         }
 
-        pub fn items(self: *Self, index: List.Index) []T {
-            const list = self.entries.items[index.n].list;
-            return self.values.items()[list.offset..][0..list.len];
+        pub fn len(pool: *Pool, list_index: List.Index) usize {
+            assert(list_index.isValid());
+            return pool.entries.items[list_index.n].list.len;
         }
 
-        pub fn len(self: *const Self, index: List.Index) usize {
-            return self.entries.items[index.n].list.len;
+        fn growCapacity(current: usize, minimum: usize) usize {
+            var new = current;
+            while (true) {
+                new +|= new / 2 + 8;
+                if (new >= minimum)
+                    return new;
+            }
         }
-
-        // For serialization.
 
         pub const Header = extern struct {
-            values_len: u32,
+            buf_len: u32,
             entries_len: u32,
             free: List.Index,
         };
 
-        pub fn getHeader(self: *const Self) Header {
+        pub fn getHeader(pool: *const Pool) Header {
             return .{
-                .values_len = self.values.len,
-                .entries_len = @intCast(self.entries.items.len),
-                .free = self.free_entries_head,
+                .buf_len = @intCast(pool.buf.items.len),
+                .entries_len = @intCast(pool.entries.items.len),
+                .free = pool.free_entries_head,
+            };
+        }
+
+        pub fn iovecs(pool: *Pool) [2]std.posix.iovec_const {
+            return .{
+                utils.arrayListIoVec(&pool.buf),
+                utils.arrayListIoVec(&pool.entries),
             };
         }
 
         pub fn fromHeader(
-            self: *Self,
-            allocator: std.mem.Allocator,
+            pool: *Pool,
+            allocator: Allocator,
             header: Header,
-        ) ![2]std.posix.iovec {
-            self.* = .{
-                .values = .{},
+        ) Allocator.Error![2]std.posix.iovec {
+            pool.* = .{
+                .buf = .empty,
                 .entries = .empty,
                 .free_entries_head = header.free,
             };
-            errdefer self.deinit(allocator);
+            errdefer pool.deinit(allocator);
 
-            _ = try self.values.addManyAt(allocator, 0, header.values_len);
-            _ = try self.entries.addManyAt(allocator, 0, header.entries_len);
+            try pool.buf.ensureTotalCapacityPrecise(allocator, header.buf_len);
+            try pool.entries.ensureTotalCapacityPrecise(allocator, header.entries_len);
+            pool.buf.expandToCapacity();
+            pool.entries.expandToCapacity();
 
-            return @bitCast(self.iovecs());
-        }
-
-        pub fn iovecs(self: *Self) [2]std.posix.iovec_const {
-            return .{ self.values.iovecs(), utils.arrayListIoVec(&self.entries) };
+            return @bitCast(pool.iovecs());
         }
     };
 }

@@ -5,7 +5,6 @@ const Position = @import("Position.zig").Position;
 const Rect = Position.Rect;
 const PosInt = Position.Int;
 const Sheet = @import("Sheet.zig");
-const Range = Sheet.Range;
 const Cell = Sheet.Cell;
 const ast = @import("ast.zig");
 const utils = @import("utils.zig");
@@ -14,7 +13,6 @@ pub fn RTree(
     comptime K: type,
     comptime V: type,
     comptime min_children: usize,
-    comptime rangeFromKey: fn (*Sheet, K) Range,
     comptime rectFromKey: fn (*Sheet, K) Rect,
     comptime eqlKeys: fn (*Sheet, K, K) bool,
 ) type {
@@ -50,7 +48,7 @@ pub fn RTree(
             fn getRectMode(tree: *Self, entry: Entry, comptime mode: Node.Mode) Rect {
                 return switch (mode) {
                     .kv => rectFromKey(tree.sheet, entry.kv.key),
-                    .node => entry.node.range.rect(tree.sheet),
+                    .node => entry.node.rect,
                 };
             }
         };
@@ -68,7 +66,7 @@ pub fn RTree(
 
         const Node = extern struct {
             level: u32,
-            range: Range,
+            rect: Rect,
             children: Handle,
             children_len: u32,
 
@@ -176,7 +174,7 @@ pub fn RTree(
             tree.entries.items[handle.n] = .{
                 .node = .{
                     .level = undefined,
-                    .range = undefined,
+                    .rect = undefined,
                     .children = tree.free,
                     .children_len = undefined,
                 },
@@ -231,7 +229,7 @@ pub fn RTree(
 
             tree.entries.items[0] = .{ .node = .{
                 .level = 0,
-                .range = rangeFromKey(tree.sheet, key),
+                .rect = rectFromKey(tree.sheet, key),
                 .children = children,
                 .children_len = 0,
             } };
@@ -348,7 +346,7 @@ pub fn RTree(
                         const ret = tree.rootNode().*;
                         tree.rootNode().* = .{
                             .level = 0,
-                            .range = undefined,
+                            .rect = undefined,
                             .children = .invalid,
                             .children_len = 0,
                         };
@@ -454,7 +452,7 @@ pub fn RTree(
                     }
                 } else {
                     for (iter.tree.nodeEntries(node)) |*entry| {
-                        const child_rect = entry.node.range.rect(iter.tree.sheet);
+                        const child_rect = entry.node.rect;
                         if (iter.rect.intersects(child_rect)) {
                             try iter.stack.append(iter.allocator, &entry.node);
                         }
@@ -506,13 +504,13 @@ pub fn RTree(
         ) Allocator.Error!void {
             if (node.isLeaf()) {
                 for (tree.nodeEntries(node)) |*entry| {
-                    if (rect.intersects(entry.kv.key.rect(tree.sheet))) {
+                    if (rect.intersects(rectFromKey(tree.sheet, entry.kv.key))) {
                         try list.append(allocator, entry.kv.value);
                     }
                 }
             } else {
                 for (tree.nodeEntries(node)) |*entry| {
-                    if (rect.intersects(entry.node.range.rect(tree.sheet))) {
+                    if (rect.intersects(entry.node.rect)) {
                         try searchValues(tree, &entry.node, allocator, rect, list);
                     }
                 }
@@ -536,7 +534,7 @@ pub fn RTree(
                 }
             } else {
                 for (tree.nodeEntries(node)) |*entry| {
-                    if (rect.intersects(entry.node.range.rect(tree.sheet))) {
+                    if (rect.intersects(entry.node.rect)) {
                         try searchNode(tree, &entry.node, rect, list);
                     }
                 }
@@ -555,7 +553,7 @@ pub fn RTree(
 
             const key_rect = rectFromKey(tree.sheet, key);
             for (tree.nodeEntries(node)) |*entry| {
-                const child_rect = entry.node.range.rect(tree.sheet);
+                const child_rect = entry.node.rect;
                 if (child_rect.contains(key_rect)) {
                     if (getSingleRecursive(tree, &entry.node, key)) |res|
                         return res;
@@ -565,7 +563,7 @@ pub fn RTree(
         }
 
         fn getSingle(tree: *Self, node: *Node, key: K) ?*KV {
-            return if (node.range.rect(tree.sheet).contains(rectFromKey(tree.sheet, key)))
+            return if (node.rect.contains(rectFromKey(tree.sheet, key)))
                 getSingleRecursive(tree, node, key)
             else
                 null;
@@ -581,7 +579,7 @@ pub fn RTree(
 
             const entries = tree.nodeEntries(node);
             for (entries, 0..) |*entry, i| {
-                const rect = entry.node.range.rect(tree.sheet);
+                const rect = entry.node.rect;
                 const r = rect.merge(rectFromKey(tree.sheet, key));
                 const enlargement = r.area() - rect.area();
 
@@ -598,10 +596,10 @@ pub fn RTree(
             return .from(@intCast(node.children.n + min_index));
         }
 
-        fn totalOverlap(tree: *Self, entries: []const Entry, range: Rect) u64 {
+        fn totalOverlap(_: *Self, entries: []const Entry, range: Rect) u64 {
             var total: u64 = 0;
             for (entries) |*entry| {
-                total += range.overlapArea(entry.node.range.rect(tree.sheet));
+                total += range.overlapArea(entry.node.rect);
             }
             return total;
         }
@@ -622,7 +620,7 @@ pub fn RTree(
 
             var min_index: usize = 0;
             var min_area_diff, var min_area = blk: {
-                const child_rect = entries[0].node.range.rect(tree.sheet);
+                const child_rect = entries[0].node.rect;
                 const merged_rect = Rect.merge(child_rect, key_rect);
 
                 break :blk .{
@@ -632,7 +630,7 @@ pub fn RTree(
             };
 
             for (entries[1..], 1..) |entry, i| {
-                const child_rect = entry.node.range.rect(tree.sheet);
+                const child_rect = entry.node.rect;
                 const merged_rect = Rect.merge(child_rect, key_rect);
                 const area = child_rect.area();
                 const area_diff = merged_rect.area() - area;
@@ -656,16 +654,16 @@ pub fn RTree(
                 for (entries[1..]) |entry|
                     rect = rect.merge(rectFromKey(tree.sheet, entry.kv.key));
 
-                node.range = Range.fromRect(tree.sheet, rect);
+                node.rect = rect;
                 return;
             }
 
             const entries = tree.nodeEntries(node);
-            var rect = entries[0].node.range.rect(tree.sheet);
+            var rect = entries[0].node.rect;
             for (entries[1..]) |entry|
-                rect = rect.merge(entry.node.range.rect(tree.sheet));
+                rect = rect.merge(entry.node.rect);
 
-            node.range = Range.fromRect(tree.sheet, rect);
+            node.rect = rect;
         }
 
         const RemoveResult = struct {
@@ -685,7 +683,7 @@ pub fn RTree(
         /// Attempt to remove `key` from the given leaf node.
         fn removeFromLeaf(tree: *Self, node: *Node, key: K) ?RemoveResult {
             const key_rect = rectFromKey(tree.sheet, key);
-            const node_rect = node.range.rect(tree.sheet);
+            const node_rect = node.rect;
             const entries = tree.nodeEntries(node);
             for (entries, 0..) |entry, i| {
                 if (!eqlKeys(tree.sheet, entry.kv.key, key)) continue;
@@ -702,11 +700,11 @@ pub fn RTree(
         /// Attempt to remove `key` from the given branch node.
         fn removeFromBranch(tree: *Self, node: *Node, key: K) ?RemoveResult {
             const key_rect = rectFromKey(tree.sheet, key);
-            const node_rect = node.range.rect(tree.sheet);
+            const node_rect = node.rect;
 
             const entries = tree.nodeEntries(node);
             for (entries, 0..) |*entry, i| {
-                const child_rect = entry.node.range.rect(tree.sheet);
+                const child_rect = entry.node.rect;
                 if (!child_rect.contains(key_rect))
                     continue;
 
@@ -729,15 +727,15 @@ pub fn RTree(
                     if (recalc) {
                         // Recalculate range excluding the child to be removed
                         const start = @intFromBool(i == 0);
-                        var rect = entries[start].node.range.rect(tree.sheet);
+                        var rect = entries[start].node.rect;
 
                         for (entries[0..i]) |e|
-                            rect = rect.merge(e.node.range.rect(tree.sheet));
+                            rect = rect.merge(e.node.rect);
 
                         for (entries[i + 1 ..]) |e|
-                            rect = rect.merge(e.node.range.rect(tree.sheet));
+                            rect = rect.merge(e.node.rect);
 
-                        node.range = Range.fromRect(tree.sheet, rect);
+                        node.rect = rect;
                     }
 
                     return .{
@@ -773,7 +771,7 @@ pub fn RTree(
 
         fn getRect(tree: *Self, a: anytype) Rect {
             return switch (@TypeOf(a)) {
-                Node, *Node, *const Node => a.range.rect(tree.sheet),
+                Node, *Node, *const Node => a.rect,
                 KV, *KV, *const KV => rectFromKey(tree.sheet, a.key),
                 else => a.rect(tree.sheet),
             };
@@ -906,10 +904,10 @@ pub fn RTree(
             for (d[0].entries.constSlice()) |entry| {
                 tree.appendNodeEntry(node, entry);
             }
-            node.range = Range.fromRect(tree.sheet, d[0].range);
+            node.rect = d[0].range;
             return .{
                 .level = node.level,
-                .range = Range.fromRect(tree.sheet, d[1].range),
+                .rect = d[1].range,
                 .children = new_entries_head,
                 .children_len = @intCast(d[1].entries.len),
             };
@@ -938,7 +936,7 @@ pub fn RTree(
             }
             return .{
                 .level = node.level,
-                .range = Range.fromRect(tree.sheet, d[1].range),
+                .rect = d[1].range,
                 .children = new_entries_head,
                 .children_len = @intCast(d[1].entries.len),
             };
@@ -950,10 +948,7 @@ pub fn RTree(
 
             var new_root = Node{
                 .level = new_node.level + 1,
-                .range = Range.fromRect(tree.sheet, Rect.merge(
-                    tree.rootNode().range.rect(tree.sheet),
-                    new_node.range.rect(tree.sheet),
-                )),
+                .rect = Rect.merge(tree.rootNode().rect, new_node.rect),
                 .children = entries_head,
                 .children_len = 0,
             };
@@ -995,11 +990,11 @@ pub fn RTree(
             const node = &tree.entryPtr(handle).node;
             if (tree.handleEntries(handle).len == 1) {
                 // This was the first node added to this leaf
-                node.range = rangeFromKey(tree.sheet, key);
+                node.rect = rectFromKey(tree.sheet, key);
             } else {
                 const key_rect = rectFromKey(tree.sheet, key);
-                const node_rect = node.range.rect(tree.sheet);
-                node.range = Range.fromRect(tree.sheet, node_rect.merge(key_rect));
+                const node_rect = node.rect;
+                node.rect = node_rect.merge(key_rect);
             }
             return null;
         }
@@ -1009,8 +1004,8 @@ pub fn RTree(
             assert(!node.isLeaf());
 
             const key_rect = rectFromKey(tree.sheet, key);
-            const node_rect = node.range.rect(tree.sheet);
-            const new_node_range = Range.fromRect(tree.sheet, node_rect.merge(key_rect));
+            const node_rect = node.rect;
+            const new_node_rect = node_rect.merge(key_rect);
 
             const best = bestChild(tree, node, key);
             const maybe_new_node = tree.putNode(best, key, value);
@@ -1025,7 +1020,7 @@ pub fn RTree(
                 }
             }
 
-            tree.nodePtr(handle).range = new_node_range;
+            tree.nodePtr(handle).rect = new_node_rect;
             return null;
         }
 
@@ -1124,8 +1119,12 @@ pub fn DependentTree(comptime min_children: usize) type {
         pub const ListPool = FlatListPool(Sheet.CellHandle);
         pub const ListIndex = ListPool.List.Index;
 
+        fn rectFromRect(_: *Sheet, r: Rect) Rect {
+            return r;
+        }
+
         const Self = @This();
-        const Tree = RTree(Range, ListIndex, min_children, rangeFromRange, rectFromRange, eqlKeys);
+        const Tree = RTree(Rect, ListIndex, min_children, rectFromRect, eqlKeys);
         pub const Handle = Tree.Handle;
         pub const Node = Tree.Node;
         pub const KV = Tree.KV;
@@ -1163,13 +1162,13 @@ pub fn DependentTree(comptime min_children: usize) type {
             return ret;
         }
 
-        pub fn get(self: *Self, key: Range) ?*KV {
+        pub fn get(self: *Self, key: Rect) ?*KV {
             return self.rtree.get(key);
         }
 
         pub fn put(
             self: *Self,
-            key: Range,
+            key: Rect,
             value: Sheet.CellHandle,
         ) Allocator.Error!void {
             return self.putSlice(key, &.{value});
@@ -1177,15 +1176,16 @@ pub fn DependentTree(comptime min_children: usize) type {
 
         pub fn putSlice(
             self: *Self,
-            key: Range,
+            key: Rect,
             values: []const Sheet.CellHandle,
         ) Allocator.Error!void {
             const sheet = self.rtree.sheet;
             try self.rtree.ensureUnusedCapacity(1);
 
             if (self.rtree.isEmpty()) {
-                try self.flat.ensureUnusedCapacity(sheet.allocator, values.len);
                 const list = try self.flat.createList(sheet.allocator);
+                errdefer self.flat.destroyList(list);
+                try self.flat.ensureUnusedCapacity(sheet.allocator, list, values.len);
                 errdefer comptime unreachable;
 
                 self.flat.appendSliceAssumeCapacity(list, values);
@@ -1200,8 +1200,9 @@ pub fn DependentTree(comptime min_children: usize) type {
                 return;
             }
 
-            try self.flat.ensureUnusedCapacity(sheet.allocator, values.len);
             const list = try self.flat.createList(sheet.allocator);
+            errdefer self.flat.destroyList(list);
+            try self.flat.ensureUnusedCapacity(sheet.allocator, list, values.len);
             errdefer comptime unreachable;
             self.flat.appendSliceAssumeCapacity(list, values);
 
@@ -1224,7 +1225,7 @@ pub fn DependentTree(comptime min_children: usize) type {
         pub fn removeKey(
             self: *Self,
             allocator: Allocator,
-            key: Range,
+            key: Rect,
         ) Allocator.Error!void {
             return self.rtree.removeContext(allocator, key, Context{});
         }
@@ -1233,7 +1234,7 @@ pub fn DependentTree(comptime min_children: usize) type {
         /// Removes `key` if there are no values left after removal.
         pub fn removeValue(
             self: *Self,
-            key: Range,
+            key: Rect,
             value: Sheet.CellHandle,
         ) Allocator.Error!void {
             if (self.rtree.isEmpty()) return;
@@ -1252,7 +1253,7 @@ pub fn DependentTree(comptime min_children: usize) type {
                         const ret = self.rtree.rootNode().*;
                         self.rtree.rootNode().* = .{
                             .level = 0,
-                            .range = undefined,
+                            .rect = undefined,
                             .children = .invalid,
                             .children_len = 0,
                         };
@@ -1290,12 +1291,11 @@ pub fn DependentTree(comptime min_children: usize) type {
         fn removeNode(
             self: *Self,
             node: *Tree.Node,
-            key: Range,
+            key: Rect,
             value: Sheet.CellHandle,
         ) RemoveNodeResult {
             const tree = &self.rtree;
             const sheet = tree.sheet;
-            const key_rect = key.rect(sheet);
             if (node.isLeaf()) {
                 const entries = tree.nodeEntries(node);
                 for (entries, 0..) |entry, i| {
@@ -1318,7 +1318,7 @@ pub fn DependentTree(comptime min_children: usize) type {
                         _ = tree.nodeEntriesSwapRemove(node, i);
                         Context.deinit(.{ .self = self }, sheet.allocator, list);
 
-                        if (tree.nodeEntries(node).len > 0 and key_rect.anyMatch(node.range.rect(sheet))) {
+                        if (tree.nodeEntries(node).len > 0 and key.anyMatch(node.rect)) {
                             Tree.recalcBoundingRange(tree, node);
                         }
 
@@ -1334,8 +1334,8 @@ pub fn DependentTree(comptime min_children: usize) type {
 
             const entries = tree.nodeEntries(node);
             for (entries, 0..) |*entry, i| {
-                const child_rect = entry.node.range.rect(tree.sheet);
-                if (!child_rect.contains(key_rect))
+                const child_rect = entry.node.rect;
+                if (!child_rect.contains(key))
                     continue;
 
                 const res = self.removeNode(&entry.node, key, value);
@@ -1352,21 +1352,21 @@ pub fn DependentTree(comptime min_children: usize) type {
                     break :blk child_len - child_mod < min_children;
                 };
 
-                const recalc_range = key_rect.anyMatch(child_rect);
+                const recalc_range = key.anyMatch(child_rect);
 
                 if (merge_node) {
                     if (recalc_range) {
                         // Recalculate range excluding the child to be removed
                         const start = @intFromBool(i == 0);
-                        var rect = entries[start].node.range.rect(tree.sheet);
+                        var rect = entries[start].node.rect;
 
                         for (entries[0..i]) |e|
-                            rect = rect.merge(e.node.range.rect(tree.sheet));
+                            rect = rect.merge(e.node.rect);
 
                         for (entries[i + 1 ..]) |e|
-                            rect = rect.merge(e.node.range.rect(tree.sheet));
+                            rect = rect.merge(e.node.rect);
 
-                        node.range = Range.fromRect(tree.sheet, rect);
+                        node.rect = rect;
                     }
 
                     return .{ .merge = .{ .parent = node, .child_index = i } };
@@ -1381,15 +1381,7 @@ pub fn DependentTree(comptime min_children: usize) type {
             return .none;
         }
 
-        fn rangeFromRange(_: *Sheet, r: Range) Range {
-            return r;
-        }
-
-        fn rectFromRange(sheet: *Sheet, r: Range) Rect {
-            return r.rect(sheet);
-        }
-
-        fn eqlKeys(_: *Sheet, a: Range, b: Range) bool {
+        fn eqlKeys(_: *Sheet, a: Rect, b: Rect) bool {
             return a.eql(b);
         }
 
