@@ -15,7 +15,6 @@ const Rect = Position.Rect;
 const ast = @import("ast.zig");
 const RTree = @import("tree.zig").RTree;
 const DependentTree = @import("tree.zig").DependentTree;
-const SkipList = @import("skip_list.zig").SkipList;
 const FlatListPool = @import("flat_list_pool.zig").FlatListPool;
 
 const Sheet = @This();
@@ -59,8 +58,7 @@ filepath: std.BoundedArray(u8, std.fs.max_path_bytes),
 pub const CellTree = RTree(CellHandle, void, 4, rectFromCellHandle, eqlCellHandles);
 pub const CellTreap = @import("treap.zig").Treap(Cell, Cell.compare);
 pub const CellHandle = CellTreap.Handle;
-pub const ColumnAxis = SkipList(Column, 4, Column.Context);
-pub const RowAxis = SkipList(Row, 4, Row.Context);
+pub const ColumnAxis = @import("treap.zig").Treap(Column, Column.compare);
 
 pub const StringIndex = packed struct {
     n: u32,
@@ -117,7 +115,7 @@ pub fn create(allocator: Allocator) !*Sheet {
 
         .filepath = .{},
     };
-    assert(sheet.cols.nodes.len == 0);
+    assert(sheet.cols.nodes.items.len == 0);
 
     try sheet.undos.ensureTotalCapacity(allocator, 1);
     errdefer sheet.undos.deinit(allocator);
@@ -170,7 +168,7 @@ pub fn destroy(sheet: *Sheet) void {
     sheet.redos.deinit(sheet.allocator);
 
     sheet.cell_treap.nodes.deinit(sheet.allocator);
-    sheet.cols.deinit(sheet.allocator);
+    sheet.cols.nodes.deinit(sheet.allocator);
     sheet.ast_nodes.deinit(sheet.allocator);
     sheet.string_values.deinit(sheet.allocator);
     sheet.allocator.destroy(sheet);
@@ -225,10 +223,6 @@ pub const Undo = extern struct {
             col: Position.Int,
             precision: u8,
         },
-        insert_row: PosInt,
-        insert_col: PosInt,
-        delete_row: PosInt,
-        delete_col: PosInt,
     };
 };
 
@@ -255,7 +249,7 @@ const SerializeHeader = extern struct {
     redos_len: u32,
 
     const magic_number: u32 = @bitCast([4]u8{ 'Z', 'C', 'Z', 'C' });
-    const binary_version = 2;
+    const binary_version = 3;
 };
 
 pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
@@ -264,7 +258,6 @@ pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
     sheet.undos.shrinkAndFree(sheet.allocator, sheet.undos.len);
     sheet.redos.shrinkAndFree(sheet.allocator, sheet.redos.len);
     utils.shrinkMultiArrayListSlice(sheet.allocator, &sheet.ast_nodes);
-    utils.shrinkMultiArrayListSlice(sheet.allocator, &sheet.cols.nodes);
 
     const header: SerializeHeader = .{
         .strings_buf_len = @intCast(sheet.strings_buf.items.len),
@@ -310,7 +303,7 @@ pub fn deserialize(allocator: Allocator, file: std.fs.File) !*Sheet {
         try sheet.cell_treap.fromHeader(allocator, header.cell_treap, 1_000_000),
         try utils.prepMultiArrayListSlice(&sheet.ast_nodes, allocator, header.ast_nodes_len),
     } ++ try sheet.string_values.fromHeader(sheet.allocator, header.string_values) ++ .{
-        try sheet.cols.fromHeader(allocator, header.cols),
+        try sheet.cols.fromHeader(allocator, header.cols, 1_000_000),
         try utils.prepMultiArrayList(&sheet.undos, allocator, header.undos_len),
         try utils.prepMultiArrayList(&sheet.redos, allocator, header.redos_len),
     };
@@ -328,7 +321,7 @@ pub fn clearRetainingCapacity(sheet: *Sheet) void {
     // var iter = sheet.cell_treap.inorderIterator();
     // while (iter.next()) |node| node.key.ast.deinit(sheet.allocator);
     sheet.cell_treap.root = .invalid;
-    sheet.cols.clearRetainingCapacity();
+    sheet.cols.root = .invalid;
 
     sheet.queued_cells.clearRetainingCapacity();
 
@@ -342,6 +335,7 @@ pub fn clearRetainingCapacity(sheet: *Sheet) void {
     sheet.redos.len = 0;
     sheet.strings_buf.clearRetainingCapacity();
     sheet.cell_treap.nodes.clearRetainingCapacity();
+    sheet.cols.nodes.clearRetainingCapacity();
 }
 
 pub fn interpretFile(sheet: *Sheet, reader: std.io.AnyReader) !void {
@@ -921,7 +915,7 @@ pub fn setColWidth(
     opts: UndoOpts,
 ) Allocator.Error!void {
     try sheet.ensureUndoCapacity(.undo, 1);
-    const col = sheet.cols.getPtr(handle).?;
+    const col = &sheet.cols.node(handle).key;
     if (width == col.width) return;
     const old_width = col.width;
     col.width = width;
@@ -938,7 +932,7 @@ pub fn incWidth(
     opts: UndoOpts,
 ) Allocator.Error!void {
     if (sheet.getColumnHandle(column_index)) |handle| {
-        const col = sheet.cols.get(handle).?;
+        const col = sheet.cols.node(handle).key;
         try sheet.setColWidth(handle, column_index, col.width +| n, opts);
     }
 }
@@ -950,7 +944,7 @@ pub fn decWidth(
     opts: UndoOpts,
 ) Allocator.Error!void {
     if (sheet.getColumnHandle(column_index)) |handle| {
-        const col = sheet.cols.get(handle).?;
+        const col = sheet.cols.node(handle).key;
         const new_width = @max(col.width -| n, 1);
         try sheet.setColWidth(handle, column_index, new_width, opts);
     }
@@ -974,7 +968,7 @@ pub fn setColPrecision(
     precision: u8,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    const col = sheet.cols.getPtr(handle).?;
+    const col = &sheet.cols.node(handle).key;
     if (precision == col.precision) return;
 
     const old_precision = col.precision;
@@ -992,7 +986,7 @@ pub fn incPrecision(
     opts: UndoOpts,
 ) Allocator.Error!void {
     if (sheet.getColumnHandle(column_index)) |handle| {
-        const col = sheet.cols.get(handle).?;
+        const col = sheet.cols.node(handle).key;
         try sheet.setColPrecision(handle, column_index, col.precision +| n, opts);
     }
 }
@@ -1004,7 +998,7 @@ pub fn decPrecision(
     opts: UndoOpts,
 ) Allocator.Error!void {
     if (sheet.getColumnHandle(column_index)) |handle| {
-        const col = sheet.cols.get(handle).?;
+        const col = sheet.cols.node(handle).key;
         try sheet.setColPrecision(handle, column_index, col.precision -| n, opts);
     }
 }
@@ -1221,11 +1215,6 @@ pub noinline fn deleteCellsInRange(sheet: *Sheet, range: Rect) Allocator.Error!v
     for (kvs) |kv| {
         try sheet.deleteCellByPtr(&sheet.cell_treap.node(kv.key).key, .{});
     }
-}
-
-pub fn getRowHandle(sheet: *Sheet, index: PosInt) ?Row.Handle {
-    const handle = sheet.rows.search(.{ .index = index });
-    return if (handle.isValid()) handle else null;
 }
 
 pub fn getCell(sheet: *Sheet, pos: Position) ?Cell {
@@ -1592,19 +1581,7 @@ pub fn printCellExpression(sheet: *Sheet, pos: Position, writer: anytype) !void 
     );
 }
 
-pub const Row = struct {
-    index: PosInt,
-
-    pub const Handle = RowAxis.Handle;
-
-    pub const Context = struct {
-        pub fn order(_: Context, a: Row, b: Row) std.math.Order {
-            return std.math.order(a.index, b.index);
-        }
-    };
-};
-
-pub const Column = struct {
+pub const Column = extern struct {
     pub const default_width = 10;
 
     index: PosInt,
@@ -1613,11 +1590,9 @@ pub const Column = struct {
 
     pub const Handle = ColumnAxis.Handle;
 
-    pub const Context = struct {
-        pub fn order(_: Context, a: Column, b: Column) std.math.Order {
-            return std.math.order(a.index, b.index);
-        }
-    };
+    pub fn compare(a: Column, b: Column) std.math.Order {
+        return std.math.order(a.index, b.index);
+    }
 };
 
 fn setRowOrColumn(
@@ -1638,24 +1613,28 @@ fn setRowOrColumn(
 }
 
 pub fn createColumn(sheet: *Sheet, index: PosInt) !Column.Handle {
-    var handle = sheet.cols.search(.{ .index = index });
-    if (!handle.isValid()) {
+    var entry = sheet.cols.getEntryFor(.{ .index = index });
+    if (!entry.node.isValid()) {
         log.debug("Creating column {}", .{index});
-        handle = try sheet.cols.insert(sheet.allocator, .{ .index = index });
+        // handle = try sheet.cols.insert(sheet.allocator, .{ .index = index });
+        const new_node = try sheet.cols.createNode(sheet.allocator);
+        entry.set(new_node);
+        return new_node;
     }
 
-    assert(handle.isValid());
-    return handle;
+    return entry.node;
 }
 
 pub fn getColumn(sheet: *Sheet, index: PosInt) ?Column {
-    const handle = sheet.cols.search(.{ .index = index });
-    return sheet.cols.get(handle);
+    const entry = sheet.cols.getEntryFor(.{ .index = index });
+    if (entry.node.isValid())
+        return sheet.cols.node(entry.node).key;
+    return null;
 }
 
 pub fn getColumnHandle(sheet: *Sheet, index: PosInt) ?Column.Handle {
-    const handle = sheet.cols.search(.{ .index = index });
-    return if (handle.isValid()) handle else null;
+    const entry = sheet.cols.getEntryFor(.{ .index = index });
+    return entry.node.get();
 }
 
 pub fn widthNeededForColumn(

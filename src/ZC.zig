@@ -1492,7 +1492,7 @@ pub inline fn cursorDecWidth(self: *Self) Allocator.Error!void {
 
 pub fn cursorExpandWidth(self: *Self) Allocator.Error!void {
     const handle = self.sheet.getColumnHandle(self.cursor.x) orelse return;
-    const col = self.sheet.cols.get(handle).?;
+    const col = self.sheet.cols.node(handle).key;
 
     const max_width = self.tui.term.width - self.leftReservedColumns();
     const width_needed = try self.sheet.widthNeededForColumn(self.cursor.x, col.precision, max_width);
