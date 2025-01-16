@@ -365,37 +365,76 @@ pub fn clearRetainingCapacity(sheet: *Sheet) void {
 pub fn interpretFile(sheet: *Sheet, reader: std.io.AnyReader) !void {
     defer sheet.endUndoGroup();
 
-    var sfa = std.heap.stackFallback(8192, sheet.allocator);
-    const a = sfa.get();
-    var buf: std.ArrayList(u8) = .init(a);
+    var buf: std.ArrayList(u8) = .init(sheet.allocator);
     defer buf.deinit();
 
+    var asts: std.ArrayList(struct {
+        root: ast.Index,
+        source: []const u8,
+        pos: Position,
+    }) = .init(sheet.allocator);
+    defer asts.deinit();
+
+    const max_size = comptime std.math.pow(usize, 2, 20) * 100;
+
     while (true) {
-        buf.clearRetainingCapacity();
-        reader.streamUntilDelimiter(buf.writer(), '\n', null) catch |err| switch (err) {
-            error.EndOfStream => if (buf.items.len == 0) break,
+        asts.clearRetainingCapacity();
+        reader.readAllArrayList(&buf, max_size) catch |err| switch (err) {
+            error.StreamTooLong => {},
             else => |e| return e,
         };
-        try buf.append(0);
 
-        const null_terminated_line = buf.items.ptr[0 .. buf.items.len - 1 :0];
+        if (buf.items.len == 0) break;
 
-        const expr_root = ast.fromSource(sheet, null_terminated_line) catch |err| {
-            switch (err) {
+        const asts_start: u32 = @intCast(sheet.ast_nodes.len);
+
+        var lines = std.mem.tokenizeScalar(u8, buf.items, '\n');
+        while (lines.next()) |line| {
+            const mutable_line = @constCast(line);
+            mutable_line.ptr[line.len] = 0;
+            defer mutable_line.ptr[line.len] = '\n';
+
+            const null_terminated_line = mutable_line.ptr[0..mutable_line.len :0];
+            const expr_root = ast.fromSource(
+                sheet,
+                null_terminated_line,
+            ) catch |err| switch (err) {
                 error.UnexpectedToken,
                 error.InvalidCellAddress,
                 => continue,
                 error.OutOfMemory => return error.OutOfMemory,
-            }
-        };
+            };
 
-        const data = sheet.ast_nodes.items(.data);
-        const assignment = data[expr_root.n].assignment;
-        const pos = data[assignment.lhs.n].pos;
+            const data = sheet.ast_nodes.items(.data);
+            const pos = data[expr_root.n].assignment;
 
-        const spliced_root = ast.splice(&sheet.ast_nodes, assignment.rhs);
+            sheet.ast_nodes.len -= 1;
+            const spliced_root: ast.Index = .from(expr_root.n - 1);
 
-        try sheet.setCell(pos, null_terminated_line, spliced_root, .{});
+            try asts.append(.{
+                .root = spliced_root,
+                .source = null_terminated_line,
+                .pos = pos,
+            });
+        }
+
+        try sheet.cell_treap.nodes.ensureUnusedCapacity(sheet.allocator, asts.items.len);
+        try sheet.anchorAstPos(asts_start, @intCast(sheet.ast_nodes.len));
+
+        for (asts.items) |ast_info| {
+            const expr_root = ast_info.root;
+            const source = ast_info.source;
+            const pos = ast_info.pos;
+            try sheet.setCell2(pos, source, expr_root, .{});
+        }
+
+        if (buf.items.len == max_size) {
+            const index = 1 + (std.mem.lastIndexOfScalar(u8, buf.items, '\n') orelse break);
+            std.mem.copyForwards(u8, buf.items, buf.items[index..]);
+            buf.items.len = buf.items.len - index;
+        } else {
+            buf.clearRetainingCapacity();
+        }
     }
 }
 
@@ -1100,6 +1139,34 @@ pub fn setCell(
     return sheet.insertCellNode(new_node, undo_opts);
 }
 
+/// Creates the cell at `pos` using the given expression, duplicating its string literals.
+pub fn setCell2(
+    sheet: *Sheet,
+    pos: Position,
+    source: []const u8,
+    expr_root: ast.Index,
+    undo_opts: UndoOpts,
+) Allocator.Error!void {
+    // Create row and column if they don't exist
+    try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, source.len + 1);
+    const row = try sheet.createRow(pos.y);
+    const col = try sheet.createColumn(pos.x);
+
+    const new_node = sheet.cell_treap.createNodeAssumeCapacity();
+    errdefer sheet.cell_treap.nodes.items.len -= 1;
+
+    const strings = sheet.dupeAstStrings(source, sheet.ast_nodes, expr_root);
+    errdefer sheet.strings_buf.items.len = strings.n;
+
+    sheet.cell_treap.node(new_node).key = .{
+        .row = row,
+        .col = col,
+        .expr_root = expr_root,
+        .strings = strings,
+    };
+    return sheet.insertCellNode(new_node, undo_opts);
+}
+
 // TODO: This function *really, really* sucks. Clean it up.
 // TODO: null undo type causes a memory leak (not used anywhere)
 /// Inserts a pre-allocated Cell node. Does not attempt to create any row/column anchors.
@@ -1730,13 +1797,47 @@ pub fn widthNeededForColumn(
     return width;
 }
 
+pub fn anchorAstPos(sheet: *Sheet, start: u32, end: u32) Allocator.Error!void {
+    const nodes = sheet.ast_nodes;
+    const tags = nodes.items(.tag)[start..end];
+    const data = nodes.items(.data)[start..end];
+
+    const pos_count = blk: {
+        var count: u32 = 0;
+        for (tags) |tag|
+            count += @intFromBool(tag == .pos);
+        break :blk count;
+    };
+
+    if (pos_count == 0) return;
+
+    try sheet.rows.ensureUnusedCapacity(sheet.allocator, pos_count);
+    try sheet.cols.ensureUnusedCapacity(sheet.allocator, pos_count);
+
+    for (tags, data) |*tag, *d| {
+        if (tag.* == .pos) {
+            const row = sheet.createRow(d.pos.y) catch unreachable;
+            const col = sheet.createColumn(d.pos.x) catch unreachable;
+
+            const ref: Reference = .{
+                .row = row,
+                .col = col,
+            };
+
+            tag.* = .ref_rel_rel;
+            d.* = .{ .ref_rel_rel = ref };
+        }
+    }
+}
+
 /// Anchors the AST to the given sheet, by replacing all 'dumb' coordinate references with
 /// references to the row/column handles in `sheet`.
 pub fn anchorAst(sheet: *Sheet, root: ast.Index) Allocator.Error!void {
     const nodes = sheet.ast_nodes;
     const start = ast.leftMostChild(nodes, root);
-    const tags = nodes.items(.tag)[start.n .. root.n + 1];
-    const data = nodes.items(.data)[start.n .. root.n + 1];
+    const end = root.n + 1;
+    const tags = nodes.items(.tag)[start.n..end];
+    const data = nodes.items(.data)[start.n..end];
 
     const pos_count = blk: {
         var count: u32 = 0;

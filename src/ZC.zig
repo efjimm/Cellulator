@@ -857,10 +857,10 @@ fn parseCommand(self: *Self, str: [:0]const u8) !void {
 
     const expr_root = try ast.fromSource(self.sheet, str);
 
-    const op = self.sheet.ast_nodes.items(.data)[expr_root.n].assignment;
-    const pos = self.sheet.ast_nodes.items(.data)[op.lhs.n].pos;
+    const pos = self.sheet.ast_nodes.items(.data)[expr_root.n].assignment;
 
-    const spliced_root = ast.splice(&self.sheet.ast_nodes, op.rhs);
+    self.sheet.ast_nodes.len -= 1;
+    const spliced_root: ast.Index = .from(expr_root.n - 1);
 
     try self.setCell(pos, str, spliced_root, .{});
     self.sheet.endUndoGroup();

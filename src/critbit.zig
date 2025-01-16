@@ -1,5 +1,4 @@
 // Crit-bit tree. Implementation taken from vis.
-// Copyright © 2023 Evan Bonner <ebonner@airmail.cc>
 //
 // Copyright © 2014-2020 Marc André Tanner, et al.
 //

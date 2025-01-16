@@ -40,7 +40,7 @@ pub const Node = extern struct {
         number: f64,
         column: PosInt,
         pos: Position,
-        assignment: BinaryOperator,
+        assignment: Position,
         concat: BinaryOperator,
         add: BinaryOperator,
         sub: BinaryOperator,
@@ -198,11 +198,9 @@ pub fn printFromNode(
             try writer.writeAll(" # ");
             try printFromIndex(nodes, sheet, b.rhs, writer, strings);
         },
-        .assignment => |b| {
-            try writer.writeAll("let ");
-            try printFromIndex(nodes, sheet, b.lhs, writer, strings);
-            try writer.writeAll(" = ");
-            try printFromIndex(nodes, sheet, b.rhs, writer, strings);
+        .assignment => |pos| {
+            try writer.print("let {} = ", .{pos});
+            try printFromIndex(nodes, sheet, .from(index.n - 1), writer, strings);
         },
         .add => |b| {
             try printFromIndex(nodes, sheet, b.lhs, writer, strings);
@@ -387,52 +385,52 @@ pub fn argIteratorForwards(nodes: NodeSlice, start: Index, end: Index) ArgIterat
 /// Removes all nodes except for the given index and its children
 /// Nodes in the list are already sorted in reverse topological order which allows us to overwrite
 /// nodes sequentially without loss. This function preserves reverse topological order.
-pub fn splice(nodes: *NodeSlice, new_root: Index) Index {
-    const old_root: Index = .from(@intCast(nodes.len - 1));
-    const old_first = leftMostChild(nodes.*, old_root);
+// pub fn splice(noalias nodes: *NodeSlice, new_root: Index) Index {
+//     const old_root: Index = .from(@intCast(nodes.len - 1));
+//     const old_first = leftMostChild(nodes.*, old_root);
 
-    const new_first = leftMostChild(nodes.*, new_root);
-    const new_len = nodes.len - (new_first.n - old_first.n) - (old_root.n - new_root.n);
+//     const new_first = leftMostChild(nodes.*, new_root);
+//     const new_len = nodes.len - (new_first.n - old_first.n) - (old_root.n - new_root.n);
 
-    assert(old_first.n <= new_first.n);
+//     assert(old_first.n <= new_first.n);
 
-    for (
-        old_first.n..,
-        new_first.n..new_root.n + 1,
-    ) |i, j| {
-        var n = nodes.get(@intCast(j));
-        switch (n.tag) {
-            .assignment,
-            .concat,
-            .add,
-            .sub,
-            .mul,
-            .div,
-            .mod,
-            .range,
-            => {
-                n.data.range.lhs.n -= new_first.n - old_first.n;
-                n.data.range.rhs.n -= new_first.n - old_first.n;
-            },
-            .builtin => {
-                n.data.builtin.first_arg.n -= new_first.n - old_first.n;
-            },
-            .string_literal,
-            .number,
-            .column,
-            .pos,
-            .ref_abs_abs,
-            .ref_rel_abs,
-            .ref_abs_rel,
-            .ref_rel_rel,
-            => {},
-        }
-        nodes.set(@intCast(i), n);
-    }
+//     for (
+//         old_first.n..,
+//         new_first.n..new_root.n + 1,
+//     ) |i, j| {
+//         var n = nodes.get(@intCast(j));
+//         switch (n.tag) {
+//             .assignment,
+//             .concat,
+//             .add,
+//             .sub,
+//             .mul,
+//             .div,
+//             .mod,
+//             .range,
+//             => {
+//                 n.data.range.lhs.n -= new_first.n - old_first.n;
+//                 n.data.range.rhs.n -= new_first.n - old_first.n;
+//             },
+//             .builtin => {
+//                 n.data.builtin.first_arg.n -= new_first.n - old_first.n;
+//             },
+//             .string_literal,
+//             .number,
+//             .column,
+//             .pos,
+//             .ref_abs_abs,
+//             .ref_rel_abs,
+//             .ref_abs_rel,
+//             .ref_rel_rel,
+//             => {},
+//         }
+//         nodes.set(@intCast(i), n);
+//     }
 
-    nodes.len = new_len;
-    return .from(@intCast(nodes.len - 1));
-}
+//     nodes.len = new_len;
+//     return .from(@intCast(nodes.len - 1));
+// }
 
 pub fn print(
     nodes: NodeSlice,
@@ -474,8 +472,8 @@ pub fn leftMostChild(
         .column,
         .pos,
         => index,
+        .assignment => leftMostChild(nodes, .from(index.n - 1)),
         // branch nodes
-        .assignment,
         .concat,
         .add,
         .sub,
@@ -1068,43 +1066,43 @@ test "Functions on Ranges" {
     try t.expectError(error.UnexpectedToken, Test.testSheetExpr(0, "@min()"));
 }
 
-test "Splice" {
-    const t = std.testing;
+// test "Splice" {
+//     const t = std.testing;
 
-    const Context = struct {
-        pub fn evalCell(_: @This(), _: Reference) !EvalResult {
-            return .none;
-        }
+//     const Context = struct {
+//         pub fn evalCell(_: @This(), _: Reference) !EvalResult {
+//             return .none;
+//         }
 
-        pub fn evalCellByHandle(_: @This(), _: Sheet.CellHandle) !EvalResult {
-            return .none;
-        }
-    };
+//         pub fn evalCellByHandle(_: @This(), _: Sheet.CellHandle) !EvalResult {
+//             return .none;
+//         }
+//     };
 
-    const sheet = try Sheet.create(t.allocator);
-    defer sheet.destroy();
+//     const sheet = try Sheet.create(t.allocator);
+//     defer sheet.destroy();
 
-    const expr_root = try fromSource(sheet, "let a0 = 100 * 3 + 5 / 2 + @avg(1, 10)");
-    const root_node = sheet.ast_nodes.get(expr_root.n);
+//     const expr_root = try fromSource(sheet, "let a0 = 100 * 3 + 5 / 2 + @avg(1, 10)");
+//     const root_node = sheet.ast_nodes.get(expr_root.n);
 
-    var spliced_root = splice(&sheet.ast_nodes, root_node.data.assignment.rhs);
+//     var spliced_root = splice(&sheet.ast_nodes, root_node.data.assignment.rhs);
 
-    try t.expectApproxEqRel(
-        308,
-        (try eval(sheet.ast_nodes, spliced_root, sheet, "", Context{})).number,
-        0.0001,
-    );
-    try t.expectEqual(11, sheet.ast_nodes.len);
+//     try t.expectApproxEqRel(
+//         308,
+//         (try eval(sheet.ast_nodes, spliced_root, sheet, "", Context{})).number,
+//         0.0001,
+//     );
+//     try t.expectEqual(11, sheet.ast_nodes.len);
 
-    spliced_root = splice(&sheet.ast_nodes, sheet.ast_nodes.get(spliced_root.n).data.add.rhs);
+//     spliced_root = splice(&sheet.ast_nodes, sheet.ast_nodes.get(spliced_root.n).data.add.rhs);
 
-    try t.expectApproxEqRel(
-        5.5,
-        (try eval(sheet.ast_nodes, spliced_root, sheet, "", Context{})).number,
-        0.0001,
-    );
-    try t.expectEqual(3, sheet.ast_nodes.len);
-}
+//     try t.expectApproxEqRel(
+//         5.5,
+//         (try eval(sheet.ast_nodes, spliced_root, sheet, "", Context{})).number,
+//         0.0001,
+//     );
+//     try t.expectEqual(3, sheet.ast_nodes.len);
+// }
 
 // test "StringEval" {
 //     const data = .{

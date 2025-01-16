@@ -13,6 +13,8 @@ token_tags: []const Token.Tag,
 token_starts: []const u32,
 tok_i: u32,
 
+strings_len: u32,
+
 src: [:0]const u8,
 
 nodes: NodeList,
@@ -80,6 +82,7 @@ pub fn init(
         .allocator = allocator,
         .token_tags = token_tags,
         .token_starts = token_starts,
+        .strings_len = 0,
         .tok_i = 0,
         .src = src,
     };
@@ -105,6 +108,9 @@ fn parseStringLiteral(parser: *Parser, comptime expected_tag: Token.Tag) ParseEr
     };
     const end = try parser.expectTokenGet(end_tag);
 
+    const len = end - start;
+    parser.strings_len += len;
+
     // TODO: Handle escapes of quotes
     return parser.addNode(
         .init(.string_literal, .{
@@ -116,11 +122,16 @@ fn parseStringLiteral(parser: *Parser, comptime expected_tag: Token.Tag) ParseEr
 
 /// Assignment <- CellReference '=' Expression
 fn parseAssignment(parser: *Parser) ParseError!Index {
-    const lhs = try parser.parseCellName();
-    try parser.expectToken(.equals_sign);
-    const rhs = try parser.parseExpression();
+    const start = try parser.expectTokenGet(.cell_name);
+    const raw = parser.src[start..parser.token_starts[parser.tok_i]];
+    const text = std.mem.trimRight(u8, raw, " \t\r\n");
 
-    return parser.addNode(.init(.assignment, .{ .lhs = lhs, .rhs = rhs }));
+    const pos = Position.fromAddress(text) catch return error.InvalidCellAddress;
+
+    try parser.expectToken(.equals_sign);
+    _ = try parser.parseExpression();
+
+    return parser.addNode(.init(.assignment, pos));
 }
 
 /// Expression <- AddExpr
@@ -358,23 +369,23 @@ test "parser" {
         }
     }.func;
 
-    try testParser("let a0 = 5", &.{ .pos, .number, .assignment });
-    try testParser("let a0 = 5.0 + +5.0", &.{ .pos, .number, .number, .add, .assignment });
-    try testParser("let a0 = 5.0 + -5.0", &.{ .pos, .number, .number, .add, .assignment });
-    try testParser("let a0 = 5.0 - +5.0", &.{ .pos, .number, .number, .sub, .assignment });
-    try testParser("let a0 = 5.0 - -5.0", &.{ .pos, .number, .number, .sub, .assignment });
-    try testParser("let b0 = 0.0 + 1.123", &.{ .pos, .number, .number, .add, .assignment });
-    try testParser("let xxx50000 = 000000 - 11111122222223333333444444", &.{ .pos, .number, .number, .sub, .assignment });
-    try testParser("let c30 = 123_123.231 * 2", &.{ .pos, .number, .number, .mul, .assignment });
-    try testParser("let crxp65535 = 123_123.321 / 123_123.321", &.{ .pos, .number, .number, .div, .assignment });
+    try testParser("let a0 = 5", &.{ .number, .assignment });
+    try testParser("let a0 = 5.0 + +5.0", &.{ .number, .number, .add, .assignment });
+    try testParser("let a0 = 5.0 + -5.0", &.{ .number, .number, .add, .assignment });
+    try testParser("let a0 = 5.0 - +5.0", &.{ .number, .number, .sub, .assignment });
+    try testParser("let a0 = 5.0 - -5.0", &.{ .number, .number, .sub, .assignment });
+    try testParser("let b0 = 0.0 + 1.123", &.{ .number, .number, .add, .assignment });
+    try testParser("let xxx50000 = 000000 - 11111122222223333333444444", &.{ .number, .number, .sub, .assignment });
+    try testParser("let c30 = 123_123.231 * 2", &.{ .number, .number, .mul, .assignment });
+    try testParser("let crxp65535 = 123_123.321 / 123_123.321", &.{ .number, .number, .div, .assignment });
 
-    try testParser("let a0 = 3 - 1 * 2", &.{ .pos, .number, .number, .number, .mul, .sub, .assignment });
-    try testParser("let a0 = 1 / 2 + 3", &.{ .pos, .number, .number, .div, .number, .add, .assignment });
-    try testParser("let a0 = 1 - (3 + 5)", &.{ .pos, .number, .number, .number, .add, .sub, .assignment });
-    try testParser("let a0 = (1 + 2) - (2 + 1)", &.{ .pos, .number, .number, .add, .number, .number, .add, .sub, .assignment });
-    try testParser("let a0 = 2 / (1 - (1 + 3))", &.{ .pos, .number, .number, .number, .number, .add, .sub, .div, .assignment });
+    try testParser("let a0 = 3 - 1 * 2", &.{ .number, .number, .number, .mul, .sub, .assignment });
+    try testParser("let a0 = 1 / 2 + 3", &.{ .number, .number, .div, .number, .add, .assignment });
+    try testParser("let a0 = 1 - (3 + 5)", &.{ .number, .number, .number, .add, .sub, .assignment });
+    try testParser("let a0 = (1 + 2) - (2 + 1)", &.{ .number, .number, .add, .number, .number, .add, .sub, .assignment });
+    try testParser("let a0 = 2 / (1 - (1 + 3))", &.{ .number, .number, .number, .number, .add, .sub, .div, .assignment });
 
-    try testParser("let a0 = 'this is epic' # ' and nice'", &.{ .pos, .string_literal, .string_literal, .concat, .assignment });
+    try testParser("let a0 = 'this is epic' # ' and nice'", &.{ .string_literal, .string_literal, .concat, .assignment });
 
     try testParseError("unga bunga", error.UnexpectedToken);
     try testParseError("let", error.UnexpectedToken);
@@ -461,23 +472,21 @@ test "Node contents" {
     try testNodes(
         "let b30 = 5 * (3 - 2) / (2 + 1)",
         &.{
-            .init(.pos, .{ .x = 1, .y = 30 }),
             .init(.number, 5.0),
             .init(.number, 3.0),
             .init(.number, 2.0),
-            .init(.sub, .{ .lhs = .from(2), .rhs = .from(3) }),
-            .init(.mul, .{ .lhs = .from(1), .rhs = .from(4) }),
+            .init(.sub, .{ .lhs = .from(1), .rhs = .from(2) }),
+            .init(.mul, .{ .lhs = .from(0), .rhs = .from(3) }),
             .init(.number, 2.0),
             .init(.number, 1.0),
-            .init(.add, .{ .lhs = .from(6), .rhs = .from(7) }),
-            .init(.div, .{ .lhs = .from(5), .rhs = .from(8) }),
-            .init(.assignment, .{ .lhs = .from(0), .rhs = .from(9) }),
+            .init(.add, .{ .lhs = .from(5), .rhs = .from(6) }),
+            .init(.div, .{ .lhs = .from(4), .rhs = .from(7) }),
+            .init(.assignment, .fromValidAddress("b30")),
         },
     );
     try testNodes(
         "let crxp65535 = 'this is epic' # 'nice'",
         &.{
-            .init(.pos, .{ .x = 65535, .y = 65535 }),
             .init(.string_literal, .{
                 .start = "let crxp65535 = '".len,
                 .end = "let crxp65535 = 'this is epic".len,
@@ -486,8 +495,8 @@ test "Node contents" {
                 .start = "let crxp65535 = 'this is epic' # '".len,
                 .end = "let crxp65535 = 'this is epic' # 'nice".len,
             }),
-            .init(.concat, .{ .lhs = .from(1), .rhs = .from(2) }),
-            .init(.assignment, .{ .lhs = .from(0), .rhs = .from(3) }),
+            .init(.concat, .{ .lhs = .from(0), .rhs = .from(1) }),
+            .init(.assignment, .fromValidAddress("crxp65535")),
         },
     );
 }
