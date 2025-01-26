@@ -49,6 +49,12 @@ pub fn FlatListPool(comptime T: type) type {
             pool.entries.deinit(allocator);
         }
 
+        pub fn clearRetainingCapacity(pool: *Pool) void {
+            pool.buf.clearRetainingCapacity();
+            pool.entries.clearRetainingCapacity();
+            pool.free_entries_head = .invalid;
+        }
+
         pub fn createList(pool: *Pool, allocator: Allocator) !List.Index {
             if (!pool.free_entries_head.isValid())
                 try pool.entries.ensureUnusedCapacity(allocator, 1);
@@ -67,11 +73,10 @@ pub fn FlatListPool(comptime T: type) type {
             const ret: List.Index = .from(@intCast(pool.entries.items.len));
             const list = &pool.entries.addOneAssumeCapacity().list;
             const offset = pool.buf.items.len;
-            pool.buf.expandToCapacity();
             list.* = .{
                 .offset = offset,
                 .len = 0,
-                .capacity = pool.buf.items.len - offset,
+                .capacity = 0,
             };
             return ret;
         }
@@ -123,23 +128,33 @@ pub fn FlatListPool(comptime T: type) type {
             list.len += slice.len;
         }
 
-        pub fn ensureUnusedCapacity(noalias pool: *Pool, allocator: Allocator, list_index: List.Index, n: usize) !void {
+        pub fn ensureUnusedListCapacity(pool: *Pool, allocator: Allocator, n: u32) !void {
+            // TODO: Keep a count of the number of entries in the free list
+            try pool.entries.ensureUnusedCapacity(allocator, n);
+        }
+
+        pub fn ensureUnusedCapacity(
+            noalias pool: *Pool,
+            allocator: Allocator,
+            list_index: List.Index,
+            n: usize,
+        ) !void {
             const list = &pool.entries.items[list_index.n].list;
             if (list.capacity - list.len < n) {
                 const new_capacity = growCapacity(list.capacity, list.len + n);
-                try pool.buf.ensureTotalCapacityPrecise(
+                try pool.buf.ensureTotalCapacity(
                     allocator,
-                    pool.buf.items.len + new_capacity,
+                    pool.buf.items.len * 2 + new_capacity,
                 );
 
                 const new_offset = pool.buf.items.len;
-                pool.buf.expandToCapacity();
+                pool.buf.items.len += new_capacity;
 
                 const new_slice = pool.buf.items[new_offset..][0..list.len];
                 @memcpy(new_slice, pool.items(list_index));
 
                 list.offset = new_offset;
-                list.capacity = @intCast(pool.buf.items.len - new_offset);
+                list.capacity = new_capacity;
             }
         }
 
@@ -158,7 +173,7 @@ pub fn FlatListPool(comptime T: type) type {
         fn growCapacity(current: usize, minimum: usize) usize {
             var new = current;
             while (true) {
-                new +|= new / 2 + 8;
+                new +|= new + 1;
                 if (new >= minimum)
                     return new;
             }

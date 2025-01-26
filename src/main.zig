@@ -90,6 +90,5 @@ pub fn log(
 test {
     if (comptime builtin.is_test) {
         std.testing.refAllDecls(ZC);
-        std.testing.refAllDecls(@import("tree.zig"));
     }
 }

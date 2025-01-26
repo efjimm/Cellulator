@@ -129,6 +129,37 @@ pub fn fromSource(sheet: *Sheet, source: [:0]const u8) ParseError!Index {
     return .from(@intCast(parser.nodes.len - 1));
 }
 
+const Token = Tokenizer.Token;
+pub fn fromSource2(
+    sheet: *Sheet,
+    source: [:0]const u8,
+    token_tags: []const Token.Tag,
+    token_starts: []const u32,
+) ParseError!struct {
+    /// Total byte length of all parsed string literals
+    u32,
+    u32,
+} {
+    var parser: Parser = .init(
+        sheet.allocator,
+        source,
+        token_tags,
+        token_starts,
+        .{ .nodes = sheet.ast_nodes.toMultiArrayList() },
+    );
+
+    const old_len = sheet.ast_nodes.len;
+
+    // The parser could re-allocate the underlying nodes
+    defer sheet.ast_nodes = parser.nodes.slice();
+    errdefer sheet.ast_nodes.len = old_len;
+
+    _ = try parser.parseStatement();
+    assert(token_tags[parser.tok_i] == .eof or token_tags[parser.tok_i] == .keyword_let);
+
+    return .{ parser.strings_len, parser.tok_i };
+}
+
 pub fn fromExpression(sheet: *Sheet, source: [:0]const u8) ParseError!Index {
     var tokens = try Tokenizer.collectTokens(sheet.allocator, source, @intCast(source.len / 2));
     defer tokens.deinit(sheet.allocator);
@@ -706,9 +737,15 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var total: f64 = 0;
-            var iter = try self.sheet.cell_tree.searchIterator(self.allocator, range);
-            while (try iter.next()) |kv| {
-                const res = try self.context.evalCellByHandle(kv.key);
+            var results: std.ArrayList(Sheet.CellTree.KV) = .init(self.allocator);
+            defer results.deinit();
+            try self.sheet.cell_tree.queryWindow(
+                &.{ range.tl.x, range.tl.y },
+                &.{ range.br.x, range.br.y },
+                &results,
+            );
+            for (results.items) |kv| {
+                const res = try self.context.evalCellByHandle(kv.value);
                 total += try res.toNumber(0);
             }
 
@@ -739,10 +776,16 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var total: f64 = 1;
-            var iter = try self.sheet.cell_tree.searchIterator(self.allocator, range);
+            var results: std.ArrayList(Sheet.CellTree.KV) = .init(self.allocator);
+            defer results.deinit();
+            try self.sheet.cell_tree.queryWindow(
+                &.{ range.tl.x, range.tl.y },
+                &.{ range.br.x, range.br.y },
+                &results,
+            );
 
-            while (try iter.next()) |kv| {
-                const res = try self.context.evalCellByHandle(kv.key);
+            for (results.items) |kv| {
+                const res = try self.context.evalCellByHandle(kv.value);
                 total *= try res.toNumber(1);
             }
 
@@ -807,9 +850,15 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var max: ?f64 = null;
-            var iter = try self.sheet.cell_tree.searchIterator(self.allocator, range);
-            while (try iter.next()) |kv| {
-                const res = try self.context.evalCellByHandle(kv.key);
+            var results: std.ArrayList(Sheet.CellTree.KV) = .init(self.allocator);
+            defer results.deinit();
+            try self.sheet.cell_tree.queryWindow(
+                &.{ range.tl.x, range.tl.y },
+                &.{ range.br.x, range.br.y },
+                &results,
+            );
+            for (results.items) |kv| {
+                const res = try self.context.evalCellByHandle(kv.value);
                 const n = try res.toNumberOrNull() orelse continue;
                 if (max == null or n > max.?) max = n;
             }
@@ -845,9 +894,15 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var min: ?f64 = null;
-            var iter = try self.sheet.cell_tree.searchIterator(self.allocator, range);
-            while (try iter.next()) |kv| {
-                const res = try self.context.evalCellByHandle(kv.key);
+            var results: std.ArrayList(Sheet.CellTree.KV) = .init(self.allocator);
+            defer results.deinit();
+            try self.sheet.cell_tree.queryWindow(
+                &.{ range.tl.x, range.tl.y },
+                &.{ range.br.x, range.br.y },
+                &results,
+            );
+            for (results.items) |kv| {
+                const res = try self.context.evalCellByHandle(kv.value);
                 const n = try res.toNumberOrNull() orelse continue;
                 if (min == null or n < min.?) min = n;
             }

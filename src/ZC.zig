@@ -2153,6 +2153,7 @@ const test_files = build.test_files;
 
 test "Sheet operations" {
     for (test_files) |path| {
+        std.debug.print("Testing file {s}\n", .{path});
         testFile(path) catch |err| {
             std.debug.print("Test file {s} failed\n", .{path});
             return err;

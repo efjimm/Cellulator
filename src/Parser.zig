@@ -13,6 +13,7 @@ token_tags: []const Token.Tag,
 token_starts: []const u32,
 tok_i: u32,
 
+/// Total byte length of all parsed string literals.
 strings_len: u32,
 
 src: [:0]const u8,
@@ -94,7 +95,7 @@ pub fn parse(parser: *Parser) ParseError!void {
 }
 
 /// Statement <- 'let' Assignment
-fn parseStatement(parser: *Parser) ParseError!Index {
+pub fn parseStatement(parser: *Parser) ParseError!Index {
     try parser.expectToken(.keyword_let);
     return parser.parseAssignment();
 }
@@ -121,7 +122,7 @@ fn parseStringLiteral(parser: *Parser, comptime expected_tag: Token.Tag) ParseEr
 }
 
 /// Assignment <- CellReference '=' Expression
-fn parseAssignment(parser: *Parser) ParseError!Index {
+pub fn parseAssignment(parser: *Parser) ParseError!Index {
     const start = try parser.expectTokenGet(.cell_name);
     const raw = parser.src[start..parser.token_starts[parser.tok_i]];
     const text = std.mem.trimRight(u8, raw, " \t\r\n");
@@ -274,7 +275,10 @@ fn parseNumber(parser: *Parser) !Index {
 
     // Correctness of the number is guaranteed because the tokenizer wouldn't have generated a
     // number token on invalid format.
-    const num = std.fmt.parseFloat(f64, text) catch unreachable;
+    const num = std.fmt.parseFloat(f64, text) catch {
+        std.debug.print("'{s}' ({x})\n", .{ text, text });
+        unreachable;
+    };
 
     return parser.addNode(.init(.number, if (is_positive) num else -num));
 }

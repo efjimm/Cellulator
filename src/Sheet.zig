@@ -13,9 +13,8 @@ const PosInt = Position.Int;
 const Rect = Position.Rect;
 
 const ast = @import("ast.zig");
-const RTree = @import("tree.zig").RTree;
-const DependentTree = @import("tree.zig").DependentTree;
 const FlatListPool = @import("flat_list_pool.zig").FlatListPool;
+const PhTree = @import("phtree.zig").PhTree;
 
 const Sheet = @This();
 
@@ -33,12 +32,14 @@ strings_buf: std.ArrayListUnmanaged(u8),
 /// Range tree mapping ranges to a list of ranges that depend on the first.
 /// Used to query whether a cell belongs to a range and then update the cells
 /// that depend on that range.
-dependents: DependentTree(4),
+dependents: Dependents,
+dependent_list: FlatListPool(CellHandle),
 
 /// Range tree containing just the positions of extant cells.
 /// Used for quick lookup of all extant cells in a range.
 cell_tree: CellTree,
 
+// TODO: Remove this field and just store cells directly in `cell_tree`.
 /// Treap containing cell information. Used for fast lookups of cell references.
 cell_treap: CellTreap,
 
@@ -51,11 +52,12 @@ cols: ColumnAxis,
 undos: UndoList,
 redos: UndoList,
 
-search_buffer: std.ArrayListUnmanaged(DependentTree(4).ListIndex),
+search_buffer: std.ArrayListUnmanaged(Dependents.KV),
 
 filepath: std.BoundedArray(u8, std.fs.max_path_bytes),
 
-pub const CellTree = RTree(CellHandle, void, 4, rectFromCellHandle, eqlCellHandles);
+pub const Dependents = PhTree(FlatListPool(CellHandle).List.Index, 4);
+pub const CellTree = @import("phtree.zig").PhTree(CellHandle, 2);
 pub const CellTreap = @import("treap.zig").Treap(Cell, Cell.compare);
 pub const CellHandle = CellTreap.Handle;
 pub const ColumnAxis = @import("treap.zig").Treap(Column, Column.compare);
@@ -103,8 +105,9 @@ pub fn create(allocator: Allocator) !*Sheet {
         .undos = .empty,
         .redos = .empty,
 
-        .cell_tree = .init(sheet),
-        .dependents = .init(sheet),
+        .cell_tree = undefined,
+        .dependents = undefined,
+        .dependent_list = .empty,
         .cell_treap = .init(1_000_000),
         .ast_nodes = .empty,
         .string_values = .empty,
@@ -116,6 +119,10 @@ pub fn create(allocator: Allocator) !*Sheet {
         .filepath = .{},
     };
     assert(sheet.cols.nodes.items.len == 0);
+    sheet.cell_tree = try .init(allocator);
+    errdefer sheet.cell_tree.deinit(allocator);
+    sheet.dependents = try .init(allocator);
+    errdefer sheet.dependents.deinit(allocator);
 
     try sheet.undos.ensureTotalCapacity(allocator, 1);
     errdefer sheet.undos.deinit(allocator);
@@ -138,8 +145,9 @@ pub fn createNoAlloc(allocator: Allocator) !*Sheet {
         .undos = .empty,
         .redos = .empty,
 
-        .cell_tree = .init(sheet),
-        .dependents = .init(sheet),
+        .cell_tree = undefined,
+        .dependents = undefined,
+        .dependent_list = .empty,
         .cell_treap = .init(1_000_000),
         .ast_nodes = .empty,
         .string_values = .empty,
@@ -150,6 +158,10 @@ pub fn createNoAlloc(allocator: Allocator) !*Sheet {
 
         .filepath = .{},
     };
+    sheet.cell_tree = try .init(allocator);
+    errdefer sheet.cell_tree.deinit(allocator);
+    sheet.dependents = try .init(allocator);
+    errdefer sheet.dependents.deinit(allocator);
 
     return sheet;
 }
@@ -161,6 +173,7 @@ pub fn destroy(sheet: *Sheet) void {
     sheet.clearUndos(.undo);
     sheet.clearUndos(.redo);
     sheet.dependents.deinit(sheet.allocator);
+    sheet.dependent_list.deinit(sheet.allocator);
     sheet.cell_tree.deinit(sheet.allocator);
 
     sheet.queued_cells.deinit(sheet.allocator);
@@ -234,7 +247,8 @@ const SerializeHeader = extern struct {
 
     strings_buf_len: u32,
 
-    dependents: DependentTree(4).Header,
+    dependents: Dependents.Header,
+    dependent_list: FlatListPool(CellHandle).Header,
     cell_tree: CellTree.Header,
 
     cell_treap: CellTreap.Header,
@@ -249,7 +263,7 @@ const SerializeHeader = extern struct {
     redos_len: u32,
 
     const magic_number: u32 = @bitCast([4]u8{ 'Z', 'C', 'Z', 'C' });
-    const binary_version = 3;
+    const binary_version = 4;
 };
 
 pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
@@ -258,10 +272,13 @@ pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
     sheet.undos.shrinkAndFree(sheet.allocator, sheet.undos.len);
     sheet.redos.shrinkAndFree(sheet.allocator, sheet.redos.len);
     utils.shrinkMultiArrayListSlice(sheet.allocator, &sheet.ast_nodes);
+    utils.shrinkMultiArrayListSlice(sheet.allocator, &sheet.dependents.entries);
+    utils.shrinkMultiArrayListSlice(sheet.allocator, &sheet.cell_tree.entries);
 
     const header: SerializeHeader = .{
         .strings_buf_len = @intCast(sheet.strings_buf.items.len),
         .dependents = sheet.dependents.getHeader(),
+        .dependent_list = sheet.dependent_list.getHeader(),
         .cell_tree = sheet.cell_tree.getHeader(),
         .cell_treap = sheet.cell_treap.getHeader(),
         .ast_nodes_len = @intCast(sheet.ast_nodes.len),
@@ -274,7 +291,8 @@ pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
     var iovecs = .{
         utils.ptrToIoVec(&header),
         utils.arrayListIoVec(&sheet.strings_buf),
-    } ++ sheet.dependents.iovecs() ++ .{
+        sheet.dependents.iovecs(),
+    } ++ sheet.dependent_list.iovecs() ++ .{
         sheet.cell_tree.iovecs(),
         sheet.cell_treap.iovecs(),
         utils.multiArrayListSliceIoVec(&sheet.ast_nodes),
@@ -298,8 +316,9 @@ pub fn deserialize(allocator: Allocator, file: std.fs.File) !*Sheet {
 
     var iovecs = [_]std.posix.iovec{
         try utils.prepArrayList(&sheet.strings_buf, allocator, header.strings_buf_len),
-    } ++ try sheet.dependents.fromHeader(allocator, header.dependents, sheet) ++ .{
-        try sheet.cell_tree.fromHeader(allocator, header.cell_tree, sheet),
+        try sheet.dependents.fromHeader(allocator, header.dependents),
+    } ++ try sheet.dependent_list.fromHeader(allocator, header.dependent_list) ++ .{
+        try sheet.cell_tree.fromHeader(allocator, header.cell_tree),
         try sheet.cell_treap.fromHeader(allocator, header.cell_treap, 1_000_000),
         try utils.prepMultiArrayListSlice(&sheet.ast_nodes, allocator, header.ast_nodes_len),
     } ++ try sheet.string_values.fromHeader(sheet.allocator, header.string_values) ++ .{
@@ -325,11 +344,12 @@ pub fn clearRetainingCapacity(sheet: *Sheet) void {
 
     sheet.queued_cells.clearRetainingCapacity();
 
-    sheet.cell_tree.deinit(sheet.allocator);
-    sheet.cell_tree = .init(sheet);
+    sheet.cell_tree.clearRetainingCapacity();
 
-    sheet.dependents.deinit(sheet.allocator);
-    sheet.dependents = .init(sheet);
+    sheet.dependents.clearRetainingCapacity();
+    sheet.dependent_list.clearRetainingCapacity();
+    sheet.string_values.clearRetainingCapacity();
+    sheet.ast_nodes.len = 0;
 
     sheet.undos.len = 0;
     sheet.redos.len = 0;
@@ -338,71 +358,177 @@ pub fn clearRetainingCapacity(sheet: *Sheet) void {
     sheet.cols.nodes.clearRetainingCapacity();
 }
 
+const Tokenizer = @import("Tokenizer.zig");
+
+const Assignment = struct {
+    root: ast.Index,
+    pos: Position,
+    strings: StringIndex,
+};
+
+/// Parses many cell assignments in bulk, appending their AST nodes to `Sheet.ast_nodes`.
+/// Returns the total byte length of all parsed string literals
+pub fn bulkParse(
+    sheet: *Sheet,
+    src: [:0]const u8,
+    tokens_allocator: std.mem.Allocator,
+    tokens: *std.MultiArrayList(Tokenizer.Token),
+    cells_allocator: std.mem.Allocator,
+    cells: *std.MultiArrayList(Assignment),
+) !u32 {
+    const line_count = blk: {
+        var line_count: u32 = 0;
+        for (src) |c| {
+            if (c == '\n') line_count += 1;
+        }
+        break :blk line_count;
+    };
+
+    {
+        var m = sheet.ast_nodes.toMultiArrayList();
+        defer sheet.ast_nodes = m.slice();
+
+        try m.ensureUnusedCapacity(sheet.allocator, line_count * 2);
+    }
+
+    try cells.ensureTotalCapacity(cells_allocator, line_count);
+    try tokens.ensureTotalCapacity(tokens_allocator, src.len / 2);
+
+    // Parse each line
+    var total_strings_len: u32 = 0;
+    var lines = std.mem.tokenizeScalar(u8, src, '\n');
+
+    tokens.clearRetainingCapacity();
+    var t: Tokenizer = .init(src);
+    while (true) {
+        const token = t.next();
+        try tokens.append(tokens_allocator, token);
+        if (token.tag == .eof) break;
+    }
+
+    const token_tags = tokens.items(.tag);
+    const token_starts = tokens.items(.start);
+
+    var cells_slice = cells.slice();
+    defer cells.* = cells_slice.toMultiArrayList();
+
+    var token_index: u32 = 0;
+    while (lines.next()) |_| {
+        const strings_len, const token_sub_index = ast.fromSource2(
+            sheet,
+            src,
+            token_tags[token_index..],
+            token_starts[token_index..],
+        ) catch |err| switch (err) {
+            error.UnexpectedToken, error.InvalidCellAddress => continue,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        token_index += token_sub_index;
+        assert(token_tags[token_index] == .eof or token_tags[token_index] == .keyword_let);
+        const expr_root: ast.Index = .from(@intCast(sheet.ast_nodes.len - 1));
+
+        total_strings_len += strings_len + 1;
+
+        const data = sheet.ast_nodes.items(.data);
+        const pos = data[expr_root.n].assignment;
+        sheet.ast_nodes.len -= 1;
+        const spliced_root: ast.Index = .from(expr_root.n - 1);
+
+        const index = cells_slice.len;
+        cells_slice.len += 1;
+        cells_slice.items(.root)[index] = spliced_root;
+        cells_slice.items(.pos)[index] = pos;
+    }
+
+    return total_strings_len;
+}
+
 pub fn interpretFile(sheet: *Sheet, reader: std.io.AnyReader) !void {
+    assert(sheet.dependent_list.entries.items.len == 0);
+    errdefer sheet.clearRetainingCapacity();
     defer sheet.endUndoGroup();
 
     var buf: std.ArrayList(u8) = .init(sheet.allocator);
     defer buf.deinit();
 
-    var asts: std.ArrayList(struct {
-        root: ast.Index,
-        source: []const u8,
-        pos: Position,
-    }) = .init(sheet.allocator);
-    defer asts.deinit();
+    var cells: std.MultiArrayList(Assignment) = .empty;
+    defer cells.deinit(sheet.allocator);
+
+    var tokens: std.MultiArrayList(Tokenizer.Token) = .empty;
+    defer tokens.deinit(sheet.allocator);
 
     const max_size = comptime std.math.pow(usize, 2, 20) * 100;
 
     while (true) {
-        asts.clearRetainingCapacity();
+        cells.clearRetainingCapacity();
         reader.readAllArrayList(&buf, max_size) catch |err| switch (err) {
             error.StreamTooLong => {},
             else => |e| return e,
         };
 
         if (buf.items.len == 0) break;
+        try buf.append(0);
+        const src: [:0]const u8 = @ptrCast(buf.items[0 .. buf.items.len - 1]);
 
-        var lines = std.mem.tokenizeScalar(u8, buf.items, '\n');
-        while (lines.next()) |line| {
-            const mutable_line = @constCast(line);
-            mutable_line.ptr[line.len] = 0;
-            defer mutable_line.ptr[line.len] = '\n';
+        const total_strings_len = try sheet.bulkParse(
+            src,
+            sheet.allocator,
+            &tokens,
+            sheet.allocator,
+            &cells,
+        );
 
-            const null_terminated_line = mutable_line.ptr[0..mutable_line.len :0];
-            const expr_root = ast.fromSource(
-                sheet,
-                null_terminated_line,
-            ) catch |err| switch (err) {
-                error.UnexpectedToken,
-                error.InvalidCellAddress,
-                => continue,
-                error.OutOfMemory => return error.OutOfMemory,
-            };
+        const dependent_count = blk: {
+            var dependent_count: u32 = 0;
+            for (sheet.ast_nodes.items(.tag)) |tag| {
+                if (tag == .pos) dependent_count += 1;
+            }
+            break :blk dependent_count;
+        };
 
-            const data = sheet.ast_nodes.items(.data);
-            const pos = data[expr_root.n].assignment;
+        try sheet.cell_treap.nodes.ensureUnusedCapacity(sheet.allocator, cells.len);
+        try sheet.cell_tree.ensureUnusedCapacity(sheet.allocator, @intCast(cells.len));
+        try sheet.dependent_list.buf.ensureUnusedCapacity(sheet.allocator, dependent_count);
+        try sheet.dependent_list.entries.ensureUnusedCapacity(sheet.allocator, dependent_count);
+        try sheet.undos.ensureUnusedCapacity(sheet.allocator, cells.len);
 
-            sheet.ast_nodes.len -= 1;
-            const spliced_root: ast.Index = .from(expr_root.n - 1);
+        try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, total_strings_len);
+        try sheet.cols.nodes.ensureUnusedCapacity(sheet.allocator, cells.len);
+        try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, cells.len);
 
-            try asts.append(.{
-                .root = spliced_root,
-                .source = null_terminated_line,
-                .pos = pos,
-            });
+        const cells_slice = cells.slice();
+
+        var start: u32 = 0;
+        for (cells_slice.items(.root), cells_slice.items(.strings)) |root, *string_index| {
+            string_index.* = sheet.dupeAstStrings2(src, .from(start), root);
+            start = root.n + 1;
         }
 
-        try sheet.cell_treap.nodes.ensureUnusedCapacity(sheet.allocator, asts.items.len);
-        // try sheet.anchorAstPos(asts_start, @intCast(sheet.ast_nodes.len));
-
-        for (asts.items) |ast_info| {
-            const expr_root = ast_info.root;
-            const source = ast_info.source;
-            const pos = ast_info.pos;
-            try sheet.setCell2(pos, source, expr_root, .{});
+        for (cells_slice.items(.pos)) |pos| {
+            sheet.undos.appendAssumeCapacity(.init(.delete_cell, pos));
         }
 
-        if (buf.items.len == max_size) {
+        const start_node_index = sheet.cell_treap.nodes.items.len;
+        sheet.queued_cells.items.len += cells.len;
+        sheet.cell_treap.nodes.items.len += cells.len;
+
+        for (sheet.queued_cells.items[start_node_index..], start_node_index..) |*queued, i| {
+            queued.* = .from(@intCast(i));
+        }
+
+        sheet.has_changes = true;
+
+        for (
+            cells_slice.items(.root),
+            cells_slice.items(.pos),
+            cells_slice.items(.strings),
+            start_node_index..,
+        ) |root, pos, strings, i| {
+            const handle: CellHandle = .from(@intCast(i));
+            try sheet.setCell2(pos, handle, root, strings);
+        }
+
+        if (src.len == max_size) {
             const index = 1 + (std.mem.lastIndexOfScalar(u8, buf.items, '\n') orelse break);
             std.mem.copyForwards(u8, buf.items, buf.items[index..]);
             buf.items.len = buf.items.len - index;
@@ -430,6 +556,7 @@ pub fn loadFile(sheet: *Sheet, filepath: []const u8) !void {
     const reader = buf.reader();
     log.debug("Loading file {s}", .{filepath});
 
+    sheet.clearRetainingCapacity();
     try sheet.interpretFile(reader.any());
 }
 
@@ -509,6 +636,7 @@ const ExprRangeIterator = struct {
     }
 };
 
+// TODO: Make these functions atomic
 /// Adds `dependent_range` as a dependent of all cells in `range`.
 fn addRangeDependents(
     sheet: *Sheet,
@@ -519,7 +647,17 @@ fn addRangeDependents(
         sheet.rectFromCellHandle(dependent).tl,
         range,
     });
-    return sheet.dependents.put(range, dependent);
+
+    const p: Dependents.Point = .{
+        range.tl.x, range.tl.y,
+        range.br.x, range.br.y,
+    };
+    try sheet.dependent_list.ensureUnusedListCapacity(sheet.allocator, 1);
+    const found_existing, const value_ptr, _ = try sheet.dependents.getOrPut(sheet.allocator, &p);
+    if (!found_existing) {
+        value_ptr.* = sheet.dependent_list.createListAssumeCapacity();
+    }
+    try sheet.dependent_list.append(sheet.allocator, value_ptr.*, dependent);
 }
 
 fn addExpressionDependents(
@@ -543,7 +681,23 @@ fn removeRangeDependents(
         sheet.rectFromCellHandle(dependent),
         range,
     });
-    return sheet.dependents.removeValue(range, dependent);
+    const p: Dependents.Point = .{
+        range.tl.x, range.tl.y,
+        range.br.x, range.br.y,
+    };
+    const list_index = (sheet.dependents.find(&p) orelse return).*;
+
+    for (sheet.dependent_list.items(list_index), 0..) |item, i| {
+        if (item == dependent) {
+            sheet.dependent_list.swapRemove(list_index, i);
+            break;
+        }
+    }
+
+    if (sheet.dependent_list.len(list_index) == 0) {
+        sheet.dependent_list.destroyList(list_index);
+        _ = sheet.dependents.remove(&p);
+    }
 }
 
 /// Removes `cell` as a dependent of all ranges referenced by `expr`.
@@ -559,15 +713,14 @@ fn removeExprDependents(
 }
 
 pub fn firstCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
-    var iter = try sheet.cell_tree.searchIterator(sheet.allocator, .{
-        .tl = .{ .x = 0, .y = row },
-        .br = .{ .x = std.math.maxInt(PosInt), .y = row },
-    });
-    defer iter.deinit();
+    var results: std.ArrayList(CellTree.KV) = .init(sheet.allocator);
+    defer results.deinit();
+
+    try sheet.cell_tree.queryWindow(&.{ 0, row }, &.{ std.math.maxInt(u32), row }, &results);
 
     var min: ?PosInt = null;
-    while (try iter.next()) |kv| {
-        const cell = sheet.getCellFromHandle(kv.key);
+    for (results.items) |kv| {
+        const cell = sheet.getCellFromHandle(kv.value);
         const x = cell.col;
         if (min == null or x < min.?) min = x;
     }
@@ -576,15 +729,14 @@ pub fn firstCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
 }
 
 pub fn lastCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
-    var iter = try sheet.cell_tree.searchIterator(sheet.allocator, .{
-        .tl = .{ .x = 0, .y = row },
-        .br = .{ .x = std.math.maxInt(PosInt), .y = row },
-    });
-    defer iter.deinit();
+    var results: std.ArrayList(CellTree.KV) = .init(sheet.allocator);
+    defer results.deinit();
+
+    try sheet.cell_tree.queryWindow(&.{ 0, row }, &.{ std.math.maxInt(u32), row }, &results);
 
     var max: ?PosInt = null;
-    while (try iter.next()) |kv| {
-        const cell = sheet.getCellFromHandle(kv.key);
+    for (results.items) |kv| {
+        const cell = sheet.getCellFromHandle(kv.value);
         const x = cell.col;
         if (max == null or x > max.?) max = x;
     }
@@ -595,15 +747,14 @@ pub fn lastCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
 // TODO: Optimize these
 
 pub fn firstCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
-    var iter = try sheet.cell_tree.searchIterator(sheet.allocator, .{
-        .tl = .{ .x = col, .y = 0 },
-        .br = .{ .x = col, .y = std.math.maxInt(PosInt) },
-    });
-    defer iter.deinit();
+    var results: std.ArrayList(CellTree.KV) = .init(sheet.allocator);
+    defer results.deinit();
+
+    try sheet.cell_tree.queryWindow(&.{ col, 0 }, &.{ col, std.math.maxInt(u32) }, &results);
 
     var min: ?PosInt = null;
-    while (try iter.next()) |kv| {
-        const cell = sheet.getCellFromHandle(kv.key);
+    for (results.items) |kv| {
+        const cell = sheet.getCellFromHandle(kv.value);
         const y = cell.row;
         if (min == null or y < min.?) min = y;
     }
@@ -612,15 +763,14 @@ pub fn firstCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
 }
 
 pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
-    var iter = try sheet.cell_tree.searchIterator(sheet.allocator, .{
-        .tl = .{ .x = col, .y = 0 },
-        .br = .{ .x = col, .y = std.math.maxInt(PosInt) },
-    });
-    defer iter.deinit();
+    var results: std.ArrayList(CellTree.KV) = .init(sheet.allocator);
+    defer results.deinit();
+
+    try sheet.cell_tree.queryWindow(&.{ col, 0 }, &.{ col, std.math.maxInt(u32) }, &results);
 
     var max: ?PosInt = null;
-    while (try iter.next()) |kv| {
-        const cell = sheet.getCellFromHandle(kv.key);
+    for (results.items) |kv| {
+        const cell = sheet.getCellFromHandle(kv.value);
         const y = cell.row;
         if (max == null or y > max.?) max = y;
     }
@@ -628,80 +778,62 @@ pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
     return if (max) |y| .{ .x = col, .y = y } else null;
 }
 
-// These functions essentially do a binary search over a range using the cell range tree. It divides
-// the range in two, checking if first half has a cell using the range tree. If it does, we divide
-// the first side in two, and so on, until the range is one cell wide.
-
-/// Given a range, find the first row that contains a cell
-fn findExtantRow(sheet: *Sheet, rect: Rect, p: enum { first, last }) !?PosInt {
+/// Given a range, find the first or last row that contains a cell
+fn findExtantRow(sheet: *Sheet, r: Rect, comptime p: enum { first, last }) !?PosInt {
     var sfa = std.heap.stackFallback(1024, sheet.allocator);
     const allocator = sfa.get();
 
-    var r = rect;
-    var iter = try sheet.cell_tree.searchIterator(allocator, r);
-    defer iter.deinit();
+    var results: std.ArrayList(CellTree.KV) = .init(allocator);
+    defer results.deinit();
 
-    if (try iter.next() == null) return null; // Range does not contain any cells
+    try sheet.cell_tree.queryWindow(&.{ r.tl.x, r.tl.y }, &.{ r.br.x, r.br.y }, &results);
 
-    return while (true) {
-        const height = r.br.y - r.tl.y;
-        if (height == 0) break r.br.y;
+    if (results.items.len == 0) return null; // Range does not contain any cells
 
-        const left_height = height / 2;
-        const left: Rect = .{
-            .tl = r.tl,
-            .br = .{ .x = r.br.x, .y = r.tl.y + left_height },
-        };
-
-        const right: Rect = .{
-            .tl = .{ .x = r.tl.x, .y = r.tl.y + left_height + 1 },
-            .br = r.br,
-        };
-
-        const first, const last = switch (p) {
-            .first => .{ left, right },
-            .last => .{ right, left },
-        };
-
-        try iter.reset(first, &sheet.cell_tree);
-        r = if (try iter.next() != null) first else last;
-    } else unreachable;
+    // TODO: Optimize this function
+    var index: usize = 0;
+    for (results.items[1..], 1..) |kv, i| {
+        switch (p) {
+            .first => {
+                if (kv.key[1] < results.items[index].key[1])
+                    index = i;
+            },
+            .last => {
+                if (kv.key[1] > results.items[index].key[1])
+                    index = i;
+            },
+        }
+    }
+    return results.items[index].key[1];
 }
 
-/// Given a range, find the first column that contains a cell
-fn findExtantCol(sheet: *Sheet, range: Rect, p: enum { first, last }) !?PosInt {
+/// Given a range, find the first or last column that contains a cell
+fn findExtantCol(sheet: *Sheet, r: Rect, comptime p: enum { first, last }) !?PosInt {
     var sfa = std.heap.stackFallback(1024, sheet.allocator);
     const allocator = sfa.get();
 
-    var r = range;
-    var iter = try sheet.cell_tree.searchIterator(allocator, r);
-    defer iter.deinit();
+    var results: std.ArrayList(CellTree.KV) = .init(allocator);
+    defer results.deinit();
 
-    if (try iter.next() == null) return null; // Range does not contain any cells
+    try sheet.cell_tree.queryWindow(&.{ r.tl.x, r.tl.y }, &.{ r.br.x, r.br.y }, &results);
 
-    return while (true) {
-        const width = r.br.x - r.tl.x;
-        if (width == 0) break r.br.x;
+    if (results.items.len == 0) return null; // Range does not contain any cells
 
-        const left_width = width / 2;
-        const left: Rect = .{
-            .tl = r.tl,
-            .br = .{ .x = r.tl.x + left_width, .y = r.br.y },
-        };
-
-        const right: Rect = .{
-            .tl = .{ .x = r.tl.x + left_width + 1, .y = r.tl.y },
-            .br = r.br,
-        };
-
-        const first, const last = switch (p) {
-            .first => .{ left, right },
-            .last => .{ right, left },
-        };
-
-        try iter.reset(first, &sheet.cell_tree);
-        r = if (try iter.next() != null) first else last;
-    } else unreachable;
+    // TODO: Optimize this function
+    var index: usize = 0;
+    for (results.items[1..], 1..) |kv, i| {
+        switch (p) {
+            .first => {
+                if (kv.key[0] < results.items[index].key[0])
+                    index = i;
+            },
+            .last => {
+                if (kv.key[0] > results.items[index].key[0])
+                    index = i;
+            },
+        }
+    }
+    return results.items[index].key[0];
 }
 
 pub fn nextPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
@@ -825,6 +957,20 @@ pub fn pushUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
     const undo_type = opts.undo_type orelse return;
 
     try sheet.ensureUndoCapacity(undo_type, 1);
+    switch (undo_type) {
+        .undo => {
+            sheet.undos.appendAssumeCapacity(u);
+            if (opts.clear_redos) sheet.clearUndos(.redo);
+        },
+        .redo => {
+            sheet.redos.appendAssumeCapacity(u);
+        },
+    }
+}
+
+pub fn pushUndoAssumeCapacity(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
+    const undo_type = opts.undo_type.?;
+    assert(sheet.undos.capacity > sheet.undos.len);
     switch (undo_type) {
         .undo => {
             sheet.undos.appendAssumeCapacity(u);
@@ -1044,6 +1190,35 @@ fn dupeAstStrings(
     return ret;
 }
 
+fn dupeAstStrings2(
+    noalias sheet: *Sheet,
+    source: []const u8,
+    start: ast.Index,
+    root_node: ast.Index,
+) StringIndex {
+    assert(root_node.n < sheet.ast_nodes.len);
+    assert(start.n <= root_node.n);
+
+    const tags = sheet.ast_nodes.items(.tag)[start.n .. root_node.n + 1];
+    const data = sheet.ast_nodes.items(.data)[start.n .. root_node.n + 1];
+
+    const ret: StringIndex = .from(@intCast(sheet.strings_buf.items.len));
+
+    // Append contents of all string literals to the list, and update their `start` and `end`
+    // indices to be into this list.
+    for (tags, 0..) |tag, i| {
+        if (tag == .string_literal) {
+            const str = &data[i].string_literal;
+            const bytes = source[str.start..str.end];
+            str.start = @intCast(sheet.strings_buf.items.len);
+            str.end = @intCast(str.start + bytes.len);
+            sheet.strings_buf.appendSliceAssumeCapacity(bytes);
+        }
+    }
+    sheet.strings_buf.appendAssumeCapacity(0);
+    return ret;
+}
+
 /// Creates the cell at `pos` using the given expression, duplicating its string literals.
 pub fn setCell(
     sheet: *Sheet,
@@ -1071,30 +1246,58 @@ pub fn setCell(
     return sheet.insertCellNode(new_node, undo_opts);
 }
 
-/// Creates the cell at `pos` using the given expression, duplicating its string literals.
 pub fn setCell2(
     sheet: *Sheet,
     pos: Position,
-    source: []const u8,
-    expr_root: ast.Index,
-    undo_opts: UndoOpts,
+    handle: CellHandle,
+    root: ast.Index,
+    strings: StringIndex,
 ) Allocator.Error!void {
-    _ = try sheet.createColumn(pos.x);
-    try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, source.len + 1);
+    _ = sheet.createColumnAssumeCapacity(pos.x);
 
-    const new_node = sheet.cell_treap.createNodeAssumeCapacity();
-    errdefer sheet.cell_treap.nodes.items.len -= 1;
+    const new_node = sheet.cell_treap.node(handle);
+    sheet.cell_treap.node(handle).key = .{
+        .row = pos.y,
+        .col = pos.x,
+        .expr_root = root,
+        .strings = strings,
+        .state = .enqueued,
+    };
 
-    const strings = sheet.dupeAstStrings(source, sheet.ast_nodes, expr_root);
-    errdefer sheet.strings_buf.items.len = strings.n;
+    var entry = sheet.cell_treap.getEntryFor(new_node.key);
+    assert(!entry.node.isValid());
+    entry.set(handle);
 
-    sheet.cell_treap.node(new_node).key = .{
+    try sheet.addExpressionDependents(handle, root);
+    _ = sheet.cell_tree.insertAssumeCapacity(&.{ pos.x, pos.y }, handle);
+}
+
+pub fn setCellNoClobberAssumeCapacity(
+    sheet: *Sheet,
+    pos: Position,
+    expr_root: ast.Index,
+    strings: StringIndex,
+) void {
+    _ = sheet.createColumnAssumeCapacity(pos.x);
+
+    const handle = sheet.cell_treap.createNodeAssumeCapacity();
+    const new_node = sheet.cell_treap.node(handle);
+    sheet.cell_treap.node(handle).key = .{
         .row = pos.y,
         .col = pos.x,
         .expr_root = expr_root,
         .strings = strings,
+        .state = .enqueued,
     };
-    return sheet.insertCellNode(new_node, undo_opts);
+
+    var entry = sheet.cell_treap.getEntryFor(new_node.key);
+    assert(!entry.node.isValid());
+    entry.set(handle);
+
+    sheet.addExpressionDependents(handle, expr_root) catch unreachable;
+    _ = sheet.cell_tree.insertAssumeCapacity(&.{ pos.x, pos.y }, handle);
+
+    sheet.queued_cells.appendAssumeCapacity(handle);
 }
 
 // TODO: This function *really, really* sucks. Clean it up.
@@ -1113,7 +1316,7 @@ pub fn insertCellNode(
     }
 
     try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, 1);
-    try sheet.cell_tree.ensureUnusedCapacity(1);
+    try sheet.cell_tree.ensureUnusedCapacity(sheet.allocator, 1);
 
     var entry = sheet.cell_treap.getEntryFor(new_node.key);
     const existing_handle = entry.node.get() orelse {
@@ -1121,7 +1324,7 @@ pub fn insertCellNode(
         try sheet.addExpressionDependents(handle, new_node.key.expr_root);
         errdefer comptime unreachable;
 
-        sheet.cell_tree.putContextAssumeCapacity(handle, {}, {});
+        _ = sheet.cell_tree.insertAssumeCapacity(&.{ cell_ptr.col, cell_ptr.row }, handle);
 
         const u: Undo = .init(.delete_cell, pos);
 
@@ -1142,7 +1345,7 @@ pub fn insertCellNode(
     try sheet.addExpressionDependents(handle, cell_ptr.expr_root);
     errdefer comptime unreachable;
 
-    sheet.cell_tree.putContextAssumeCapacity(handle, {}, {});
+    _ = sheet.cell_tree.insertAssumeCapacity(&.{ cell_ptr.col, cell_ptr.row }, handle);
 
     const old_strings = entry.key.strings;
 
@@ -1163,29 +1366,27 @@ pub fn insertCellNode(
     sheet.has_changes = true;
 }
 
-pub fn deleteCellByPtr(
+pub fn deleteCellByHandle(
     sheet: *Sheet,
-    cell: *Cell,
+    handle: CellHandle,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
-    const node = cell.node();
-    const handle = sheet.cell_treap.handleFromNode(node);
+    const node = sheet.cell_treap.node(handle);
 
     if (undo_opts.undo_type) |undo_type| {
         try sheet.ensureUndoCapacity(undo_type, 1);
     }
     try sheet.enqueueUpdate(handle);
-    try sheet.removeExprDependents(handle, cell.expr_root);
+    try sheet.removeExprDependents(handle, node.key.expr_root);
 
-    // TODO: If this allocation fails we are left with an inconsistent state.
-    //        This is actually a pain in the ass to fix...
-    //        Maybe an RTree function to calculate the amount of mem needed
-    //        for a removal ahead of time?
-    //
-    sheet.cell_tree.remove(handle) catch @panic("TODO"); // TODO: Probably save the current file before we panic
+    const removed = sheet.cell_tree.remove(&.{
+        node.key.col,
+        node.key.row,
+    });
+    assert(removed == null or removed.? == handle);
 
     // TODO: re-use string buffer
-    sheet.setCellError(cell);
+    sheet.setCellError(&node.key);
     sheet.cell_treap.remove(handle);
 
     sheet.pushUndo(.init(.set_cell, .{
@@ -1202,18 +1403,19 @@ pub fn deleteCell(
 ) Allocator.Error!void {
     const entry = sheet.cell_treap.getEntryFor(.{ .row = pos.y, .col = pos.x });
     const handle = entry.node.get() orelse return;
-    return sheet.deleteCellByPtr(&sheet.cell_treap.node(handle).key, undo_opts);
+    return sheet.deleteCellByHandle(handle, undo_opts);
 }
 
-pub noinline fn deleteCellsInRange(sheet: *Sheet, range: Rect) Allocator.Error!void {
+pub fn deleteCellsInRange(sheet: *Sheet, r: Rect) Allocator.Error!void {
     var sfa = std.heap.stackFallback(4096, sheet.allocator);
     const allocator = sfa.get();
 
-    const kvs = try sheet.cell_tree.search(allocator, range);
-    defer allocator.free(kvs);
+    var results: std.ArrayList(CellTree.KV) = .init(allocator);
+    try sheet.cell_tree.queryWindow(&.{ r.tl.x, r.tl.y }, &.{ r.br.x, r.br.y }, &results);
+    defer results.deinit();
 
-    for (kvs) |kv| {
-        try sheet.deleteCellByPtr(&sheet.cell_treap.node(kv.key).key, .{});
+    for (results.items) |kv| {
+        try sheet.deleteCellByHandle(kv.value, .{});
     }
 }
 
@@ -1323,14 +1525,20 @@ fn markDirty(
 ) Allocator.Error!void {
     const cell = &sheet.cell_treap.node(handle).key;
     sheet.search_buffer.clearRetainingCapacity();
-    try sheet.dependents.rtree.searchBuffer(
-        sheet.allocator,
-        &sheet.search_buffer,
-        Rect.initSinglePos(cell.position()),
+
+    var list = sheet.search_buffer.toManaged(sheet.allocator);
+    defer sheet.search_buffer = list.moveToUnmanaged();
+
+    const pos = cell.position();
+    try sheet.dependents.queryWindowRect(
+        .{ pos.x, pos.y },
+        .{ pos.x, pos.y },
+        &list,
     );
 
-    for (sheet.search_buffer.items) |list_index| {
-        const items = sheet.dependents.flat.items(list_index);
+    for (list.items) |kv| {
+        const list_index = kv.value;
+        const items = sheet.dependent_list.items(list_index);
         for (items) |h| {
             const c = &sheet.cell_treap.node(h).key;
             if (c.state != .dirty) {
@@ -1488,14 +1696,18 @@ pub const Cell = extern struct {
 /// Queues the dependents of `ref` for update.
 fn queueDependents(sheet: *Sheet, rect: Rect) Allocator.Error!void {
     sheet.search_buffer.clearRetainingCapacity();
-    try sheet.dependents.rtree.searchBuffer(
-        sheet.allocator,
-        &sheet.search_buffer,
-        rect,
+    var list = sheet.search_buffer.toManaged(sheet.allocator);
+    defer sheet.search_buffer = list.moveToUnmanaged();
+
+    try sheet.dependents.queryWindowRect(
+        .{ rect.tl.x, rect.tl.y },
+        .{ rect.br.x, rect.br.y },
+        &list,
     );
 
-    for (sheet.search_buffer.items) |list_index| {
-        const values = sheet.dependents.flat.items(list_index);
+    for (list.items) |kv| {
+        const list_index = kv.value;
+        const values = sheet.dependent_list.items(list_index);
         for (values) |handle| {
             const cell = &sheet.cell_treap.node(handle).key;
             if (cell.state == .dirty) {
@@ -1625,6 +1837,19 @@ pub fn createColumn(sheet: *Sheet, index: PosInt) !Column.Handle {
     return entry.node;
 }
 
+pub fn createColumnAssumeCapacity(sheet: *Sheet, index: PosInt) Column.Handle {
+    var entry = sheet.cols.getEntryFor(.{ .index = index });
+    if (!entry.node.isValid()) {
+        log.debug("Creating column {}", .{index});
+        // handle = try sheet.cols.insert(sheet.allocator, .{ .index = index });
+        const new_node = sheet.cols.createNodeAssumeCapacity();
+        entry.set(new_node);
+        return new_node;
+    }
+
+    return entry.node;
+}
+
 pub fn getColumn(sheet: *Sheet, index: PosInt) ?Column {
     const entry = sheet.cols.getEntryFor(.{ .index = index });
     if (entry.node.isValid())
@@ -1645,16 +1870,19 @@ pub fn widthNeededForColumn(
 ) !u16 {
     var width: u16 = Column.default_width;
 
-    var iter = try sheet.cell_tree.searchIterator(sheet.allocator, .{
-        .tl = .{ .x = column_index, .y = 0 },
-        .br = .{ .x = column_index, .y = std.math.maxInt(PosInt) },
-    });
-    defer iter.deinit();
+    var results: std.ArrayList(CellTree.KV) = .init(sheet.allocator);
+    defer results.deinit();
+
+    try sheet.cell_tree.queryWindow(
+        &.{ column_index, 0 },
+        &.{ column_index, std.math.maxInt(u32) },
+        &results,
+    );
 
     var buf: std.BoundedArray(u8, 512) = .{};
     const writer = buf.writer();
-    while (try iter.next()) |kv| {
-        const cell = &sheet.cell_treap.node(kv.key).key;
+    for (results.items) |kv| {
+        const cell = &sheet.cell_treap.node(kv.value).key;
         switch (cell.value_type) {
             .err => {},
             .number => {
@@ -1801,173 +2029,166 @@ test "Update values" {
     try t.expectEqual(6.0, cell.value.number);
 }
 
-// TODO: This test is dumb, way too broad and slow.
 fn testCellEvaluation(a: Allocator) !void {
     const t = std.testing;
     const sheet = try Sheet.create(a);
     defer sheet.destroy();
 
-    const _setCell = struct {
-        fn _setCell(
-            _sheet: *Sheet,
-            pos: Position,
-            expr_root: ast.Index,
-        ) !void {
-            try _sheet.setCell(pos, "", expr_root, .{});
-            _sheet.endUndoGroup();
-        }
-    }._setCell;
-
     // Set cell values in random order
-    try _setCell(sheet, try .fromAddress("B17"), try ast.fromExpression(sheet, "A17+B16"));
-    try _setCell(sheet, try .fromAddress("G8"), try ast.fromExpression(sheet, "G7+F8"));
-    try _setCell(sheet, try .fromAddress("A9"), try ast.fromExpression(sheet, "A8+1"));
-    try _setCell(sheet, try .fromAddress("G11"), try ast.fromExpression(sheet, "G10+F11"));
-    try _setCell(sheet, try .fromAddress("E16"), try ast.fromExpression(sheet, "E15+D16"));
-    try _setCell(sheet, try .fromAddress("G10"), try ast.fromExpression(sheet, "G9+F10"));
-    try _setCell(sheet, try .fromAddress("D2"), try ast.fromExpression(sheet, "D1+C2"));
-    try _setCell(sheet, try .fromAddress("F2"), try ast.fromExpression(sheet, "F1+E2"));
-    try _setCell(sheet, try .fromAddress("B18"), try ast.fromExpression(sheet, "A18+B17"));
-    try _setCell(sheet, try .fromAddress("D15"), try ast.fromExpression(sheet, "D14+C15"));
-    try _setCell(sheet, try .fromAddress("D20"), try ast.fromExpression(sheet, "D19+C20"));
-    try _setCell(sheet, try .fromAddress("E13"), try ast.fromExpression(sheet, "E12+D13"));
-    try _setCell(sheet, try .fromAddress("C12"), try ast.fromExpression(sheet, "C11+B12"));
-    try _setCell(sheet, try .fromAddress("A16"), try ast.fromExpression(sheet, "A15+1"));
-    try _setCell(sheet, try .fromAddress("A10"), try ast.fromExpression(sheet, "A9+1"));
-    try _setCell(sheet, try .fromAddress("C19"), try ast.fromExpression(sheet, "C18+B19"));
-    try _setCell(sheet, try .fromAddress("F0"), try ast.fromExpression(sheet, "E0+1"));
-    try _setCell(sheet, try .fromAddress("B4"), try ast.fromExpression(sheet, "A4+B3"));
-    try _setCell(sheet, try .fromAddress("C11"), try ast.fromExpression(sheet, "C10+B11"));
-    try _setCell(sheet, try .fromAddress("B6"), try ast.fromExpression(sheet, "A6+B5"));
-    try _setCell(sheet, try .fromAddress("G5"), try ast.fromExpression(sheet, "G4+F5"));
-    try _setCell(sheet, try .fromAddress("A18"), try ast.fromExpression(sheet, "A17+1"));
-    try _setCell(sheet, try .fromAddress("D1"), try ast.fromExpression(sheet, "D0+C1"));
-    try _setCell(sheet, try .fromAddress("G12"), try ast.fromExpression(sheet, "G11+F12"));
-    try _setCell(sheet, try .fromAddress("B5"), try ast.fromExpression(sheet, "A5+B4"));
-    try _setCell(sheet, try .fromAddress("D4"), try ast.fromExpression(sheet, "D3+C4"));
-    try _setCell(sheet, try .fromAddress("A5"), try ast.fromExpression(sheet, "A4+1"));
-    try _setCell(sheet, try .fromAddress("A0"), try ast.fromExpression(sheet, "1"));
-    try _setCell(sheet, try .fromAddress("D13"), try ast.fromExpression(sheet, "D12+C13"));
-    try _setCell(sheet, try .fromAddress("A15"), try ast.fromExpression(sheet, "A14+1"));
-    try _setCell(sheet, try .fromAddress("A20"), try ast.fromExpression(sheet, "A19+1"));
-    try _setCell(sheet, try .fromAddress("G19"), try ast.fromExpression(sheet, "G18+F19"));
-    try _setCell(sheet, try .fromAddress("G13"), try ast.fromExpression(sheet, "G12+F13"));
-    try _setCell(sheet, try .fromAddress("G17"), try ast.fromExpression(sheet, "G16+F17"));
-    try _setCell(sheet, try .fromAddress("C14"), try ast.fromExpression(sheet, "C13+B14"));
-    try _setCell(sheet, try .fromAddress("B8"), try ast.fromExpression(sheet, "A8+B7"));
-    try _setCell(sheet, try .fromAddress("D10"), try ast.fromExpression(sheet, "D9+C10"));
-    try _setCell(sheet, try .fromAddress("F19"), try ast.fromExpression(sheet, "F18+E19"));
-    try _setCell(sheet, try .fromAddress("B11"), try ast.fromExpression(sheet, "A11+B10"));
-    try _setCell(sheet, try .fromAddress("F9"), try ast.fromExpression(sheet, "F8+E9"));
-    try _setCell(sheet, try .fromAddress("G7"), try ast.fromExpression(sheet, "G6+F7"));
-    try _setCell(sheet, try .fromAddress("C10"), try ast.fromExpression(sheet, "C9+B10"));
-    try _setCell(sheet, try .fromAddress("C2"), try ast.fromExpression(sheet, "C1+B2"));
-    try _setCell(sheet, try .fromAddress("D0"), try ast.fromExpression(sheet, "C0+1"));
-    try _setCell(sheet, try .fromAddress("C18"), try ast.fromExpression(sheet, "C17+B18"));
-    try _setCell(sheet, try .fromAddress("D6"), try ast.fromExpression(sheet, "D5+C6"));
-    try _setCell(sheet, try .fromAddress("C0"), try ast.fromExpression(sheet, "B0+1"));
-    try _setCell(sheet, try .fromAddress("B14"), try ast.fromExpression(sheet, "A14+B13"));
-    try _setCell(sheet, try .fromAddress("B19"), try ast.fromExpression(sheet, "A19+B18"));
-    try _setCell(sheet, try .fromAddress("G16"), try ast.fromExpression(sheet, "G15+F16"));
-    try _setCell(sheet, try .fromAddress("C8"), try ast.fromExpression(sheet, "C7+B8"));
-    try _setCell(sheet, try .fromAddress("G4"), try ast.fromExpression(sheet, "G3+F4"));
-    try _setCell(sheet, try .fromAddress("D18"), try ast.fromExpression(sheet, "D17+C18"));
-    try _setCell(sheet, try .fromAddress("E17"), try ast.fromExpression(sheet, "E16+D17"));
-    try _setCell(sheet, try .fromAddress("D3"), try ast.fromExpression(sheet, "D2+C3"));
-    try _setCell(sheet, try .fromAddress("E20"), try ast.fromExpression(sheet, "E19+D20"));
-    try _setCell(sheet, try .fromAddress("C6"), try ast.fromExpression(sheet, "C5+B6"));
-    try _setCell(sheet, try .fromAddress("E2"), try ast.fromExpression(sheet, "E1+D2"));
-    try _setCell(sheet, try .fromAddress("C1"), try ast.fromExpression(sheet, "C0+B1"));
-    try _setCell(sheet, try .fromAddress("D17"), try ast.fromExpression(sheet, "D16+C17"));
-    try _setCell(sheet, try .fromAddress("C9"), try ast.fromExpression(sheet, "C8+B9"));
-    try _setCell(sheet, try .fromAddress("D12"), try ast.fromExpression(sheet, "D11+C12"));
-    try _setCell(sheet, try .fromAddress("F18"), try ast.fromExpression(sheet, "F17+E18"));
-    try _setCell(sheet, try .fromAddress("H0"), try ast.fromExpression(sheet, "G0+1"));
-    try _setCell(sheet, try .fromAddress("D8"), try ast.fromExpression(sheet, "D7+C8"));
-    try _setCell(sheet, try .fromAddress("B12"), try ast.fromExpression(sheet, "A12+B11"));
-    try _setCell(sheet, try .fromAddress("E19"), try ast.fromExpression(sheet, "E18+D19"));
-    try _setCell(sheet, try .fromAddress("A14"), try ast.fromExpression(sheet, "A13+1"));
-    try _setCell(sheet, try .fromAddress("E14"), try ast.fromExpression(sheet, "E13+D14"));
-    try _setCell(sheet, try .fromAddress("F14"), try ast.fromExpression(sheet, "F13+E14"));
-    try _setCell(sheet, try .fromAddress("A13"), try ast.fromExpression(sheet, "A12+1"));
-    try _setCell(sheet, try .fromAddress("A19"), try ast.fromExpression(sheet, "A18+1"));
-    try _setCell(sheet, try .fromAddress("A4"), try ast.fromExpression(sheet, "A3+1"));
-    try _setCell(sheet, try .fromAddress("F7"), try ast.fromExpression(sheet, "F6+E7"));
-    try _setCell(sheet, try .fromAddress("A7"), try ast.fromExpression(sheet, "A6+1"));
-    try _setCell(sheet, try .fromAddress("E11"), try ast.fromExpression(sheet, "E10+D11"));
-    try _setCell(sheet, try .fromAddress("B1"), try ast.fromExpression(sheet, "A1+B0"));
-    try _setCell(sheet, try .fromAddress("A11"), try ast.fromExpression(sheet, "A10+1"));
-    try _setCell(sheet, try .fromAddress("B16"), try ast.fromExpression(sheet, "A16+B15"));
-    try _setCell(sheet, try .fromAddress("E12"), try ast.fromExpression(sheet, "E11+D12"));
-    try _setCell(sheet, try .fromAddress("F11"), try ast.fromExpression(sheet, "F10+E11"));
-    try _setCell(sheet, try .fromAddress("F1"), try ast.fromExpression(sheet, "F0+E1"));
-    try _setCell(sheet, try .fromAddress("C4"), try ast.fromExpression(sheet, "C3+B4"));
-    try _setCell(sheet, try .fromAddress("G20"), try ast.fromExpression(sheet, "G19+F20"));
-    try _setCell(sheet, try .fromAddress("F16"), try ast.fromExpression(sheet, "F15+E16"));
-    try _setCell(sheet, try .fromAddress("D5"), try ast.fromExpression(sheet, "D4+C5"));
-    try _setCell(sheet, try .fromAddress("A17"), try ast.fromExpression(sheet, "A16+1"));
-    try _setCell(sheet, try .fromAddress("A22"), try ast.fromExpression(sheet, "@sum(a0:g20)"));
-    try _setCell(sheet, try .fromAddress("F4"), try ast.fromExpression(sheet, "F3+E4"));
-    try _setCell(sheet, try .fromAddress("B9"), try ast.fromExpression(sheet, "A9+B8"));
-    try _setCell(sheet, try .fromAddress("E4"), try ast.fromExpression(sheet, "E3+D4"));
-    try _setCell(sheet, try .fromAddress("F13"), try ast.fromExpression(sheet, "F12+E13"));
-    try _setCell(sheet, try .fromAddress("A1"), try ast.fromExpression(sheet, "A0+1"));
-    try _setCell(sheet, try .fromAddress("F3"), try ast.fromExpression(sheet, "F2+E3"));
-    try _setCell(sheet, try .fromAddress("F17"), try ast.fromExpression(sheet, "F16+E17"));
-    try _setCell(sheet, try .fromAddress("G14"), try ast.fromExpression(sheet, "G13+F14"));
-    try _setCell(sheet, try .fromAddress("D11"), try ast.fromExpression(sheet, "D10+C11"));
-    try _setCell(sheet, try .fromAddress("A2"), try ast.fromExpression(sheet, "A1+1"));
-    try _setCell(sheet, try .fromAddress("E9"), try ast.fromExpression(sheet, "E8+D9"));
-    try _setCell(sheet, try .fromAddress("B15"), try ast.fromExpression(sheet, "A15+B14"));
-    try _setCell(sheet, try .fromAddress("E18"), try ast.fromExpression(sheet, "E17+D18"));
-    try _setCell(sheet, try .fromAddress("E8"), try ast.fromExpression(sheet, "E7+D8"));
-    try _setCell(sheet, try .fromAddress("G18"), try ast.fromExpression(sheet, "G17+F18"));
-    try _setCell(sheet, try .fromAddress("A6"), try ast.fromExpression(sheet, "A5+1"));
-    try _setCell(sheet, try .fromAddress("C3"), try ast.fromExpression(sheet, "C2+B3"));
-    try _setCell(sheet, try .fromAddress("B0"), try ast.fromExpression(sheet, "A0+1"));
-    try _setCell(sheet, try .fromAddress("E10"), try ast.fromExpression(sheet, "E9+D10"));
-    try _setCell(sheet, try .fromAddress("B7"), try ast.fromExpression(sheet, "A7+B6"));
-    try _setCell(sheet, try .fromAddress("C7"), try ast.fromExpression(sheet, "C6+B7"));
-    try _setCell(sheet, try .fromAddress("D9"), try ast.fromExpression(sheet, "D8+C9"));
-    try _setCell(sheet, try .fromAddress("D14"), try ast.fromExpression(sheet, "D13+C14"));
-    try _setCell(sheet, try .fromAddress("B20"), try ast.fromExpression(sheet, "A20+B19"));
-    try _setCell(sheet, try .fromAddress("E7"), try ast.fromExpression(sheet, "E6+D7"));
-    try _setCell(sheet, try .fromAddress("E0"), try ast.fromExpression(sheet, "D0+1"));
-    try _setCell(sheet, try .fromAddress("A3"), try ast.fromExpression(sheet, "A2+1"));
-    try _setCell(sheet, try .fromAddress("G9"), try ast.fromExpression(sheet, "G8+F9"));
-    try _setCell(sheet, try .fromAddress("C17"), try ast.fromExpression(sheet, "C16+B17"));
-    try _setCell(sheet, try .fromAddress("F5"), try ast.fromExpression(sheet, "F4+E5"));
-    try _setCell(sheet, try .fromAddress("F6"), try ast.fromExpression(sheet, "F5+E6"));
-    try _setCell(sheet, try .fromAddress("G3"), try ast.fromExpression(sheet, "G2+F3"));
-    try _setCell(sheet, try .fromAddress("E5"), try ast.fromExpression(sheet, "E4+D5"));
-    try _setCell(sheet, try .fromAddress("A8"), try ast.fromExpression(sheet, "A7+1"));
-    try _setCell(sheet, try .fromAddress("B13"), try ast.fromExpression(sheet, "A13+B12"));
-    try _setCell(sheet, try .fromAddress("B3"), try ast.fromExpression(sheet, "A3+B2"));
-    try _setCell(sheet, try .fromAddress("D19"), try ast.fromExpression(sheet, "D18+C19"));
-    try _setCell(sheet, try .fromAddress("B2"), try ast.fromExpression(sheet, "A2+B1"));
-    try _setCell(sheet, try .fromAddress("C5"), try ast.fromExpression(sheet, "C4+B5"));
-    try _setCell(sheet, try .fromAddress("G6"), try ast.fromExpression(sheet, "G5+F6"));
-    try _setCell(sheet, try .fromAddress("F12"), try ast.fromExpression(sheet, "F11+E12"));
-    try _setCell(sheet, try .fromAddress("E1"), try ast.fromExpression(sheet, "E0+D1"));
-    try _setCell(sheet, try .fromAddress("C15"), try ast.fromExpression(sheet, "C14+B15"));
-    try _setCell(sheet, try .fromAddress("A12"), try ast.fromExpression(sheet, "A11+1"));
-    try _setCell(sheet, try .fromAddress("G1"), try ast.fromExpression(sheet, "G0+F1"));
-    try _setCell(sheet, try .fromAddress("D16"), try ast.fromExpression(sheet, "D15+C16"));
-    try _setCell(sheet, try .fromAddress("F20"), try ast.fromExpression(sheet, "F19+E20"));
-    try _setCell(sheet, try .fromAddress("E6"), try ast.fromExpression(sheet, "E5+D6"));
-    try _setCell(sheet, try .fromAddress("E15"), try ast.fromExpression(sheet, "E14+D15"));
-    try _setCell(sheet, try .fromAddress("F8"), try ast.fromExpression(sheet, "F7+E8"));
-    try _setCell(sheet, try .fromAddress("F10"), try ast.fromExpression(sheet, "F9+E10"));
-    try _setCell(sheet, try .fromAddress("C16"), try ast.fromExpression(sheet, "C15+B16"));
-    try _setCell(sheet, try .fromAddress("C20"), try ast.fromExpression(sheet, "C19+B20"));
-    try _setCell(sheet, try .fromAddress("E3"), try ast.fromExpression(sheet, "E2+D3"));
-    try _setCell(sheet, try .fromAddress("B10"), try ast.fromExpression(sheet, "A10+B9"));
-    try _setCell(sheet, try .fromAddress("G2"), try ast.fromExpression(sheet, "G1+F2"));
-    try _setCell(sheet, try .fromAddress("D7"), try ast.fromExpression(sheet, "D6+C7"));
-    try _setCell(sheet, try .fromAddress("G15"), try ast.fromExpression(sheet, "G14+F15"));
-    try _setCell(sheet, try .fromAddress("G0"), try ast.fromExpression(sheet, "F0+1"));
-    try _setCell(sheet, try .fromAddress("F15"), try ast.fromExpression(sheet, "F14+E15"));
-    try _setCell(sheet, try .fromAddress("C13"), try ast.fromExpression(sheet, "C12+B13"));
+    const set_cells =
+        \\let B17 = A17+B16
+        \\let G8 = G7+F8
+        \\let A9 = A8+1
+        \\let G11 = G10+F11
+        \\let E16 = E15+D16
+        \\let G10 = G9+F10
+        \\let D2 = D1+C2
+        \\let F2 = F1+E2
+        \\let B18 = A18+B17
+        \\let D15 = D14+C15
+        \\let D20 = D19+C20
+        \\let E13 = E12+D13
+        \\let C12 = C11+B12
+        \\let A16 = A15+1
+        \\let A10 = A9+1
+        \\let C19 = C18+B19
+        \\let F0 = E0+1
+        \\let B4 = A4+B3
+        \\let C11 = C10+B11
+        \\let B6 = A6+B5
+        \\let G5 = G4+F5
+        \\let A18 = A17+1
+        \\let D1 = D0+C1
+        \\let G12 = G11+F12
+        \\let B5 = A5+B4
+        \\let D4 = D3+C4
+        \\let A5 = A4+1
+        \\let A0 = 1
+        \\let D13 = D12+C13
+        \\let A15 = A14+1
+        \\let A20 = A19+1
+        \\let G19 = G18+F19
+        \\let G13 = G12+F13
+        \\let G17 = G16+F17
+        \\let C14 = C13+B14
+        \\let B8 = A8+B7
+        \\let D10 = D9+C10
+        \\let F19 = F18+E19
+        \\let B11 = A11+B10
+        \\let F9 = F8+E9
+        \\let G7 = G6+F7
+        \\let C10 = C9+B10
+        \\let C2 = C1+B2
+        \\let D0 = C0+1
+        \\let C18 = C17+B18
+        \\let D6 = D5+C6
+        \\let C0 = B0+1
+        \\let B14 = A14+B13
+        \\let B19 = A19+B18
+        \\let G16 = G15+F16
+        \\let C8 = C7+B8
+        \\let G4 = G3+F4
+        \\let D18 = D17+C18
+        \\let E17 = E16+D17
+        \\let D3 = D2+C3
+        \\let E20 = E19+D20
+        \\let C6 = C5+B6
+        \\let E2 = E1+D2
+        \\let C1 = C0+B1
+        \\let D17 = D16+C17
+        \\let C9 = C8+B9
+        \\let D12 = D11+C12
+        \\let F18 = F17+E18
+        \\let H0 = G0+1
+        \\let D8 = D7+C8
+        \\let B12 = A12+B11
+        \\let E19 = E18+D19
+        \\let A14 = A13+1
+        \\let E14 = E13+D14
+        \\let F14 = F13+E14
+        \\let A13 = A12+1
+        \\let A19 = A18+1
+        \\let A4 = A3+1
+        \\let F7 = F6+E7
+        \\let A7 = A6+1
+        \\let E11 = E10+D11
+        \\let B1 = A1+B0
+        \\let A11 = A10+1
+        \\let B16 = A16+B15
+        \\let E12 = E11+D12
+        \\let F11 = F10+E11
+        \\let F1 = F0+E1
+        \\let C4 = C3+B4
+        \\let G20 = G19+F20
+        \\let F16 = F15+E16
+        \\let D5 = D4+C5
+        \\let A17 = A16+1
+        \\let A22 = @sum(a0:g20)
+        \\let F4 = F3+E4
+        \\let B9 = A9+B8
+        \\let E4 = E3+D4
+        \\let F13 = F12+E13
+        \\let A1 = A0+1
+        \\let F3 = F2+E3
+        \\let F17 = F16+E17
+        \\let G14 = G13+F14
+        \\let D11 = D10+C11
+        \\let A2 = A1+1
+        \\let E9 = E8+D9
+        \\let B15 = A15+B14
+        \\let E18 = E17+D18
+        \\let E8 = E7+D8
+        \\let G18 = G17+F18
+        \\let A6 = A5+1
+        \\let C3 = C2+B3
+        \\let B0 = A0+1
+        \\let E10 = E9+D10
+        \\let B7 = A7+B6
+        \\let C7 = C6+B7
+        \\let D9 = D8+C9
+        \\let D14 = D13+C14
+        \\let B20 = A20+B19
+        \\let E7 = E6+D7
+        \\let E0 = D0+1
+        \\let A3 = A2+1
+        \\let G9 = G8+F9
+        \\let C17 = C16+B17
+        \\let F5 = F4+E5
+        \\let F6 = F5+E6
+        \\let G3 = G2+F3
+        \\let E5 = E4+D5
+        \\let A8 = A7+1
+        \\let B13 = A13+B12
+        \\let B3 = A3+B2
+        \\let D19 = D18+C19
+        \\let B2 = A2+B1
+        \\let C5 = C4+B5
+        \\let G6 = G5+F6
+        \\let F12 = F11+E12
+        \\let E1 = E0+D1
+        \\let C15 = C14+B15
+        \\let A12 = A11+1
+        \\let G1 = G0+F1
+        \\let D16 = D15+C16
+        \\let F20 = F19+E20
+        \\let E6 = E5+D6
+        \\let E15 = E14+D15
+        \\let F8 = F7+E8
+        \\let F10 = F9+E10
+        \\let C16 = C15+B16
+        \\let C20 = C19+B20
+        \\let E3 = E2+D3
+        \\let B10 = A10+B9
+        \\let G2 = G1+F2
+        \\let D7 = D6+C7
+        \\let G15 = G14+F15
+        \\let G0 = F0+1
+        \\let F15 = F14+E15
+        \\let C13 = C12+B13
+    ;
+    var fbs = std.io.fixedBufferStream(set_cells);
+    try sheet.interpretFile(fbs.reader().any());
+    try sheet.update();
 
     // Test that updating this takes less than 100 ms
     const begin = try std.time.Instant.now();
@@ -2287,7 +2508,8 @@ fn testCellEvaluation(a: Allocator) !void {
         \\let G20 = F20 # G19
     ;
 
-    var fbs = std.io.fixedBufferStream(commands);
+    fbs = std.io.fixedBufferStream(commands);
+    sheet.clearRetainingCapacity();
     try sheet.interpretFile(fbs.reader().any());
     try sheet.update();
 
@@ -2326,7 +2548,7 @@ pub fn expectRangeNonExtant(sheet: *Sheet, address: []const u8) !void {
     var iter = std.mem.tokenizeScalar(u8, address, ':');
     const tl = iter.next() orelse return error.MalformedAddress;
     const br = iter.next() orelse return error.MalformedAddress;
-    const rect: Rect = .initPos(
+    const r: Rect = .initPos(
         try .fromAddress(tl),
         try .fromAddress(br),
     );
@@ -2334,15 +2556,16 @@ pub fn expectRangeNonExtant(sheet: *Sheet, address: []const u8) !void {
     var sfa = std.heap.stackFallback(4096, sheet.allocator);
     const a = sfa.get();
 
-    const items = try sheet.cell_tree.search(a, rect);
-    defer a.free(items);
+    var results: std.ArrayList(CellTree.KV) = .init(a);
+    try sheet.cell_tree.queryWindow(&.{ r.tl.x, r.tl.y }, &.{ r.br.x, r.br.y }, &results);
+    defer results.deinit();
 
-    if (items.len != 0) {
+    if (results.items.len != 0) {
         var bw = std.io.bufferedWriter(std.io.getStdErr().writer());
         const w = bw.writer();
-        try w.print("Expected cells {} to not exist, found", .{rect});
-        for (items) |item| {
-            const handle = item.key;
+        try w.print("Expected cells {} to not exist, found", .{r});
+        for (results.items) |kv| {
+            const handle = kv.value;
             const cell = sheet.getCellFromHandle(handle);
             try w.print(" {}", .{cell.position()});
         }

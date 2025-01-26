@@ -1,0 +1,839 @@
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
+
+pub fn PhTree(comptime V: type, comptime dims: usize) type {
+    return struct {
+        root: Handle,
+        free: Handle,
+        entries: std.MultiArrayList(Entry).Slice,
+
+        fn calculateHypercubeAddress(p: *const Point, postfix_length: u8) u8 {
+            const pl: u5 = @intCast(postfix_length);
+            const bit_mask = @as(u32, 1) << pl;
+            var address: u32 = 0;
+            for (p) |v| {
+                address <<= 1;
+                address |= (bit_mask & v) >> pl;
+            }
+            return @intCast(address);
+        }
+
+        fn createEntry(tree: *@This(), allocator: Allocator) Allocator.Error!Handle {
+            if (!tree.free.isValid()) {
+                var m = tree.entries.toMultiArrayList();
+                defer tree.entries = m.slice();
+
+                try m.ensureUnusedCapacity(allocator, 1);
+            }
+
+            return tree.createEntryAssumeCapacity();
+        }
+
+        fn createEntryAssumeCapacity(tree: *@This()) Handle {
+            if (tree.free.isValid()) {
+                const ret = tree.free;
+                tree.free = tree.entries.items(.data)[ret.n].free;
+                assert(!tree.free.isValid() or tree.free.n < tree.entries.len);
+                return ret;
+            }
+
+            assert(tree.entries.capacity > tree.entries.len);
+            const handle: Handle = .from(@intCast(tree.entries.len));
+            tree.entries.len += 1;
+            return handle;
+        }
+
+        fn destroyEntry(tree: *@This(), handle: Handle) void {
+            if (handle.n == tree.entries.len - 1) {
+                tree.entries.len -= 1;
+            } else {
+                tree.entries.items(.data)[handle.n].free = tree.free;
+                tree.free = handle;
+            }
+        }
+
+        // Inserts a KV into a node. If a KV with `point` already exists, overwrites it's value with
+        // `value` and returns the old one.
+        fn addNodeKvAssumeCapacity(
+            tree: *@This(),
+            handle: Handle,
+            p: *const Point,
+            value: V,
+        ) ?V {
+            var node = tree.nodePtr(handle);
+            assert(node.isLeaf());
+
+            const address = calculateHypercubeAddress(p, 0);
+
+            if (node.children[address].isValid()) {
+                const child_handle = node.children[address];
+                const child_value_ptr = &tree.entries.items(.data)[child_handle.n].value;
+                const old_value = child_value_ptr.*;
+                child_value_ptr.* = value;
+                return old_value;
+            }
+
+            const new_entry_handle = tree.createEntryAssumeCapacity();
+
+            tree.entries.set(new_entry_handle.n, .{
+                .point = p.*,
+                .parent = handle,
+                .data = .{ .value = value },
+            });
+
+            // Node pointer may have been invalidated
+            node = tree.nodePtr(handle);
+            node.children_len += 1;
+            node.children[address] = new_entry_handle;
+
+            return null;
+        }
+
+        fn createNodeAssumeCapacity(
+            tree: *@This(),
+            parent: Handle,
+            infix_length: u8,
+            postfix_length: u8,
+            p: *const Point,
+            value: V,
+        ) Handle {
+            const handle = tree.createEntryAssumeCapacity();
+            assert(handle.isValid());
+
+            const one: u32 = 1;
+            const max: u32 = std.math.maxInt(u32);
+            const pl: u5 = @intCast(postfix_length);
+            const key_mask = if (pl < 31) (max << (pl + 1)) else 0;
+            var new_point = p.*;
+            for (&new_point) |*v| {
+                v.* &= key_mask;
+                v.* |= one << pl;
+            }
+
+            tree.entries.set(handle.n, .{
+                .point = new_point,
+                .parent = parent,
+                .data = .{
+                    .node = .{
+                        .children = @splat(.invalid),
+                        .children_len = 0,
+                        .infix_length = infix_length,
+                        .postfix_length = postfix_length,
+                    },
+                },
+            });
+
+            if (postfix_length == 0) {
+                _ = tree.addNodeKvAssumeCapacity(handle, p, value);
+            }
+
+            return handle;
+        }
+
+        fn tryAddNode(
+            tree: *@This(),
+            handle: Handle,
+            address: u8,
+            p: *const Point,
+            value: V,
+        ) struct { Handle, bool } {
+            const node = tree.nodePtr(handle);
+            var added = false;
+            if (!node.children[address].isValid()) {
+                node.children[address] = tree.createNodeAssumeCapacity(handle, node.postfix_length - 1, 0, p, value);
+                node.children_len += 1;
+                added = true;
+            }
+
+            return .{ node.children[address], added };
+        }
+
+        /// Returns the index of the bit at which the two points diverge
+        fn numberOfDivergingBits(p1: *const Point, p2: *const Point) u8 {
+            var diff: u32 = 0;
+            for (p1, p2) |v1, v2| {
+                diff |= v1 ^ v2;
+            }
+            return 32 - @clz(diff);
+        }
+
+        /// Insert a new node between existing nodes
+        fn insertNodeSplit(
+            tree: *@This(),
+            handle: Handle,
+            child_handle: Handle,
+            p: *const Point,
+            max_conflicting_bits: u8,
+        ) Handle {
+            // TODO: Add pointer stability locks
+            const node = tree.nodePtr(handle);
+            const new_handle = tree.createNodeAssumeCapacity(
+                handle,
+                node.postfix_length - max_conflicting_bits,
+                max_conflicting_bits - 1,
+                p,
+                undefined, // A value never gets inserted in this case
+            );
+            const new_node = tree.nodePtr(new_handle);
+            const child_point = &tree.entries.items(.point)[child_handle.n];
+
+            const parent_address = calculateHypercubeAddress(p, node.postfix_length);
+            node.children[parent_address] = new_handle;
+
+            const new_node_address = calculateHypercubeAddress(child_point, new_node.postfix_length);
+            new_node.children[new_node_address] = child_handle;
+            new_node.children_len += 1;
+
+            const child_node = tree.nodePtr(child_handle);
+            child_node.infix_length = (new_node.postfix_length - child_node.postfix_length) - 1;
+
+            return new_handle;
+        }
+
+        fn handleNodeCollision(
+            tree: *@This(),
+            handle: Handle,
+            child_handle: Handle,
+            p: *const Point,
+            value: V,
+        ) struct { Handle, ?V } {
+            const child_node = tree.nodePtr(child_handle);
+            if (child_node.isLeaf()) {
+                if (child_node.infix_length > 0) {
+                    const child_point = &tree.entries.items(.point)[child_handle.n];
+                    const conflicting_bits = numberOfDivergingBits(p, child_point);
+                    if (conflicting_bits > 1) {
+                        const new_handle = tree.insertNodeSplit(handle, child_handle, p, conflicting_bits);
+                        return .{ new_handle, null };
+                    }
+                }
+
+                const removed_value = tree.addNodeKvAssumeCapacity(child_handle, p, value);
+                return .{ child_handle, removed_value };
+            }
+
+            if (child_node.infix_length > 0) {
+                const child_point = &tree.entries.items(.point)[child_handle.n];
+                const conflicting_bits = numberOfDivergingBits(p, child_point);
+                if (conflicting_bits > child_node.postfix_length + 1) {
+                    const new_handle = tree.insertNodeSplit(handle, child_handle, p, conflicting_bits);
+                    return .{ new_handle, null };
+                }
+            }
+
+            return .{ child_handle, null };
+        }
+
+        fn addNode(tree: *@This(), handle: Handle, p: *const Point, value: V) struct { Handle, ?V } {
+            const node = tree.nodePtr(handle);
+            const address = calculateHypercubeAddress(p, node.postfix_length);
+            const child_node, const added = tree.tryAddNode(handle, address, p, value);
+
+            if (added) {
+                return .{ child_node, null };
+            }
+
+            return tree.handleNodeCollision(handle, child_node, p, value);
+        }
+
+        pub fn ensureUnusedCapacity(tree: *@This(), allocator: Allocator, n: u32) Allocator.Error!void {
+            var m = tree.entries.toMultiArrayList();
+            defer tree.entries = m.slice();
+
+            const count = std.math.mul(u32, n, 3) catch return error.OutOfMemory;
+            if (m.len + count > m.capacity) {
+                try m.ensureUnusedCapacity(allocator, count);
+            }
+        }
+
+        pub fn getOrPut(
+            tree: *@This(),
+            allocator: Allocator,
+            p: *const Point,
+        ) Allocator.Error!struct {
+            /// True if this point already existed in the tree
+            bool,
+            /// Pointer to the value associated with `p`. If no entry previously existed for `p`,
+            /// the value pointed to is undefined.
+            *V,
+            /// Handle of the `Entry` associated with `p`.
+            Handle,
+        } {
+            try tree.ensureUnusedCapacity(allocator, 1);
+            return tree.getOrPutAssumeCapacity(p);
+        }
+
+        pub fn getOrPutAssumeCapacity(tree: *@This(), p: *const Point) struct {
+            /// True if this point already existed in the tree
+            bool,
+            /// Pointer to the value associated with `p`. If no entry previously existed for `p`,
+            /// the value pointed to is undefined.
+            *V,
+            /// Handle of the `Entry` associated with `p`.
+            Handle,
+        } {
+            const handle, const removed_value = tree.insertAssumeCapacity(p, undefined);
+            const found_existing = removed_value != null;
+            const value_ptr = &tree.entries.items(.data)[handle.n].value;
+            if (removed_value) |v| {
+                value_ptr.* = v;
+            }
+
+            return .{ found_existing, value_ptr, handle };
+        }
+
+        pub fn insert(
+            tree: *@This(),
+            allocator: Allocator,
+            p: *const Point,
+            value: V,
+        ) Allocator.Error!struct { Handle, ?V } {
+            try tree.ensureUnusedCapacity(allocator, 1);
+            return tree.insertAssumeCapacity(p, value);
+        }
+
+        pub fn insertAssumeCapacity(tree: *@This(), p: *const Point, value: V) struct { Handle, ?V } {
+            assert(tree.entries.len + 3 <= tree.entries.capacity);
+            assert(tree.root.isValid());
+            var current_node = tree.root;
+            var removed_value: ?V = null;
+            while (!tree.nodePtr(current_node).isLeaf()) {
+                // If `addNode` adds a value it must be the last call to `addNode`.
+                assert(removed_value == null);
+                current_node, removed_value = tree.addNode(current_node, p, value);
+            }
+
+            const node = tree.nodePtr(current_node);
+            const address = calculateHypercubeAddress(p, node.postfix_length);
+            return .{ node.children[address], removed_value };
+        }
+
+        pub fn clearRetainingCapacity(tree: *@This()) void {
+            tree.entries.len = 1;
+            tree.root = .from(0);
+            tree.free = .invalid;
+            tree.entries.set(0, .{
+                .point = @splat(0),
+                .parent = .invalid,
+                .data = .{
+                    .node = .{
+                        .children = @splat(.invalid),
+                        .children_len = 0,
+                        .infix_length = 0,
+                        .postfix_length = 31,
+                    },
+                },
+            });
+        }
+
+        fn printNode(tree: *@This(), handle: Handle) void {
+            const entry = tree.entries.get(handle.n);
+            std.debug.print(
+                \\Node {c} ({c}): postfix {d}, infix {d}, [{d} children]
+                \\{x:0>8}
+                \\
+            ,
+                .{
+                    @as(u8, @intCast(handle.n + 'A')),
+                    if (entry.parent.isValid()) @as(u8, @intCast(entry.parent.n + 'A')) else '!',
+                    entry.data.node.postfix_length,
+                    entry.data.node.infix_length,
+                    entry.data.node.children_len,
+                    entry.point,
+                },
+            );
+
+            if (entry.data.node.isLeaf()) {
+                for (entry.data.node.children, 0..) |child, i| {
+                    if (child.isValid()) {
+                        const child_entry = tree.entries.get(child.n);
+                        std.debug.print("  {b:0>2}: {}, point: {d}, parent: {c}\n", .{
+                            i,
+                            child_entry.data.value,
+                            child_entry.point,
+                            child_entry.parent.toAscii(),
+                        });
+                    } else {
+                        std.debug.print("  {b:0>2}: invalid\n", .{i});
+                    }
+                }
+                std.debug.print("\n", .{});
+                return;
+            }
+
+            for (entry.data.node.children, 0..) |child, i| {
+                if (child.isValid()) {
+                    std.debug.print("  {b:0>2}: {c}\n", .{ i, @as(u8, @intCast(child.n + 'A')) });
+                } else {
+                    std.debug.print("  {b:0>2}: invalid\n", .{i});
+                }
+            }
+            std.debug.print("\n", .{});
+            for (entry.data.node.children) |child| {
+                if (child.isValid())
+                    tree.printNode(child);
+            }
+        }
+
+        fn print(tree: *@This()) void {
+            std.debug.print("========================\n", .{});
+            tree.printNode(tree.root);
+            std.debug.print("========================\n", .{});
+        }
+
+        fn findEntry(tree: *@This(), p: *const Point) Handle {
+            var h = tree.root;
+            while (h.isValid()) {
+                const node = tree.nodePtr(h);
+                h = node.children[calculateHypercubeAddress(p, node.postfix_length)];
+                if (node.isLeaf()) {
+                    return h;
+                }
+            }
+
+            return .invalid;
+        }
+
+        const Self = @This();
+
+        pub const Iterator = struct {
+            tree: *Self,
+            current: Handle,
+            index: u8,
+
+            pub fn next(iter: *Iterator) ?KV {
+                const node = iter.tree.nodePtr(iter.current);
+                if (node.isLeaf()) {
+                    for (node.children[iter.index..], iter.index..) |child_handle, i| {
+                        if (!child_handle.isValid()) continue;
+
+                        iter.index = @intCast(i + 1);
+                        const point = iter.tree.entries.items(.point)[child_handle.n];
+                        const value = iter.tree.entries.items(.data)[child_handle.n].value;
+                        return .{
+                            .key = point,
+                            .value = value,
+                        };
+                    }
+                } else {
+                    for (node.children[iter.index..]) |child_handle| {
+                        if (!child_handle.isValid()) continue;
+
+                        iter.index = 0;
+                        iter.current = child_handle;
+                        return iter.next();
+                    }
+                }
+
+                const parent = iter.tree.getParent(iter.current);
+                if (!parent.isValid()) {
+                    // iter.current is the root node, and we have processed all the children
+                    return null;
+                }
+
+                const parent_node = iter.tree.nodePtr(parent);
+                for (parent_node.children, 0..) |child_handle, i| {
+                    if (child_handle == iter.current) {
+                        iter.index = @intCast(i + 1);
+                        break;
+                    }
+                } else unreachable;
+
+                iter.current = parent;
+                return iter.next();
+            }
+        };
+
+        pub fn iterator(tree: *Self) Iterator {
+            return .{
+                .tree = tree,
+                .current = tree.root,
+                .index = 0,
+            };
+        }
+
+        pub fn find(tree: *@This(), p: *const Point) ?*V {
+            const handle = tree.findEntry(p);
+            if (handle.isValid()) {
+                return &tree.entries.items(.data)[handle.n].value;
+            }
+            return null;
+        }
+
+        pub fn remove(tree: *@This(), p: *const Point) ?V {
+            const handle = tree.findEntry(p);
+            if (!handle.isValid()) return null;
+            const ret = tree.entries.items(.data)[handle.n].value;
+
+            var current = tree.entries.items(.parent)[handle.n];
+            var address = calculateHypercubeAddress(p, tree.nodePtr(current).postfix_length);
+
+            tree.destroyEntry(handle);
+            tree.getChildren(current)[address] = .invalid;
+            tree.getChildrenLenPtr(current).* -= 1;
+
+            if (tree.getChildrenLen(current) != 0) return ret;
+
+            // Need to delete the leaf node
+
+            var parent = tree.entries.items(.parent)[current.n];
+
+            address = calculateHypercubeAddress(
+                &tree.entries.items(.point)[current.n],
+                tree.nodePtr(parent).postfix_length,
+            );
+            tree.getChildren(parent)[address] = .invalid;
+            tree.getChildrenLenPtr(parent).* -= 1;
+            tree.destroyEntry(current);
+
+            current = parent;
+            parent = tree.getParent(parent);
+
+            while (tree.getParent(current).isValid()) {
+                if (tree.getChildrenLen(current) != 1) break;
+                assert(tree.getChildrenLen(current) != 0);
+
+                const child: Handle = for (tree.getChildren(current)) |child| {
+                    if (child.isValid()) {
+                        break child;
+                    }
+                } else .invalid;
+
+                address = calculateHypercubeAddress(
+                    &tree.entries.items(.point)[current.n],
+                    tree.nodePtr(parent).postfix_length,
+                );
+                tree.nodePtr(child).infix_length += tree.nodePtr(current).infix_length + 1;
+                tree.getChildren(parent)[address] = child;
+                tree.destroyEntry(current);
+
+                current = parent;
+                parent = tree.getParent(parent);
+            }
+
+            return ret;
+        }
+
+        pub const KV = struct {
+            key: Point,
+            value: V,
+        };
+
+        /// Appends all key/value pairs whose key falls between `min` and `max`.
+        pub fn queryWindow(
+            tree: *@This(),
+            min: *const Point,
+            max: *const Point,
+            results: *std.ArrayList(KV),
+        ) Allocator.Error!void {
+            if (!tree.root.isValid())
+                return;
+
+            const root = tree.nodePtr(tree.root);
+            for (root.children) |child_handle| {
+                if (child_handle.isValid())
+                    try tree.queryNodeWindow(child_handle, min, max, results);
+            }
+        }
+
+        /// Appends all key/value pairs whose key intersects the rectangle of `min` and `max`.
+        /// Only works for 4 dimensional trees whose keys are assumed to be rectangles.
+        /// e.g. { top_left_x, top_left_y, bottom_right_x, bottom_right_y }.
+        pub fn queryWindowRect(
+            tree: *@This(),
+            min: [2]u32,
+            max: [2]u32,
+            results: *std.ArrayList(KV),
+        ) Allocator.Error!void {
+            if (dims != 4) {
+                @compileError("queryWindowRect only supports 4 dimensional trees");
+            }
+
+            return tree.queryWindow(
+                &.{ 0, 0, min[0], min[1] },
+                &.{ max[0], max[1], std.math.maxInt(u32), std.math.maxInt(u32) },
+                results,
+            );
+        }
+
+        fn getParent(tree: *@This(), handle: Handle) Handle {
+            return tree.entries.items(.parent)[handle.n];
+        }
+
+        fn getChildrenLen(tree: *@This(), handle: Handle) u8 {
+            return tree.nodePtr(handle).children_len;
+        }
+
+        fn getChildrenLenPtr(tree: *@This(), handle: Handle) *u8 {
+            return &tree.nodePtr(handle).children_len;
+        }
+
+        fn getChildren(tree: *@This(), handle: Handle) *[1 << dims]Handle {
+            return &tree.nodePtr(handle).children;
+        }
+
+        pub fn init(allocator: std.mem.Allocator) !@This() {
+            var ret: @This() = .{
+                .root = .invalid,
+                .free = .invalid,
+                .entries = .empty,
+            };
+            ret.root = try ret.createEntry(allocator);
+            ret.entries.set(ret.root.n, .{
+                .point = @splat(0),
+                .parent = .invalid,
+                .data = .{
+                    .node = .{
+                        .children = @splat(.invalid),
+                        .children_len = 0,
+                        .infix_length = 0,
+                        .postfix_length = 31,
+                    },
+                },
+            });
+            return ret;
+        }
+
+        pub fn deinit(tree: *@This(), allocator: Allocator) void {
+            tree.entries.deinit(allocator);
+        }
+
+        pub const Header = extern struct {
+            entries_len: u32,
+            root: Handle,
+            free: Handle,
+        };
+
+        pub fn iovecs(tree: *@This()) std.posix.iovec_const {
+            const utils = @import("utils.zig");
+            return utils.multiArrayListSliceIoVec(&tree.entries);
+        }
+
+        pub fn getHeader(tree: *@This()) Header {
+            return .{
+                .entries_len = @intCast(tree.entries.len),
+                .root = tree.root,
+                .free = tree.free,
+            };
+        }
+
+        pub fn fromHeader(tree: *@This(), allocator: Allocator, header: Header) !std.posix.iovec {
+            var m = tree.entries.toMultiArrayList();
+
+            try m.setCapacity(allocator, header.entries_len);
+            m.len = header.entries_len;
+            tree.entries = m.slice();
+
+            tree.root = header.root;
+            tree.free = header.free;
+
+            return @bitCast(tree.iovecs());
+        }
+
+        fn nodePtr(tree: *@This(), handle: Handle) *Node {
+            return &tree.entries.items(.data)[handle.n].node;
+        }
+
+        fn pointGreaterOrEqual(a: *const Point, b: *const Point) bool {
+            for (a, b) |v1, v2| {
+                if (v1 < v2) return false;
+            }
+            return true;
+        }
+
+        fn pointLessOrEqual(a: *const Point, b: *const Point) bool {
+            for (a, b) |v1, v2| {
+                if (v1 > v2) return false;
+            }
+            return true;
+        }
+
+        fn prefixGreaterOrEqual(a: *const Point, b: *const Point, postfix_length: u8) bool {
+            var p1 = a.*;
+            var p2 = b.*;
+            for (&p1, &p2) |*v1, *v2| {
+                v1.* >>= @intCast(postfix_length + 1);
+                v2.* >>= @intCast(postfix_length + 1);
+            }
+
+            return pointGreaterOrEqual(&p1, &p2);
+        }
+
+        fn prefixLessOrEqual(a: *const Point, b: *const Point, postfix_length: u8) bool {
+            var p1 = a.*;
+            var p2 = b.*;
+            for (&p1, &p2) |*v1, *v2| {
+                v1.* >>= @intCast(postfix_length + 1);
+                v2.* >>= @intCast(postfix_length + 1);
+            }
+
+            return pointLessOrEqual(&p1, &p2);
+        }
+
+        fn nodeInWindow(p: *const Point, postfix_length: u8, min: *const Point, max: *const Point) bool {
+            return prefixGreaterOrEqual(p, min, postfix_length) and prefixLessOrEqual(p, max, postfix_length);
+        }
+
+        fn entryInWindow(p: *const Point, min: *const Point, max: *const Point) bool {
+            return pointGreaterOrEqual(p, min) and pointLessOrEqual(p, max);
+        }
+
+        fn queryNodeWindow(
+            tree: *@This(),
+            handle: Handle,
+            min: *const Point,
+            max: *const Point,
+            results: *std.ArrayList(KV),
+        ) Allocator.Error!void {
+            assert(handle.isValid());
+            const p = &tree.entries.items(.point)[handle.n];
+            const node = tree.nodePtr(handle);
+            if (!nodeInWindow(p, node.postfix_length, min, max))
+                return;
+
+            var mask_lower: u32 = 0;
+            var mask_upper: u32 = 0;
+
+            for (p, min, max) |v, minv, maxv| {
+                mask_lower = (mask_lower << 1) | @intFromBool(minv >= v);
+                mask_upper = (mask_upper << 1) | @intFromBool(maxv >= v);
+            }
+
+            if (node.isLeaf()) {
+                for (node.children, 0..) |child_handle, i| {
+                    if (!child_handle.isValid() or ((i | mask_lower) & mask_upper) != i)
+                        continue;
+
+                    const child_point = &tree.entries.items(.point)[child_handle.n];
+                    if (entryInWindow(child_point, min, max)) {
+                        const v = tree.entries.items(.data)[child_handle.n].value;
+                        try results.append(.{
+                            .key = child_point.*,
+                            .value = v,
+                        });
+                    }
+                }
+                return;
+            }
+
+            for (node.children, 0..) |child_handle, i| {
+                if (!child_handle.isValid() or ((i | mask_lower) & mask_upper) != i)
+                    continue;
+
+                try tree.queryNodeWindow(child_handle, min, max, results);
+            }
+        }
+
+        pub const Entry = extern struct {
+            point: Point,
+            parent: Handle,
+            data: extern union {
+                node: Node,
+                value: V,
+                free: Handle,
+            },
+        };
+
+        pub const Node = extern struct {
+            children: [1 << dims]Handle,
+            children_len: u8,
+
+            infix_length: u8,
+            postfix_length: u8,
+
+            pub fn isLeaf(node: *const Node) bool {
+                return node.postfix_length == 0;
+            }
+        };
+
+        pub const Point = [dims]u32;
+
+        pub const Handle = packed struct {
+            n: u32,
+
+            fn toAscii(h: Handle) u8 {
+                return @intCast(h.n + 'A');
+            }
+
+            pub fn from(n: u32) Handle {
+                assert(n != std.math.maxInt(u32));
+                return .{ .n = n };
+            }
+
+            pub fn isValid(handle: Handle) bool {
+                return handle != invalid;
+            }
+
+            pub const invalid: Handle = .{ .n = std.math.maxInt(u32) };
+        };
+    };
+}
+
+test "Basics" {
+    var tree: PhTree([*:0]const u8, 2) = try .init(std.testing.allocator);
+    defer tree.deinit(std.testing.allocator);
+
+    const handle, _ = try tree.insert(std.testing.allocator, &.{ 1, 1 }, "1, 1! :D");
+    const value = tree.entries.items(.data)[handle.n].value;
+    try std.testing.expectEqualStrings("1, 1! :D", std.mem.span(value));
+
+    const v = tree.find(&.{ 1, 1 }).?.*;
+    try std.testing.expectEqualStrings("1, 1! :D", std.mem.span(v));
+
+    const removed_value = tree.remove(&.{ 1, 1 }).?;
+    try std.testing.expectEqualStrings("1, 1! :D", std.mem.span(removed_value));
+
+    try std.testing.expectEqual(null, tree.find(&.{ 1, 1 }));
+}
+
+fn fuzz(input: []const u8) anyerror!void {
+    // const file = try std.fs.cwd().createFile("out.txt", .{ .truncate = true });
+    // defer file.close();
+
+    var tree: PhTree(u32, 4) = try .init(std.testing.allocator);
+    defer tree.deinit(std.testing.allocator);
+
+    const KV = extern struct {
+        p: PhTree(u32, 4).Point,
+        value: u32,
+    };
+
+    const len = input.len - input.len % @sizeOf(KV);
+    // try file.writeAll(input[0..len]);
+    const slice = std.mem.bytesAsSlice(KV, input[0..len]);
+    for (slice) |kv| {
+        _ = try tree.insert(std.testing.allocator, &kv.p, kv.value);
+        const value = tree.find(&kv.p).?;
+        try std.testing.expectEqual(kv.value, value.*);
+    }
+
+    for (slice) |kv| {
+        _ = tree.remove(&kv.p);
+        try std.testing.expectEqual(null, tree.find(&kv.p));
+    }
+}
+
+test "Fuzz phtree" {
+    try std.testing.fuzz(fuzz, .{});
+}
+
+test "phtree crash" {
+    const x1 = 0;
+    const y1 = 0;
+
+    const x2 = 5;
+    const y2 = 0;
+
+    const x3 = 13;
+    const y3 = 0;
+
+    var tree: PhTree(void, 4) = try .init(std.testing.allocator);
+    defer tree.deinit(std.testing.allocator);
+
+    _ = try tree.insert(std.testing.allocator, &.{ x1, y1, x1, y1 }, {});
+    _ = try tree.insert(std.testing.allocator, &.{ x2, y2, x2, y2 }, {});
+    _ = try tree.insert(std.testing.allocator, &.{ x3, y3, x3, y3 }, {});
+    _ = tree.remove(&.{ x3, y3, x3, y3 });
+    _ = try tree.insert(std.testing.allocator, &.{ x3, y3, x3, y3 }, {});
+}
