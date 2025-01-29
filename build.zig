@@ -70,7 +70,7 @@ pub fn build(b: *std.Build) void {
             "test/undo-redo.zc",
             "test/string.zc",
             "test/fill.zc",
-            // "test/binary-serialize.zc",
+            "test/binary-serialize.zc",
             "test/save-load.zc",
         });
         opts.addOption(bool, "fast_tests", fast_tests);

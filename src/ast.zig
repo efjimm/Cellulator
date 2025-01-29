@@ -737,15 +737,15 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var total: f64 = 0;
-            var results: std.ArrayList(Sheet.CellTree.KV) = .init(self.allocator);
+            var results: std.ArrayList(Sheet.CellHandle) = .init(self.allocator);
             defer results.deinit();
             try self.sheet.cell_tree.queryWindow(
                 &.{ range.tl.x, range.tl.y },
                 &.{ range.br.x, range.br.y },
                 &results,
             );
-            for (results.items) |kv| {
-                const res = try self.context.evalCellByHandle(kv.value);
+            for (results.items) |handle| {
+                const res = try self.context.evalCellByHandle(handle);
                 total += try res.toNumber(0);
             }
 
@@ -776,7 +776,7 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var total: f64 = 1;
-            var results: std.ArrayList(Sheet.CellTree.KV) = .init(self.allocator);
+            var results: std.ArrayList(Sheet.CellHandle) = .init(self.allocator);
             defer results.deinit();
             try self.sheet.cell_tree.queryWindow(
                 &.{ range.tl.x, range.tl.y },
@@ -784,8 +784,8 @@ pub fn EvalContext(comptime Context: type) type {
                 &results,
             );
 
-            for (results.items) |kv| {
-                const res = try self.context.evalCellByHandle(kv.value);
+            for (results.items) |handle| {
+                const res = try self.context.evalCellByHandle(handle);
                 total *= try res.toNumber(1);
             }
 
@@ -850,15 +850,15 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var max: ?f64 = null;
-            var results: std.ArrayList(Sheet.CellTree.KV) = .init(self.allocator);
+            var results: std.ArrayList(Sheet.CellHandle) = .init(self.allocator);
             defer results.deinit();
             try self.sheet.cell_tree.queryWindow(
                 &.{ range.tl.x, range.tl.y },
                 &.{ range.br.x, range.br.y },
                 &results,
             );
-            for (results.items) |kv| {
-                const res = try self.context.evalCellByHandle(kv.value);
+            for (results.items) |handle| {
+                const res = try self.context.evalCellByHandle(handle);
                 const n = try res.toNumberOrNull() orelse continue;
                 if (max == null or n > max.?) max = n;
             }
@@ -894,15 +894,15 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var min: ?f64 = null;
-            var results: std.ArrayList(Sheet.CellTree.KV) = .init(self.allocator);
+            var results: std.ArrayList(Sheet.CellHandle) = .init(self.allocator);
             defer results.deinit();
             try self.sheet.cell_tree.queryWindow(
                 &.{ range.tl.x, range.tl.y },
                 &.{ range.br.x, range.br.y },
                 &results,
             );
-            for (results.items) |kv| {
-                const res = try self.context.evalCellByHandle(kv.value);
+            for (results.items) |handle| {
+                const res = try self.context.evalCellByHandle(handle);
                 const n = try res.toNumberOrNull() orelse continue;
                 if (min == null or n < min.?) min = n;
             }

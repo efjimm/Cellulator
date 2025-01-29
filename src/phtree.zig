@@ -1,3 +1,4 @@
+// TODO: Discover and assert more invariants to improve robustness
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -17,6 +18,31 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
                 address |= (bit_mask & v) >> pl;
             }
             return @intCast(address);
+        }
+
+        pub fn createKvEntry(
+            tree: *@This(),
+            allocator: Allocator,
+            p: *const Point,
+            value: V,
+        ) Allocator.Error!Handle {
+            const handle = try tree.createEntry(allocator);
+            tree.entries.set(handle.n, .{
+                .point = p.*,
+                .parent = .invalid,
+                .data = .{ .value = value },
+            });
+            return handle;
+        }
+
+        pub fn createKvEntryAssumeCapacity(tree: *@This(), p: *const Point, value: V) Handle {
+            const handle = tree.createEntryAssumeCapacity();
+            tree.entries.set(handle.n, .{
+                .point = p.*,
+                .parent = .invalid,
+                .data = .{ .value = value },
+            });
+            return handle;
         }
 
         fn createEntry(tree: *@This(), allocator: Allocator) Allocator.Error!Handle {
@@ -59,35 +85,22 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             tree: *@This(),
             handle: Handle,
             p: *const Point,
-            value: V,
-        ) ?V {
-            var node = tree.nodePtr(handle);
+            kv_handle: Handle,
+        ) Handle {
+            const node = tree.nodePtr(handle);
             assert(node.isLeaf());
 
             const address = calculateHypercubeAddress(p, 0);
+            tree.entries.items(.parent)[kv_handle.n] = handle;
 
-            if (node.children[address].isValid()) {
-                const child_handle = node.children[address];
-                const child_value_ptr = &tree.entries.items(.data)[child_handle.n].value;
-                const old_value = child_value_ptr.*;
-                child_value_ptr.* = value;
-                return old_value;
+            if (!node.children[address].isValid()) {
+                node.children_len += 1;
             }
 
-            const new_entry_handle = tree.createEntryAssumeCapacity();
+            const old_child = node.children[address];
+            node.children[address] = kv_handle;
 
-            tree.entries.set(new_entry_handle.n, .{
-                .point = p.*,
-                .parent = handle,
-                .data = .{ .value = value },
-            });
-
-            // Node pointer may have been invalidated
-            node = tree.nodePtr(handle);
-            node.children_len += 1;
-            node.children[address] = new_entry_handle;
-
-            return null;
+            return old_child;
         }
 
         fn createNodeAssumeCapacity(
@@ -96,7 +109,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             infix_length: u8,
             postfix_length: u8,
             p: *const Point,
-            value: V,
+            kv: Handle,
         ) Handle {
             const handle = tree.createEntryAssumeCapacity();
             assert(handle.isValid());
@@ -125,7 +138,8 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             });
 
             if (postfix_length == 0) {
-                _ = tree.addNodeKvAssumeCapacity(handle, p, value);
+                const old_kv = tree.addNodeKvAssumeCapacity(handle, p, kv);
+                assert(!old_kv.isValid());
             }
 
             return handle;
@@ -136,12 +150,18 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             handle: Handle,
             address: u8,
             p: *const Point,
-            value: V,
+            kv: Handle,
         ) struct { Handle, bool } {
             const node = tree.nodePtr(handle);
             var added = false;
             if (!node.children[address].isValid()) {
-                node.children[address] = tree.createNodeAssumeCapacity(handle, node.postfix_length - 1, 0, p, value);
+                node.children[address] = tree.createNodeAssumeCapacity(
+                    handle,
+                    node.postfix_length - 1,
+                    0,
+                    p,
+                    kv,
+                );
                 node.children_len += 1;
                 added = true;
             }
@@ -179,11 +199,14 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             const child_point = &tree.entries.items(.point)[child_handle.n];
 
             const parent_address = calculateHypercubeAddress(p, node.postfix_length);
+            assert(node.children[parent_address] == child_handle);
             node.children[parent_address] = new_handle;
 
             const new_node_address = calculateHypercubeAddress(child_point, new_node.postfix_length);
             new_node.children[new_node_address] = child_handle;
             new_node.children_len += 1;
+
+            tree.entries.items(.parent)[child_handle.n] = new_handle;
 
             const child_node = tree.nodePtr(child_handle);
             child_node.infix_length = (new_node.postfix_length - child_node.postfix_length) - 1;
@@ -196,8 +219,13 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             handle: Handle,
             child_handle: Handle,
             p: *const Point,
-            value: V,
-        ) struct { Handle, ?V } {
+            kv: Handle,
+        ) struct {
+            /// Handle of the newly inserted node
+            Handle,
+            /// Handle of any old KV that was removed
+            Handle,
+        } {
             const child_node = tree.nodePtr(child_handle);
             if (child_node.isLeaf()) {
                 if (child_node.infix_length > 0) {
@@ -205,12 +233,12 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
                     const conflicting_bits = numberOfDivergingBits(p, child_point);
                     if (conflicting_bits > 1) {
                         const new_handle = tree.insertNodeSplit(handle, child_handle, p, conflicting_bits);
-                        return .{ new_handle, null };
+                        return .{ new_handle, .invalid };
                     }
                 }
 
-                const removed_value = tree.addNodeKvAssumeCapacity(child_handle, p, value);
-                return .{ child_handle, removed_value };
+                const removed_kv = tree.addNodeKvAssumeCapacity(child_handle, p, kv);
+                return .{ child_handle, removed_kv };
             }
 
             if (child_node.infix_length > 0) {
@@ -218,23 +246,23 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
                 const conflicting_bits = numberOfDivergingBits(p, child_point);
                 if (conflicting_bits > child_node.postfix_length + 1) {
                     const new_handle = tree.insertNodeSplit(handle, child_handle, p, conflicting_bits);
-                    return .{ new_handle, null };
+                    return .{ new_handle, .invalid };
                 }
             }
 
-            return .{ child_handle, null };
+            return .{ child_handle, .invalid };
         }
 
-        fn addNode(tree: *@This(), handle: Handle, p: *const Point, value: V) struct { Handle, ?V } {
+        fn addNode(tree: *@This(), handle: Handle, p: *const Point, kv: Handle) struct { Handle, Handle } {
             const node = tree.nodePtr(handle);
             const address = calculateHypercubeAddress(p, node.postfix_length);
-            const child_node, const added = tree.tryAddNode(handle, address, p, value);
+            const child_node, const added = tree.tryAddNode(handle, address, p, kv);
 
             if (added) {
-                return .{ child_node, null };
+                return .{ child_node, .invalid };
             }
 
-            return tree.handleNodeCollision(handle, child_node, p, value);
+            return tree.handleNodeCollision(handle, child_node, p, kv);
         }
 
         pub fn ensureUnusedCapacity(tree: *@This(), allocator: Allocator, n: u32) Allocator.Error!void {
@@ -273,40 +301,44 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             /// Handle of the `Entry` associated with `p`.
             Handle,
         } {
-            const handle, const removed_value = tree.insertAssumeCapacity(p, undefined);
-            const found_existing = removed_value != null;
-            const value_ptr = &tree.entries.items(.data)[handle.n].value;
-            if (removed_value) |v| {
-                value_ptr.* = v;
+            const h = tree.findEntry(p);
+            if (h.isValid()) {
+                return .{ true, &tree.entries.items(.data)[h.n].value, h };
             }
 
-            return .{ found_existing, value_ptr, handle };
+            const handle = tree.createKvEntryAssumeCapacity(p, undefined);
+            const removed_kv = tree.insertAssumeCapacity(p, handle);
+            assert(!removed_kv.isValid());
+
+            const value_ptr = &tree.entries.items(.data)[handle.n].value;
+            return .{ false, value_ptr, handle };
         }
 
         pub fn insert(
             tree: *@This(),
             allocator: Allocator,
             p: *const Point,
-            value: V,
-        ) Allocator.Error!struct { Handle, ?V } {
+            kv: Handle,
+        ) Allocator.Error!Handle {
             try tree.ensureUnusedCapacity(allocator, 1);
-            return tree.insertAssumeCapacity(p, value);
+            return tree.insertAssumeCapacity(p, kv);
         }
 
-        pub fn insertAssumeCapacity(tree: *@This(), p: *const Point, value: V) struct { Handle, ?V } {
-            assert(tree.entries.len + 3 <= tree.entries.capacity);
+        pub fn insertAssumeCapacity(tree: *@This(), p: *const Point, kv: Handle) Handle {
+            assert(tree.entries.len + 2 <= tree.entries.capacity);
             assert(tree.root.isValid());
             var current_node = tree.root;
-            var removed_value: ?V = null;
+            var removed_kv: Handle = .invalid;
             while (!tree.nodePtr(current_node).isLeaf()) {
                 // If `addNode` adds a value it must be the last call to `addNode`.
-                assert(removed_value == null);
-                current_node, removed_value = tree.addNode(current_node, p, value);
+                assert(!removed_kv.isValid());
+                current_node, removed_kv = tree.addNode(current_node, p, kv);
             }
 
             const node = tree.nodePtr(current_node);
             const address = calculateHypercubeAddress(p, node.postfix_length);
-            return .{ node.children[address], removed_value };
+            assert(node.children[address] == kv);
+            return removed_kv;
         }
 
         pub fn clearRetainingCapacity(tree: *@This()) void {
@@ -382,12 +414,19 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             std.debug.print("========================\n", .{});
         }
 
-        fn findEntry(tree: *@This(), p: *const Point) Handle {
+        pub fn findEntry(tree: *@This(), p: *const Point) Handle {
             var h = tree.root;
             while (h.isValid()) {
                 const node = tree.nodePtr(h);
                 h = node.children[calculateHypercubeAddress(p, node.postfix_length)];
                 if (node.isLeaf()) {
+                    if (h.isValid()) {
+                        const p2 = tree.entries.items(.point)[h.n];
+                        if (std.mem.eql(u32, p, &p2))
+                            return h;
+
+                        return .invalid;
+                    }
                     return h;
                 }
             }
@@ -409,10 +448,10 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
                         if (!child_handle.isValid()) continue;
 
                         iter.index = @intCast(i + 1);
-                        const point = iter.tree.entries.items(.point)[child_handle.n];
+                        const p = iter.tree.entries.items(.point)[child_handle.n];
                         const value = iter.tree.entries.items(.data)[child_handle.n].value;
                         return .{
-                            .key = point,
+                            .key = p,
                             .value = value,
                         };
                     }
@@ -469,7 +508,6 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             var current = tree.entries.items(.parent)[handle.n];
             var address = calculateHypercubeAddress(p, tree.nodePtr(current).postfix_length);
 
-            tree.destroyEntry(handle);
             tree.getChildren(current)[address] = .invalid;
             tree.getChildrenLenPtr(current).* -= 1;
 
@@ -505,6 +543,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
                     tree.nodePtr(parent).postfix_length,
                 );
                 tree.nodePtr(child).infix_length += tree.nodePtr(current).infix_length + 1;
+                tree.entries.items(.parent)[child.n] = parent;
                 tree.getChildren(parent)[address] = child;
                 tree.destroyEntry(current);
 
@@ -512,6 +551,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
                 parent = tree.getParent(parent);
             }
 
+            tree.entries.items(.parent)[handle.n] = .invalid;
             return ret;
         }
 
@@ -525,7 +565,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             tree: *@This(),
             min: *const Point,
             max: *const Point,
-            results: *std.ArrayList(KV),
+            results: *std.ArrayList(Handle),
         ) Allocator.Error!void {
             if (!tree.root.isValid())
                 return;
@@ -544,7 +584,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             tree: *@This(),
             min: [2]u32,
             max: [2]u32,
-            results: *std.ArrayList(KV),
+            results: *std.ArrayList(Handle),
         ) Allocator.Error!void {
             if (dims != 4) {
                 @compileError("queryWindowRect only supports 4 dimensional trees");
@@ -597,6 +637,14 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
 
         pub fn deinit(tree: *@This(), allocator: Allocator) void {
             tree.entries.deinit(allocator);
+        }
+
+        pub fn valuePtr(tree: *@This(), handle: Handle) *V {
+            return &tree.entries.items(.data)[handle.n].value;
+        }
+
+        pub fn point(tree: *@This(), handle: Handle) Point {
+            return tree.entries.items(.point)[handle.n];
         }
 
         pub const Header = extern struct {
@@ -684,7 +732,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             handle: Handle,
             min: *const Point,
             max: *const Point,
-            results: *std.ArrayList(KV),
+            results: *std.ArrayList(Handle),
         ) Allocator.Error!void {
             assert(handle.isValid());
             const p = &tree.entries.items(.point)[handle.n];
@@ -707,11 +755,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
 
                     const child_point = &tree.entries.items(.point)[child_handle.n];
                     if (entryInWindow(child_point, min, max)) {
-                        const v = tree.entries.items(.data)[child_handle.n].value;
-                        try results.append(.{
-                            .key = child_point.*,
-                            .value = v,
-                        });
+                        try results.append(child_handle);
                     }
                 }
                 return;
@@ -774,8 +818,10 @@ test "Basics" {
     var tree: PhTree([*:0]const u8, 2) = try .init(std.testing.allocator);
     defer tree.deinit(std.testing.allocator);
 
-    const handle, _ = try tree.insert(std.testing.allocator, &.{ 1, 1 }, "1, 1! :D");
-    const value = tree.entries.items(.data)[handle.n].value;
+    const kv1 = try tree.createKvEntry(std.testing.allocator, &.{ 1, 1 }, "1, 1! :D");
+    const old_kv = try tree.insert(std.testing.allocator, &.{ 1, 1 }, kv1);
+    try std.testing.expect(!old_kv.isValid());
+    const value = tree.entries.items(.data)[kv1.n].value;
     try std.testing.expectEqualStrings("1, 1! :D", std.mem.span(value));
 
     const v = tree.find(&.{ 1, 1 }).?.*;
@@ -803,7 +849,8 @@ fn fuzz(input: []const u8) anyerror!void {
     // try file.writeAll(input[0..len]);
     const slice = std.mem.bytesAsSlice(KV, input[0..len]);
     for (slice) |kv| {
-        _ = try tree.insert(std.testing.allocator, &kv.p, kv.value);
+        const entry = try tree.createKvEntry(std.testing.allocator, &kv.p, kv.value);
+        _ = try tree.insert(std.testing.allocator, &kv.p, entry);
         const value = tree.find(&kv.p).?;
         try std.testing.expectEqual(kv.value, value.*);
     }
@@ -819,21 +866,22 @@ test "Fuzz phtree" {
 }
 
 test "phtree crash" {
-    const x1 = 0;
-    const y1 = 0;
+    const points = [_]PhTree(u32, 2).Point{
+        .{ 0, 0 },
+        .{ 0, 1 },
+        .{ 0, 2 },
+    };
 
-    const x2 = 5;
-    const y2 = 0;
-
-    const x3 = 13;
-    const y3 = 0;
-
-    var tree: PhTree(void, 4) = try .init(std.testing.allocator);
+    var tree: PhTree(u32, 2) = try .init(std.testing.allocator);
     defer tree.deinit(std.testing.allocator);
 
-    _ = try tree.insert(std.testing.allocator, &.{ x1, y1, x1, y1 }, {});
-    _ = try tree.insert(std.testing.allocator, &.{ x2, y2, x2, y2 }, {});
-    _ = try tree.insert(std.testing.allocator, &.{ x3, y3, x3, y3 }, {});
-    _ = tree.remove(&.{ x3, y3, x3, y3 });
-    _ = try tree.insert(std.testing.allocator, &.{ x3, y3, x3, y3 }, {});
+    for (&points) |p| {
+        _, const ptr, _ = try tree.getOrPut(std.testing.allocator, &p);
+        ptr.* = p[1];
+    }
+    const removed = tree.remove(&points[0]);
+    try std.testing.expectEqual(0, removed);
+
+    var iter = tree.iterator();
+    while (iter.next()) |_| {}
 }
