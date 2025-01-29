@@ -147,13 +147,18 @@ pub fn FlatListPool(comptime T: type) type {
                     pool.buf.items.len * 2 + new_capacity,
                 );
 
-                const new_offset = pool.buf.items.len;
-                pool.buf.items.len += new_capacity;
+                if (list.offset + list.capacity < pool.buf.items.len) {
+                    const new_offset = pool.buf.items.len;
+                    pool.buf.items.len += new_capacity;
 
-                const new_slice = pool.buf.items[new_offset..][0..list.len];
-                @memcpy(new_slice, pool.items(list_index));
+                    const new_slice = pool.buf.items[new_offset..][0..list.len];
+                    @memcpy(new_slice, pool.items(list_index));
 
-                list.offset = new_offset;
+                    list.offset = new_offset;
+                } else {
+                    pool.buf.items.len += new_capacity - list.capacity;
+                }
+
                 list.capacity = new_capacity;
             }
         }
@@ -173,7 +178,7 @@ pub fn FlatListPool(comptime T: type) type {
         fn growCapacity(current: usize, minimum: usize) usize {
             var new = current;
             while (true) {
-                new +|= new + 1;
+                new +|= new + 2;
                 if (new >= minimum)
                     return new;
             }
@@ -220,4 +225,25 @@ pub fn FlatListPool(comptime T: type) type {
             return @bitCast(pool.iovecs());
         }
     };
+}
+
+test "buhbuh" {
+    const a = std.testing.allocator;
+    var pool: FlatListPool(u8) = .empty;
+    defer pool.deinit(a);
+
+    const list = try pool.createList(a);
+    try pool.append(a, list, 'a');
+    try pool.append(a, list, 'b');
+    try pool.append(a, list, 'c');
+
+    const list2 = try pool.createList(a);
+    try pool.append(a, list2, 'a');
+    try pool.append(a, list2, 'b');
+    try pool.append(a, list2, 'c');
+
+    try pool.append(a, list, 'd');
+
+    try std.testing.expectEqualStrings("abc", pool.items(list2));
+    try std.testing.expectEqualStrings("abcd", pool.items(list));
 }

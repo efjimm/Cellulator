@@ -468,8 +468,9 @@ pub fn interpretFile(sheet: *Sheet, reader: std.io.AnyReader) !void {
         };
 
         try sheet.cell_tree.ensureUnusedCapacity(sheet.allocator, @intCast(cells.len));
-        try sheet.dependent_list.buf.ensureUnusedCapacity(sheet.allocator, dependent_count);
-        try sheet.dependent_list.entries.ensureUnusedCapacity(sheet.allocator, dependent_count);
+        try sheet.dependents.ensureUnusedCapacity(sheet.allocator, dependent_count);
+        try sheet.dependent_list.buf.ensureUnusedCapacity(sheet.allocator, dependent_count * 4);
+        try sheet.dependent_list.entries.ensureUnusedCapacity(sheet.allocator, dependent_count / 2);
         try sheet.undos.ensureUnusedCapacity(sheet.allocator, cells.len);
 
         try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, total_strings_len);
@@ -768,7 +769,6 @@ fn findExtantRow(sheet: *Sheet, r: Rect, comptime p: enum { first, last }) !?Pos
 
     if (results.items.len == 0) return null; // Range does not contain any cells
 
-    // TODO: Optimize this function
     var result_y: u32 = sheet.cell_tree.point(results.items[0])[1];
     for (results.items[1..]) |handle| {
         const y = sheet.cell_tree.point(handle)[1];
@@ -796,7 +796,6 @@ fn findExtantCol(sheet: *Sheet, r: Rect, comptime p: enum { first, last }) !?Pos
 
     if (results.items.len == 0) return null; // Range does not contain any cells
 
-    // TODO: Optimize this function
     var result_x: u32 = sheet.cell_tree.point(results.items[0])[0];
     for (results.items[1..]) |handle| {
         const x = sheet.cell_tree.point(handle)[0];
