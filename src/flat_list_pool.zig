@@ -16,9 +16,9 @@ pub fn FlatListPool(comptime T: type) type {
         };
 
         pub const List = extern struct {
-            len: usize,
-            offset: usize,
-            capacity: usize,
+            len: u32,
+            offset: u32,
+            capacity: u32,
 
             pub const Index = packed struct {
                 n: u32,
@@ -74,7 +74,7 @@ pub fn FlatListPool(comptime T: type) type {
             const list = &pool.entries.addOneAssumeCapacity().list;
             const offset = pool.buf.items.len;
             list.* = .{
-                .offset = offset,
+                .offset = @intCast(offset),
                 .len = 0,
                 .capacity = 0,
             };
@@ -125,7 +125,7 @@ pub fn FlatListPool(comptime T: type) type {
 
             const dest = pool.buf.items[list.offset + list.len ..][0..slice.len];
             @memcpy(dest, slice);
-            list.len += slice.len;
+            list.len += @intCast(slice.len);
         }
 
         pub fn ensureUnusedListCapacity(pool: *Pool, allocator: Allocator, n: u32) !void {
@@ -137,7 +137,7 @@ pub fn FlatListPool(comptime T: type) type {
             noalias pool: *Pool,
             allocator: Allocator,
             list_index: List.Index,
-            n: usize,
+            n: u32,
         ) !void {
             const list = &pool.entries.items[list_index.n].list;
             if (list.capacity - list.len < n) {
@@ -154,7 +154,7 @@ pub fn FlatListPool(comptime T: type) type {
                     const new_slice = pool.buf.items[new_offset..][0..list.len];
                     @memcpy(new_slice, pool.items(list_index));
 
-                    list.offset = new_offset;
+                    list.offset = @intCast(new_offset);
                 } else {
                     pool.buf.items.len += new_capacity - list.capacity;
                 }
@@ -175,7 +175,7 @@ pub fn FlatListPool(comptime T: type) type {
             return pool.entries.items[list_index.n].list.len;
         }
 
-        fn growCapacity(current: usize, minimum: usize) usize {
+        fn growCapacity(current: u32, minimum: u32) u32 {
             var new = current;
             while (true) {
                 new +|= new + 2;

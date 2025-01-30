@@ -24,23 +24,40 @@ pub fn arrayListIoVec(list: anytype) std.posix.iovec_const {
     return ptrToIoVec(list.items);
 }
 
-pub fn multiArrayListIoVec(list: anytype) std.posix.iovec_const {
-    const info = @typeInfo(@TypeOf(list));
-    comptime assert(info == .pointer);
-    assert(list.len == list.capacity);
-    const bytes = list.bytes[0..info.pointer.child.capacityInBytes(list.capacity)];
-    return ptrToIoVec(bytes);
+pub fn multiArrayListIoVec(
+    comptime T: type,
+    list: *std.MultiArrayList(T),
+) MultiArrayListIoVecs(T) {
+    var iovecs: MultiArrayListIoVecs(T) = undefined;
+    const Field = std.MultiArrayList(T).Field;
+    inline for (&iovecs, comptime std.enums.values(Field)) |*iovec, field| {
+        iovec.* = ptrToIoVec(list.items(field));
+    }
+
+    return iovecs;
 }
 
-pub fn multiArrayListSliceIoVec(list: anytype) std.posix.iovec_const {
-    const info = @typeInfo(@TypeOf(list));
-    comptime assert(info == .pointer);
-    assert(list.len == list.capacity);
+pub fn MultiArrayListIoVecs(comptime T: type) type {
+    const fields = @typeInfo(T).@"struct".fields;
+    return [fields.len]std.posix.iovec_const;
+}
 
-    var m = list.toMultiArrayList();
+pub fn MultiArrayListIoVecsMut(comptime T: type) type {
+    const fields = @typeInfo(T).@"struct".fields;
+    return [fields.len]std.posix.iovec;
+}
 
-    const bytes = m.bytes[0..@TypeOf(m).capacityInBytes(list.capacity)];
-    return ptrToIoVec(bytes);
+pub fn multiArrayListSliceIoVec(
+    comptime T: type,
+    slice: *std.MultiArrayList(T).Slice,
+) MultiArrayListIoVecs(T) {
+    var iovecs: MultiArrayListIoVecs(T) = undefined;
+    const Field = std.MultiArrayList(T).Field;
+    inline for (&iovecs, comptime std.enums.values(Field)) |*iovec, field| {
+        iovec.* = ptrToIoVec(slice.items(field));
+    }
+
+    return iovecs;
 }
 
 pub fn prepArrayList(list: anytype, allocator: Allocator, len: u32) !std.posix.iovec {
@@ -49,23 +66,29 @@ pub fn prepArrayList(list: anytype, allocator: Allocator, len: u32) !std.posix.i
     return @bitCast(arrayListIoVec(list));
 }
 
-pub fn prepMultiArrayList(list: anytype, allocator: Allocator, len: u32) !std.posix.iovec {
-    try list.setCapacity(allocator, len);
+pub fn prepMultiArrayList(
+    comptime T: type,
+    list: *std.MultiArrayList(T),
+    allocator: Allocator,
+    len: u32,
+    cap: u32,
+) !MultiArrayListIoVecsMut(T) {
+    try list.setCapacity(allocator, cap);
     list.len = len;
-    return @bitCast(multiArrayListIoVec(list));
+    return @bitCast(multiArrayListIoVec(T, list));
 }
 
-pub fn prepMultiArrayListSlice(list: anytype, allocator: Allocator, len: u32) !std.posix.iovec {
+pub fn prepMultiArrayListSlice(
+    comptime T: type,
+    list: anytype,
+    allocator: Allocator,
+    len: u32,
+    cap: u32,
+) !MultiArrayListIoVecsMut(T) {
     var m = list.toMultiArrayList();
-    const ret = try prepMultiArrayList(&m, allocator, len);
+    const ret = try prepMultiArrayList(T, &m, allocator, len, cap);
     list.* = m.slice();
     return ret;
-}
-
-pub fn shrinkMultiArrayListSlice(allocator: std.mem.Allocator, slice_ptr: anytype) void {
-    var m = slice_ptr.toMultiArrayList();
-    m.shrinkAndFree(allocator, m.len);
-    slice_ptr.* = m.slice();
 }
 
 /// Returns true if the passed type will coerce to []const u8.

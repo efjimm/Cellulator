@@ -2,11 +2,14 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
+const utils = @import("utils.zig");
 
 pub fn PhTree(comptime V: type, comptime dims: usize) type {
     return struct {
         root: Handle,
         free: Handle,
+        free_count: u32,
+        added_count: u32 = 0,
         entries: std.MultiArrayList(Entry).Slice,
 
         fn calculateHypercubeAddress(p: *const Point, postfix_length: u8) u8 {
@@ -57,10 +60,12 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
         }
 
         fn createEntryAssumeCapacity(tree: *@This()) Handle {
+            tree.added_count += 1;
             if (tree.free.isValid()) {
                 const ret = tree.free;
                 tree.free = tree.entries.items(.data)[ret.n].free;
                 assert(!tree.free.isValid() or tree.free.n < tree.entries.len);
+                tree.free_count -= 1;
                 return ret;
             }
 
@@ -70,18 +75,17 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             return handle;
         }
 
-        fn destroyEntry(tree: *@This(), handle: Handle) void {
+        pub fn destroyEntry(tree: *@This(), handle: Handle) void {
             if (handle.n == tree.entries.len - 1) {
                 tree.entries.len -= 1;
             } else {
                 tree.entries.items(.data)[handle.n].free = tree.free;
                 tree.free = handle;
+                tree.free_count += 1;
             }
         }
 
-        // Inserts a KV into a node. If a KV with `point` already exists, overwrites it's value with
-        // `value` and returns the old one.
-        fn addNodeKvAssumeCapacity(
+        fn addNodeKv(
             tree: *@This(),
             handle: Handle,
             p: *const Point,
@@ -138,7 +142,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             });
 
             if (postfix_length == 0) {
-                const old_kv = tree.addNodeKvAssumeCapacity(handle, p, kv);
+                const old_kv = tree.addNodeKv(handle, p, kv);
                 assert(!old_kv.isValid());
             }
 
@@ -237,7 +241,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
                     }
                 }
 
-                const removed_kv = tree.addNodeKvAssumeCapacity(child_handle, p, kv);
+                const removed_kv = tree.addNodeKv(child_handle, p, kv);
                 return .{ child_handle, removed_kv };
             }
 
@@ -266,12 +270,11 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
         }
 
         pub fn ensureUnusedCapacity(tree: *@This(), allocator: Allocator, n: u32) Allocator.Error!void {
-            var m = tree.entries.toMultiArrayList();
-            defer tree.entries = m.slice();
-
             const count = std.math.mul(u32, n, 3) catch return error.OutOfMemory;
-            if (m.len + count > m.capacity) {
-                try m.ensureUnusedCapacity(allocator, count);
+            if (tree.entries.len + count > tree.entries.capacity) {
+                var m = tree.entries.toMultiArrayList();
+                defer tree.entries = m.slice();
+                try m.setCapacity(allocator, m.len + count);
             }
         }
 
@@ -324,9 +327,15 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             return tree.insertAssumeCapacity(p, kv);
         }
 
+        fn hasCapacity(tree: *@This(), n: u32) bool {
+            const unused_entries = tree.entries.capacity - tree.entries.len;
+            return n <= tree.free_count + unused_entries;
+        }
+
         pub fn insertAssumeCapacity(tree: *@This(), p: *const Point, kv: Handle) Handle {
-            assert(tree.entries.len + 2 <= tree.entries.capacity);
+            assert(tree.hasCapacity(2));
             assert(tree.root.isValid());
+            tree.added_count = 0;
             var current_node = tree.root;
             var removed_kv: Handle = .invalid;
             while (!tree.nodePtr(current_node).isLeaf()) {
@@ -500,18 +509,18 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             return null;
         }
 
-        pub fn remove(tree: *@This(), p: *const Point) ?V {
+        pub fn remove(tree: *@This(), p: *const Point) ?Handle {
             const handle = tree.findEntry(p);
             if (!handle.isValid()) return null;
-            const ret = tree.entries.items(.data)[handle.n].value;
 
             var current = tree.entries.items(.parent)[handle.n];
+            assert(tree.nodePtr(current).isLeaf());
             var address = calculateHypercubeAddress(p, tree.nodePtr(current).postfix_length);
 
             tree.getChildren(current)[address] = .invalid;
             tree.getChildrenLenPtr(current).* -= 1;
 
-            if (tree.getChildrenLen(current) != 0) return ret;
+            if (tree.getChildrenLen(current) != 0) return handle;
 
             // Need to delete the leaf node
 
@@ -552,7 +561,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             }
 
             tree.entries.items(.parent)[handle.n] = .invalid;
-            return ret;
+            return handle;
         }
 
         pub const KV = struct {
@@ -617,6 +626,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             var ret: @This() = .{
                 .root = .invalid,
                 .free = .invalid,
+                .free_count = 0,
                 .entries = .empty,
             };
             ret.root = try ret.createEntry(allocator);
@@ -649,32 +659,39 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
 
         pub const Header = extern struct {
             entries_len: u32,
+            entries_cap: u32,
             root: Handle,
             free: Handle,
+            free_count: u32,
         };
 
-        pub fn iovecs(tree: *@This()) std.posix.iovec_const {
-            const utils = @import("utils.zig");
-            return utils.multiArrayListSliceIoVec(&tree.entries);
+        pub const IoVecs = utils.MultiArrayListIoVecs(Entry);
+        pub const IoVecsMut = utils.MultiArrayListIoVecsMut(Entry);
+
+        pub fn iovecs(tree: *@This()) IoVecs {
+            return utils.multiArrayListSliceIoVec(Entry, &tree.entries);
         }
 
         pub fn getHeader(tree: *@This()) Header {
             return .{
                 .entries_len = @intCast(tree.entries.len),
+                .entries_cap = @intCast(tree.entries.capacity),
                 .root = tree.root,
                 .free = tree.free,
+                .free_count = tree.free_count,
             };
         }
 
-        pub fn fromHeader(tree: *@This(), allocator: Allocator, header: Header) !std.posix.iovec {
+        pub fn fromHeader(tree: *@This(), allocator: Allocator, header: Header) !IoVecsMut {
             var m = tree.entries.toMultiArrayList();
 
-            try m.setCapacity(allocator, header.entries_len);
+            try m.setCapacity(allocator, header.entries_cap);
             m.len = header.entries_len;
             tree.entries = m.slice();
 
             tree.root = header.root;
             tree.free = header.free;
+            tree.free_count = header.free_count;
 
             return @bitCast(tree.iovecs());
         }
@@ -827,7 +844,8 @@ test "Basics" {
     const v = tree.find(&.{ 1, 1 }).?.*;
     try std.testing.expectEqualStrings("1, 1! :D", std.mem.span(v));
 
-    const removed_value = tree.remove(&.{ 1, 1 }).?;
+    const removed = tree.remove(&.{ 1, 1 }).?;
+    const removed_value = tree.entries.items(.data)[removed.n].value;
     try std.testing.expectEqualStrings("1, 1! :D", std.mem.span(removed_value));
 
     try std.testing.expectEqual(null, tree.find(&.{ 1, 1 }));
@@ -879,8 +897,9 @@ test "phtree crash" {
         _, const ptr, _ = try tree.getOrPut(std.testing.allocator, &p);
         ptr.* = p[1];
     }
-    const removed = tree.remove(&points[0]);
-    try std.testing.expectEqual(0, removed);
+    const removed = tree.remove(&points[0]).?;
+    const removed_value = tree.entries.items(.data)[removed.n].value;
+    try std.testing.expectEqual(0, removed_value);
 
     var iter = tree.iterator();
     while (iter.next()) |_| {}
