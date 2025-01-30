@@ -130,12 +130,15 @@ fn getStringSlice(sheet: *Sheet, index: StringIndex) [:0]const u8 {
     return std.mem.span(ptr);
 }
 
-pub fn rectFromCellHandle(sheet: *Sheet, handle: CellHandle) Rect {
-    return sheet.getCellFromHandle(handle).rect();
+pub fn posFromCellHandle(sheet: *Sheet, handle: CellHandle) Position {
+    const point = sheet.cell_tree.point(handle);
+    return .init(point[0], point[1]);
 }
 
-pub fn eqlCellHandles(sheet: *Sheet, a: CellHandle, b: CellHandle) bool {
-    return sheet.getCellFromHandle(a).eql(sheet.getCellFromHandle(b));
+pub fn rectFromCellHandle(sheet: *Sheet, handle: CellHandle) Rect {
+    const point = sheet.cell_tree.point(handle);
+    const pos: Position = .init(point[0], point[1]);
+    return .initSinglePos(pos);
 }
 
 pub fn create(allocator: Allocator) !*Sheet {
@@ -230,7 +233,7 @@ pub fn destroy(sheet: *Sheet) void {
 }
 
 pub fn getCellFromHandle(sheet: *Sheet, handle: CellHandle) *Cell {
-    return &sheet.cell_tree.entries.items(.data)[handle.n].value;
+    return sheet.cell_tree.valuePtr(handle);
 }
 
 const Marker = packed struct(u2) {
@@ -474,7 +477,7 @@ pub fn bulkParse(
     return total_strings_len;
 }
 
-pub fn interpretFile(sheet: *Sheet, reader: std.io.AnyReader) !void {
+pub fn interpretSource(sheet: *Sheet, reader: std.io.AnyReader) !void {
     errdefer sheet.clearRetainingCapacity();
     defer sheet.endUndoGroup();
 
@@ -529,16 +532,20 @@ pub fn interpretFile(sheet: *Sheet, reader: std.io.AnyReader) !void {
 
         const cells_slice = cells.slice();
 
+        // Copy the string values from every cell into the string table
         var start: u32 = 0;
         for (cells_slice.items(.root), cells_slice.items(.strings)) |root, *string_index| {
-            string_index.* = sheet.dupeAstStrings2(src, .from(start), root);
+            string_index.* = sheet.dupeAstStrings(src, .from(start), root);
             start = root.n + 1;
         }
 
+        // TODO: Should we even create undos for loading a sheet?
+        // Create all undos
         for (cells_slice.items(.pos)) |pos| {
             sheet.undos.appendAssumeCapacity(.init(.delete_cell, pos));
         }
 
+        // Queue up all the to-be-inserted cells for update
         const start_node_index = sheet.cell_tree.entries.len;
         sheet.queued_cells.items.len += cells.len;
         sheet.cell_tree.entries.len += cells.len;
@@ -590,7 +597,7 @@ pub fn loadFile(sheet: *Sheet, filepath: []const u8) !void {
     log.debug("Loading file {s}", .{filepath});
 
     sheet.clearRetainingCapacity();
-    try sheet.interpretFile(reader.any());
+    try sheet.interpretSource(reader.any());
 }
 
 pub fn writeFile(
@@ -612,8 +619,7 @@ pub fn writeFile(
 
     var iter = sheet.cell_tree.iterator();
     while (iter.next()) |kv| {
-        const cell = kv.value;
-        const pos = cell.position();
+        const pos: Position = .init(kv.key[0], kv.key[1]);
         try writer.print("let {}=", .{pos});
         try sheet.printCellExpression(pos, writer);
         try writer.writeByte('\n');
@@ -1219,36 +1225,6 @@ pub fn needsUpdate(sheet: *const Sheet) bool {
 fn dupeAstStrings(
     sheet: *Sheet,
     source: []const u8,
-    nodes: ast.NodeSlice,
-    root_node: ast.Index,
-) StringIndex {
-    assert(root_node.n < nodes.len);
-    const start = ast.leftMostChild(nodes, root_node);
-    assert(start.n <= root_node.n);
-
-    const tags = nodes.items(.tag)[start.n .. root_node.n + 1];
-    const data = nodes.items(.data)[start.n .. root_node.n + 1];
-
-    const ret: StringIndex = .from(@intCast(sheet.strings_buf.items.len));
-
-    // Append contents of all string literals to the list, and update their `start` and `end`
-    // indices to be into this list.
-    for (tags, 0..) |tag, i| {
-        if (tag == .string_literal) {
-            const str = &data[i].string_literal;
-            const bytes = source[str.start..str.end];
-            str.start = @intCast(sheet.strings_buf.items.len);
-            str.end = @intCast(str.start + bytes.len);
-            sheet.strings_buf.appendSliceAssumeCapacity(bytes);
-        }
-    }
-    sheet.strings_buf.appendAssumeCapacity(0);
-    return ret;
-}
-
-fn dupeAstStrings2(
-    noalias sheet: *Sheet,
-    source: []const u8,
     start: ast.Index,
     root_node: ast.Index,
 ) StringIndex {
@@ -1291,11 +1267,10 @@ pub fn setCell(
     _ = try sheet.createColumn(pos.x);
     errdefer comptime unreachable;
 
-    const strings = sheet.dupeAstStrings(source, sheet.ast_nodes, expr_root);
+    const ast_start_node = ast.leftMostChild(sheet.ast_nodes, expr_root);
+    const strings = sheet.dupeAstStrings(source, ast_start_node, expr_root);
 
     const new_node = sheet.cell_tree.createKvEntryAssumeCapacity(&.{ pos.x, pos.y }, .{
-        .row = pos.y,
-        .col = pos.x,
         .expr_root = expr_root,
         .strings = strings,
     });
@@ -1316,8 +1291,6 @@ pub fn setCell2(
         .point = .{ pos.x, pos.y },
         .parent = .invalid,
         .data = .{ .value = .{
-            .row = pos.y,
-            .col = pos.x,
             .expr_root = root,
             .strings = strings,
             .state = .enqueued,
@@ -1380,21 +1353,22 @@ pub fn insertCellNode(
     handle: CellHandle,
     undo_opts: UndoOpts,
 ) void {
-    const cell_ptr = sheet.cell_tree.valuePtr(handle);
-    const pos = cell_ptr.position();
+    const point = sheet.cell_tree.point(handle);
+    const pos: Position = .init(point[0], point[1]);
+    const cell_ptr = sheet.getCellFromHandle(handle);
 
-    const old_handle = sheet.cell_tree.insertAssumeCapacity(&.{ cell_ptr.col, cell_ptr.row }, handle);
+    const old_handle = sheet.cell_tree.insertAssumeCapacity(&point, handle);
 
     var u: Undo = undefined;
     if (!old_handle.isValid()) {
-        log.debug("Creating cell {}", .{cell_ptr.rect().tl});
+        log.debug("Creating cell {}", .{pos});
         sheet.addExpressionDependents(handle, cell_ptr.expr_root);
 
         u = .init(.delete_cell, pos);
     } else {
         const old_cell_ptr = sheet.getCellFromHandle(old_handle);
 
-        log.debug("Overwriting cell {}", .{old_cell_ptr.rect().tl});
+        log.debug("Overwriting cell {}", .{pos});
 
         sheet.removeExprDependents(handle, cell_ptr.expr_root);
         sheet.addExpressionDependents(handle, cell_ptr.expr_root);
@@ -1418,6 +1392,7 @@ pub fn deleteCellByHandle(
     handle: CellHandle,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
+    const point = sheet.cell_tree.point(handle);
     const cell = sheet.getCellFromHandle(handle);
 
     try sheet.ensureUndoCapacity(undo_opts.undo_type, 1);
@@ -1426,7 +1401,7 @@ pub fn deleteCellByHandle(
     sheet.removeExprDependents(handle, cell.expr_root);
 
     sheet.setCellError(cell);
-    _ = sheet.cell_tree.remove(&.{ cell.col, cell.row });
+    _ = sheet.cell_tree.remove(&point);
 
     sheet.pushUndo(.init(.set_cell, .{
         .handle = handle,
@@ -1519,9 +1494,9 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
         _ = sheet.evalCellByHandle(handle) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.CyclicalReference => {
-                const cell = sheet.getCellFromHandle(handle);
+                const point = sheet.cell_tree.point(handle);
                 log.info("Cyclical reference encountered while evaluating {}", .{
-                    cell.position(),
+                    Position.init(point[0], point[1]),
                 });
             },
             else => {},
@@ -1552,13 +1527,12 @@ fn markDirty(
     handle: CellHandle,
     dirty_cells: *std.ArrayList(CellHandle),
 ) Allocator.Error!void {
-    const cell = sheet.getCellFromHandle(handle);
     sheet.search_buffer.clearRetainingCapacity();
 
     var list = sheet.search_buffer.toManaged(sheet.allocator);
     defer sheet.search_buffer = list.moveToUnmanaged();
 
-    const pos = cell.position();
+    const pos = sheet.posFromCellHandle(handle);
     try sheet.dependents.queryWindowRect(
         .{ pos.x, pos.y },
         .{ pos.x, pos.y },
@@ -1572,7 +1546,9 @@ fn markDirty(
             const h = sheet.deps.items[index.n].handle;
             const c = sheet.getCellFromHandle(h);
             if (c.state != .dirty) {
-                log.debug("Marked {} as dirty", .{c.position()});
+                log.debug("Marked {} as dirty", .{
+                    sheet.posFromCellHandle(h),
+                });
                 c.state = .dirty;
                 try dirty_cells.append(h);
             }
@@ -1616,9 +1592,6 @@ pub fn setCellError(sheet: *Sheet, cell: *Cell) void {
 }
 
 pub const Cell = extern struct {
-    row: PosInt,
-    col: PosInt,
-
     /// Cached value of the cell
     value: Value = .{ .err = .fromError(error.NotEvaluable) },
 
@@ -1684,27 +1657,6 @@ pub const Cell = extern struct {
         }
     };
 
-    pub inline fn position(cell: Cell) Position {
-        return .{
-            .x = cell.col,
-            .y = cell.row,
-        };
-    }
-
-    pub inline fn eql(a: *const Cell, b: *const Cell) bool {
-        return a.row == b.row and a.col == b.col;
-    }
-
-    pub inline fn rect(cell: Cell) Rect {
-        return .initSingle(cell.col, cell.row);
-    }
-
-    fn compare(a: Cell, b: Cell) std.math.Order {
-        const a_key: u64 = @bitCast(a.position());
-        const b_key: u64 = @bitCast(b.position());
-        return std.math.order(a_key, b_key);
-    }
-
     pub fn fromExpression(sheet: *Sheet, expr: []const u8) !Cell {
         return .{ .expr_root = try ast.fromExpression(sheet, expr) };
     }
@@ -1747,7 +1699,7 @@ fn queueDependents(sheet: *Sheet, rect: Rect) Allocator.Error!void {
 
 pub fn evalCellByHandle(sheet: *Sheet, handle: CellHandle) ast.EvalError!ast.EvalResult {
     const cell = sheet.getCellFromHandle(handle);
-    log.debug("Evaluating cell {}", .{cell.position()});
+    log.debug("Evaluating cell {}", .{sheet.posFromCellHandle(handle)});
     switch (cell.state) {
         .up_to_date => {},
         .computing => return error.CyclicalReference,
@@ -1756,7 +1708,7 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: CellHandle) ast.EvalError!ast.Eva
 
             // Queue dependents before evaluating to ensure that errors are propagated to
             // dependents.
-            try sheet.queueDependents(cell.rect());
+            try sheet.queueDependents(sheet.rectFromCellHandle(handle));
 
             // Evaluate
             const res = ast.eval(
@@ -2202,7 +2154,7 @@ fn testCellEvaluation(a: Allocator) !void {
         \\let C13 = C12+B13
     ;
     var fbs = std.io.fixedBufferStream(set_cells);
-    try sheet.interpretFile(fbs.reader().any());
+    try sheet.interpretSource(fbs.reader().any());
     try sheet.update();
 
     // Test that updating this takes less than 100 ms
@@ -2525,7 +2477,7 @@ fn testCellEvaluation(a: Allocator) !void {
 
     fbs = std.io.fixedBufferStream(commands);
     sheet.clearRetainingCapacity();
-    try sheet.interpretFile(fbs.reader().any());
+    try sheet.interpretSource(fbs.reader().any());
     try sheet.update();
 
     // Only checks the eval results of some of the cells, checking all is kinda slow
@@ -2687,7 +2639,7 @@ test "DupeStrings" {
         try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, source.len);
         const strings = sheet.dupeAstStrings(
             source,
-            sheet.ast_nodes,
+            ast.leftMostChild(sheet.ast_nodes, expr_root),
             expr_root,
         );
 
@@ -2701,7 +2653,7 @@ test "DupeStrings" {
         try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, source.len);
         const strings = sheet.dupeAstStrings(
             source,
-            sheet.ast_nodes,
+            ast.leftMostChild(sheet.ast_nodes, expr_root),
             expr_root,
         );
         try t.expectEqualStrings("", sheet.getStringSlice(strings));
@@ -2795,7 +2747,7 @@ test "Dependencies" {
     const sheet = try create(std.testing.allocator);
     defer sheet.destroy();
 
-    try sheet.interpretFile(fbs.reader().any());
+    try sheet.interpretSource(fbs.reader().any());
     try sheet.update();
 
     try testSetCell(sheet, "A2", "A0 * 3");
