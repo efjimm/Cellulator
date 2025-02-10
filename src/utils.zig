@@ -12,8 +12,8 @@ pub usingnamespace @import("buffer_utils.zig");
 pub fn ptrToIoVec(ptr: anytype) std.posix.iovec_const {
     const p = @typeInfo(@TypeOf(ptr)).pointer;
     const bytes = blk: {
-        if (p.size == .Slice) break :blk std.mem.sliceAsBytes(ptr);
-        comptime assert(p.size == .One);
+        if (p.size == .slice) break :blk std.mem.sliceAsBytes(ptr);
+        comptime assert(p.size == .one);
         break :blk std.mem.asBytes(ptr);
     };
     return .{ .base = bytes.ptr, .len = bytes.len };
@@ -109,12 +109,12 @@ pub fn isZigString(comptime T: type) bool {
         const info = @typeInfo(T);
         if (info != .pointer) break :blk false;
 
-        const ptr = &info.Pointer;
+        const ptr = &info.pointer;
         // Check for CV qualifiers that would prevent coerction to []const u8
         if (ptr.is_volatile or ptr.is_allowzero) break :blk false;
 
         // If it's already a slice, simple check.
-        if (ptr.size == .Slice) {
+        if (ptr.size == .slice) {
             break :blk ptr.child == u8;
         }
 
@@ -122,7 +122,7 @@ pub fn isZigString(comptime T: type) bool {
         if (ptr.size == .One) {
             const child = @typeInfo(ptr.child);
             if (child == .Array) {
-                const arr = &child.Array;
+                const arr = &child.array;
                 break :blk arr.child == u8;
             }
         }

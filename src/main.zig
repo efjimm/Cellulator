@@ -54,20 +54,13 @@ pub fn main() !void {
     try zc.run();
 }
 
-pub const Panic = struct {
-    pub fn call(msg: []const u8, trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
-        @branchHint(.cold);
-        // zc.tui.term.cook() catch {};
-        std.debug.defaultPanic(msg, trace, ret_addr);
-    }
+fn panic(msg: []const u8, ret_addr: ?usize) noreturn {
+    @branchHint(.cold);
+    zc.tui.term.cook() catch {};
+    std.debug.defaultPanic(msg, ret_addr);
+}
 
-    pub const sentinelMismatch = std.debug.FormattedPanic.sentinelMismatch;
-    pub const unwrapError = std.debug.FormattedPanic.unwrapError;
-    pub const outOfBounds = std.debug.FormattedPanic.outOfBounds;
-    pub const startGreaterThanEnd = std.debug.FormattedPanic.startGreaterThanEnd;
-    pub const inactiveUnionField = std.debug.FormattedPanic.inactiveUnionField;
-    pub const messages = std.debug.SimplePanic.messages;
-};
+pub const Panic = std.debug.FullPanic(panic);
 
 pub const std_options: std.Options = if (use_logfile) .{
     .log_level = .debug,
