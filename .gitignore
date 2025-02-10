@@ -1,4 +1,11 @@
-zig-cache
-zig-out
-.gdb_history
-log.txt
+*
+!src
+!src/*
+!examples
+!examples/*
+!test
+!test/*
+!build.zig
+!build.zig.zon
+!TODO.md
+!README.md

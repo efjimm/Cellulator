@@ -3,14 +3,18 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const utils = @import("utils.zig");
+const runtime_safety = switch (@import("builtin").mode) {
+    .Debug, .ReleaseSafe => true,
+    .ReleaseFast, .ReleaseSmall => false,
+};
 
 pub fn PhTree(comptime V: type, comptime dims: usize) type {
     return struct {
         root: Handle,
         free: Handle,
         free_count: u32,
-        added_count: u32 = 0,
         entries: std.MultiArrayList(Entry).Slice,
+        // ensured_capacity: if (runtime_safety) u32 else void,
 
         fn calculateHypercubeAddress(p: *const Point, postfix_length: u8) u8 {
             const pl: u5 = @intCast(postfix_length);
@@ -60,7 +64,6 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
         }
 
         fn createEntryAssumeCapacity(tree: *@This()) Handle {
-            tree.added_count += 1;
             if (tree.free.isValid()) {
                 const ret = tree.free;
                 tree.free = tree.entries.items(.data)[ret.n].free;
@@ -75,7 +78,8 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             return handle;
         }
 
-        pub fn destroyEntry(tree: *@This(), handle: Handle) void {
+        pub fn destroyHandle(tree: *@This(), handle: Handle) void {
+            tree.entries.items(.parent)[handle.n] = .invalid;
             if (handle.n == tree.entries.len - 1) {
                 tree.entries.len -= 1;
             } else {
@@ -274,10 +278,11 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             if (tree.entries.len + count > tree.entries.capacity) {
                 var m = tree.entries.toMultiArrayList();
                 defer tree.entries = m.slice();
-                try m.setCapacity(allocator, m.len + count);
+                try m.setCapacity(allocator, m.len * 2 + count);
             }
         }
 
+        // TODO: Make the return type a normal struct instead of a tuple.
         pub fn getOrPut(
             tree: *@This(),
             allocator: Allocator,
@@ -333,9 +338,8 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
         }
 
         pub fn insertAssumeCapacity(tree: *@This(), p: *const Point, kv: Handle) Handle {
-            assert(tree.hasCapacity(2));
+            // assert(tree.hasCapacity(2));
             assert(tree.root.isValid());
-            tree.added_count = 0;
             var current_node = tree.root;
             var removed_kv: Handle = .invalid;
             while (!tree.nodePtr(current_node).isLeaf()) {
@@ -347,6 +351,8 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             const node = tree.nodePtr(current_node);
             const address = calculateHypercubeAddress(p, node.postfix_length);
             assert(node.children[address] == kv);
+            if (removed_kv.isValid())
+                tree.entries.items(.parent)[removed_kv.n] = .invalid;
             return removed_kv;
         }
 
@@ -417,10 +423,23 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             }
         }
 
-        fn print(tree: *@This()) void {
+        pub fn print(tree: *@This()) void {
             std.debug.print("========================\n", .{});
             tree.printNode(tree.root);
             std.debug.print("========================\n", .{});
+        }
+
+        pub fn largestDim(tree: *@This(), dim: u8) Handle {
+            var largest: Handle = .invalid;
+            for (tree.entries.items(.point), 0..) |p, i| {
+                const handle: Handle = .from(@intCast(i));
+                if (tree.isValue(handle) and
+                    (!largest.isValid() or tree.point(largest)[dim] < p[dim]))
+                {
+                    largest = handle;
+                }
+            }
+            return largest;
         }
 
         pub fn findEntry(tree: *@This(), p: *const Point) Handle {
@@ -509,18 +528,27 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             return null;
         }
 
-        pub fn remove(tree: *@This(), p: *const Point) ?Handle {
-            const handle = tree.findEntry(p);
-            if (!handle.isValid()) return null;
+        /// Returns true if `handle` is not in the tree.
+        pub fn isOrphaned(tree: *@This(), handle: Handle) bool {
+            return !tree.entries.items(.parent)[handle.n].isValid();
+        }
 
+        pub fn isValue(tree: *@This(), handle: Handle) bool {
+            const parent = tree.getParent(handle);
+            return parent.isValid() and tree.nodePtr(parent).isLeaf();
+        }
+
+        pub fn removeHandle(tree: *@This(), handle: Handle, p: *const Point) void {
             var current = tree.entries.items(.parent)[handle.n];
+            tree.entries.items(.parent)[handle.n] = .invalid;
+
             assert(tree.nodePtr(current).isLeaf());
             var address = calculateHypercubeAddress(p, tree.nodePtr(current).postfix_length);
 
             tree.getChildren(current)[address] = .invalid;
             tree.getChildrenLenPtr(current).* -= 1;
 
-            if (tree.getChildrenLen(current) != 0) return handle;
+            if (tree.getChildrenLen(current) != 0) return;
 
             // Need to delete the leaf node
 
@@ -532,7 +560,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             );
             tree.getChildren(parent)[address] = .invalid;
             tree.getChildrenLenPtr(parent).* -= 1;
-            tree.destroyEntry(current);
+            tree.destroyHandle(current);
 
             current = parent;
             parent = tree.getParent(parent);
@@ -554,13 +582,17 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
                 tree.nodePtr(child).infix_length += tree.nodePtr(current).infix_length + 1;
                 tree.entries.items(.parent)[child.n] = parent;
                 tree.getChildren(parent)[address] = child;
-                tree.destroyEntry(current);
+                tree.destroyHandle(current);
 
                 current = parent;
                 parent = tree.getParent(parent);
             }
+        }
 
-            tree.entries.items(.parent)[handle.n] = .invalid;
+        pub fn remove(tree: *@This(), p: *const Point) ?Handle {
+            const handle = tree.findEntry(p);
+            if (!handle.isValid()) return null;
+            tree.removeHandle(handle, p);
             return handle;
         }
 
@@ -696,7 +728,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             return @bitCast(tree.iovecs());
         }
 
-        fn nodePtr(tree: *@This(), handle: Handle) *Node {
+        pub fn nodePtr(tree: *@This(), handle: Handle) *Node {
             return &tree.entries.items(.data)[handle.n].node;
         }
 

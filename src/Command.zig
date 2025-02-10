@@ -14,7 +14,7 @@ cursor: u32 = 0,
 
 /// The command currently being edited. May be a pointer to an older command,
 /// which will have copy on write behaviour.
-buffer: GapBuffer(u8) = .{},
+buffer: GapBuffer(u8) = .empty,
 
 /// What index of the `history` list the `current` buffer points to.
 /// If none, this is equal to history.items.len

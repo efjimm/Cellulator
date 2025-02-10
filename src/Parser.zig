@@ -65,8 +65,6 @@ pub const ParseError = error{
     InvalidCellAddress,
 } || Allocator.Error;
 
-const log = std.log.scoped(.parser);
-
 const InitOptions = struct {
     nodes: NodeList = .{},
 };

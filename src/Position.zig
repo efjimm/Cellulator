@@ -154,6 +154,8 @@ pub const Position = packed struct {
 
     pub fn columnFromAddress(address: []const u8) FromAddressError!Int {
         assert(address.len > 0);
+        if (!std.ascii.isAlphabetic(address[0]))
+            return error.InvalidCellAddress;
 
         var ret: HashInt = 0;
         for (address) |c| {

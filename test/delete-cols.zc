@@ -1,0 +1,201 @@
+# Test 1: Delete a single column and verify shifting and reference invalidation
+let A0 = 1
+let B0 = 2
+let C0 = 3
+let D0 = 4
+let E0 = B0 + 10
+:delete-cols B
+:expect-eql-number A0 1
+:expect-eql-number B0 3
+:expect-eql-number C0 4
+:expect-error D0
+:expect-non-extant E0
+
+# Test 2: Delete a range of columns where a range reference becomes fully invalid
+let A1 = 10
+let B1 = 20
+let C1 = 30
+let D1 = 40
+let E1 = 50
+let F1 = @sum(B1:D1)
+:delete-cols B:D
+:expect-eql-number A1 10
+:expect-eql-number B1 50
+:expect-error C1
+:expect-non-extant D1:F1
+
+# Test 3: Delete a column that partially intersects a range reference
+let A2 = 5
+let B2 = 15
+let C2 = 25
+let D2 = 35
+let E2 = @sum(A2:C2)
+:delete-cols B
+:expect-eql-number A2 5
+:expect-eql-number B2 25
+:expect-eql-number D2 30
+:expect-non-extant E2
+
+# Test 4: Delete a range of columns that completely covers a referenced range, making the expression error
+let A3 = 100
+let B3 = 200
+let C3 = 300
+let D3 = @sum(B3:C3)
+:delete-cols B:C
+:expect-eql-number A3 100
+:expect-error B3
+:expect-non-extant C3:D3
+
+# Test 5: Delete a range of columns in a grid and verify shifting of cells
+let E5 = 10
+let F5 = 20
+let G5 = 30
+let H5 = 40
+:delete-cols F:G
+:expect-eql-number E5 10
+:expect-eql-number F5 40
+:expect-non-extant G5
+
+# Test 6: Delete columns using multi-letter column references
+let ZZ6 = 500
+let AAA6 = 600
+let AAB6 = 700
+:delete-cols ZZ:AAB
+:expect-non-extant ZZ6:AAB6
+
+# Test 7: Delete a single column from within a range used in a formula that partially resizes the range
+let A7 = 1
+let B7 = 2
+let C7 = 3
+let D7 = 4
+let E7 = @sum(B7:D7)
+:delete-cols C
+:expect-eql-number B7 2
+:expect-eql-number C7 4
+:expect-eql-number D7 6
+:expect-non-extant E7
+
+# Test Case 8: Single column deletion with undo/redo.
+let A0 = 1
+let B0 = 2
+let C0 = 3
+let D0 = B0 + 10
+:delete-cols B
+:expect-eql-number A0 1
+:expect-eql-number B0 3
+:expect-error C0
+:expect-non-extant D0
+:undo 1
+:expect-eql-number A0 1
+:expect-eql-number B0 2
+:expect-eql-number C0 3
+:expect-eql-number D0 12
+:redo 1
+:expect-eql-number A0 1
+:expect-eql-number B0 3
+:expect-error C0
+:expect-non-extant D0
+
+# Test Case 9: Range deletion with undo/redo.
+let A1 = 10
+let B1 = 20
+let C1 = 30
+let D1 = 40
+let E1 = @sum(B1:D1)
+:delete-cols B:D
+:expect-eql-number A1 10
+:expect-error B1
+:expect-non-extant C1:F1
+:undo 1
+:expect-eql-number A1 10
+:expect-eql-number B1 20
+:expect-eql-number C1 30
+:expect-eql-number D1 40
+:expect-eql-number E1 90
+:redo 1
+:expect-eql-number A1 10
+:expect-error B1
+:expect-non-extant C1:F1
+
+# Test Case 10: Deleting a single column that partially intersects a range.
+let A2 = 5
+let B2 = 10
+let C2 = 15
+let D2 = 20
+let E2 = @sum(B2:D2)
+:delete-cols C
+:expect-eql-number A2 5
+:expect-eql-number B2 10
+:expect-eql-number C2 20
+:expect-eql-number D2 30
+:expect-non-extant E2
+:undo 1
+:expect-eql-number A2 5
+:expect-eql-number B2 10
+:expect-eql-number C2 15
+:expect-eql-number D2 20
+:expect-eql-number E2 45
+:redo 1
+:expect-eql-number A2 5
+:expect-eql-number B2 10
+:expect-eql-number C2 20
+:expect-eql-number D2 30
+:expect-non-extant E2
+
+# Test Case 11: Deleting a range of columns that invalidates a formula.
+let A3 = 100
+let B3 = 200
+let C3 = 300
+let D3 = 400
+let F3 = @prod(B3:D3)
+:delete-cols B:D
+:expect-eql-number A3 100
+:expect-error C3
+:expect-non-extant B3
+:expect-non-extant D3:G3
+:undo 1
+:expect-eql-number A3 100
+:expect-eql-number B3 200
+:expect-eql-number C3 300
+:expect-eql-number D3 400
+:expect-eql-number F3 24000000
+:redo 1
+:expect-eql-number A3 100
+:expect-error C3
+:expect-non-extant B3
+:expect-non-extant D3:G3
+
+# Test Case 12: Deleting columns in a filled grid with undo/redo.
+:fill A4:E4 1 1
+:delete-cols B:D
+:expect-eql-number A4 1
+:expect-eql-number B4 5
+:expect-non-extant C4:E4
+:undo 1
+:expect-eql-number A4 1
+:expect-eql-number B4 2
+:expect-eql-number C4 3
+:expect-eql-number D4 4
+:expect-eql-number E4 5
+:redo 1
+:expect-eql-number A4 1
+:expect-eql-number B4 5
+:expect-non-extant C4:E4
+
+# Test Case 12: Deleting a multi‐letter column with undo/redo.
+let ZZ5 = 555
+let AAA5 = 666
+let AAB5 = 777
+:delete-cols AAA5
+:expect-eql-number ZZ5 555
+:expect-eql-number AAA5 777
+:expect-non-extant AAB5
+:undo 1
+:expect-eql-number ZZ5 555
+:expect-eql-number AAA5 666
+:expect-eql-number AAB5 777
+:redo 1
+:expect-eql-number ZZ5 555
+:expect-eql-number AAA5 777
+:expect-non-extant AAB5
+

@@ -44,7 +44,7 @@ ast_nodes: std.MultiArrayList(ast.Node).Slice,
 
 string_values: FlatListPool(u8),
 
-cols: ColumnAxis,
+cols: Columns,
 
 undos: UndoList,
 redos: UndoList,
@@ -53,15 +53,20 @@ search_buffer: std.ArrayListUnmanaged(Dependents.Handle),
 
 filepath: std.BoundedArray(u8, std.fs.max_path_bytes),
 
+/// Used for temporary allocations
+arena: std.heap.ArenaAllocator,
+
+const arena_retain_size = std.math.pow(usize, 2, 20);
+
 pub const Dep = extern struct {
     handle: CellHandle,
     next: DepIndex,
 };
 
+pub const Columns = PhTree(Column, 1);
 pub const Dependents = PhTree(DepIndex, 4);
 pub const CellTree = @import("phtree.zig").PhTree(Cell, 2);
 pub const CellHandle = CellTree.Handle;
-pub const ColumnAxis = @import("treap.zig").Treap(Column, Column.compare);
 
 fn createDep(sheet: *Sheet, dep: Dep) !DepIndex {
     if (sheet.free_deps.isValid()) {
@@ -160,13 +165,15 @@ pub fn create(allocator: Allocator) !*Sheet {
         .ast_nodes = .empty,
         .string_values = .empty,
 
-        .cols = .init(1),
+        .cols = undefined,
 
         .search_buffer = .empty,
 
+        .arena = .init(allocator),
         .filepath = .{},
     };
-    assert(sheet.cols.nodes.items.len == 0);
+    sheet.cols = try .init(allocator);
+    errdefer sheet.cols.deinit(allocator);
     sheet.cell_tree = try .init(allocator);
     errdefer sheet.cell_tree.deinit(allocator);
     sheet.dependents = try .init(allocator);
@@ -198,12 +205,15 @@ pub fn createNoAlloc(allocator: Allocator) !*Sheet {
         .ast_nodes = .empty,
         .string_values = .empty,
 
-        .cols = .init(1),
+        .cols = undefined,
 
         .search_buffer = .empty,
 
+        .arena = .init(allocator),
         .filepath = .{},
     };
+    sheet.cols = try .init(allocator);
+    errdefer sheet.cols.deinit(allocator);
     sheet.cell_tree = try .init(allocator);
     errdefer sheet.cell_tree.deinit(allocator);
     sheet.dependents = try .init(allocator);
@@ -225,10 +235,11 @@ pub fn destroy(sheet: *Sheet) void {
     sheet.undos.deinit(sheet.allocator);
     sheet.redos.deinit(sheet.allocator);
 
-    sheet.cols.nodes.deinit(sheet.allocator);
+    sheet.cols.deinit(sheet.allocator);
     sheet.ast_nodes.deinit(sheet.allocator);
     sheet.string_values.deinit(sheet.allocator);
     sheet.deps.deinit(sheet.allocator);
+    sheet.arena.deinit();
     sheet.allocator.destroy(sheet);
 }
 
@@ -264,14 +275,22 @@ pub const Undo = extern struct {
         set_column_width,
         set_column_precision,
         sentinel,
+        delete_columns,
+        insert_columns,
+        delete_rows,
+        insert_rows,
+        update_range,
+        update_pos,
+        insert_dep,
+        update_dep,
+        insert_cell,
     };
 
     pub const Payload = extern union {
-        set_cell: extern struct {
-            handle: CellHandle,
-            strings: StringIndex,
-        },
+        set_cell: CellHandle,
         delete_cell: Position,
+
+        insert_cell: CellHandle,
 
         set_column_width: extern struct {
             col: Position.Int,
@@ -280,6 +299,35 @@ pub const Undo = extern struct {
         set_column_precision: extern struct {
             col: Position.Int,
             precision: u8,
+        },
+        delete_columns: extern struct {
+            start: u32,
+            end: u32,
+        },
+        insert_columns: extern struct {
+            start: u32,
+            len: u32,
+        },
+        delete_rows: extern struct {
+            start: u32,
+            end: u32,
+        },
+        insert_rows: extern struct {
+            start: u32,
+            len: u32,
+        },
+        update_range: extern struct {
+            ast_node: ast.Index,
+            range: Rect,
+        },
+        update_pos: extern struct {
+            ast_node: ast.Index,
+            pos: Position,
+        },
+        insert_dep: Dependents.Handle,
+        update_dep: extern struct {
+            handle: Dependents.Handle,
+            point: Dependents.Point,
         },
     };
 };
@@ -303,7 +351,7 @@ const SerializeHeader = extern struct {
 
     string_values: FlatListPool(u8).Header,
 
-    cols: ColumnAxis.Header,
+    cols: Columns.Header,
 
     undos_len: u32,
     undos_cap: u32,
@@ -311,7 +359,7 @@ const SerializeHeader = extern struct {
     redos_cap: u32,
 
     const magic_number: u32 = @bitCast([4]u8{ 'Z', 'C', 'Z', 'C' });
-    const binary_version = 6;
+    const binary_version = 7;
 };
 
 pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
@@ -340,9 +388,9 @@ pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
         utils.arrayListIoVec(&sheet.deps),
     } ++ sheet.cell_tree.iovecs() ++
         utils.multiArrayListSliceIoVec(ast.Node, &sheet.ast_nodes) ++
-        sheet.string_values.iovecs() ++ .{
-        sheet.cols.iovecs(),
-    } ++ utils.multiArrayListIoVec(Undo, &sheet.undos) ++
+        sheet.string_values.iovecs() ++
+        sheet.cols.iovecs() ++
+        utils.multiArrayListIoVec(Undo, &sheet.undos) ++
         utils.multiArrayListIoVec(Undo, &sheet.redos);
 
     try file.writevAll(&iovecs);
@@ -365,9 +413,9 @@ pub fn deserialize(allocator: Allocator, file: std.fs.File) !*Sheet {
         try utils.prepArrayList(&sheet.deps, sheet.allocator, header.deps_len),
     } ++ try sheet.cell_tree.fromHeader(allocator, header.cell_tree) ++
         try utils.prepMultiArrayListSlice(ast.Node, &sheet.ast_nodes, allocator, header.ast_nodes_len, header.ast_nodes_cap) ++
-        try sheet.string_values.fromHeader(sheet.allocator, header.string_values) ++ .{
-        try sheet.cols.fromHeader(allocator, header.cols, 1_000_000),
-    } ++ try utils.prepMultiArrayList(Undo, &sheet.undos, allocator, header.undos_len, header.undos_cap) ++
+        try sheet.string_values.fromHeader(sheet.allocator, header.string_values) ++
+        try sheet.cols.fromHeader(allocator, header.cols) ++
+        try utils.prepMultiArrayList(Undo, &sheet.undos, allocator, header.undos_len, header.undos_cap) ++
         try utils.prepMultiArrayList(Undo, &sheet.redos, allocator, header.redos_len, header.redos_cap);
 
     _ = try file.readvAll(&iovecs);
@@ -389,7 +437,8 @@ pub fn clearRetainingCapacity(sheet: *Sheet) void {
     sheet.undos.len = 0;
     sheet.redos.len = 0;
     sheet.strings_buf.clearRetainingCapacity();
-    sheet.cols.nodes.clearRetainingCapacity();
+    sheet.cols.clearRetainingCapacity();
+    _ = sheet.arena.reset(.{ .retain_with_limit = arena_retain_size });
 }
 
 const Tokenizer = @import("Tokenizer.zig");
@@ -455,15 +504,15 @@ pub fn bulkParse(
             token_starts[token_index..],
         ) catch |err| switch (err) {
             error.UnexpectedToken, error.InvalidCellAddress => continue,
-            error.OutOfMemory => return error.OutOfMemory,
+            else => |e| return e,
         };
         token_index += token_sub_index;
-        assert(token_tags[token_index] == .eof or token_tags[token_index] == .keyword_let);
         const expr_root: ast.Index = .from(@intCast(sheet.ast_nodes.len - 1));
 
         total_strings_len += strings_len + 1;
 
         const data = sheet.ast_nodes.items(.data);
+        assert(sheet.ast_nodes.items(.tag)[expr_root.n] == .assignment);
         const pos = data[expr_root.n].assignment;
         sheet.ast_nodes.len -= 1;
         const spliced_root: ast.Index = .from(expr_root.n - 1);
@@ -477,45 +526,42 @@ pub fn bulkParse(
     return total_strings_len;
 }
 
-pub fn interpretSource(sheet: *Sheet, reader: std.io.AnyReader) !void {
+fn resetArena(sheet: *Sheet) void {
+    _ = sheet.arena.reset(.{ .retain_with_limit = arena_retain_size });
+}
+
+// Optimized for bulk loading
+pub fn interpretSource(sheet: *Sheet, reader: anytype) !void {
     errdefer sheet.clearRetainingCapacity();
     defer sheet.endUndoGroup();
 
-    var buf: std.ArrayList(u8) = .init(sheet.allocator);
-    defer buf.deinit();
+    const arena = sheet.arena.allocator();
+    defer sheet.resetArena();
 
     var cells: std.MultiArrayList(Assignment) = .empty;
-    defer cells.deinit(sheet.allocator);
-
     var tokens: std.MultiArrayList(Tokenizer.Token) = .empty;
-    defer tokens.deinit(sheet.allocator);
 
-    const max_size = comptime std.math.pow(usize, 2, 20) * 100;
-
-    try cells.ensureUnusedCapacity(sheet.allocator, 1_000);
+    const buf_size = comptime std.math.pow(usize, 2, 22);
+    var buf = try arena.alloc(u8, buf_size);
+    buf[buf_size - 1] = 0;
+    buf.len = 0;
 
     while (true) {
+        buf.len += try reader.readAll(buf.ptr[buf.len .. buf_size - 1]);
+        if (buf.len == 0) break;
+
+        const end = std.mem.lastIndexOfScalar(u8, buf, '\n') orelse buf.len;
+        buf.ptr[end] = 0;
+        const src = buf.ptr[0..end :0];
+
         cells.clearRetainingCapacity();
-        reader.readAllArrayList(&buf, max_size) catch |err| switch (err) {
-            error.StreamTooLong => {},
-            else => |e| return e,
-        };
-
-        if (buf.items.len == 0) break;
-        try buf.append(0);
-        const src: [:0]const u8 = @ptrCast(buf.items[0 .. buf.items.len - 1]);
-
-        const total_strings_len = try sheet.bulkParse(
-            src,
-            sheet.allocator,
-            &tokens,
-            sheet.allocator,
-            &cells,
-        );
+        tokens.clearRetainingCapacity();
+        const ast_nodes_start: u32 = @intCast(sheet.ast_nodes.len);
+        const total_strings_len = try sheet.bulkParse(src, arena, &tokens, arena, &cells);
 
         const dependent_count = blk: {
             var dependent_count: u32 = 0;
-            for (sheet.ast_nodes.items(.tag)) |tag| {
+            for (sheet.ast_nodes.items(.tag)[ast_nodes_start..]) |tag| {
                 if (tag == .pos) dependent_count += 1;
             }
             break :blk dependent_count;
@@ -527,13 +573,14 @@ pub fn interpretSource(sheet: *Sheet, reader: std.io.AnyReader) !void {
         try sheet.undos.ensureUnusedCapacity(sheet.allocator, cells.len);
 
         try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, total_strings_len);
-        try sheet.cols.nodes.ensureUnusedCapacity(sheet.allocator, cells.len);
+        try sheet.cols.ensureUnusedCapacity(sheet.allocator, @intCast(cells.len));
         try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, cells.len);
+        errdefer comptime unreachable;
 
         const cells_slice = cells.slice();
 
         // Copy the string values from every cell into the string table
-        var start: u32 = 0;
+        var start: u32 = ast_nodes_start;
         for (cells_slice.items(.root), cells_slice.items(.strings)) |root, *string_index| {
             string_index.* = sheet.dupeAstStrings(src, .from(start), root);
             start = root.n + 1;
@@ -547,12 +594,13 @@ pub fn interpretSource(sheet: *Sheet, reader: std.io.AnyReader) !void {
 
         // Queue up all the to-be-inserted cells for update
         const start_node_index = sheet.cell_tree.entries.len;
+        const queue_start_index = sheet.queued_cells.items.len;
         sheet.queued_cells.items.len += cells.len;
         sheet.cell_tree.entries.len += cells.len;
         assert(sheet.queued_cells.items.len <= sheet.queued_cells.capacity);
         assert(sheet.cell_tree.entries.len <= sheet.cell_tree.entries.capacity);
 
-        for (sheet.queued_cells.items, start_node_index..) |*queued, i| {
+        for (sheet.queued_cells.items[queue_start_index..], start_node_index..) |*queued, i| {
             queued.* = .from(@intCast(i));
         }
 
@@ -568,12 +616,11 @@ pub fn interpretSource(sheet: *Sheet, reader: std.io.AnyReader) !void {
             sheet.setCell2(pos, handle, root, strings);
         }
 
-        if (src.len == max_size) {
-            const index = 1 + (std.mem.lastIndexOfScalar(u8, buf.items, '\n') orelse break);
-            std.mem.copyForwards(u8, buf.items, buf.items[index..]);
-            buf.items.len = buf.items.len - index;
+        if (end + 1 < buf.len) {
+            std.mem.copyForwards(u8, buf, buf[end + 1 ..]);
+            buf.len -= end + 1;
         } else {
-            buf.clearRetainingCapacity();
+            buf.len = 0;
         }
     }
 }
@@ -592,12 +639,10 @@ pub fn loadFile(sheet: *Sheet, filepath: []const u8) !void {
     sheet.setFilePath(filepath);
     defer sheet.has_changes = false;
 
-    var buf = std.io.bufferedReader(file.reader());
-    const reader = buf.reader();
-    log.debug("Loading file {s}", .{filepath});
+    // log.debug("Loading file {s}", .{filepath});
 
     sheet.clearRetainingCapacity();
-    try sheet.interpretSource(reader.any());
+    try sheet.interpretSource(file.reader());
 }
 
 pub fn writeFile(
@@ -682,10 +727,10 @@ fn addRangeDependents(
     dependent: CellHandle,
     range: Rect,
 ) void {
-    log.debug("Adding {} as a dependent of {}", .{
-        sheet.rectFromCellHandle(dependent).tl,
-        range,
-    });
+    // log.debug("Adding {} as a dependent of {}", .{
+    //     sheet.rectFromCellHandle(dependent).tl,
+    //     range,
+    // });
 
     const p: Dependents.Point = .{
         range.tl.x, range.tl.y,
@@ -732,10 +777,10 @@ fn removeRangeDependents(
     dependent: CellHandle,
     range: Rect,
 ) void {
-    log.debug("Removing {} as a dependent of {}", .{
-        sheet.rectFromCellHandle(dependent),
-        range,
-    });
+    // log.debug("Removing {} as a dependent of {}", .{
+    //     sheet.rectFromCellHandle(dependent),
+    //     range,
+    // });
     const p: Dependents.Point = .{
         range.tl.x, range.tl.y,
         range.br.x, range.br.y,
@@ -750,7 +795,7 @@ fn removeRangeDependents(
 
     if (!head.isValid()) {
         if (sheet.dependents.remove(&p)) |kv_handle|
-            sheet.dependents.destroyEntry(kv_handle);
+            sheet.dependents.destroyHandle(kv_handle);
         return;
     }
 
@@ -768,7 +813,7 @@ fn removeRangeDependents(
 
     if (!head.isValid()) {
         if (sheet.dependents.remove(&p)) |kv_handle|
-            sheet.dependents.destroyEntry(kv_handle);
+            sheet.dependents.destroyHandle(kv_handle);
     }
 }
 
@@ -1030,8 +1075,8 @@ pub fn pushUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
     }
 }
 
-pub fn pushUndoAssumeCapacity(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
-    const undo_type = opts.undo_type.?;
+pub fn pushUndoAssumeCapacity(sheet: *Sheet, u: Undo, opts: UndoOpts) void {
+    const undo_type = opts.undo_type;
     assert(sheet.undos.capacity > sheet.undos.len);
     switch (undo_type) {
         .undo => {
@@ -1045,9 +1090,16 @@ pub fn pushUndoAssumeCapacity(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.
 }
 
 pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
+    // log.debug("undo {}", .{u.tag});
     switch (u.tag) {
-        .set_cell => sheet.insertCellNode(u.payload.set_cell.handle, opts),
+        .set_cell => sheet.insertCellNode(u.payload.set_cell, opts),
         .delete_cell => try sheet.deleteCell(u.payload.delete_cell, opts),
+        .insert_cell => {
+            const handle = u.payload.insert_cell;
+            const p = sheet.cell_tree.point(handle);
+            _ = try sheet.cell_tree.insert(sheet.allocator, &p, handle);
+            try sheet.enqueueUpdate(handle);
+        },
         .set_column_width => {
             const p = u.payload.set_column_width;
             try sheet.setWidth(p.col, p.width, opts);
@@ -1056,8 +1108,83 @@ pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
             const p = u.payload.set_column_precision;
             try sheet.setPrecision(p.col, p.precision, opts);
         },
+        .delete_columns => {
+            const p = u.payload.delete_columns;
+            try sheet.deleteColumnRange(p.start, p.end, opts);
+        },
+        .insert_columns => {
+            const p = u.payload.insert_columns;
+            sheet.insertColumns(p.start, p.len, opts) catch |err| switch (err) {
+                // This isn't possible for undos
+                error.Overflow => unreachable,
+                else => |e| return e,
+            };
+        },
+        .delete_rows => {
+            const p = u.payload.delete_rows;
+            try sheet.deleteRowRange(p.start, p.end, opts);
+        },
+        .insert_rows => {
+            const p = u.payload.insert_rows;
+            sheet.insertRows(p.start, p.len, opts) catch |err| switch (err) {
+                // This isn't possible for undos
+                error.Overflow => unreachable,
+                else => |e| return e,
+            };
+        },
+        .update_range => {
+            const p = u.payload.update_range;
+            try sheet.updateRange(p.ast_node, p.range, opts);
+        },
+        .update_pos => {
+            const pos = u.payload.update_pos.pos;
+            const i = u.payload.update_pos.ast_node;
+            try sheet.updatePos(i, pos, opts);
+        },
+        .insert_dep => {
+            const handle = u.payload.insert_dep;
+            const p = sheet.dependents.point(handle);
+            _ = try sheet.dependents.insert(sheet.allocator, &p, handle);
+        },
+        .update_dep => {
+            const handle = u.payload.update_dep.handle;
+            const new_point = u.payload.update_dep.point;
+            assert(handle.isValid());
+
+            const p = &sheet.dependents.entries.items(.point)[handle.n];
+
+            assert(sheet.dependents.isValue(handle));
+
+            _ = sheet.dependents.removeHandle(handle, p);
+            p.* = new_point;
+            _ = sheet.dependents.insertAssumeCapacity(p, handle);
+        },
         .sentinel => {},
     }
+}
+
+fn updatePos(sheet: *Sheet, index: ast.Index, new_pos: Position, undo_opts: UndoOpts) !void {
+    const tag = sheet.ast_nodes.items(.tag)[index.n];
+    assert(tag == .pos or tag == .invalidated_pos);
+    try sheet.ensureUndoCapacity(undo_opts.undo_type, 1);
+
+    const ptr = &sheet.ast_nodes.items(.data)[index.n];
+    ptr.pos = new_pos;
+    sheet.ast_nodes.items(.tag)[index.n] = .pos;
+}
+
+fn updateRange(sheet: *Sheet, index: ast.Index, new_range: Rect, undo_opts: UndoOpts) !void {
+    const tag = sheet.ast_nodes.items(.tag)[index.n];
+    assert(tag == .range or tag == .invalidated_range);
+    try sheet.ensureUndoCapacity(undo_opts.undo_type, 1);
+
+    const ptr = &sheet.ast_nodes.items(.data)[index.n].range;
+    const lhs = &sheet.ast_nodes.items(.data)[ptr.lhs.n].pos;
+    const rhs = &sheet.ast_nodes.items(.data)[ptr.rhs.n].pos;
+
+    lhs.* = new_range.tl;
+    rhs.* = new_range.br;
+    sheet.ast_nodes.items(.tag)[index.n] = .range;
 }
 
 pub fn undo(sheet: *Sheet) Allocator.Error!void {
@@ -1123,7 +1250,7 @@ pub fn setColWidth(
     opts: UndoOpts,
 ) Allocator.Error!void {
     try sheet.ensureUndoCapacity(.undo, 1);
-    const col = &sheet.cols.node(handle).key;
+    const col = sheet.cols.valuePtr(handle);
     if (width == col.width) return;
     const old_width = col.width;
     col.width = width;
@@ -1140,7 +1267,7 @@ pub fn incWidth(
     opts: UndoOpts,
 ) Allocator.Error!void {
     if (sheet.getColumnHandle(column_index)) |handle| {
-        const col = sheet.cols.node(handle).key;
+        const col = sheet.cols.valuePtr(handle);
         try sheet.setColWidth(handle, column_index, col.width +| n, opts);
     }
 }
@@ -1152,7 +1279,7 @@ pub fn decWidth(
     opts: UndoOpts,
 ) Allocator.Error!void {
     if (sheet.getColumnHandle(column_index)) |handle| {
-        const col = sheet.cols.node(handle).key;
+        const col = sheet.cols.valuePtr(handle);
         const new_width = @max(col.width -| n, 1);
         try sheet.setColWidth(handle, column_index, new_width, opts);
     }
@@ -1176,7 +1303,7 @@ pub fn setColPrecision(
     precision: u8,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    const col = &sheet.cols.node(handle).key;
+    const col = sheet.cols.valuePtr(handle);
     if (precision == col.precision) return;
 
     const old_precision = col.precision;
@@ -1194,7 +1321,7 @@ pub fn incPrecision(
     opts: UndoOpts,
 ) Allocator.Error!void {
     if (sheet.getColumnHandle(column_index)) |handle| {
-        const col = sheet.cols.node(handle).key;
+        const col = sheet.cols.valuePtr(handle);
         try sheet.setColPrecision(handle, column_index, col.precision +| n, opts);
     }
 }
@@ -1206,16 +1333,9 @@ pub fn decPrecision(
     opts: UndoOpts,
 ) Allocator.Error!void {
     if (sheet.getColumnHandle(column_index)) |handle| {
-        const col = sheet.cols.node(handle).key;
+        const col = sheet.cols.valuePtr(handle);
         try sheet.setColPrecision(handle, column_index, col.precision -| n, opts);
     }
-}
-
-pub fn cellCount(sheet: *Sheet) Position.HashInt {
-    var iter = sheet.cell_treap.inorderIterator();
-    var count: Position.HashInt = 0;
-    while (iter.next()) |_| count += 1;
-    return count;
 }
 
 pub fn needsUpdate(sheet: *const Sheet) bool {
@@ -1319,34 +1439,6 @@ pub fn setCell2(
     }
 }
 
-pub fn setCellNoClobberAssumeCapacity(
-    sheet: *Sheet,
-    pos: Position,
-    expr_root: ast.Index,
-    strings: StringIndex,
-) void {
-    _ = sheet.createColumnAssumeCapacity(pos.x);
-
-    const handle = sheet.cell_treap.createNodeAssumeCapacity();
-    const new_node = sheet.cell_treap.node(handle);
-    sheet.cell_treap.node(handle).key = .{
-        .row = pos.y,
-        .col = pos.x,
-        .expr_root = expr_root,
-        .strings = strings,
-        .state = .enqueued,
-    };
-
-    var entry = sheet.cell_treap.getEntryFor(new_node.key);
-    assert(!entry.node.isValid());
-    entry.set(handle);
-
-    sheet.addExpressionDependents(handle, expr_root) catch unreachable;
-    _ = sheet.cell_tree.insertAssumeCapacity(&.{ pos.x, pos.y }, handle);
-
-    sheet.queued_cells.appendAssumeCapacity(handle);
-}
-
 /// Inserts a pre-allocated Cell node. Does not attempt to create any row/column anchors.
 pub fn insertCellNode(
     sheet: *Sheet,
@@ -1361,25 +1453,20 @@ pub fn insertCellNode(
 
     var u: Undo = undefined;
     if (!old_handle.isValid()) {
-        log.debug("Creating cell {}", .{pos});
+        // log.debug("Creating cell {}", .{pos});
         sheet.addExpressionDependents(handle, cell_ptr.expr_root);
 
         u = .init(.delete_cell, pos);
     } else {
+        // log.debug("Overwriting cell {}", .{pos});
+
         const old_cell_ptr = sheet.getCellFromHandle(old_handle);
-
-        log.debug("Overwriting cell {}", .{pos});
-
-        sheet.removeExprDependents(handle, cell_ptr.expr_root);
+        sheet.removeExprDependents(handle, old_cell_ptr.expr_root);
         sheet.addExpressionDependents(handle, cell_ptr.expr_root);
 
         sheet.setCellError(old_cell_ptr);
 
-        const old_strings = sheet.getCellFromHandle(old_handle).strings;
-        u = .init(.set_cell, .{
-            .handle = old_handle,
-            .strings = old_strings,
-        });
+        u = .init(.set_cell, old_handle);
     }
 
     sheet.pushUndo(u, undo_opts) catch unreachable;
@@ -1403,10 +1490,7 @@ pub fn deleteCellByHandle(
     sheet.setCellError(cell);
     _ = sheet.cell_tree.remove(&point);
 
-    sheet.pushUndo(.init(.set_cell, .{
-        .handle = handle,
-        .strings = cell.strings,
-    }), undo_opts) catch unreachable;
+    sheet.pushUndo(.init(.set_cell, handle), undo_opts) catch unreachable;
     sheet.has_changes = true;
 }
 
@@ -1438,22 +1522,6 @@ pub fn getCell(sheet: *Sheet, pos: Position) ?Cell {
     return if (sheet.getCellPtr(pos)) |ptr| ptr.* else null;
 }
 
-pub fn getCellHandle(sheet: *Sheet, pos: Position) ?CellHandle {
-    const row = sheet.getRowHandle(pos.y) orelse {
-        return null;
-    };
-    const col = sheet.getColumnHandle(pos.x) orelse {
-        return null;
-    };
-    const key: Cell = .{
-        .row = row,
-        .col = col,
-    };
-
-    const entry = sheet.cell_treap.getEntryFor(key);
-    return entry.node.get();
-}
-
 pub fn getCellPtr(sheet: *Sheet, pos: Position) ?*Cell {
     return sheet.cell_tree.find(&.{ pos.x, pos.y });
 }
@@ -1464,17 +1532,804 @@ pub fn getCellHandleByPos(sheet: *Sheet, pos: Position) ?CellHandle {
     return null;
 }
 
+// This naive implementation is shockingly fast with ph trees. R-trees could never!
+pub fn deleteColumnRange(
+    sheet: *Sheet,
+    start: u32,
+    /// Inclusive end index
+    end: u32,
+    undo_opts: UndoOpts,
+) !void {
+    assert(start <= end);
+    const deleted_cols = end - start + 1;
+
+    defer sheet.resetArena();
+    const arena = sheet.arena.allocator();
+
+    // List of cells that are affected
+    var cells: std.ArrayList(CellHandle) = .init(arena);
+    // List of dependency ranges that need to be updated
+    var deps: std.ArrayList(Dependents.Handle) = .init(arena);
+    // List of dependency ranges whose depending cells will need to be re-calculated
+    var intersecting_deps: std.ArrayList(Dependents.Handle) = .init(arena);
+    // List of columns whose position needs to be adjusted
+    var cols: std.ArrayList(Columns.Handle) = .init(arena);
+
+    const max = std.math.maxInt(u32);
+
+    try sheet.cell_tree.queryWindow(&.{ start, 0 }, &.{ max, max }, &cells);
+    try sheet.dependents.queryWindowRect(.{ start, 0 }, .{ max, max }, &deps);
+    try sheet.dependents.queryWindowRect(.{ start, 0 }, .{ start, max }, &intersecting_deps);
+    try sheet.cols.queryWindow(&.{start}, &.{max}, &cols);
+
+    const undo_count = blk: {
+        var undo_count: u32 = 1;
+
+        for (cells.items) |handle| {
+            const p = sheet.cell_tree.point(handle);
+            undo_count += @intFromBool(p[0] >= start and p[0] <= end);
+        }
+
+        for (deps.items) |handle| {
+            const p = sheet.dependents.point(handle);
+            const needs_resize_or_delete = !(p[0] > end or (p[0] < start and p[2] > end));
+            undo_count += @intFromBool(needs_resize_or_delete);
+        }
+
+        const tags = sheet.ast_nodes.items(.tag);
+        const data = sheet.ast_nodes.items(.data);
+        var i: u32 = @intCast(sheet.ast_nodes.len);
+        while (i > 0) {
+            i -= 1;
+            switch (tags[i]) {
+                .pos => {
+                    const pos = data[i].pos;
+                    undo_count += @intFromBool(pos.x >= start);
+                },
+                .range => {
+                    const range = data[i].range;
+                    const tl: Position = data[range.lhs.n].pos;
+                    const br: Position = data[range.rhs.n].pos;
+                    const needs_resize_or_delete = !(tl.x > end or (tl.x < start and br.x > end));
+                    undo_count += @intFromBool(needs_resize_or_delete);
+                },
+                else => {},
+            }
+        }
+
+        break :blk undo_count;
+    };
+
+    // Count of the number of cells who depend on a range that intersects with
+    var queue_count: u32 = 0;
+    for (intersecting_deps.items) |handle| {
+        const root = sheet.dependents.valuePtr(handle).*;
+        var n = root;
+        while (n.isValid()) : (n = sheet.deps.items[n.n].next) {
+            queue_count += 1;
+        }
+    }
+
+    try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, queue_count + cells.items.len);
+    try sheet.ensureUndoCapacity(undo_opts.undo_type, undo_count);
+    errdefer comptime unreachable;
+
+    for (intersecting_deps.items) |dep_handle| {
+        const root = sheet.dependents.valuePtr(dep_handle).*;
+        var n = root;
+        assert(n.isValid());
+        while (n.isValid()) : (n = sheet.deps.items[n.n].next) {
+            const cell_handle = sheet.deps.items[n.n].handle;
+            sheet.queued_cells.appendAssumeCapacity(cell_handle);
+            sheet.getCellFromHandle(cell_handle).state = .enqueued;
+        }
+    }
+    sheet.queued_cells.appendSliceAssumeCapacity(cells.items);
+
+    for (cells.items) |handle| {
+        const p = &sheet.cell_tree.entries.items(.point)[handle.n];
+        if (!sheet.cell_tree.isOrphaned(handle))
+            sheet.cell_tree.removeHandle(handle, p);
+    }
+
+    for (cells.items) |handle| {
+        const p = &sheet.cell_tree.entries.items(.point)[handle.n];
+
+        if (p[0] >= start and p[0] <= end) {
+            sheet.pushUndoAssumeCapacity(.init(.insert_cell, handle), undo_opts);
+        } else {
+            p[0] -= deleted_cols;
+            _ = sheet.cell_tree.insertAssumeCapacity(p, handle);
+        }
+        sheet.getCellFromHandle(handle).state = .enqueued;
+    }
+
+    for (cols.items) |handle| {
+        const p = &sheet.cols.entries.items(.point)[handle.n];
+        assert(p[0] >= start);
+
+        if (!sheet.cols.isOrphaned(handle))
+            sheet.cols.removeHandle(handle, p);
+
+        if (p[0] > end) {
+            p[0] -= end - start + 1;
+            _ = sheet.cols.insertAssumeCapacity(p, handle);
+        }
+    }
+
+    // Cases
+    //  Deletion entirely contains range
+    //   -> Needs to be deleted and restored on undo
+    //  Deletion contains range start or end
+    //   -> Needs to be resized and restored on undo
+    //  Deletion is in the middle of the range
+    //   -> Range end needs to be decremented, no undo
+    //  Deletion is before range and does not intersect it
+    //   -> Range start and end needs to be decremented, no undo
+    for (deps.items) |handle| {
+        const p = &sheet.dependents.entries.items(.point)[handle.n];
+        if (!sheet.dependents.isOrphaned(handle))
+            sheet.dependents.removeHandle(handle, p);
+        if (p[0] >= start) {
+            if (p[2] <= end) {
+                // Deletion entirely contains range
+                sheet.pushUndoAssumeCapacity(.init(.insert_dep, handle), undo_opts);
+            } else if (p[0] <= end) {
+                // Deletion contains range start
+                sheet.pushUndoAssumeCapacity(.init(.update_dep, .{
+                    .handle = handle,
+                    .point = p.*,
+                }), undo_opts);
+                p[0] = start;
+                p[2] -= deleted_cols;
+                _ = sheet.dependents.insertAssumeCapacity(p, handle);
+            } else {
+                // Deletion does not intersect with range
+                // This is undone by the .insert undo
+                p[0] -= deleted_cols;
+                p[2] -= deleted_cols;
+                _ = sheet.dependents.insertAssumeCapacity(p, handle);
+            }
+        } else if (p[2] <= end) {
+            // Deletion contains range end
+            // Resizes the range, so a special undo is required
+            sheet.pushUndoAssumeCapacity(.init(.update_dep, .{
+                .handle = handle,
+                .point = p.*,
+            }), undo_opts);
+            p[2] = start - 1;
+            _ = sheet.dependents.insertAssumeCapacity(p, handle);
+        } else {
+            // Deletion is in the middle of the range
+            // This is undone by the .insert undo
+            p[2] -= deleted_cols;
+            _ = sheet.dependents.insertAssumeCapacity(p, handle);
+        }
+    }
+
+    const tags = sheet.ast_nodes.items(.tag);
+    const data = sheet.ast_nodes.items(.data);
+    var i: u32 = @intCast(sheet.ast_nodes.len);
+    while (i > 0) {
+        i -= 1;
+        switch (tags[i]) {
+            .pos => {
+                const pos: *Position = &data[i].pos;
+                if (pos.x >= start) {
+                    sheet.pushUndoAssumeCapacity(.init(.update_pos, .{
+                        .ast_node = .from(i),
+                        .pos = pos.*,
+                    }), undo_opts);
+
+                    if (pos.x <= end) {
+                        tags[i] = .invalidated_pos;
+                    } else {
+                        pos.x -= deleted_cols;
+                    }
+                }
+            },
+            .range => {
+                const range = data[i].range;
+                const tl: *Position = &data[range.lhs.n].pos;
+                const br: *Position = &data[range.rhs.n].pos;
+                const u: Undo = .init(.update_range, .{
+                    .ast_node = .from(i),
+                    .range = .{
+                        .tl = tl.*,
+                        .br = br.*,
+                    },
+                });
+
+                if (tl.x >= start) {
+                    if (br.x <= end) {
+                        sheet.pushUndoAssumeCapacity(u, undo_opts);
+                        // Lies entirely in the deleted range
+                        tags[i] = .invalidated_range;
+                    } else if (tl.x <= end) {
+                        sheet.pushUndoAssumeCapacity(u, undo_opts);
+                        tl.x = start;
+                        br.x -= deleted_cols;
+                    } else {
+                        tl.x -= deleted_cols;
+                        br.x -= deleted_cols;
+                    }
+                } else if (br.x >= start) {
+                    if (br.x <= end) {
+                        sheet.pushUndoAssumeCapacity(u, undo_opts);
+                        br.x = start - 1;
+                    } else {
+                        br.x -= end - start + 1;
+                    }
+                }
+
+                i -= 2;
+            },
+            else => {},
+        }
+    }
+
+    sheet.pushUndoAssumeCapacity(.init(.insert_columns, .{
+        .start = start,
+        .len = deleted_cols,
+    }), undo_opts);
+}
+
+pub fn deleteRowRange(
+    sheet: *Sheet,
+    start: u32,
+    /// Inclusive end index
+    end: u32,
+    undo_opts: UndoOpts,
+) !void {
+    assert(start <= end);
+    const deleted_rows = end - start + 1;
+
+    defer sheet.resetArena();
+    const arena = sheet.arena.allocator();
+
+    // List of cells that are affected
+    var cells: std.ArrayList(CellHandle) = .init(arena);
+    // List of dependency ranges that need to be updated
+    var deps: std.ArrayList(Dependents.Handle) = .init(arena);
+    // List of dependency ranges whose depending cells will need to be re-calculated
+    var intersecting_deps: std.ArrayList(Dependents.Handle) = .init(arena);
+
+    const max = std.math.maxInt(u32);
+
+    try sheet.cell_tree.queryWindow(&.{ 0, start }, &.{ max, max }, &cells);
+    try sheet.dependents.queryWindowRect(.{ 0, start }, .{ max, max }, &deps);
+    try sheet.dependents.queryWindowRect(.{ 0, start }, .{ max, start }, &intersecting_deps);
+
+    const undo_count = blk: {
+        var undo_count: u32 = 1;
+
+        for (cells.items) |handle| {
+            const p = sheet.cell_tree.point(handle);
+            undo_count += @intFromBool(p[1] >= start and p[1] <= end);
+        }
+
+        for (deps.items) |handle| {
+            const p = sheet.dependents.point(handle);
+            const needs_resize_or_delete = !(p[1] > end or (p[1] < start and p[3] > end));
+            undo_count += @intFromBool(needs_resize_or_delete);
+        }
+
+        const tags = sheet.ast_nodes.items(.tag);
+        const data = sheet.ast_nodes.items(.data);
+        var i: u32 = @intCast(sheet.ast_nodes.len);
+        while (i > 0) {
+            i -= 1;
+            switch (tags[i]) {
+                .pos => {
+                    const pos = data[i].pos;
+                    undo_count += @intFromBool(pos.y >= start);
+                },
+                .range => {
+                    const range = data[i].range;
+                    const tl: Position = data[range.lhs.n].pos;
+                    const br: Position = data[range.rhs.n].pos;
+                    const needs_resize_or_delete = !(tl.y > end or (tl.y < start and br.y > end));
+                    undo_count += @intFromBool(needs_resize_or_delete);
+                },
+                else => {},
+            }
+        }
+
+        break :blk undo_count;
+    };
+
+    // Count of the number of cells who depend on a range that intersects with
+    var queue_count: u32 = 0;
+    for (intersecting_deps.items) |handle| {
+        const root = sheet.dependents.valuePtr(handle).*;
+        var n = root;
+        while (n.isValid()) : (n = sheet.deps.items[n.n].next) {
+            queue_count += 1;
+        }
+    }
+
+    try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, queue_count + cells.items.len);
+    try sheet.ensureUndoCapacity(undo_opts.undo_type, undo_count);
+    errdefer comptime unreachable;
+
+    for (intersecting_deps.items) |dep_handle| {
+        const root = sheet.dependents.valuePtr(dep_handle).*;
+        var n = root;
+        assert(n.isValid());
+        while (n.isValid()) : (n = sheet.deps.items[n.n].next) {
+            const cell_handle = sheet.deps.items[n.n].handle;
+            sheet.queued_cells.appendAssumeCapacity(cell_handle);
+            sheet.getCellFromHandle(cell_handle).state = .enqueued;
+        }
+    }
+    sheet.queued_cells.appendSliceAssumeCapacity(cells.items);
+
+    for (cells.items) |handle| {
+        const p = &sheet.cell_tree.entries.items(.point)[handle.n];
+        if (!sheet.cell_tree.isOrphaned(handle))
+            sheet.cell_tree.removeHandle(handle, p);
+    }
+
+    for (cells.items) |handle| {
+        const p = &sheet.cell_tree.entries.items(.point)[handle.n];
+
+        if (p[1] >= start and p[1] <= end) {
+            sheet.pushUndoAssumeCapacity(.init(.insert_cell, handle), undo_opts);
+        } else {
+            p[1] -= deleted_rows;
+            _ = sheet.cell_tree.insertAssumeCapacity(p, handle);
+        }
+        sheet.getCellFromHandle(handle).state = .enqueued;
+    }
+
+    // Cases
+    //  Deletion entirely contains range
+    //   -> Needs to be deleted and restored on undo
+    //  Deletion contains range start or end
+    //   -> Needs to be resized and restored on undo
+    //  Deletion is in the middle of the range
+    //   -> Range end needs to be decremented, no undo
+    //  Deletion is before range and does not intersect it
+    //   -> Range start and end needs to be decremented, no undo
+    for (deps.items) |handle| {
+        const p = &sheet.dependents.entries.items(.point)[handle.n];
+        if (!sheet.dependents.isOrphaned(handle))
+            sheet.dependents.removeHandle(handle, p);
+        if (p[1] >= start) {
+            if (p[3] <= end) {
+                // Deletion entirely contains range
+                sheet.pushUndoAssumeCapacity(.init(.insert_dep, handle), undo_opts);
+            } else if (p[1] <= end) {
+                // Deletion contains range start
+                sheet.pushUndoAssumeCapacity(.init(.update_dep, .{
+                    .handle = handle,
+                    .point = p.*,
+                }), undo_opts);
+                p[1] = start;
+                p[3] -= deleted_rows;
+                _ = sheet.dependents.insertAssumeCapacity(p, handle);
+            } else {
+                // Deletion does not intersect with range
+                // This is undone by the .insert undo
+                p[1] -= deleted_rows;
+                p[3] -= deleted_rows;
+                _ = sheet.dependents.insertAssumeCapacity(p, handle);
+            }
+        } else if (p[3] <= end) {
+            // Deletion contains range end
+            // Resizes the range, so a special undo is required
+            sheet.pushUndoAssumeCapacity(.init(.update_dep, .{
+                .handle = handle,
+                .point = p.*,
+            }), undo_opts);
+            p[3] = start - 1;
+            _ = sheet.dependents.insertAssumeCapacity(p, handle);
+        } else {
+            // Deletion is in the middle of the range
+            // This is undone by the .insert undo
+            p[3] -= deleted_rows;
+            _ = sheet.dependents.insertAssumeCapacity(p, handle);
+        }
+    }
+
+    const tags = sheet.ast_nodes.items(.tag);
+    const data = sheet.ast_nodes.items(.data);
+    var i: u32 = @intCast(sheet.ast_nodes.len);
+    while (i > 0) {
+        i -= 1;
+        switch (tags[i]) {
+            .pos => {
+                const pos: *Position = &data[i].pos;
+                if (pos.y >= start) {
+                    sheet.pushUndoAssumeCapacity(.init(.update_pos, .{
+                        .ast_node = .from(i),
+                        .pos = pos.*,
+                    }), undo_opts);
+
+                    if (pos.y <= end) {
+                        tags[i] = .invalidated_pos;
+                    } else {
+                        pos.y -= deleted_rows;
+                    }
+                }
+            },
+            .range => {
+                const range = data[i].range;
+                const tl: *Position = &data[range.lhs.n].pos;
+                const br: *Position = &data[range.rhs.n].pos;
+                const u: Undo = .init(.update_range, .{
+                    .ast_node = .from(i),
+                    .range = .{
+                        .tl = tl.*,
+                        .br = br.*,
+                    },
+                });
+
+                if (tl.y >= start) {
+                    if (br.y <= end) {
+                        sheet.pushUndoAssumeCapacity(u, undo_opts);
+                        // Lies entirely in the deleted range
+                        tags[i] = .invalidated_range;
+                    } else if (tl.y <= end) {
+                        sheet.pushUndoAssumeCapacity(u, undo_opts);
+                        tl.y = start;
+                        br.y -= deleted_rows;
+                    } else {
+                        tl.y -= deleted_rows;
+                        br.y -= deleted_rows;
+                    }
+                } else if (br.y >= start) {
+                    if (br.y <= end) {
+                        sheet.pushUndoAssumeCapacity(u, undo_opts);
+                        br.y = start - 1;
+                    } else {
+                        br.y -= end - start + 1;
+                    }
+                }
+
+                i -= 2;
+            },
+            else => {},
+        }
+    }
+
+    sheet.pushUndoAssumeCapacity(.init(.insert_rows, .{
+        .start = start,
+        .len = deleted_rows,
+    }), undo_opts);
+}
+
+// When we insert n columns...
+//
+// Columns after index need to be incremented
+//
+// Cells after index need to be incremented
+//
+// Dependencies after index need to be incremented
+// Dependencies containing index need to be adjusted specially
+//
+// AST references >= index need to be incremented
+// AST ranges with at least one point >= index need to be incremented
+//
+// No cells need to be updated
+pub fn insertColumns(sheet: *Sheet, index: u32, n: u32, undo_opts: UndoOpts) !void {
+    assert(n > 0);
+
+    // Check if columns would overflow
+    const largest = sheet.cell_tree.largestDim(0);
+    if (largest.isValid()) {
+        const col = sheet.cell_tree.point(largest)[0];
+        if (std.math.maxInt(u32) - col < n)
+            return error.Overflow;
+    }
+
+    const arena = sheet.arena.allocator();
+    defer sheet.resetArena();
+
+    var cells: std.ArrayList(CellHandle) = .init(arena);
+    var deps: std.ArrayList(Dependents.Handle) = .init(arena);
+    var cols: std.ArrayList(Columns.Handle) = .init(arena);
+
+    const undo_count = blk: {
+        const tags = sheet.ast_nodes.items(.tag);
+        const data = sheet.ast_nodes.items(.data);
+        var i: u32 = @intCast(sheet.ast_nodes.len);
+        var undo_count: u32 = 1;
+        while (i > 0) {
+            i -= 1;
+            switch (tags[i]) {
+                .pos => {
+                    const pos = data[i].pos;
+                    undo_count += @intFromBool(pos.x >= index);
+                },
+                .range => {
+                    const range = data[i].range;
+                    const tl: Position = data[range.lhs.n].pos;
+                    const br: Position = data[range.rhs.n].pos;
+                    undo_count += @intFromBool(tl.x >= index or br.x >= index);
+                },
+                else => {},
+            }
+        }
+
+        break :blk undo_count;
+    };
+
+    try sheet.ensureUndoCapacity(undo_opts.undo_type, undo_count);
+    try sheet.cols.ensureUnusedCapacity(sheet.allocator, n);
+
+    const max = std.math.maxInt(u32);
+
+    try sheet.cell_tree.queryWindow(&.{ index, 0 }, &.{ max, max }, &cells);
+    try sheet.dependents.queryWindowRect(.{ index, 0 }, .{ max, max }, &deps);
+    try sheet.cols.queryWindow(&.{index}, &.{max}, &cols);
+    errdefer comptime unreachable;
+
+    // Remove affected cols
+    for (cols.items) |handle| {
+        const p = &sheet.cols.entries.items(.point)[handle.n];
+        sheet.cols.removeHandle(handle, p);
+    }
+
+    // Reinsert affected cols with adjusted positions
+    for (cols.items) |handle| {
+        const p = &sheet.cols.entries.items(.point)[handle.n];
+        assert(p[0] >= index);
+        p[0] += n;
+        _ = sheet.cols.insertAssumeCapacity(p, handle);
+    }
+
+    // Create new columns
+    for (index..index + n) |i|
+        _ = sheet.createColumnAssumeCapacity(@intCast(i));
+
+    // Remove affected cells
+    for (cells.items) |handle| {
+        const p = &sheet.cell_tree.entries.items(.point)[handle.n];
+        assert(p[0] >= index);
+        sheet.cell_tree.removeHandle(handle, p);
+    }
+
+    // Re-insert affected cells with adjusted positions
+    for (cells.items) |handle| {
+        // TODO: Handle overflow
+        const p = &sheet.cell_tree.entries.items(.point)[handle.n];
+        p[0] += n;
+        const removed = sheet.cell_tree.insertAssumeCapacity(p, handle);
+        assert(!removed.isValid());
+    }
+
+    // Remove affected dependency ranges
+    for (deps.items) |handle| {
+        const p = &sheet.dependents.entries.items(.point)[handle.n];
+        assert(p[2] >= p[0]);
+        sheet.dependents.removeHandle(handle, p);
+    }
+
+    // Re-insert affected dependency ranges with adjustments
+    for (deps.items) |handle| {
+        const p = &sheet.dependents.entries.items(.point)[handle.n];
+        if (p[0] >= index) {
+            p[0] += n;
+            p[2] += n;
+            _ = sheet.dependents.insertAssumeCapacity(p, handle);
+        } else {
+            assert(p[2] >= index);
+            p[2] += n;
+            _ = sheet.dependents.insertAssumeCapacity(p, handle);
+        }
+    }
+
+    // TODO: Could we store these in a ph-tree, and AST pos nodes store a handle into that tree.
+    //       This would allow looking up all affected nodes in the AST easier. But is it even
+    //       needed?
+    // Adjust all affected position/range references in cell expressions
+    const tags = sheet.ast_nodes.items(.tag);
+    const data = sheet.ast_nodes.items(.data);
+    var i: u32 = @intCast(sheet.ast_nodes.len);
+    while (i > 0) {
+        i -= 1;
+        switch (tags[i]) {
+            .pos => {
+                const pos = &data[i].pos;
+                if (pos.x >= index) {
+                    sheet.pushUndoAssumeCapacity(.init(.update_pos, .{
+                        .ast_node = .from(i),
+                        .pos = pos.*,
+                    }), undo_opts);
+                    pos.x += n;
+                }
+            },
+            .range => {
+                const range = data[i].range;
+                const tl = &data[range.lhs.n].pos;
+                const br = &data[range.rhs.n].pos;
+                assert(tl.x <= br.x);
+                assert(tl.y <= br.y);
+
+                const u: Undo = .init(.update_range, .{
+                    .ast_node = .from(i),
+                    .range = .{
+                        .tl = tl.*,
+                        .br = br.*,
+                    },
+                });
+
+                if (tl.x >= index) {
+                    sheet.pushUndoAssumeCapacity(u, undo_opts);
+                    tl.x += n;
+                    br.x += n;
+                } else if (br.x >= index) {
+                    sheet.pushUndoAssumeCapacity(u, undo_opts);
+                    br.x += n;
+                }
+
+                i -= 2;
+            },
+            else => {},
+        }
+    }
+
+    sheet.pushUndoAssumeCapacity(.init(.delete_columns, .{
+        .start = index,
+        .end = index + n - 1,
+    }), undo_opts);
+}
+
+pub fn insertRows(sheet: *Sheet, index: u32, n: u32, undo_opts: UndoOpts) !void {
+    assert(n > 0);
+
+    // Check if this would cause rows to overflow
+    const largest = sheet.cell_tree.largestDim(1);
+    if (largest.isValid()) {
+        const row = sheet.cell_tree.point(largest)[1];
+        if (std.math.maxInt(u32) - row < n)
+            return error.Overflow;
+    }
+
+    const arena = sheet.arena.allocator();
+    defer sheet.resetArena();
+
+    var cells: std.ArrayList(CellHandle) = .init(arena);
+    var deps: std.ArrayList(Dependents.Handle) = .init(arena);
+
+    const undo_count = blk: {
+        const tags = sheet.ast_nodes.items(.tag);
+        const data = sheet.ast_nodes.items(.data);
+        var i: u32 = @intCast(sheet.ast_nodes.len);
+        var undo_count: u32 = 1;
+        while (i > 0) {
+            i -= 1;
+            switch (tags[i]) {
+                .pos => {
+                    const pos = data[i].pos;
+                    undo_count += @intFromBool(pos.y >= index);
+                },
+                .range => {
+                    const range = data[i].range;
+                    const tl: Position = data[range.lhs.n].pos;
+                    const br: Position = data[range.rhs.n].pos;
+                    undo_count += @intFromBool(tl.y >= index or br.y >= index);
+                },
+                else => {},
+            }
+        }
+
+        break :blk undo_count;
+    };
+
+    try sheet.ensureUndoCapacity(undo_opts.undo_type, undo_count);
+
+    const max = std.math.maxInt(u32);
+
+    try sheet.cell_tree.queryWindow(&.{ 0, index }, &.{ max, max }, &cells);
+    try sheet.dependents.queryWindowRect(.{ 0, index }, .{ max, max }, &deps);
+    errdefer comptime unreachable;
+
+    // Remove affected cells
+    for (cells.items) |handle| {
+        const p = &sheet.cell_tree.entries.items(.point)[handle.n];
+        assert(p[1] >= index);
+        sheet.cell_tree.removeHandle(handle, p);
+    }
+
+    // Re-insert affected cells with adjusted positions
+    for (cells.items) |handle| {
+        // TODO: Handle overflow
+        const p = &sheet.cell_tree.entries.items(.point)[handle.n];
+        p[1] += n;
+        const removed = sheet.cell_tree.insertAssumeCapacity(p, handle);
+        assert(!removed.isValid());
+    }
+
+    // Remove affected dependency ranges
+    for (deps.items) |handle| {
+        const p = &sheet.dependents.entries.items(.point)[handle.n];
+        assert(p[3] >= p[1]);
+        sheet.dependents.removeHandle(handle, p);
+    }
+
+    // Re-insert affected dependency ranges with adjustments
+    for (deps.items) |handle| {
+        const p = &sheet.dependents.entries.items(.point)[handle.n];
+        if (p[1] >= index) {
+            p[1] += n;
+            p[3] += n;
+            _ = sheet.dependents.insertAssumeCapacity(p, handle);
+        } else {
+            assert(p[3] >= index);
+            p[3] += n;
+            _ = sheet.dependents.insertAssumeCapacity(p, handle);
+        }
+    }
+
+    // TODO: Could we store these in a ph-tree, and AST pos nodes store a handle into that tree.
+    //       This would allow looking up all affected nodes in the AST easier. But is it even
+    //       needed?
+    // Adjust all affected position/range references in cell expressions
+    const tags = sheet.ast_nodes.items(.tag);
+    const data = sheet.ast_nodes.items(.data);
+    var i: u32 = @intCast(sheet.ast_nodes.len);
+    while (i > 0) {
+        i -= 1;
+        switch (tags[i]) {
+            .pos => {
+                const pos = &data[i].pos;
+                if (pos.y >= index) {
+                    sheet.pushUndoAssumeCapacity(.init(.update_pos, .{
+                        .ast_node = .from(i),
+                        .pos = pos.*,
+                    }), undo_opts);
+                    pos.y += n;
+                }
+            },
+            .range => {
+                const range = data[i].range;
+                const tl = &data[range.lhs.n].pos;
+                const br = &data[range.rhs.n].pos;
+                assert(tl.y <= br.y);
+                assert(tl.y <= br.y);
+
+                const u: Undo = .init(.update_range, .{
+                    .ast_node = .from(i),
+                    .range = .{
+                        .tl = tl.*,
+                        .br = br.*,
+                    },
+                });
+
+                if (tl.y >= index) {
+                    sheet.pushUndoAssumeCapacity(u, undo_opts);
+                    tl.y += n;
+                    br.y += n;
+                } else if (br.y >= index) {
+                    sheet.pushUndoAssumeCapacity(u, undo_opts);
+                    br.y += n;
+                }
+
+                i -= 2;
+            },
+            else => {},
+        }
+    }
+
+    sheet.pushUndoAssumeCapacity(.init(.delete_rows, .{
+        .start = index,
+        .end = index + n - 1,
+    }), undo_opts);
+}
+
 pub fn update(sheet: *Sheet) Allocator.Error!void {
     if (!sheet.needsUpdate()) return;
 
-    log.debug("Updating cells...", .{});
+    // log.debug("Updating cells...", .{});
     var timer = if (builtin.mode == .Debug)
         std.time.Timer.start() catch unreachable
     else {};
 
     defer sheet.queued_cells.clearRetainingCapacity();
 
-    log.debug("Marking dirty cells", .{});
+    // log.debug("Marking dirty cells", .{});
 
     var sfa = std.heap.stackFallback(16384, sheet.allocator);
     var dirty_cells: std.ArrayList(CellHandle) = .init(sfa.get());
@@ -1487,17 +2342,17 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
     while (dirty_cells.popOrNull()) |cell| {
         try sheet.markDirty(cell, &dirty_cells);
     }
-    log.debug("Finished marking", .{});
+    // log.debug("Finished marking", .{});
 
     // All dirty cells are reachable from the cells in queued_cells
     while (sheet.queued_cells.popOrNull()) |handle| {
         _ = sheet.evalCellByHandle(handle) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.CyclicalReference => {
-                const point = sheet.cell_tree.point(handle);
-                log.info("Cyclical reference encountered while evaluating {}", .{
-                    Position.init(point[0], point[1]),
-                });
+                // const point = sheet.cell_tree.point(handle);
+                // log.info("Cyclical reference encountered while evaluating {}", .{
+                //     Position.init(point[0], point[1]),
+                // });
             },
             else => {},
         };
@@ -1510,7 +2365,6 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
     }
 }
 
-/// Marks the cell at `pos` as needing to be updated.
 pub fn enqueueUpdate(
     sheet: *Sheet,
     handle: CellHandle,
@@ -1546,9 +2400,6 @@ fn markDirty(
             const h = sheet.deps.items[index.n].handle;
             const c = sheet.getCellFromHandle(h);
             if (c.state != .dirty) {
-                log.debug("Marked {} as dirty", .{
-                    sheet.posFromCellHandle(h),
-                });
                 c.state = .dirty;
                 try dirty_cells.append(h);
             }
@@ -1699,7 +2550,6 @@ fn queueDependents(sheet: *Sheet, rect: Rect) Allocator.Error!void {
 
 pub fn evalCellByHandle(sheet: *Sheet, handle: CellHandle) ast.EvalError!ast.EvalResult {
     const cell = sheet.getCellFromHandle(handle);
-    log.debug("Evaluating cell {}", .{sheet.posFromCellHandle(handle)});
     switch (cell.state) {
         .up_to_date => {},
         .computing => return error.CyclicalReference,
@@ -1775,15 +2625,10 @@ pub fn printCellExpression(sheet: *Sheet, pos: Position, writer: anytype) !void 
 pub const Column = extern struct {
     pub const default_width = 10;
 
-    index: PosInt,
     width: u16 = default_width,
     precision: u8 = 2,
 
-    pub const Handle = ColumnAxis.Handle;
-
-    pub fn compare(a: Column, b: Column) std.math.Order {
-        return std.math.order(a.index, b.index);
-    }
+    pub const Handle = Columns.Handle;
 };
 
 fn setRowOrColumn(
@@ -1804,41 +2649,34 @@ fn setRowOrColumn(
 }
 
 pub fn createColumn(sheet: *Sheet, index: PosInt) !Column.Handle {
-    var entry = sheet.cols.getEntryFor(.{ .index = index });
-    if (!entry.node.isValid()) {
-        log.debug("Creating column {}", .{index});
-        // handle = try sheet.cols.insert(sheet.allocator, .{ .index = index });
-        const new_node = try sheet.cols.createNode(sheet.allocator);
-        entry.set(new_node);
-        return new_node;
+    const found, const value_ptr, const handle = try sheet.cols.getOrPut(sheet.allocator, &.{index});
+    if (!found) {
+        log.debug("Created column {}", .{index});
+        value_ptr.* = .{};
     }
-
-    return entry.node;
+    return handle;
 }
 
 pub fn createColumnAssumeCapacity(sheet: *Sheet, index: PosInt) Column.Handle {
-    var entry = sheet.cols.getEntryFor(.{ .index = index });
-    if (!entry.node.isValid()) {
-        log.debug("Creating column {}", .{index});
-        // handle = try sheet.cols.insert(sheet.allocator, .{ .index = index });
-        const new_node = sheet.cols.createNodeAssumeCapacity();
-        entry.set(new_node);
-        return new_node;
+    const found, const value_ptr, const handle = sheet.cols.getOrPutAssumeCapacity(&.{index});
+    if (!found) {
+        log.debug("Created column {}", .{index});
+        value_ptr.* = .{};
     }
-
-    return entry.node;
+    return handle;
 }
 
 pub fn getColumn(sheet: *Sheet, index: PosInt) ?Column {
-    const entry = sheet.cols.getEntryFor(.{ .index = index });
-    if (entry.node.isValid())
-        return sheet.cols.node(entry.node).key;
+    if (sheet.cols.find(&.{index})) |value_ptr|
+        return value_ptr.*;
     return null;
 }
 
 pub fn getColumnHandle(sheet: *Sheet, index: PosInt) ?Column.Handle {
-    const entry = sheet.cols.getEntryFor(.{ .index = index });
-    return entry.node.get();
+    const handle = sheet.cols.findEntry(&.{index});
+    if (handle.isValid())
+        return handle;
+    return null;
 }
 
 pub fn widthNeededForColumn(
@@ -1889,16 +2727,6 @@ pub fn widthNeededForColumn(
     return width;
 }
 
-const PositionContext = struct {
-    pub fn eql(_: PositionContext, p1: Position, p2: Position) bool {
-        return p1.y == p2.y and p1.x == p2.x;
-    }
-
-    pub fn hash(_: PositionContext, pos: Position) u64 {
-        return pos.hash();
-    }
-};
-
 test "Sheet basics" {
     const t = std.testing;
 
@@ -1941,26 +2769,6 @@ test "setCell allocations" {
     };
 
     try t.checkAllAllocationFailures(t.allocator, Test.testSetCellAllocs, .{});
-}
-
-// TODO: Expand test
-test "Load file" {
-    const t = std.testing;
-
-    const ZC = @import("ZC.zig");
-    var zc: ZC = undefined;
-    try zc.init(t.allocator, .{ .ui = false });
-    defer zc.deinit();
-
-    try zc.setCellString(try Position.fromAddress("B0"), "B0", .{});
-    try zc.updateCells();
-    try zc.setCellString(try Position.fromAddress("B0"), "C0", .{});
-    try zc.updateCells();
-    try zc.setCellString(try Position.fromAddress("C0"), "10", .{});
-    try zc.updateCells();
-
-    try zc.loadCmd("erm.zc");
-    try zc.updateCells();
 }
 
 test "Update values" {
@@ -2709,23 +3517,6 @@ test "Overwrite with reference" {
     }
 }
 
-pub fn printCellDependents(sheet: *Sheet, address: []const u8) !void {
-    const pos = Position.fromValidAddress(address);
-    var iter = try sheet.dependents.searchIterator(sheet.allocator, .{ .tl = pos, .br = pos });
-    defer iter.deinit();
-
-    while (try iter.next()) |item| {
-        const slice = sheet.dependents.flat.items(item.value_ptr.*);
-        log.debug("{} is depended on by", .{pos});
-        for (slice) |handle| {
-            log.debug("    {} ({d})", .{
-                sheet.cell_treap.node(handle).key.rect(sheet),
-                handle.n,
-            });
-        }
-    }
-}
-
 fn testSetCell(sheet: *Sheet, address: []const u8, expr: [:0]const u8) !void {
     try sheet.setCell(.fromValidAddress(address), expr, try ast.fromExpression(sheet, expr), .{});
 }
@@ -2740,6 +3531,7 @@ test "Dependencies" {
         \\ let B0 = 20
         \\ let A1 = A0 * 2
         \\ let B1 = B0 * 2
+        \\
     ;
 
     var fbs = std.io.fixedBufferStream(bytes);
@@ -2787,13 +3579,20 @@ fn fuzzNumbers(input: []const u8) !void {
     const sheet = try create(std.testing.allocator);
     defer sheet.destroy();
 
-    const Operation = union(enum(u1)) {
-        insert: extern struct {
-            pos: Position,
-            number_or_ref: extern union { f: u64, pos: Position },
-            rand: bool,
-        } align(1),
+    const Insert = extern struct {
+        pos: Position,
+        number_or_ref: extern union { f: u64, pos: Position },
+        rand: bool,
+    };
+
+    const Operation = union(enum(u2)) {
+        insert: Insert align(1),
         delete: Position align(1),
+        delete_col: extern struct {
+            start: u32,
+            len: u32,
+        } align(1),
+        nothing: Insert align(1),
     };
 
     const slice: []align(1) const Operation = std.mem.bytesAsSlice(
@@ -2804,27 +3603,32 @@ fn fuzzNumbers(input: []const u8) !void {
     for (slice) |t| {
         switch (t) {
             // Insert a random expression
-            .insert => |data| {
-                const pos: Position = .init(data.pos.x % 5, data.pos.y % 5);
+            .insert, .nothing => |data| {
+                const pos: Position = .init(data.pos.x % 10, data.pos.y % 10);
 
                 var buf: std.BoundedArray(u8, 1024) = .{};
                 if (data.rand) {
                     try buf.writer().print("{d}", .{data.number_or_ref.f});
                 } else {
                     const p: Position = .init(
-                        data.number_or_ref.pos.x % 5,
-                        data.number_or_ref.pos.y % 5,
+                        data.number_or_ref.pos.x % 10,
+                        data.number_or_ref.pos.y % 10,
                     );
                     try buf.writer().print("{}", .{p});
                 }
                 try buf.append(0);
-                const null_terminated_expr = buf.buffer[0..buf.len :0];
+                const null_terminated_expr = buf.buffer[0 .. buf.len - 1 :0];
 
                 const a = try ast.fromExpression(sheet, null_terminated_expr);
                 try sheet.setCell(pos, buf.constSlice(), a, .{});
             },
             .delete => |pos| {
                 try sheet.deleteCell(pos, .{});
+            },
+            .delete_col => |col| {
+                const start = col.start % 10;
+                const end = (start + col.len % 10);
+                try sheet.deleteColumnRange(start, end, .{});
             },
         }
 
@@ -2850,4 +3654,22 @@ test "Fuzz sheet" {
         );
     }
     try std.testing.fuzz(fuzzNumbers, .{});
+}
+
+test "insert column overflow" {
+    const sheet = try create(std.testing.allocator);
+    defer sheet.destroy();
+
+    try sheet.setCell(.init(std.math.maxInt(u32) - 1, 0), "5", try ast.fromExpression(sheet, "5"), .{});
+    const res = sheet.insertColumns(0, 2, .{});
+    try std.testing.expectError(error.Overflow, res);
+}
+
+test "insert row overflow" {
+    const sheet = try create(std.testing.allocator);
+    defer sheet.destroy();
+
+    try sheet.setCell(.init(0, std.math.maxInt(u32) - 1), "5", try ast.fromExpression(sheet, "5"), .{});
+    try sheet.insertRows(0, 1, .{});
+    try std.testing.expectError(error.Overflow, sheet.insertRows(0, 1, .{}));
 }

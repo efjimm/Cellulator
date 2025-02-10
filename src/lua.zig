@@ -3,7 +3,6 @@ const lua = @import("ziglua");
 const utils = @import("utils.zig");
 const Lua = lua.Lua;
 const ZC = @import("ZC.zig");
-const Allocator = std.mem.Allocator;
 const Position = @import("Position.zig").Position;
 const assert = std.debug.assert;
 const _log = std.log.scoped(.lua);
@@ -215,28 +214,6 @@ fn getZc(state: *Lua) *ZC {
     defer state.pop(1);
     return (state.toUserdata(*ZC, -1) catch unreachable).*;
 }
-
-// /// Returns the Zig wrapper around a Lua state.
-// inline fn getState(c_state: ?*lua.LuaState) *Lua {
-//     return .{ .state = c_state.? };
-// }
-
-/// Zig functions that get called for certain events.
-/// These are not exposed to lua code, and always get executed BEFORE
-/// any registered lua handlers.
-const handlers = struct {
-    pub fn Start(zc: *ZC, name: []const u8) void {
-        // Creates a new `sheet` object in zc.sheets.
-        // TODO: Move this into the NewSheet handler
-        _ = zc.lua.getGlobal("zc") catch unreachable;
-        _ = zc.lua.getField(-1, "sheets");
-
-        zc.lua.createTable(0, 1);
-        zc.lua.setMetatableRegistry("sheet");
-        zc.lua.pushString(name);
-        zc.lua.setField(-1, "name");
-    }
-};
 
 const metatables = .{
     .zc = struct {

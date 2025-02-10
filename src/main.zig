@@ -1,13 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const spoon = @import("spoon");
-const Sheet = @import("Sheet.zig");
-const Position = @import("Position.zig").Position;
-const Tui = @import("Tui.zig");
 const ZC = @import("ZC.zig");
-
-const Allocator = std.mem.Allocator;
 
 // TODO: Move this to build.zig
 const use_logfile = builtin.mode == .Debug;
@@ -45,7 +39,6 @@ pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const a = gpa.allocator();
-
     // const a = std.heap.c_allocator;
 
     try zc.init(a, .{ .filepath = filepath, .ui = true });

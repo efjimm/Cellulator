@@ -49,6 +49,8 @@ pub const Node = extern struct {
         mod: BinaryOperator,
         builtin: Builtin,
         range: BinaryOperator,
+        invalidated_pos: Position,
+        invalidated_range: BinaryOperator,
         string_literal: String,
     };
 
@@ -68,17 +70,6 @@ pub const Node = extern struct {
             .tag_type = Tag,
         } });
     };
-
-    pub fn isRef(n: Node) bool {
-        return isRefTag(n.tag);
-    }
-
-    pub fn isRefTag(tag: Tag) bool {
-        return switch (tag) {
-            .ref_abs_abs, .ref_rel_abs, .ref_abs_rel, .ref_rel_rel => true,
-            else => false,
-        };
-    }
 
     pub inline fn get(n: Node) Tagged {
         switch (n.tag) {
@@ -155,7 +146,6 @@ pub fn fromSource2(
     errdefer sheet.ast_nodes.len = old_len;
 
     _ = try parser.parseStatement();
-    assert(token_tags[parser.tok_i] == .eof or token_tags[parser.tok_i] == .keyword_let);
 
     return .{ parser.strings_len, parser.tok_i };
 }
@@ -212,6 +202,10 @@ pub fn printFromNode(
         .number => |n| try writer.print("{d}", .{n}),
         .column => |col| try Position.writeColumnAddress(col, writer),
         .pos => |pos| try pos.writeCellAddress(writer),
+        .invalidated_pos => |pos| {
+            // TODO: Print these differently
+            try pos.writeCellAddress(writer);
+        },
 
         .string_literal => |str| {
             try writer.print("\"{s}\"", .{strings[str.start..str.end]});
@@ -319,7 +313,7 @@ pub fn printFromNode(
                 else => try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings),
             }
         },
-        .range => |b| {
+        .range, .invalidated_range => |b| {
             try printFromIndex(nodes, sheet, b.lhs, writer, strings);
             try writer.writeByte(':');
             try printFromIndex(nodes, sheet, b.rhs, writer, strings);
@@ -405,56 +399,6 @@ pub fn argIteratorForwards(nodes: NodeSlice, start: Index, end: Index) ArgIterat
     };
 }
 
-/// Removes all nodes except for the given index and its children
-/// Nodes in the list are already sorted in reverse topological order which allows us to overwrite
-/// nodes sequentially without loss. This function preserves reverse topological order.
-// pub fn splice(noalias nodes: *NodeSlice, new_root: Index) Index {
-//     const old_root: Index = .from(@intCast(nodes.len - 1));
-//     const old_first = leftMostChild(nodes.*, old_root);
-
-//     const new_first = leftMostChild(nodes.*, new_root);
-//     const new_len = nodes.len - (new_first.n - old_first.n) - (old_root.n - new_root.n);
-
-//     assert(old_first.n <= new_first.n);
-
-//     for (
-//         old_first.n..,
-//         new_first.n..new_root.n + 1,
-//     ) |i, j| {
-//         var n = nodes.get(@intCast(j));
-//         switch (n.tag) {
-//             .assignment,
-//             .concat,
-//             .add,
-//             .sub,
-//             .mul,
-//             .div,
-//             .mod,
-//             .range,
-//             => {
-//                 n.data.range.lhs.n -= new_first.n - old_first.n;
-//                 n.data.range.rhs.n -= new_first.n - old_first.n;
-//             },
-//             .builtin => {
-//                 n.data.builtin.first_arg.n -= new_first.n - old_first.n;
-//             },
-//             .string_literal,
-//             .number,
-//             .column,
-//             .pos,
-//             .ref_abs_abs,
-//             .ref_rel_abs,
-//             .ref_abs_rel,
-//             .ref_rel_rel,
-//             => {},
-//         }
-//         nodes.set(@intCast(i), n);
-//     }
-
-//     nodes.len = new_len;
-//     return .from(@intCast(nodes.len - 1));
-// }
-
 pub fn print(
     nodes: NodeSlice,
     root: Index,
@@ -464,17 +408,6 @@ pub fn print(
 ) @TypeOf(writer).Error!void {
     return printFromIndex(nodes, sheet, root, writer, strings);
 }
-
-/// The order in which nodes are evaluated.
-const TraverseOrder = enum {
-    /// Nodes with children will be evaluated before their children
-    first,
-    /// Nodes with children will have their left child evaluated first, then themselves, then their
-    /// right child.
-    middle,
-    /// Nodes with children will be evaluated after all their children.
-    last,
-};
 
 pub fn leftMostChild(
     nodes: NodeSlice,
@@ -490,6 +423,7 @@ pub fn leftMostChild(
         .number,
         .column,
         .pos,
+        .invalidated_pos,
         => index,
         .assignment => leftMostChild(nodes, .from(index.n - 1)),
         // branch nodes
@@ -500,6 +434,7 @@ pub fn leftMostChild(
         .div,
         .mod,
         .range,
+        .invalidated_range,
         => |b| leftMostChild(nodes, b.lhs),
         .builtin => |b| leftMostChild(nodes, b.first_arg),
     };
@@ -684,7 +619,12 @@ pub fn EvalContext(comptime Context: type) type {
                     return .{ .string = buf };
                 },
                 .string_literal => |str| .{ .string = self.strings[str.start..str.end] },
-                .column, .range, .assignment => error.NotEvaluable,
+                .column,
+                .invalidated_pos,
+                .range,
+                .invalidated_range,
+                .assignment,
+                => error.NotEvaluable,
             };
         }
 
@@ -707,15 +647,14 @@ pub fn EvalContext(comptime Context: type) type {
             var iter = argIterator(self.nodes, start, end);
             var total: f64 = 0;
 
-            while (iter.next()) |i| {
-                const tag = tags[i.n];
-                if (tag == .range) {
-                    total += try self.sumRange(data[i.n].range);
-                } else {
+            while (iter.next()) |i| switch (tags[i.n]) {
+                .range => total += try self.sumRange(data[i.n].range),
+                .invalidated_range => return error.NotEvaluable,
+                else => {
                     const res = try self.eval(i);
                     total += try res.toNumber(0);
-                }
-            }
+                },
+            };
 
             return total;
         }
@@ -724,8 +663,14 @@ pub fn EvalContext(comptime Context: type) type {
         fn toPosRange(self: @This(), r: BinaryOperator) Position.Rect {
             const data = self.nodes.items(.data);
 
-            assert(self.nodes.items(.tag)[r.lhs.n] == .pos);
-            assert(self.nodes.items(.tag)[r.rhs.n] == .pos);
+            if (self.nodes.items(.tag)[r.lhs.n] != .pos) {
+                std.debug.print("{}\n", .{self.nodes.items(.tag)[r.lhs.n]});
+                unreachable;
+            }
+            if (self.nodes.items(.tag)[r.rhs.n] != .pos) {
+                std.debug.print("{}\n", .{self.nodes.items(.tag)[r.rhs.n]});
+                unreachable;
+            }
 
             return .initPos(
                 data[r.lhs.n].pos,
@@ -759,15 +704,14 @@ pub fn EvalContext(comptime Context: type) type {
             var iter = argIterator(self.nodes, start, end);
             var total: f64 = 1;
 
-            while (iter.next()) |i| {
-                const tag = tags[i.n];
-                if (tag == .range) {
-                    total *= try self.prodRange(data[i.n].range);
-                } else {
+            while (iter.next()) |i| switch (tags[i.n]) {
+                .range => total *= try self.prodRange(data[i.n].range),
+                .invalidated_range => return error.NotEvaluable,
+                else => {
                     const res = try self.eval(i);
                     total *= try res.toNumber(0);
-                }
-            }
+                },
+            };
 
             return total;
         }
@@ -801,8 +745,8 @@ pub fn EvalContext(comptime Context: type) type {
             var total: f64 = 0;
             var total_items: Position.HashInt = 0;
 
-            while (iter.next()) |i| {
-                if (tags[i.n] == .range) {
+            while (iter.next()) |i| switch (tags[i.n]) {
+                .range => {
                     const r = data[i.n].range;
                     total += try self.sumRange(r);
 
@@ -812,12 +756,14 @@ pub fn EvalContext(comptime Context: type) type {
                     );
 
                     total_items += rect.area();
-                } else {
+                },
+                .invalidated_range => return error.NotEvaluable,
+                else => {
                     const res = try self.eval(i);
                     total += try res.toNumber(0);
                     total_items += 1;
-                }
-            }
+                },
+            };
 
             return total / @as(f64, @floatFromInt(total_items));
         }
@@ -830,15 +776,14 @@ pub fn EvalContext(comptime Context: type) type {
             var max: ?f64 = null;
 
             while (iter.next()) |i| {
-                const m = blk: {
-                    if (tags[i.n] == .range) {
-                        const r = data[i.n].range;
-                        break :blk try self.maxRange(r) orelse continue;
-                    } else {
+                const m = switch (tags[i.n]) {
+                    .range => try self.maxRange(data[i.n].range),
+                    .invalidated_range => return error.NotEvaluable,
+                    else => blk: {
                         const res = try self.eval(i);
-                        break :blk try res.toNumberOrNull() orelse continue;
-                    }
-                };
+                        break :blk try res.toNumberOrNull();
+                    },
+                } orelse continue;
 
                 if (max == null or m > max.?) max = m;
             }
@@ -874,15 +819,14 @@ pub fn EvalContext(comptime Context: type) type {
             var min: ?f64 = null;
 
             while (iter.next()) |i| {
-                const m = blk: {
-                    if (tags[i.n] == .range) {
-                        const r = data[i.n].range;
-                        break :blk try self.minRange(r) orelse continue;
-                    } else {
+                const m = switch (tags[i.n]) {
+                    .range => try self.minRange(data[i.n].range),
+                    .invalidated_range => return error.NotEvaluable,
+                    else => blk: {
                         const res = try self.eval(i);
-                        break :blk try res.toNumberOrNull() orelse continue;
-                    }
-                };
+                        break :blk try res.toNumberOrNull();
+                    },
+                } orelse continue;
 
                 if (min == null or m < min.?) min = m;
             }
@@ -954,10 +898,6 @@ pub fn eval(
         },
     };
 }
-
-const EvalDynamicError = error{
-    InvalidCoercion, // Tried to coerce invalid string to integer
-};
 
 test "Parse and Eval Expression" {
     const t = std.testing;

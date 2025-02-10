@@ -1,6 +1,5 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Position = @import("Position.zig").Position;
 const wcWidth = @import("wcwidth").wcWidth;
 
 const unicode = std.unicode;
@@ -139,9 +138,15 @@ pub fn dupeZ(comptime T: type, buf: anytype) [buf.len:0]T {
 }
 
 pub const CodepointBuilder = struct {
-    buf: [4]u8 = undefined,
-    desired_len: u3 = 0,
-    len: u3 = 0,
+    buf: [4]u8,
+    desired_len: u3,
+    len: u3,
+
+    pub const empty: CodepointBuilder = .{
+        .buf = undefined,
+        .desired_len = 0,
+        .len = 0,
+    };
 
     pub fn appendByte(builder: *CodepointBuilder, byte: u8) bool {
         if (builder.desired_len == 0) {

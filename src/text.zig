@@ -3,13 +3,11 @@ const utils = @import("utils.zig");
 const spoon = @import("spoon");
 const CodepointBuilder = utils.CodepointBuilder;
 const wcWidth = @import("wcwidth").wcWidth;
-const inputParser = spoon.inputParser;
 const isWhitespace = std.ascii.isWhitespace;
 const unicode = std.unicode;
 const utf8Encode = unicode.utf8Encode;
 
 const assert = std.debug.assert;
-const log = std.log.scoped(.text_input);
 
 pub fn isContinuation(c: u8) bool {
     return c & 0xC0 == 0x80;
@@ -35,7 +33,7 @@ pub fn nextCharacter(buf: anytype, offset: u32, count: u32) u32 {
     var i = offset;
     for (0..count) |_| {
         while (i < buf.length()) : (i += 1) {
-            var builder = CodepointBuilder{};
+            var builder: CodepointBuilder = .empty;
             var j = i;
             while (builder.appendByte(buf.get(j))) : (j += 1) {}
             i += builder.desired_len;
@@ -53,7 +51,7 @@ pub fn prevCharacter(buf: anytype, offset: u32, count: u32) u32 {
             const len = prevCodepoint(buf, i);
             i -= len;
 
-            var builder = CodepointBuilder{};
+            var builder: CodepointBuilder = .empty;
             for (i..i + len) |j| _ = builder.appendByte(buf.get(@intCast(j)));
             if (wcWidth(builder.codepoint()) != 0) break;
         } else break;
@@ -752,7 +750,7 @@ fn testMotion(
     motion: Motion,
     count: u32,
 ) !void {
-    var buf = GapBuffer(u8){};
+    var buf: GapBuffer(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
     try buf.appendSlice(std.testing.allocator, text);

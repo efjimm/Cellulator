@@ -1,3 +1,4 @@
+// TODO: this whole file sucks
 const std = @import("std");
 const spoon = @import("spoon");
 const utils = @import("utils.zig");
@@ -8,7 +9,6 @@ const PosInt = Position.Int;
 const wcWidth = @import("wcwidth").wcWidth;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
-const log = std.log.scoped(.tui);
 const CellType = enum {
     number,
     string,
@@ -20,7 +20,7 @@ const Col = Sheet.Column;
 const Term = spoon.Term;
 
 term: Term,
-update: UpdateFlags = .all,
+update_flags: UpdateFlags = .all,
 
 const UpdateFlags = packed struct {
     command: bool,
@@ -91,13 +91,19 @@ pub fn deinit(self: *Self, allocator: Allocator) void {
     self.* = undefined;
 }
 
+pub fn update(tui: *Self, comptime fields: []const std.meta.FieldEnum(UpdateFlags)) void {
+    inline for (fields) |tag| {
+        @field(tui.update_flags, @tagName(tag)) = true;
+    }
+}
+
 pub const RenderError = Term.WriteError;
 
 pub fn render(self: *Self, zc: *ZC) RenderError!void {
     if (needs_resize) {
         try self.term.fetchSize();
         zc.clampScreenToCursor();
-        self.update = .all;
+        self.update_flags = .all;
         needs_resize = false;
     }
 
@@ -113,26 +119,26 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
     }
 
     try self.renderStatus(&rc, zc);
-    if (self.update.column_headings) {
+    if (self.update_flags.column_headings) {
         try self.renderColumnHeadings(&rc, zc);
-        self.update.column_headings = false;
+        self.update_flags.column_headings = false;
     }
-    if (self.update.row_numbers) {
+    if (self.update_flags.row_numbers) {
         try self.renderRowNumbers(&rc, zc);
-        self.update.row_numbers = false;
+        self.update_flags.row_numbers = false;
     }
-    if (self.update.cells) {
+    if (self.update_flags.cells) {
         try self.renderCells(&rc, zc);
         try renderCursor(&rc, zc);
-        self.update.cells = false;
-        self.update.cursor = false;
-    } else if (self.update.cursor) {
+        self.update_flags.cells = false;
+        self.update_flags.cursor = false;
+    } else if (self.update_flags.cursor) {
         try renderCursor(&rc, zc);
-        self.update.cursor = false;
+        self.update_flags.cursor = false;
     }
-    if (self.update.command or zc.mode.isCommandMode()) {
+    if (self.update_flags.command or zc.mode.isCommandMode()) {
         try renderCommandLine(&rc, zc);
-        self.update.command = false;
+        self.update_flags.command = false;
     }
 
     try rc.setStyle(.{ .fg = .white, .bg = .black });
@@ -285,7 +291,7 @@ pub fn renderColumnHeadings(
     try rc.setStyle(.{ .fg = .blue, .bg = .black });
 
     while (w < self.term.width) : (x += 1) {
-        const col: Col = zc.sheet.getColumn(x) orelse .{ .index = x };
+        const col: Col = zc.sheet.getColumn(x) orelse .{};
         const width = @min(self.term.width - reserved_cols, col.width);
 
         var buf: [Position.max_str_len]u8 = undefined;
@@ -356,7 +362,7 @@ pub fn renderCursor(
         const prev_x = blk: {
             var x: u16 = left;
             for (zc.screen_pos.x..zc.prev_cursor.x) |i| {
-                const col: Col = zc.sheet.getColumn(@intCast(i)) orelse Sheet.Column{ .index = @intCast(i) };
+                const col: Col = zc.sheet.getColumn(@intCast(i)) orelse .{};
                 x += col.width;
             }
             break :blk x;
@@ -369,7 +375,7 @@ pub fn renderCursor(
 
         try rc.setStyle(.{ .fg = .blue, .bg = .black });
 
-        const col: Col = zc.sheet.getColumn(zc.prev_cursor.x) orelse .{ .index = zc.prev_cursor.x };
+        const col: Col = zc.sheet.getColumn(zc.prev_cursor.x) orelse .{};
         const width = @min(col.width, rc.term.width - left);
 
         try rc.moveCursorTo(ZC.col_heading_line, prev_x);
@@ -388,7 +394,7 @@ pub fn renderCursor(
 
         var x: u16 = left;
         for (zc.screen_pos.x..zc.cursor.x) |i| {
-            const col: Col = zc.sheet.getColumn(@intCast(i)) orelse .{ .index = @intCast(i) };
+            const col: Col = zc.sheet.getColumn(@intCast(i)) orelse .{};
             x += col.width;
         }
         break :blk x;
@@ -399,7 +405,7 @@ pub fn renderCursor(
     _ = try renderCell(rc, zc, zc.cursor);
     try rc.setStyle(.{ .fg = .black, .bg = .blue });
 
-    const col: Col = zc.sheet.getColumn(zc.cursor.x) orelse .{ .index = zc.cursor.x };
+    const col: Col = zc.sheet.getColumn(zc.cursor.x) orelse .{};
     const width = @min(col.width, rc.term.width - left);
     try rc.moveCursorTo(ZC.col_heading_line, x);
     try writer.print("{s: ^[1]}", .{
@@ -428,6 +434,7 @@ pub fn renderCells(
 
     try rc.setStyle(.{ .fg = .white, .bg = .black });
 
+    // TODO: This really sucks
     for (ZC.content_line..self.term.height, zc.screen_pos.y..) |line, y| {
         try rc.moveCursorTo(@intCast(line), reserved_cols);
 
@@ -463,7 +470,7 @@ pub fn renderCell(
     const width = getColWidth: {
         var width: u16 = 0;
         for (zc.screen_pos.x..pos.x) |x| {
-            const c: Col = zc.sheet.getColumn(@intCast(x)) orelse .{ .index = @intCast(x) };
+            const c: Col = zc.sheet.getColumn(@intCast(x)) orelse .{};
             width += c.width;
         }
         const screen_width = rc.term.width - zc.leftReservedColumns();
@@ -526,7 +533,7 @@ pub fn isOnScreen(tui: *Self, zc: *ZC, pos: Position) bool {
     const end_col = blk: {
         var i = zc.screen_pos.x;
         while (true) : (i += 1) {
-            const col: Col = zc.sheet.getColumn(i) orelse .{ .index = i };
+            const col: Col = zc.sheet.getColumn(i) orelse .{};
             w += col.width;
             if (w >= tui.term.width or i == std.math.maxInt(Position.Int))
                 break :blk i;

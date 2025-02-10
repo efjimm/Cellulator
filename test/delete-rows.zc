@@ -1,0 +1,120 @@
+# Test 1: Delete a single row and verify shifting and reference invalidation with undo/redo.
+let A0 = 10
+let A1 = 20
+let A2 = 30
+let B0 = A1 + 5
+:delete-rows 1
+:expect-eql-number A0 10
+:expect-eql-number A1 30
+:expect-error B0
+:undo 1
+:expect-eql-number A0 10
+:expect-eql-number A1 20
+:expect-eql-number A2 30
+:expect-eql-number B0 25
+:redo 1
+:expect-eql-number A0 10
+:expect-eql-number A1 30
+:expect-error B0
+
+# Test 2: Delete a range of rows affecting a range reference formula.
+let A3 = 5
+let A4 = 10
+let A5 = 15
+let A6 = 20
+let C3 = @sum(A3:A6)
+:delete-rows 4:5
+:expect-eql-number A3 5
+:expect-eql-number A4 20
+:expect-eql-number C3 25
+:undo 1
+:expect-eql-number A3 5
+:expect-eql-number A4 10
+:expect-eql-number A5 15
+:expect-eql-number A6 20
+:expect-eql-number C3 50
+:redo 1
+:expect-eql-number A3 5
+:expect-eql-number A4 20
+:expect-eql-number C3 25
+
+# Test 3: Delete a row that is referenced in a formula with a single cell reference.
+let A7 = 100
+let A8 = 200
+let B8 = A7 + A8
+:delete-rows 7
+:expect-error B7
+:expect-non-extant B8
+:expect-eql-number A7 200
+:undo 1
+:expect-eql-number A7 100
+:expect-eql-number A8 200
+:expect-eql-number B8 300
+:redo 1
+:expect-error B7
+:expect-non-extant B8
+
+# Test 4: Delete a range of rows from a filled grid with undo/redo.
+:fill A10:E12 1 1
+:delete-rows 11:12
+:expect-eql-number A10 1
+:expect-eql-number B10 2
+:expect-eql-number C10 3
+:expect-eql-number D10 4
+:expect-eql-number E10 5
+:expect-non-extant A11:E12
+:undo 1
+:expect-eql-number A10 1
+:expect-eql-number B10 2
+:expect-eql-number C10 3
+:expect-eql-number D10 4
+:expect-eql-number E10 5
+:expect-eql-number A11 6
+:expect-eql-number B11 7
+:expect-eql-number C11 8
+:expect-eql-number D11 9
+:expect-eql-number E11 10
+:expect-eql-number A12 11
+:expect-eql-number B12 12
+:expect-eql-number C12 13
+:expect-eql-number D12 14
+:expect-eql-number E12 15
+:redo 1
+:expect-eql-number A10 1
+:expect-non-extant A11:E12
+
+# Test 5: Delete rows that completely cover a range referenced by a formula, causing the formula to error.
+let A20 = 50
+let A21 = 60
+let A22 = 70
+let B19 = @sum(A20:A22)
+:delete-rows 20:22
+:expect-error B19
+:undo 1
+:expect-eql-number A20 50
+:expect-eql-number A21 60
+:expect-eql-number A22 70
+:expect-eql-number B19 180
+:redo 1
+:expect-error B19
+
+# Test 6: Multiple deletion with undo/redo interleaved with other operations.
+let A30 = 5
+let A31 = 10
+let A32 = 15
+let B30 = A30 + A32
+:delete-rows 31
+:expect-eql-number B30 20
+:expect-eql-number A30 5
+:expect-eql-number A31 15
+:expect-non-extant A32
+:undo 1
+:expect-eql-number A30 5
+:expect-eql-number A31 10
+:expect-eql-number A32 15
+:expect-eql-number B30 20
+:redo 1
+:expect-eql-number B30 20
+:expect-eql-number A30 5
+:expect-eql-number A31 15
+:expect-non-extant A32

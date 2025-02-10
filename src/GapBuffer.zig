@@ -5,12 +5,19 @@ const mem = std.mem;
 
 pub fn GapBuffer(comptime T: type) type {
     return struct {
-        ptr: [*]T = undefined,
-        len: u32 = 0,
-        gap_start: u32 = 0,
-        gap_len: u32 = 0,
+        ptr: [*]T,
+        len: u32,
+        gap_start: u32,
+        gap_len: u32,
 
         const Self = @This();
+
+        pub const empty: Self = .{
+            .ptr = undefined,
+            .len = 0,
+            .gap_start = 0,
+            .gap_len = 0,
+        };
 
         pub const ChildType = T;
 
@@ -240,7 +247,7 @@ pub fn GapBuffer(comptime T: type) type {
 
 test "GapBuffer" {
     const t = std.testing;
-    var buf: GapBuffer(u8) = .{};
+    var buf: GapBuffer(u8) = .empty;
     defer buf.deinit(t.allocator);
 
     try buf.appendSlice(t.allocator, "This is epic");
@@ -279,7 +286,7 @@ test "GapBuffer" {
 
 test "u32" {
     const t = std.testing;
-    var buf: GapBuffer(u32) = .{};
+    var buf: GapBuffer(u32) = .empty;
     defer buf.deinit(t.allocator);
 
     try buf.appendSlice(t.allocator, &.{ 1, 2, 3, 4, 5 });
