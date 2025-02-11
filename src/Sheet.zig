@@ -1630,13 +1630,18 @@ pub fn deleteColumnRange(
         const p = &sheet.cell_tree.entries.items(.point)[handle.n];
         if (!sheet.cell_tree.isOrphaned(handle))
             sheet.cell_tree.removeHandle(handle, p);
+
+        if (p[0] >= start and p[0] <= end) {
+            sheet.removeExprDependents(handle, sheet.getCellFromHandle(handle).expr_root);
+        }
     }
 
     for (cells.items) |handle| {
         const p = &sheet.cell_tree.entries.items(.point)[handle.n];
 
         if (p[0] >= start and p[0] <= end) {
-            sheet.pushUndoAssumeCapacity(.init(.insert_cell, handle), undo_opts);
+            // TODO: batch these cell inserts
+            sheet.pushUndoAssumeCapacity(.init(.set_cell, handle), undo_opts);
         } else {
             p[0] -= deleted_cols;
             _ = sheet.cell_tree.insertAssumeCapacity(p, handle);
@@ -1667,6 +1672,9 @@ pub fn deleteColumnRange(
     //  Deletion is before range and does not intersect it
     //   -> Range start and end needs to be decremented, no undo
     for (deps.items) |handle| {
+        if (handle.n >= sheet.dependents.entries.len or sheet.dependents.isOrphaned(handle))
+            continue;
+
         const p = &sheet.dependents.entries.items(.point)[handle.n];
         if (!sheet.dependents.isOrphaned(handle))
             sheet.dependents.removeHandle(handle, p);
@@ -1868,12 +1876,17 @@ pub fn deleteRowRange(
         const p = &sheet.cell_tree.entries.items(.point)[handle.n];
         if (!sheet.cell_tree.isOrphaned(handle))
             sheet.cell_tree.removeHandle(handle, p);
+
+        if (p[1] >= start and p[1] <= end) {
+            sheet.removeExprDependents(handle, sheet.getCellFromHandle(handle).expr_root);
+        }
     }
 
     for (cells.items) |handle| {
         const p = &sheet.cell_tree.entries.items(.point)[handle.n];
 
         if (p[1] >= start and p[1] <= end) {
+            // TODO: Batch these inserts
             sheet.pushUndoAssumeCapacity(.init(.insert_cell, handle), undo_opts);
         } else {
             p[1] -= deleted_rows;
@@ -1892,6 +1905,9 @@ pub fn deleteRowRange(
     //  Deletion is before range and does not intersect it
     //   -> Range start and end needs to be decremented, no undo
     for (deps.items) |handle| {
+        if (handle.n >= sheet.dependents.entries.len or sheet.dependents.isOrphaned(handle))
+            continue;
+
         const p = &sheet.dependents.entries.items(.point)[handle.n];
         if (!sheet.dependents.isOrphaned(handle))
             sheet.dependents.removeHandle(handle, p);
@@ -3672,4 +3688,24 @@ test "insert row overflow" {
     try sheet.setCell(.init(0, std.math.maxInt(u32) - 1), "5", try ast.fromExpression(sheet, "5"), .{});
     try sheet.insertRows(0, 1, .{});
     try std.testing.expectError(error.Overflow, sheet.insertRows(0, 1, .{}));
+}
+
+test "delete col dependency data" {
+    const sheet = try create(std.testing.allocator);
+    defer sheet.destroy();
+
+    try sheet.setCell(.init(0, 0), "b0", try ast.fromExpression(sheet, "b0"), .{});
+    try std.testing.expect(sheet.dependents.find(&.{ 1, 0, 1, 0 }) != null);
+    try sheet.deleteColumnRange(0, 0, .{});
+    try std.testing.expect(sheet.dependents.find(&.{ 1, 0, 1, 0 }) == null);
+}
+
+test "delete row dependency data" {
+    const sheet = try create(std.testing.allocator);
+    defer sheet.destroy();
+
+    try sheet.setCell(.init(0, 0), "a1", try ast.fromExpression(sheet, "a1"), .{});
+    try std.testing.expect(sheet.dependents.find(&.{ 0, 1, 0, 1 }) != null);
+    try sheet.deleteRowRange(0, 0, .{});
+    try std.testing.expect(sheet.dependents.find(&.{ 0, 1, 0, 1 }) == null);
 }

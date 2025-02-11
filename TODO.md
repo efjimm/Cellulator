@@ -7,48 +7,25 @@ might be an interesting read so I committed it. The stuff at the top is probably
     one on a large input sheet.
 - Support for justifying strings
 - Generate fuzzer output files from the build system
-- Replace RTree with PH-Tree
-- Reconsider using ranges that store references to rows/cols, instead reverting back to using u32
-  x/y positions.
-  - Original intent was to avoid having to update the x/y value of every position in the r-tree
-    when a row/column was inserted/deleted.
-  - This makes inserting/deleting rows/columns faster, at the expense of adding a level of
-    indirection every time a range is resolved.
-  - Now that all data structures are backed by arrays, iterating over all the x/y values to update
-    them would be trivial *and* fast.
-  - Deleting/inserting rows/columns is relatively rare compared to resolving ranges which is
-    extremely common.
-  - The planned strategy for deleting rows/columns is hazy and would rely on tombstones in the rows/
-    columns skiplists. The alternative would require no strategy!
-  - Need to benchmark!
-- Reconsider rtree
-  - Not well suited to constantly mutating data
-  - Deletions are particularly expensive.
-    - Can cause every single value in the tree to have to be re-inserted.
-  - Uses lots of recursion (bad.)
 - Store undos and redos in a single list and just keep an index into where the current undo is.
   When an undo happens we can just invert the Undo operation at the index and decrement the index
   by one. When a redo happens we invert the operation at index+1 and increment the index by one.
 
-- **WRITE BETTER TESTS**
-- !!! **PERFORMANCE PROFILING AND BENCHMARKS** !!!
+- Batch undo cell inserts / deletes
+- Improve fill implementation
+- Remove critbit tree implementation in favour of 1d PH-tree
+  - Add prefix functions to phtree
 
-- Figure out how to handle deleting a row/col in the range tree
-  - Should figure itself out by recalculating the bounding ranges on removal of the cells in the row/column
-
-Dependency information needs to be retained somehow after deleting a row/column. References to
-deleted rows/cols can't stay in the rtree, as they mess up range calculations.
-
-Should be stored in undos.
-
-Need to handle ranges that are anchored on a row/col that is being removed.
-Need to handle branch ranges being anchored on a deleted row/col.
-
-Modify the affected keys directly, and then traverse the whole tree and recalc all ranges?
-'Easy' to implement.
-
-- Relative cell references
-- 'Precision as shown' option
+- Features
+  - Justify text
+  - Copy cells
+    - Absolute references
+    - Virtual copies of cell expressions
+      - Would significantly reduce memory usage when copying many cells
+      - Requires making cell references in AST nodes relative
+  - 'Precision as shown' option
+  - Insert cells feature from libreoffice
+  - Highlight cells in expression of hovered cell
 
 - Implement constant folding
   - Full expressions still need to exist in the Ast for printing purposes
