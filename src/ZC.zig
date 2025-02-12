@@ -2,7 +2,6 @@ const std = @import("std");
 const build = @import("build");
 const utils = @import("utils.zig");
 const ast = @import("ast.zig");
-const spoon = @import("spoon");
 const Sheet = @import("Sheet.zig");
 const Tui = @import("Tui.zig");
 const text = @import("text.zig");
@@ -58,13 +57,13 @@ command_keymaps: KeyMap(CommandAction, CommandMapType),
 
 allocator: Allocator,
 
-input_buf_sfa: std.heap.StackFallbackAllocator(INPUT_BUF_LEN),
+input_buf_sfa: std.heap.StackFallbackAllocator(input_buf_len),
 input_buf: std.ArrayListUnmanaged(u8) = .{},
 
 status_message_type: StatusMessageType = .info,
 status_message: std.BoundedArray(u8, 256) = .{},
 
-const INPUT_BUF_LEN = 256;
+const input_buf_len = 256;
 
 pub const status_line = 0;
 pub const input_line = 1;
@@ -159,7 +158,7 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
         .allocator = allocator,
         .keymaps = keys.sheet_keys,
         .command_keymaps = keys.command_keys,
-        .input_buf_sfa = std.heap.stackFallback(INPUT_BUF_LEN, allocator),
+        .input_buf_sfa = std.heap.stackFallback(input_buf_len, allocator),
     };
 
     zc.sourceLua() catch |err| log.err("Could not source init.lua: {}", .{err});
@@ -374,7 +373,7 @@ fn handleInput(self: *Self) !void {
     assert(self.sheet.undos.len == 0 or self.sheet.undos.items(.tag)[self.sheet.undos.len - 1] == .sentinel);
     assert(self.sheet.redos.len == 0 or self.sheet.redos.items(.tag)[self.sheet.redos.len - 1] == .sentinel);
 
-    var buf: [INPUT_BUF_LEN / 2]u8 = undefined;
+    var buf: [input_buf_len / 2]u8 = undefined;
     const slice = try self.tui.term.readInput(&buf);
 
     const writer = self.input_buf.writer(self.allocator);
@@ -852,7 +851,7 @@ fn doVisualMode(self: *Self, action: Action) Allocator.Error!void {
 
         .delete_cell => {
             defer self.setMode(.normal);
-            try self.deleteCellsInRange(self.visualRange());
+            try self.deleteCellRange(self.visualRange());
         },
         else => {},
     }
@@ -861,6 +860,10 @@ fn doVisualMode(self: *Self, action: Action) Allocator.Error!void {
 fn parseCommand(self: *Self, str: [:0]const u8) !void {
     if (str.len == 0) return;
 
+    // TODO: Unify command and assignment parsing and handling
+    //       One issue is that AST nodes get appended to the underlying sheet's ast_nodes list,
+    //       which is useless for anything other than assignments. I suppose we could append them
+    //       no matter what and decrement ast_nodes.len if it's not an assignment?
     if (str[0] == ':')
         return self.runCommand(str[1..]);
 
@@ -973,6 +976,7 @@ const Cmd = enum {
     quit,
     quit_force,
     fill,
+    fill_expr,
     binary_save,
     binary_load,
     binary_load_force,
@@ -993,6 +997,7 @@ const cmds = std.StaticStringMap(Cmd).initComptime(.{
     .{ "q", .quit },
     .{ "q!", .quit_force },
     .{ "fill", .fill },
+    .{ "fill-expr", .fill_expr },
     .{ "bw", .binary_save },
     .{ "be", .binary_load },
     .{ "be!", .binary_load_force },
@@ -1081,7 +1086,7 @@ fn runDebugCommand(self: *Self, cmd_str: []const u8, iter: *utils.WordIterator) 
     }
 }
 
-pub fn runCommand(self: *Self, str: []const u8) !void {
+pub fn runCommand(self: *Self, str: [:0]const u8) !void {
     var iter = utils.wordIterator(str);
     const cmd_str = iter.next() orelse return error.InvalidCommand;
     assert(cmd_str.len > 0);
@@ -1144,40 +1149,44 @@ pub fn runCommand(self: *Self, str: []const u8) !void {
         .load_force => try self.loadCmd(iter.next() orelse ""),
         .fill => {
             const range = try parseRangeOrPoint(iter.next() orelse return error.InvalidSyntax);
+            const arg1_start = iter.index;
+            const arg1 = iter.next() orelse return error.InvalidSyntax;
 
-            const value = blk: {
-                const string = iter.next() orelse return error.InvalidSyntax;
-                const num = std.fmt.parseFloat(f64, string) catch return error.InvalidSyntax;
-                break :blk num;
+            const arg2 = iter.next() orelse {
+                // TODO: Clean this up on failure
+                // No incrment was provided, so all cells can share the same expression
+                const expr = try ast.fromExpression(self.sheet, str[arg1_start..]);
+                const node = self.sheet.ast_nodes.get(expr.n);
+                if (node.tag != .number) return error.InvalidSyntax;
+
+                const n = node.data.number;
+                try self.sheet.bulkSetCellExpr(range, arg1, expr, .{
+                    .value = .{ .number = n },
+                    .tag = .number,
+                });
+                self.sheet.queued_cells.items.len = 0;
+                self.sheet.endUndoGroup();
+                self.tui.update(&.{ .cells, .cursor });
+                return;
             };
 
-            const increment = blk: {
-                const string = iter.next() orelse break :blk 0;
-                const num = std.fmt.parseFloat(f64, string) catch return error.InvalidSyntax;
-                break :blk num;
-            };
+            const value = std.fmt.parseFloat(f64, arg1) catch return error.InvalidSyntax;
+            const increment = std.fmt.parseFloat(f64, arg2) catch return error.InvalidSyntax;
 
-            defer self.sheet.endUndoGroup();
+            try self.sheet.insertIncrementingCellRange(range, value, increment, .{});
+            self.sheet.endUndoGroup();
+            self.tui.update(&.{ .cells, .cursor });
+        },
+        .fill_expr => {
+            const arg1 = iter.next() orelse return error.InvalidSyntax;
+            const expr_str = str[iter.index..];
 
-            var i = self.sheet.ast_nodes.len;
-            const area = range.area();
-            {
-                var nodes = self.sheet.ast_nodes.toMultiArrayList();
-                try nodes.ensureUnusedCapacity(self.sheet.allocator, area);
-                nodes.len += area;
-                self.sheet.ast_nodes = nodes.slice();
-            }
+            const range = try parseRangeOrPoint(arg1);
 
-            var n: f64 = value;
-            for (range.tl.y..@as(u64, range.br.y) + 1) |y| {
-                for (range.tl.x..@as(u64, range.br.x) + 1) |x| {
-                    const expr_root: ast.Index = .from(@intCast(i));
-                    self.sheet.ast_nodes.set(i, .init(.number, n));
-                    try self.setCell(.{ .y = @intCast(y), .x = @intCast(x) }, "", expr_root, .{});
-                    n += increment;
-                    i += 1;
-                }
-            }
+            const expr = try ast.fromExpression(self.sheet, expr_str);
+            try self.sheet.bulkSetCellExpr(range, expr_str, expr, .{});
+            self.sheet.endUndoGroup();
+            self.tui.update(&.{ .cursor, .cells });
         },
         inline .undo, .redo => |tag| {
             const count = blk: {
@@ -1209,7 +1218,7 @@ pub fn runCommand(self: *Self, str: []const u8) !void {
             else
                 self.anyCursorRange();
 
-            try self.deleteCellsInRange(range);
+            try self.deleteCellRange(range);
         },
         .delete_columns => {
             const start, const end = blk: {
@@ -1391,8 +1400,8 @@ pub fn deleteCell(self: *Self) Allocator.Error!void {
     self.tui.update_flags.cursor = true;
 }
 
-pub fn deleteCellsInRange(self: *Self, rect: Rect) Allocator.Error!void {
-    try self.sheet.deleteCellsInRange(rect);
+pub fn deleteCellRange(self: *Self, rect: Rect) Allocator.Error!void {
+    try self.sheet.deleteCellRange(rect, .{});
     self.sheet.endUndoGroup();
 
     self.tui.update_flags.cells = true;

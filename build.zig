@@ -20,6 +20,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .lang = .lua54,
     }).module("ziglua");
+    const zc_mod = b.createModule(.{
+        .root_source_file = b.path("src/ZC.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    zc_mod.addImport("zc", zc_mod);
+    zc_mod.addImport("ziglua", ziglua);
+    zc_mod.addImport("spoon", spoon);
+    zc_mod.addImport("wcwidth", wcwidth);
 
     // Main executable
     {
@@ -48,6 +57,23 @@ pub fn build(b: *std.Build) void {
 
         const run_step = b.step("run", "Run the program");
         run_step.dependOn(&run_cmd.step);
+    }
+
+    {
+        const exe = b.addExecutable(.{
+            .name = "cellulator",
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .use_llvm = !use_native_backend,
+            .use_lld = !use_native_backend,
+        });
+
+        exe.root_module.addImport("ziglua", ziglua);
+        exe.root_module.addImport("spoon", spoon);
+        exe.root_module.addImport("wcwidth", wcwidth);
+
+        b.step("check", "").dependOn(&exe.step);
     }
 
     // Tests
@@ -115,5 +141,27 @@ pub fn build(b: *std.Build) void {
         const coverage_step = b.step("coverage", "Run tests and generate coverage report.");
         coverage_step.dependOn(&kcov_cleanup.step);
         coverage_step.dependOn(&install_kcov_out.step);
+    }
+
+    // Benchmarks
+    {
+        const fill_exe = b.addExecutable(.{
+            .root_source_file = b.path("bench/bench-fill.zig"),
+            .name = "fill",
+            .target = target,
+            .optimize = optimize,
+        });
+
+        fill_exe.root_module.addImport("zc", zc_mod);
+        fill_exe.root_module.addImport("ziglua", ziglua);
+        fill_exe.root_module.addImport("spoon", spoon);
+        fill_exe.root_module.addImport("wcwidth", wcwidth);
+
+        const install_fill = b.addInstallArtifact(fill_exe, .{
+            .dest_dir = .{ .override = .{ .custom = "bench" } },
+        });
+
+        const bench_step = b.step("bench", "Build benchmark executables");
+        bench_step.dependOn(&install_fill.step);
     }
 }

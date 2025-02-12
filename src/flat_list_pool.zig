@@ -2,7 +2,6 @@ const std = @import("std");
 const utils = @import("utils.zig");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
-const log = std.log.scoped(.flat_list_pool);
 
 pub fn FlatListPool(comptime T: type) type {
     return struct {

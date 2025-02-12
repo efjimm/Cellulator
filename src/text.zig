@@ -1,11 +1,16 @@
 const std = @import("std");
 const utils = @import("utils.zig");
-const spoon = @import("spoon");
+const bufutils = @import("buffer_utils.zig");
 const CodepointBuilder = utils.CodepointBuilder;
 const wcWidth = @import("wcwidth").wcWidth;
 const isWhitespace = std.ascii.isWhitespace;
 const unicode = std.unicode;
 const utf8Encode = unicode.utf8Encode;
+
+const indexOfPos = bufutils.indexOfPos;
+const containsAt = bufutils.containsAt;
+const indexOfPosScalar = bufutils.indexOfPosScalar;
+const Iterator = bufutils.Iterator;
 
 const assert = std.debug.assert;
 
@@ -374,7 +379,7 @@ pub const Motion = union(enum(u8)) {
     fn insideWord(buf: anytype, comptime word_type: WordType, pos: u32) Range {
         if (buf.length() == 0) return .{ .start = 0, .end = 0 };
 
-        var iter = utils.reverseIterator(buf);
+        var iter = bufutils.reverseIterator(buf);
         iter.index = pos;
         var start: u32 = pos;
         var end: u32 = pos;
@@ -386,7 +391,7 @@ pub const Motion = union(enum(u8)) {
                 if (boundary(c)) break;
             }
 
-            var forward_iter = utils.Iterator(@TypeOf(buf)){
+            var forward_iter = Iterator(@TypeOf(buf)){
                 .data = buf,
                 .index = pos,
             };
@@ -399,7 +404,7 @@ pub const Motion = union(enum(u8)) {
                 if (!boundary(c)) break;
             }
 
-            var forward_iter = utils.Iterator(@TypeOf(buf)){
+            var forward_iter = Iterator(@TypeOf(buf)){
                 .data = buf,
                 .index = pos,
             };
@@ -418,7 +423,7 @@ pub const Motion = union(enum(u8)) {
     fn aroundWord(buf: anytype, comptime word_type: WordType, pos: u32) Range {
         if (buf.length() == 0) return .{ .start = 0, .end = 0 };
 
-        var iter = utils.ReverseIterator(@TypeOf(buf)){
+        var iter = bufutils.ReverseIterator(@TypeOf(buf)){
             .data = buf,
             .index = pos,
         };
@@ -432,7 +437,7 @@ pub const Motion = union(enum(u8)) {
                 if (boundary(c)) break;
             }
 
-            var forward_iter = utils.Iterator(@TypeOf(buf)){
+            var forward_iter = Iterator(@TypeOf(buf)){
                 .data = buf,
                 .index = pos,
             };
@@ -451,7 +456,7 @@ pub const Motion = union(enum(u8)) {
                 if (!boundary(c)) break;
             }
 
-            var forward_iter = utils.Iterator(@TypeOf(buf)){
+            var forward_iter = Iterator(@TypeOf(buf)){
                 .data = buf,
                 .index = pos,
             };
@@ -548,12 +553,12 @@ pub const Motion = union(enum(u8)) {
         // This is ambiguous
         if (buf.get(pos) == delim) return .{ .start = pos, .end = pos };
 
-        const start = utils.lastIndexOfPosScalar(buf, pos, delim) orelse return .{
+        const start = bufutils.lastIndexOfPosScalar(buf, pos, delim) orelse return .{
             .start = pos,
             .end = pos,
         };
 
-        const end = 1 + (utils.indexOfPosScalar(buf, pos, delim) orelse return .{
+        const end = 1 + (indexOfPosScalar(buf, pos, delim) orelse return .{
             .start = pos,
             .end = pos,
         });
@@ -626,12 +631,12 @@ pub const Motion = union(enum(u8)) {
         assert((unicode.utf8ByteSequenceLength(right[0]) catch unreachable) == right.len);
 
         var i = pos;
-        var depth: i32 = if (utils.containsAt(buf, pos, right)) -1 else 0;
+        var depth: i32 = if (containsAt(buf, pos, right)) -1 else 0;
         while (true) : (i -= 1) {
-            if (utils.containsAt(buf, i, left)) {
+            if (containsAt(buf, i, left)) {
                 if (depth == 0) break;
                 depth -= 1;
-            } else if (utils.containsAt(buf, i, right)) {
+            } else if (containsAt(buf, i, right)) {
                 depth += 1;
             }
 
@@ -642,16 +647,16 @@ pub const Motion = union(enum(u8)) {
         }
 
         var j = pos;
-        depth = if (utils.containsAt(buf, pos, left)) -1 else 0;
+        depth = if (containsAt(buf, pos, left)) -1 else 0;
 
         while (j < buf.length()) : (j += 1) {
-            if (utils.containsAt(buf, j, right)) {
+            if (containsAt(buf, j, right)) {
                 if (depth == 0) {
                     j += @intCast(right.len);
                     break;
                 }
                 depth -= 1;
-            } else if (utils.containsAt(buf, j, left)) {
+            } else if (containsAt(buf, j, left)) {
                 depth += 1;
             }
         } else return .{
@@ -694,12 +699,12 @@ pub const Motion = union(enum(u8)) {
     fn toForwards(buf: anytype, needle: []const u8, pos: u32, count: u32) ?u32 {
         if (pos >= buf.length() or count == 0) return pos;
 
-        const first = 1 + (utils.indexOfPos(buf, pos + 1, needle) orelse return null) - (pos + 1);
+        const first = 1 + (indexOfPos(buf, pos + 1, needle) orelse return null) - (pos + 1);
         var p = pos + first;
 
         for (1..count) |_| {
             if (p >= buf.length()) break;
-            p += 1 + (utils.indexOfPos(buf, p + 1, needle) orelse break) - (p + 1);
+            p += 1 + (indexOfPos(buf, p + 1, needle) orelse break) - (p + 1);
         }
 
         return @intCast(p);
@@ -709,10 +714,10 @@ pub const Motion = union(enum(u8)) {
         assert(pos <= buf.length());
         if (count == 0) return pos;
 
-        var p = (utils.lastIndexOfPos(buf, pos, needle) orelse return null);
+        var p = (bufutils.lastIndexOfPos(buf, pos, needle) orelse return null);
 
         for (1..count) |_| {
-            p = (utils.lastIndexOfPos(buf, p, needle) orelse break);
+            p = (bufutils.lastIndexOfPos(buf, p, needle) orelse break);
         }
 
         return p;

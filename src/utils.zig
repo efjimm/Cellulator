@@ -6,7 +6,12 @@ const unicode = std.unicode;
 const mem = std.mem;
 const assert = std.debug.assert;
 
-pub usingnamespace @import("buffer_utils.zig");
+pub fn appendManyAssumeCapacity(comptime T: type, list: *std.ArrayListUnmanaged(T), n: usize) []T {
+    const start = list.items.len;
+    list.items.len += n;
+    assert(list.items.len <= list.capacity);
+    return list.items[start..];
+}
 
 pub fn ptrToIoVec(ptr: anytype) std.posix.iovec_const {
     const p = @typeInfo(@TypeOf(ptr)).pointer;

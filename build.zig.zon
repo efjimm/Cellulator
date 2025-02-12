@@ -8,8 +8,8 @@
     },
     .dependencies = .{
         .shovel = .{
-            .url = "git+https://github.com/efjimm/shovel?ref=master#5048a46a554e558d11bf09b751d100c1f01ea43c",
-            .hash = "1220c91109c77ba06b5c4fb6c092deb92f55b22edecca6b033b01999e58309b7dd71",
+            .url = "git+https://github.com/efjimm/shovel?ref=master#142722536849e91fce449427534f06e6db6d2c86",
+            .hash = "1220e5c99bf9e5e5817cdbd1d68691a76dabec8f17e6b6dd11987668e0ed7c8bcd92",
         },
         .wcwidth = .{
             .url = "git+https://github.com/efjimm/zig-wcwidth?ref=master#d3fde4f6d76d6208cee59ac570772275339d3c10",

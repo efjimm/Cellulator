@@ -2,6 +2,7 @@ This is a schizo document that contains basically every idea I thought should be
 working on cellulator. It's completely unorganised and some parts are very outdated. I thought it
 might be an interesting read so I committed it. The stuff at the top is probably newer.
 
+- Make kcov reports a flag rather than a separate step
 - Eliminate recursion
   - Will run into stack overflows with big data. An older implementation of `markDirty` caused
     one on a large input sheet.

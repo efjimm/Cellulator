@@ -384,7 +384,7 @@ pub const ArgIteratorForwards = struct {
                 iter.buffer.appendAssumeCapacity(item);
             }
         }
-        iter.index = iter.buffer.pop();
+        iter.index = iter.buffer.pop().?;
 
         return ret;
     }
@@ -528,6 +528,7 @@ pub fn EvalContext(comptime Context: type) type {
         strings: []const u8,
         sheet: *Sheet,
         context: Context,
+        pos: Position,
 
         pub const Error = blk: {
             const E = error{
@@ -866,6 +867,7 @@ pub const DynamicEvalResult = union(enum) {
 pub fn eval(
     nodes: NodeSlice,
     root_node: Index,
+    pos: Position,
     sheet: *Sheet,
     /// Strings required by the expression. String literal nodes contain offsets
     /// into this buffer. If the expression has no string literals then this
@@ -884,11 +886,11 @@ pub fn eval(
         .allocator = arena.allocator(),
         .strings = strings,
         .context = context,
+        .pos = pos,
     };
 
     const res = try ctx.eval(root_node);
 
-    // TODO: Remove string allocation from arena list and shrink, rather than copying.
     return switch (res) {
         .none => .none,
         .number => |n| .{ .number = n },
@@ -925,6 +927,7 @@ test "Parse and Eval Expression" {
             const res = eval(
                 sheet.ast_nodes,
                 expr_root,
+                .init(0, 0),
                 sheet,
                 expr,
                 Context{},
@@ -982,6 +985,7 @@ test "Functions on Ranges" {
             const res = try eval(
                 sheet.ast_nodes,
                 expr_root,
+                .init(0, 0),
                 sheet,
                 "",
                 sheet,

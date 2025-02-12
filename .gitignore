@@ -9,3 +9,6 @@
 !build.zig.zon
 !TODO.md
 !README.md
+!LICENSE
+!bench
+!bench/*

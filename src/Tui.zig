@@ -2,6 +2,7 @@
 const std = @import("std");
 const spoon = @import("spoon");
 const utils = @import("utils.zig");
+const bufutils = @import("buffer_utils.zig");
 const ZC = @import("ZC.zig");
 const Sheet = @import("Sheet.zig");
 const Position = @import("Position.zig").Position;
@@ -225,7 +226,7 @@ pub fn renderCommandLine(
         }
 
         const cursor_pos = blk: {
-            var iter = utils.Utf8Iterator(@TypeOf(zc.command)){
+            var iter = bufutils.Utf8Iterator(@TypeOf(zc.command)){
                 .data = zc.command,
                 .index = zc.command_screen_pos,
             };

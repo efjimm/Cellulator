@@ -2,7 +2,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
+
 const utils = @import("utils.zig");
+
 const runtime_safety = switch (@import("builtin").mode) {
     .Debug, .ReleaseSafe => true,
     .ReleaseFast, .ReleaseSmall => false,
@@ -27,7 +29,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             return @intCast(address);
         }
 
-        pub fn createKvEntry(
+        pub fn createHandle(
             tree: *@This(),
             allocator: Allocator,
             p: *const Point,
@@ -42,7 +44,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             return handle;
         }
 
-        pub fn createKvEntryAssumeCapacity(tree: *@This(), p: *const Point, value: V) Handle {
+        pub fn createHandleAssumeCapacity(tree: *@This(), p: *const Point, value: V) Handle {
             const handle = tree.createEntryAssumeCapacity();
             tree.entries.set(handle.n, .{
                 .point = p.*,
@@ -314,7 +316,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
                 return .{ true, &tree.entries.items(.data)[h.n].value, h };
             }
 
-            const handle = tree.createKvEntryAssumeCapacity(p, undefined);
+            const handle = tree.createHandleAssumeCapacity(p, undefined);
             const removed_kv = tree.insertAssumeCapacity(p, handle);
             assert(!removed_kv.isValid());
 
@@ -867,7 +869,7 @@ test "Basics" {
     var tree: PhTree([*:0]const u8, 2) = try .init(std.testing.allocator);
     defer tree.deinit(std.testing.allocator);
 
-    const kv1 = try tree.createKvEntry(std.testing.allocator, &.{ 1, 1 }, "1, 1! :D");
+    const kv1 = try tree.createHandle(std.testing.allocator, &.{ 1, 1 }, "1, 1! :D");
     const old_kv = try tree.insert(std.testing.allocator, &.{ 1, 1 }, kv1);
     try std.testing.expect(!old_kv.isValid());
     const value = tree.entries.items(.data)[kv1.n].value;
@@ -899,7 +901,7 @@ fn fuzz(input: []const u8) anyerror!void {
     // try file.writeAll(input[0..len]);
     const slice = std.mem.bytesAsSlice(KV, input[0..len]);
     for (slice) |kv| {
-        const entry = try tree.createKvEntry(std.testing.allocator, &kv.p, kv.value);
+        const entry = try tree.createHandle(std.testing.allocator, &kv.p, kv.value);
         _ = try tree.insert(std.testing.allocator, &kv.p, entry);
         const value = tree.find(&kv.p).?;
         try std.testing.expectEqual(kv.value, value.*);

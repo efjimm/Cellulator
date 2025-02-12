@@ -22,7 +22,6 @@ nodes: NodeList,
 
 allocator: Allocator,
 
-const String = @import("ast.zig").String;
 const Node = @import("ast.zig").Node;
 const Index = @import("ast.zig").Index;
 

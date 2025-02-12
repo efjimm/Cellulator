@@ -29,7 +29,7 @@ queued_cells: std.ArrayListUnmanaged(CellHandle),
 /// Stores the null terminated text of string literals. Cells contain an index into this buffer.
 strings_buf: std.ArrayListUnmanaged(u8),
 
-/// Range tree mapping ranges to a list of ranges that depend on the first.
+/// Maps ranges to a list of cell handles that depend on them.
 /// Used to query whether a cell belongs to a range and then update the cells
 /// that depend on that range.
 dependents: Dependents,
@@ -48,6 +48,12 @@ cols: Columns,
 
 undos: UndoList,
 redos: UndoList,
+
+// TODO: Allow storing intervals of cell handles for bulk operations e.g. operations that bulk
+//       create cells will create them as contiguous handles in the cell tree's underlying array.
+//       The cells created by these operations could therefore be represented as just a start and
+//       end index as they are contiguous.
+cell_buffer: std.ArrayListUnmanaged(CellHandle) = .empty,
 
 search_buffer: std.ArrayListUnmanaged(Dependents.Handle),
 
@@ -239,6 +245,7 @@ pub fn destroy(sheet: *Sheet) void {
     sheet.ast_nodes.deinit(sheet.allocator);
     sheet.string_values.deinit(sheet.allocator);
     sheet.deps.deinit(sheet.allocator);
+    sheet.cell_buffer.deinit(sheet.allocator);
     sheet.arena.deinit();
     sheet.allocator.destroy(sheet);
 }
@@ -284,6 +291,8 @@ pub const Undo = extern struct {
         insert_dep,
         update_dep,
         insert_cell,
+        bulk_cell_delete,
+        bulk_cell_insert,
     };
 
     pub const Payload = extern union {
@@ -329,6 +338,8 @@ pub const Undo = extern struct {
             handle: Dependents.Handle,
             point: Dependents.Point,
         },
+        bulk_cell_delete: u32,
+        bulk_cell_insert: u32,
     };
 };
 
@@ -353,13 +364,15 @@ const SerializeHeader = extern struct {
 
     cols: Columns.Header,
 
+    cells_buffer_len: u32,
+
     undos_len: u32,
     undos_cap: u32,
     redos_len: u32,
     redos_cap: u32,
 
     const magic_number: u32 = @bitCast([4]u8{ 'Z', 'C', 'Z', 'C' });
-    const binary_version = 7;
+    const binary_version = 8;
 };
 
 pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
@@ -375,6 +388,7 @@ pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
         .ast_nodes_cap = @intCast(sheet.ast_nodes.capacity),
         .string_values = sheet.string_values.getHeader(),
         .cols = sheet.cols.getHeader(),
+        .cells_buffer_len = @intCast(sheet.cell_buffer.items.len),
         .undos_len = @intCast(sheet.undos.len),
         .undos_cap = @intCast(sheet.undos.capacity),
         .redos_len = @intCast(sheet.redos.len),
@@ -390,6 +404,7 @@ pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
         utils.multiArrayListSliceIoVec(ast.Node, &sheet.ast_nodes) ++
         sheet.string_values.iovecs() ++
         sheet.cols.iovecs() ++
+        .{utils.arrayListIoVec(&sheet.cell_buffer)} ++
         utils.multiArrayListIoVec(Undo, &sheet.undos) ++
         utils.multiArrayListIoVec(Undo, &sheet.redos);
 
@@ -415,6 +430,7 @@ pub fn deserialize(allocator: Allocator, file: std.fs.File) !*Sheet {
         try utils.prepMultiArrayListSlice(ast.Node, &sheet.ast_nodes, allocator, header.ast_nodes_len, header.ast_nodes_cap) ++
         try sheet.string_values.fromHeader(sheet.allocator, header.string_values) ++
         try sheet.cols.fromHeader(allocator, header.cols) ++
+        .{try utils.prepArrayList(&sheet.cell_buffer, sheet.allocator, header.cells_buffer_len)} ++
         try utils.prepMultiArrayList(Undo, &sheet.undos, allocator, header.undos_len, header.undos_cap) ++
         try utils.prepMultiArrayList(Undo, &sheet.redos, allocator, header.redos_len, header.redos_cap);
 
@@ -720,7 +736,6 @@ const ExprRangeIterator = struct {
     }
 };
 
-// TODO: Make these functions atomic
 /// Adds `dependent_range` as a dependent of all cells in `range`.
 fn addRangeDependents(
     sheet: *Sheet,
@@ -1055,15 +1070,13 @@ fn endRedoGroup(sheet: *Sheet) void {
     sheet.redos.appendAssumeCapacity(.sentinel);
 }
 
-pub fn ensureUndoCapacity(sheet: *Sheet, undo_type: UndoType, n: u32) Allocator.Error!void {
-    switch (undo_type) {
-        .undo => try sheet.undos.ensureUnusedCapacity(sheet.allocator, n + 1),
-        .redo => try sheet.redos.ensureUnusedCapacity(sheet.allocator, n + 1),
-    }
+pub fn ensureUnusedUndoCapacity(sheet: *Sheet, n: u32) Allocator.Error!void {
+    try sheet.undos.ensureUnusedCapacity(sheet.allocator, n + 1);
+    try sheet.redos.ensureUnusedCapacity(sheet.allocator, n + 1);
 }
 
 pub fn pushUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
-    try sheet.ensureUndoCapacity(opts.undo_type, 1);
+    try sheet.ensureUnusedUndoCapacity(1);
     switch (opts.undo_type) {
         .undo => {
             sheet.undos.appendAssumeCapacity(u);
@@ -1159,24 +1172,80 @@ pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
             p.* = new_point;
             _ = sheet.dependents.insertAssumeCapacity(p, handle);
         },
+        // Bulk delete cells. TODO: Implement a bulk delete for contiguous *ranges* of cells, which
+        //                          could be done more efficiently using the ph-tree.
+        .bulk_cell_delete => {
+            const index = u.payload.bulk_cell_delete;
+            const handles = sheet.getUndoCellsSlice(index);
+
+            sheet.bulkDeleteCellHandles(handles);
+
+            try sheet.pushUndo(.init(.bulk_cell_insert, index), opts);
+        },
+        .bulk_cell_insert => {
+            const index = u.payload.bulk_cell_insert;
+            const handles = sheet.getUndoCellsSlice(index);
+
+            sheet.bulkInsertCellHandles(handles);
+
+            try sheet.pushUndo(.init(.bulk_cell_delete, index), opts);
+        },
         .sentinel => {},
     }
 }
 
-fn updatePos(sheet: *Sheet, index: ast.Index, new_pos: Position, undo_opts: UndoOpts) !void {
+fn bulkDeleteCellHandles(sheet: *Sheet, handles: []const CellHandle) void {
+    for (handles) |handle| {
+        const p = sheet.cell_tree.point(handle);
+        const cell = sheet.getCellFromHandle(handle);
+        // TODO: Doing this in a separate loop from removeHandle might be better
+        sheet.removeExprDependents(handle, cell.expr_root);
+        sheet.setCellError(cell);
+        sheet.cell_tree.removeHandle(handle, &p);
+    }
+}
+
+// Inserts cell handles, asserting that they do not overwrite any existing cells.
+// Asserts that the cell tree, dependents tree, have enough capacity.
+// Enqueues the cells for update.
+fn bulkInsertCellHandles(sheet: *Sheet, handles: []const CellHandle) void {
+    sheet.queued_cells.appendSliceAssumeCapacity(handles);
+
+    for (handles) |handle| {
+        const cell = sheet.getCellFromHandle(handle);
+        const p = sheet.cell_tree.point(handle);
+        const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
+        assert(!removed.isValid());
+        sheet.addExpressionDependents(handle, cell.expr_root);
+        cell.state = .enqueued;
+    }
+}
+
+fn getUndoCellsSlice(sheet: *Sheet, index: u32) []CellHandle {
+    for (sheet.cell_buffer.items[index..], index..) |handle, i| {
+        if (!handle.isValid()) {
+            assert(i > index);
+            return sheet.cell_buffer.items[index..i];
+        }
+    }
+
+    unreachable;
+}
+
+fn updatePos(sheet: *Sheet, index: ast.Index, new_pos: Position, _: UndoOpts) !void {
     const tag = sheet.ast_nodes.items(.tag)[index.n];
     assert(tag == .pos or tag == .invalidated_pos);
-    try sheet.ensureUndoCapacity(undo_opts.undo_type, 1);
+    try sheet.ensureUnusedUndoCapacity(1);
 
     const ptr = &sheet.ast_nodes.items(.data)[index.n];
     ptr.pos = new_pos;
     sheet.ast_nodes.items(.tag)[index.n] = .pos;
 }
 
-fn updateRange(sheet: *Sheet, index: ast.Index, new_range: Rect, undo_opts: UndoOpts) !void {
+fn updateRange(sheet: *Sheet, index: ast.Index, new_range: Rect, _: UndoOpts) !void {
     const tag = sheet.ast_nodes.items(.tag)[index.n];
     assert(tag == .range or tag == .invalidated_range);
-    try sheet.ensureUndoCapacity(undo_opts.undo_type, 1);
+    try sheet.ensureUnusedUndoCapacity(1);
 
     const ptr = &sheet.ast_nodes.items(.data)[index.n].range;
     const lhs = &sheet.ast_nodes.items(.data)[ptr.lhs.n].pos;
@@ -1191,14 +1260,14 @@ pub fn undo(sheet: *Sheet) Allocator.Error!void {
     if (sheet.undos.len == 0) return;
 
     // All undo groups MUST end with a group marker - so remove it!
-    const last_undo = sheet.undos.pop();
+    const last_undo = sheet.undos.pop().?;
     assert(last_undo.tag == .sentinel);
 
     defer sheet.endRedoGroup();
 
     const tags = sheet.undos.items(.tag);
     const opts: UndoOpts = .{ .undo_type = .redo };
-    while (sheet.undos.popOrNull()) |u| {
+    while (sheet.undos.pop()) |u| {
         errdefer {
             sheet.undos.appendAssumeCapacity(u);
             sheet.endUndoGroup();
@@ -1213,14 +1282,14 @@ pub fn redo(sheet: *Sheet) Allocator.Error!void {
     if (sheet.redos.len == 0) return;
 
     // All undo groups MUST end with a group marker - so remove it!
-    const last = sheet.redos.pop();
+    const last = sheet.redos.pop().?;
     assert(last.tag == .sentinel);
 
     defer sheet.endUndoGroup();
 
     const tags = sheet.redos.items(.tag);
     const opts: UndoOpts = .{ .clear_redos = false };
-    while (sheet.redos.popOrNull()) |u| {
+    while (sheet.redos.pop()) |u| {
         errdefer {
             sheet.redos.appendAssumeCapacity(u);
             sheet.endRedoGroup();
@@ -1249,7 +1318,7 @@ pub fn setColWidth(
     width: u16,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    try sheet.ensureUndoCapacity(.undo, 1);
+    try sheet.ensureUnusedUndoCapacity(1);
     const col = sheet.cols.valuePtr(handle);
     if (width == col.width) return;
     const old_width = col.width;
@@ -1371,6 +1440,319 @@ fn dupeAstStrings(
     return ret;
 }
 
+fn ensureUnusedCellCapacity(sheet: *Sheet, n: u32) !void {
+    try sheet.cell_tree.ensureUnusedCapacity(sheet.allocator, n);
+}
+
+fn ensureUnusedStringsCapacity(sheet: *Sheet, n: u32) !void {
+    try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, n + 1);
+}
+
+fn ensureUnusedCellQueueCapacity(sheet: *Sheet, n: u32) !void {
+    try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, n);
+}
+
+fn ensureUnusedColumnCapacity(sheet: *Sheet, n: u32) !void {
+    try sheet.cols.ensureUnusedCapacity(sheet.allocator, n);
+}
+
+fn ensureUnusedAstNodeCapacity(sheet: *Sheet, n: u32) !void {
+    var m = sheet.ast_nodes.toMultiArrayList();
+    defer sheet.ast_nodes = m.slice();
+
+    try m.ensureUnusedCapacity(sheet.allocator, n);
+}
+
+fn ensureUnusedCellBufferCapacity(sheet: *Sheet, n: u32) !void {
+    try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, n);
+}
+
+// TODO: This could be done without allocating by walking the ph-tree and removing as we go.
+/// Deletes a cell range, pushing a `.bulk_cell_insert` undo. Asserts that `undo_cell_buffer` and the
+/// respective undo stack has enough capacity.
+fn deleteCellRangeAssumeCapacity(sheet: *Sheet, range: Rect, opts: UndoOpts) void {
+    assert(sheet.cell_buffer.capacity - sheet.cell_buffer.items.len >= range.area() + 1);
+    assert(opts.undo_type == .redo or sheet.undos.capacity - sheet.undos.len > 0);
+    assert(opts.undo_type == .undo or sheet.redos.capacity - sheet.redos.len > 0);
+
+    const existing_cells: []const CellHandle, const deleted_index: u32 = blk: {
+        var buf = sheet.cell_buffer.toManaged(sheet.allocator);
+        defer sheet.cell_buffer = buf.moveToUnmanaged();
+        const start = buf.items.len;
+        sheet.cell_tree.queryWindow(
+            &.{ range.tl.x, range.tl.y },
+            &.{ range.br.x, range.br.y },
+            &buf,
+        ) catch unreachable;
+
+        if (buf.items.len == start) {
+            break :blk .{ &.{}, std.math.maxInt(u32) };
+        }
+
+        buf.appendAssumeCapacity(.invalid);
+        break :blk .{ buf.items[start .. buf.items.len - 1], @intCast(start) };
+    };
+
+    for (existing_cells) |cell_handle| {
+        const p = sheet.cell_tree.point(cell_handle);
+        const old_cell = sheet.getCellFromHandle(cell_handle);
+        sheet.removeExprDependents(cell_handle, old_cell.expr_root);
+        sheet.cell_tree.removeHandle(cell_handle, &p);
+        sheet.setCellError(old_cell);
+    }
+
+    if (existing_cells.len > 0) {
+        sheet.pushUndoAssumeCapacity(.init(.bulk_cell_insert, deleted_index), opts);
+    }
+}
+
+pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr: f64, opts: UndoOpts) !void {
+    const area: u32 = @intCast(range.area());
+    try sheet.ensureUnusedCellCapacity(area);
+    try sheet.ensureUnusedAstNodeCapacity(area);
+    // One for deleting existing cells, one for inserting new cells
+    try sheet.ensureUnusedUndoCapacity(2);
+    try sheet.ensureUnusedCellQueueCapacity(area);
+
+    // TODO: We could instead store the deletion undos as a range instead of a list
+    //       of cell handles.
+    //
+    // Enough to store every cell in the range twice, plus two sentinel handles.
+    try sheet.ensureUnusedCellBufferCapacity(area * 2 + 2);
+    try sheet.ensureUnusedColumnCapacity(range.width());
+    errdefer comptime unreachable;
+
+    // These cells don't have any dependencies or strings that need to be stored.
+
+    // Delete existing cells
+
+    sheet.deleteCellRangeAssumeCapacity(range, opts);
+
+    const ast_start = sheet.ast_nodes.len;
+    sheet.ast_nodes.len += area;
+    for (ast_start..sheet.ast_nodes.len, 0..) |i, j| {
+        const f: f64 = @floatFromInt(j);
+        sheet.ast_nodes.set(i, .{
+            .tag = .number,
+            .data = .{ .number = start + incr * f },
+        });
+    }
+
+    sheet.createColumnRangeAssumeCapacity(range);
+
+    const cells_start = sheet.bulkCreateCellRange(range);
+    for (0..area) |i| {
+        const handle: CellHandle = .from(@intCast(i + cells_start.n));
+        const expr: ast.Index = .from(@intCast(i + ast_start));
+        sheet.cell_tree.entries.items(.data)[handle.n] = .{ .value = .{
+            .state = .enqueued,
+            .expr_root = expr,
+            .strings = .invalid,
+        } };
+        sheet.queued_cells.appendAssumeCapacity(handle);
+    }
+    sheet.bulkInsertContiguousCells(cells_start, opts);
+}
+
+/// Creates a new cell handle for every cell in `range`. Only sets the point field of each handle.
+/// Only allocates memory for the cell tree.
+pub fn bulkCreateCellRange(sheet: *Sheet, range: Rect) CellHandle {
+    const area: u32 = @intCast(range.area());
+    assert(sheet.cell_tree.entries.capacity - sheet.cell_tree.entries.len >= area);
+    const start: CellHandle = .from(@intCast(sheet.cell_tree.entries.len));
+    sheet.cell_tree.entries.len += area;
+
+    var i: u32 = start.n;
+    var y: u64 = range.tl.y;
+    while (y <= range.br.y) : (y += 1) {
+        var x: u64 = range.tl.x;
+        while (x <= range.br.x) : (x += 1) {
+            sheet.cell_tree.entries.items(.point)[i] = .{
+                @intCast(x),
+                @intCast(y),
+            };
+            i += 1;
+        }
+    }
+
+    return start;
+}
+
+/// Inserts all the cells from `cells_start` to `sheet.cell_tree.entries.len` into the cell tree.
+/// Also inserts dependency information. Asserts that the cell tree and undo cell buffer has enough
+/// capacity to hold all the cells.
+pub fn bulkInsertContiguousCells(
+    sheet: *Sheet,
+    cells_start: CellHandle,
+    opts: UndoOpts,
+) void {
+    const cell_count = sheet.cell_tree.entries.len - cells_start.n;
+    assert(sheet.cell_tree.entries.len <= sheet.cell_tree.entries.capacity);
+    assert(cell_count > 0);
+    assert(sheet.cell_buffer.capacity - sheet.cell_buffer.items.len >= cell_count + 1);
+
+    const undo_cells_index: u32 = @intCast(sheet.cell_buffer.items.len);
+
+    for (cells_start.n..sheet.cell_tree.entries.len) |i| {
+        const handle: CellHandle = .from(@intCast(i));
+        const p = sheet.cell_tree.point(handle);
+        const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
+        assert(!removed.isValid());
+        sheet.addExpressionDependents(handle, sheet.getCellFromHandle(handle).expr_root);
+        sheet.getCellFromHandle(handle).state = .enqueued;
+        sheet.cell_buffer.appendAssumeCapacity(handle);
+    }
+    sheet.cell_buffer.appendAssumeCapacity(.invalid);
+
+    sheet.pushUndoAssumeCapacity(.init(.bulk_cell_delete, undo_cells_index), opts);
+}
+
+/// Creates all the columns required by range.
+fn createColumnRangeAssumeCapacity(sheet: *Sheet, range: Rect) void {
+    const width = range.width();
+    const cols_start = sheet.cols.entries.len;
+    sheet.cols.entries.len += width;
+    @memset(sheet.cols.entries.items(.data)[cols_start..], .{ .value = .{} });
+
+    for (sheet.cols.entries.items(.point)[cols_start..], range.tl.x.., cols_start..) |*p, x, i| {
+        p.* = .{@intCast(x)};
+        const handle: Columns.Handle = .from(@intCast(i));
+        const found_existing, const col_ptr, _ = sheet.cols.getOrPutAssumeCapacity(p);
+        if (found_existing) {
+            // Put the new column in the free list
+            sheet.cols.destroyHandle(handle);
+        }
+
+        col_ptr.* = .{};
+    }
+}
+
+pub const BulkSetCellOptions = struct {
+    value: Cell.Value = .{ .err = .fromError(error.NotEvaluable) },
+    tag: Cell.Value.Tag = .err,
+    undo_opts: UndoOpts = .{},
+};
+
+/// Sets all cells in `range` to `expr`.
+pub fn bulkSetCellExpr(
+    sheet: *Sheet,
+    range: Rect,
+    source: []const u8,
+    expr: ast.Index,
+    opts: BulkSetCellOptions,
+) !void {
+    const need_cell_eval = opts.tag != .err;
+    // Pre-allocate memory
+    const area: u32 = @intCast(range.area());
+    const width = range.width();
+    try sheet.ensureUnusedCellCapacity(area);
+    try sheet.ensureUnusedStringsCapacity(@intCast(source.len));
+    if (need_cell_eval)
+        try sheet.ensureUnusedCellQueueCapacity(area);
+    try sheet.ensureExpressionDependentsCapacity(expr);
+    try sheet.ensureUnusedColumnCapacity(width);
+    try sheet.ensureUnusedUndoCapacity(2);
+    try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, area * 2 + 2);
+
+    const ref_count = blk: {
+        var ref_count: u32 = 0;
+        var iter: ExprRangeIterator = .init(sheet, expr);
+        while (iter.next()) |_| ref_count += 1;
+        break :blk ref_count;
+    };
+    try sheet.deps.ensureUnusedCapacity(sheet.allocator, area * ref_count);
+    errdefer comptime unreachable;
+
+    sheet.deleteCellRangeAssumeCapacity(range, opts.undo_opts);
+
+    const ast_start_node = ast.leftMostChild(sheet.ast_nodes, expr);
+    const strings = sheet.dupeAstStrings(source, ast_start_node, expr);
+
+    const handles_start = sheet.cell_tree.entries.len;
+
+    // Create dependency information
+    // For each range we depend on, prepend the cell handle of every cell we're creating
+    var iter: ExprRangeIterator = .init(sheet, expr);
+    while (iter.next()) |expr_range| {
+        const p: Dependents.Point = .{
+            expr_range.tl.x, expr_range.tl.y,
+            expr_range.br.x, expr_range.br.y,
+        };
+        const found_existing, const head, _ = sheet.dependents.getOrPutAssumeCapacity(&p);
+        if (!found_existing) head.* = .none;
+
+        const start = sheet.deps.items.len;
+        sheet.deps.items.len += area;
+        const new_deps = sheet.deps.items[start..];
+        for (new_deps, 1.., handles_start..) |*dep, i, handle_index| {
+            dep.* = .{
+                .handle = .from(@intCast(handle_index)),
+                .next = .from(@intCast(i)),
+            };
+        }
+        new_deps[new_deps.len - 1].next = head.*;
+        head.* = .from(@intCast(start));
+    }
+
+    const inserted_index: u32 = @intCast(sheet.cell_buffer.items.len);
+
+    if (need_cell_eval) {
+        for (
+            utils.appendManyAssumeCapacity(CellHandle, &sheet.queued_cells, area),
+            utils.appendManyAssumeCapacity(CellHandle, &sheet.cell_buffer, area),
+            handles_start..,
+        ) |*queued_cell, *undo_cell, handle_index| {
+            const handle: CellHandle = .from(@intCast(handle_index));
+            queued_cell.* = handle;
+            undo_cell.* = handle;
+        }
+    } else {
+        for (
+            utils.appendManyAssumeCapacity(CellHandle, &sheet.cell_buffer, area),
+            handles_start..,
+        ) |*undo_cell, handle_index| {
+            const handle: CellHandle = .from(@intCast(handle_index));
+            undo_cell.* = handle;
+        }
+    }
+    sheet.cell_buffer.appendAssumeCapacity(.invalid);
+
+    sheet.createColumnRangeAssumeCapacity(range);
+
+    const cell: Cell = .{
+        .value = opts.value,
+        .state = if (opts.tag != .err) .enqueued else .up_to_date,
+        .expr_root = expr,
+        .strings = strings,
+    };
+    sheet.cell_tree.entries.len += area;
+    // All created cells share the same cell value
+    @memset(sheet.cell_tree.entries.items(.data)[handles_start..], .{ .value = cell });
+
+    // TODO: These inserts get slow when we start inserting millions of cells at once.
+    //       Each insert does a separate lookup. We should find some way to exploit the internal
+    //       layout of the phtree to make inserting consecutive points faster.
+    //       We could build the tree bottom-up?
+    const point_slice = sheet.cell_tree.entries.items(.point);
+    var y: u64 = range.tl.y;
+    while (y <= range.br.y) : (y += 1) {
+        var x: u64 = range.tl.x;
+        while (x <= range.br.x) : (x += 1) {
+            const y_off = (y - range.tl.y) * width;
+            const x_off = x - range.tl.x;
+            const off = y_off + x_off;
+            const handle: CellHandle = .from(@intCast(handles_start + off));
+            const p: CellTree.Point = .{ @intCast(x), @intCast(y) };
+            point_slice[handle.n] = p;
+
+            const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
+            assert(!removed.isValid());
+        }
+    }
+
+    sheet.pushUndoAssumeCapacity(.init(.bulk_cell_delete, inserted_index), opts.undo_opts);
+}
+
 /// Creates the cell at `pos` using the given expression, duplicating its string literals.
 pub fn setCell(
     sheet: *Sheet,
@@ -1379,18 +1761,18 @@ pub fn setCell(
     expr_root: ast.Index,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
-    try sheet.cell_tree.ensureUnusedCapacity(sheet.allocator, 1);
-    try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, source.len + 1);
-    try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, 1);
+    try sheet.ensureUnusedCellCapacity(1);
+    try sheet.ensureUnusedStringsCapacity(@intCast(source.len));
+    try sheet.ensureUnusedCellQueueCapacity(1);
     try sheet.ensureExpressionDependentsCapacity(expr_root);
-    try sheet.ensureUndoCapacity(undo_opts.undo_type, 1);
+    try sheet.ensureUnusedUndoCapacity(1);
     _ = try sheet.createColumn(pos.x);
     errdefer comptime unreachable;
 
     const ast_start_node = ast.leftMostChild(sheet.ast_nodes, expr_root);
     const strings = sheet.dupeAstStrings(source, ast_start_node, expr_root);
 
-    const new_node = sheet.cell_tree.createKvEntryAssumeCapacity(&.{ pos.x, pos.y }, .{
+    const new_node = sheet.cell_tree.createHandleAssumeCapacity(&.{ pos.x, pos.y }, .{
         .expr_root = expr_root,
         .strings = strings,
     });
@@ -1482,13 +1864,13 @@ pub fn deleteCellByHandle(
     const point = sheet.cell_tree.point(handle);
     const cell = sheet.getCellFromHandle(handle);
 
-    try sheet.ensureUndoCapacity(undo_opts.undo_type, 1);
+    try sheet.ensureUnusedUndoCapacity(1);
 
     try sheet.enqueueUpdate(handle);
     sheet.removeExprDependents(handle, cell.expr_root);
 
     sheet.setCellError(cell);
-    _ = sheet.cell_tree.remove(&point);
+    _ = sheet.cell_tree.removeHandle(handle, &point);
 
     sheet.pushUndo(.init(.set_cell, handle), undo_opts) catch unreachable;
     sheet.has_changes = true;
@@ -1505,17 +1887,10 @@ pub fn deleteCell(
         return sheet.deleteCellByHandle(handle, undo_opts);
 }
 
-pub fn deleteCellsInRange(sheet: *Sheet, r: Rect) Allocator.Error!void {
-    var sfa = std.heap.stackFallback(4096, sheet.allocator);
-    const allocator = sfa.get();
-
-    var results: std.ArrayList(CellHandle) = .init(allocator);
-    try sheet.cell_tree.queryWindow(&.{ r.tl.x, r.tl.y }, &.{ r.br.x, r.br.y }, &results);
-    defer results.deinit();
-
-    for (results.items) |handle| {
-        try sheet.deleteCellByHandle(handle, .{});
-    }
+pub fn deleteCellRange(sheet: *Sheet, r: Rect, opts: UndoOpts) Allocator.Error!void {
+    try sheet.ensureUnusedUndoCapacity(1);
+    try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, r.area() + 1);
+    sheet.deleteCellRangeAssumeCapacity(r, opts);
 }
 
 pub fn getCell(sheet: *Sheet, pos: Position) ?Cell {
@@ -1611,7 +1986,7 @@ pub fn deleteColumnRange(
     }
 
     try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, queue_count + cells.items.len);
-    try sheet.ensureUndoCapacity(undo_opts.undo_type, undo_count);
+    try sheet.ensureUnusedUndoCapacity(undo_count);
     errdefer comptime unreachable;
 
     for (intersecting_deps.items) |dep_handle| {
@@ -1857,7 +2232,7 @@ pub fn deleteRowRange(
     }
 
     try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, queue_count + cells.items.len);
-    try sheet.ensureUndoCapacity(undo_opts.undo_type, undo_count);
+    try sheet.ensureUnusedUndoCapacity(undo_count);
     errdefer comptime unreachable;
 
     for (intersecting_deps.items) |dep_handle| {
@@ -2071,7 +2446,7 @@ pub fn insertColumns(sheet: *Sheet, index: u32, n: u32, undo_opts: UndoOpts) !vo
         break :blk undo_count;
     };
 
-    try sheet.ensureUndoCapacity(undo_opts.undo_type, undo_count);
+    try sheet.ensureUnusedUndoCapacity(undo_count);
     try sheet.cols.ensureUnusedCapacity(sheet.allocator, n);
 
     const max = std.math.maxInt(u32);
@@ -2108,7 +2483,6 @@ pub fn insertColumns(sheet: *Sheet, index: u32, n: u32, undo_opts: UndoOpts) !vo
 
     // Re-insert affected cells with adjusted positions
     for (cells.items) |handle| {
-        // TODO: Handle overflow
         const p = &sheet.cell_tree.entries.items(.point)[handle.n];
         p[0] += n;
         const removed = sheet.cell_tree.insertAssumeCapacity(p, handle);
@@ -2234,7 +2608,7 @@ pub fn insertRows(sheet: *Sheet, index: u32, n: u32, undo_opts: UndoOpts) !void 
         break :blk undo_count;
     };
 
-    try sheet.ensureUndoCapacity(undo_opts.undo_type, undo_count);
+    try sheet.ensureUnusedUndoCapacity(undo_count);
 
     const max = std.math.maxInt(u32);
 
@@ -2355,13 +2729,13 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
         try sheet.markDirty(cell, &dirty_cells);
     }
 
-    while (dirty_cells.popOrNull()) |cell| {
+    while (dirty_cells.pop()) |cell| {
         try sheet.markDirty(cell, &dirty_cells);
     }
     // log.debug("Finished marking", .{});
 
     // All dirty cells are reachable from the cells in queued_cells
-    while (sheet.queued_cells.popOrNull()) |handle| {
+    while (sheet.queued_cells.pop()) |handle| {
         _ = sheet.evalCellByHandle(handle) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.CyclicalReference => {
@@ -2576,10 +2950,12 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: CellHandle) ast.EvalError!ast.Eva
             // dependents.
             try sheet.queueDependents(sheet.rectFromCellHandle(handle));
 
+            const p = sheet.cell_tree.point(handle);
             // Evaluate
             const res = ast.eval(
                 sheet.ast_nodes,
                 cell.expr_root,
+                .init(p[0], p[1]),
                 sheet,
                 sheet.strings_buf.items,
                 sheet,
@@ -3652,7 +4028,7 @@ fn fuzzNumbers(input: []const u8) !void {
     }
 }
 
-var map: ?[]align(std.mem.page_size) u8 = null;
+var map: ?[]align(std.heap.page_size_min) u8 = null;
 
 test "Fuzz sheet" {
     {

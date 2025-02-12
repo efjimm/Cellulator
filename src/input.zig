@@ -299,7 +299,7 @@ pub fn KeyMap(comptime A: type, comptime M: type) type {
 
         pub fn init(default: anytype, allocator: Allocator) !@This() {
             var maps = std.EnumArray(M, Map).initFill(.{
-                .keys = CritMap.init(),
+                .keys = .init(),
                 .parents = &.{},
             });
             errdefer for (&maps.values) |*v| v.keys.deinit(allocator);
