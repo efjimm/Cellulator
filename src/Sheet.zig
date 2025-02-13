@@ -44,15 +44,12 @@ ast_nodes: std.MultiArrayList(ast.Node).Slice,
 
 string_values: FlatListPool(u8),
 
+// TODO: Only create columns for columns whose width/precision/whatever actually changes.
 cols: Columns,
 
 undos: UndoList,
 redos: UndoList,
 
-// TODO: Allow storing intervals of cell handles for bulk operations e.g. operations that bulk
-//       create cells will create them as contiguous handles in the cell tree's underlying array.
-//       The cells created by these operations could therefore be represented as just a start and
-//       end index as they are contiguous.
 cell_buffer: std.ArrayListUnmanaged(CellHandle) = .empty,
 
 search_buffer: std.ArrayListUnmanaged(Dependents.Handle),
@@ -293,6 +290,8 @@ pub const Undo = extern struct {
         insert_cell,
         bulk_cell_delete,
         bulk_cell_insert,
+        bulk_cell_delete_contiguous,
+        bulk_cell_insert_contiguous,
     };
 
     pub const Payload = extern union {
@@ -340,6 +339,13 @@ pub const Undo = extern struct {
         },
         bulk_cell_delete: u32,
         bulk_cell_insert: u32,
+        bulk_cell_delete_contiguous: CellHandleInterval,
+        bulk_cell_insert_contiguous: CellHandleInterval,
+
+        const CellHandleInterval = extern struct {
+            start: u32,
+            end: u32,
+        };
     };
 };
 
@@ -1190,12 +1196,37 @@ pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
 
             try sheet.pushUndo(.init(.bulk_cell_delete, index), opts);
         },
+        .bulk_cell_delete_contiguous => {
+            const p = u.payload.bulk_cell_delete_contiguous;
+            sheet.bulkDeleteCellHandlesContiguous(p.start, p.end);
+            try sheet.pushUndo(.init(.bulk_cell_insert_contiguous, p), opts);
+        },
+        .bulk_cell_insert_contiguous => {
+            const p = u.payload.bulk_cell_delete_contiguous;
+            sheet.bulkInsertCellHandlesContiguous(p.start, p.end);
+            try sheet.pushUndo(.init(.bulk_cell_delete_contiguous, p), opts);
+        },
         .sentinel => {},
     }
 }
 
 fn bulkDeleteCellHandles(sheet: *Sheet, handles: []const CellHandle) void {
     for (handles) |handle| {
+        const p = sheet.cell_tree.point(handle);
+        const cell = sheet.getCellFromHandle(handle);
+        // TODO: Doing this in a separate loop from removeHandle might be better
+        sheet.removeExprDependents(handle, cell.expr_root);
+        sheet.setCellError(cell);
+        sheet.cell_tree.removeHandle(handle, &p);
+    }
+}
+
+fn bulkDeleteCellHandlesContiguous(sheet: *Sheet, start: u32, end: u32) void {
+    assert(start < sheet.cell_tree.entries.len);
+    assert(end < sheet.cell_tree.entries.len);
+
+    for (start..end) |i| {
+        const handle: CellHandle = .from(@intCast(i));
         const p = sheet.cell_tree.point(handle);
         const cell = sheet.getCellFromHandle(handle);
         // TODO: Doing this in a separate loop from removeHandle might be better
@@ -1217,6 +1248,22 @@ fn bulkInsertCellHandles(sheet: *Sheet, handles: []const CellHandle) void {
         const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
         assert(!removed.isValid());
         sheet.addExpressionDependents(handle, cell.expr_root);
+        cell.state = .enqueued;
+    }
+}
+
+fn bulkInsertCellHandlesContiguous(sheet: *Sheet, start: u32, end: u32) void {
+    assert(start < sheet.cell_tree.entries.len);
+    assert(end < sheet.cell_tree.entries.len);
+
+    for (start..end) |i| {
+        const handle: CellHandle = .from(@intCast(i));
+        const cell = sheet.getCellFromHandle(handle);
+        const p = sheet.cell_tree.point(handle);
+        const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
+        assert(!removed.isValid());
+        sheet.addExpressionDependents(handle, cell.expr_root);
+        sheet.queued_cells.appendAssumeCapacity(handle);
         cell.state = .enqueued;
     }
 }
@@ -1513,12 +1560,7 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
     // One for deleting existing cells, one for inserting new cells
     try sheet.ensureUnusedUndoCapacity(2);
     try sheet.ensureUnusedCellQueueCapacity(area);
-
-    // TODO: We could instead store the deletion undos as a range instead of a list
-    //       of cell handles.
-    //
-    // Enough to store every cell in the range twice, plus two sentinel handles.
-    try sheet.ensureUnusedCellBufferCapacity(area * 2 + 2);
+    try sheet.ensureUnusedCellBufferCapacity(area + 1);
     try sheet.ensureUnusedColumnCapacity(range.width());
     errdefer comptime unreachable;
 
@@ -1551,6 +1593,7 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
         } };
         sheet.queued_cells.appendAssumeCapacity(handle);
     }
+
     sheet.bulkInsertContiguousCells(cells_start, opts);
 }
 
@@ -1591,20 +1634,20 @@ pub fn bulkInsertContiguousCells(
     assert(cell_count > 0);
     assert(sheet.cell_buffer.capacity - sheet.cell_buffer.items.len >= cell_count + 1);
 
-    const undo_cells_index: u32 = @intCast(sheet.cell_buffer.items.len);
-
-    for (cells_start.n..sheet.cell_tree.entries.len) |i| {
+    const end = sheet.cell_tree.entries.len;
+    for (cells_start.n..end) |i| {
         const handle: CellHandle = .from(@intCast(i));
         const p = sheet.cell_tree.point(handle);
         const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
         assert(!removed.isValid());
         sheet.addExpressionDependents(handle, sheet.getCellFromHandle(handle).expr_root);
         sheet.getCellFromHandle(handle).state = .enqueued;
-        sheet.cell_buffer.appendAssumeCapacity(handle);
     }
-    sheet.cell_buffer.appendAssumeCapacity(.invalid);
 
-    sheet.pushUndoAssumeCapacity(.init(.bulk_cell_delete, undo_cells_index), opts);
+    sheet.pushUndoAssumeCapacity(.init(.bulk_cell_delete_contiguous, .{
+        .start = cells_start.n,
+        .end = @intCast(end),
+    }), opts);
 }
 
 /// Creates all the columns required by range.
@@ -1652,7 +1695,7 @@ pub fn bulkSetCellExpr(
     try sheet.ensureExpressionDependentsCapacity(expr);
     try sheet.ensureUnusedColumnCapacity(width);
     try sheet.ensureUnusedUndoCapacity(2);
-    try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, area * 2 + 2);
+    try sheet.ensureUnusedCellBufferCapacity(area + 1);
 
     const ref_count = blk: {
         var ref_count: u32 = 0;
@@ -1694,33 +1737,21 @@ pub fn bulkSetCellExpr(
         head.* = .from(@intCast(start));
     }
 
-    const inserted_index: u32 = @intCast(sheet.cell_buffer.items.len);
-
     if (need_cell_eval) {
         for (
             utils.appendManyAssumeCapacity(CellHandle, &sheet.queued_cells, area),
-            utils.appendManyAssumeCapacity(CellHandle, &sheet.cell_buffer, area),
             handles_start..,
-        ) |*queued_cell, *undo_cell, handle_index| {
+        ) |*queued_cell, handle_index| {
             const handle: CellHandle = .from(@intCast(handle_index));
             queued_cell.* = handle;
-            undo_cell.* = handle;
-        }
-    } else {
-        for (
-            utils.appendManyAssumeCapacity(CellHandle, &sheet.cell_buffer, area),
-            handles_start..,
-        ) |*undo_cell, handle_index| {
-            const handle: CellHandle = .from(@intCast(handle_index));
-            undo_cell.* = handle;
         }
     }
-    sheet.cell_buffer.appendAssumeCapacity(.invalid);
 
     sheet.createColumnRangeAssumeCapacity(range);
 
     const cell: Cell = .{
         .value = opts.value,
+        .value_type = opts.tag,
         .state = if (opts.tag != .err) .enqueued else .up_to_date,
         .expr_root = expr,
         .strings = strings,
@@ -1733,6 +1764,7 @@ pub fn bulkSetCellExpr(
     //       Each insert does a separate lookup. We should find some way to exploit the internal
     //       layout of the phtree to make inserting consecutive points faster.
     //       We could build the tree bottom-up?
+    const end = sheet.cell_tree.entries.len;
     const point_slice = sheet.cell_tree.entries.items(.point);
     var y: u64 = range.tl.y;
     while (y <= range.br.y) : (y += 1) {
@@ -1750,7 +1782,10 @@ pub fn bulkSetCellExpr(
         }
     }
 
-    sheet.pushUndoAssumeCapacity(.init(.bulk_cell_delete, inserted_index), opts.undo_opts);
+    sheet.pushUndoAssumeCapacity(.init(.bulk_cell_delete_contiguous, .{
+        .start = @intCast(handles_start),
+        .end = @intCast(end),
+    }), opts.undo_opts);
 }
 
 /// Creates the cell at `pos` using the given expression, duplicating its string literals.
