@@ -555,7 +555,6 @@ fn resetArena(sheet: *Sheet) void {
 // Optimized for bulk loading
 pub fn interpretSource(sheet: *Sheet, reader: anytype) !void {
     errdefer sheet.clearRetainingCapacity();
-    defer sheet.endUndoGroup();
 
     const arena = sheet.arena.allocator();
     defer sheet.resetArena();
@@ -685,8 +684,9 @@ pub fn writeFile(
     const writer = buf.writer();
 
     var iter = sheet.cell_tree.iterator();
-    while (iter.next()) |kv| {
-        const pos: Position = .init(kv.key[0], kv.key[1]);
+    while (iter.next()) |handle| {
+        const p = sheet.cell_tree.point(handle);
+        const pos: Position = .init(p[0], p[1]);
         try writer.print("let {}=", .{pos});
         try sheet.printCellExpression(pos, writer);
         try writer.writeByte('\n');
@@ -1068,6 +1068,7 @@ pub fn clearUndos(sheet: *Sheet, comptime kind: UndoType) void {
 
 pub fn endUndoGroup(sheet: *Sheet) void {
     if (sheet.undos.len == 0) return;
+    assert(sheet.undos.items(.tag)[sheet.undos.len - 1] != .sentinel);
     sheet.undos.appendAssumeCapacity(.sentinel);
 }
 
@@ -1306,21 +1307,23 @@ fn updateRange(sheet: *Sheet, index: ast.Index, new_range: Rect, _: UndoOpts) !v
 pub fn undo(sheet: *Sheet) Allocator.Error!void {
     if (sheet.undos.len == 0) return;
 
-    // All undo groups MUST end with a group marker - so remove it!
+    // All undo groups MUST end with a group marker
     const last_undo = sheet.undos.pop().?;
     assert(last_undo.tag == .sentinel);
 
     defer sheet.endRedoGroup();
 
-    const tags = sheet.undos.items(.tag);
     const opts: UndoOpts = .{ .undo_type = .redo };
     while (sheet.undos.pop()) |u| {
+        assert(u.tag != .sentinel);
         errdefer {
-            sheet.undos.appendAssumeCapacity(u);
             sheet.endUndoGroup();
+            sheet.undos.appendAssumeCapacity(u);
         }
+        const old_undos_len = sheet.undos.len;
         try sheet.doUndo(u, opts);
-        if (sheet.undos.len == 0 or tags[sheet.undos.len - 1] == .sentinel)
+        assert(sheet.undos.len == old_undos_len);
+        if (sheet.undos.len == 0 or sheet.undos.items(.tag)[sheet.undos.len - 1] == .sentinel)
             break;
     }
 }
@@ -1334,15 +1337,17 @@ pub fn redo(sheet: *Sheet) Allocator.Error!void {
 
     defer sheet.endUndoGroup();
 
-    const tags = sheet.redos.items(.tag);
     const opts: UndoOpts = .{ .clear_redos = false };
     while (sheet.redos.pop()) |u| {
+        assert(u.tag != .sentinel);
         errdefer {
-            sheet.redos.appendAssumeCapacity(u);
             sheet.endRedoGroup();
+            sheet.redos.appendAssumeCapacity(u);
         }
+        const old_redos_len = sheet.redos.len;
         try sheet.doUndo(u, opts);
-        if (sheet.redos.len == 0 or tags[sheet.redos.len - 1] == .sentinel)
+        assert(sheet.redos.len == old_redos_len);
+        if (sheet.redos.len == 0 or sheet.redos.items(.tag)[sheet.redos.len - 1] == .sentinel)
             break;
     }
 }
@@ -2885,6 +2890,7 @@ pub const Cell = extern struct {
     /// Abstract syntax tree representing the expression in the cell.
     expr_root: ast.Index = .invalid,
 
+    // TODO: We can encode this information in the string AST nodes themselves.
     strings: StringIndex = .invalid,
 
     // Non-extern unions get a hidden tag in safe builds which makes serialising them annoying.

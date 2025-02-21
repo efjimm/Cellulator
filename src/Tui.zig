@@ -10,18 +10,18 @@ const PosInt = Position.Int;
 const wcWidth = @import("wcwidth").wcWidth;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
-const CellType = enum {
-    number,
-    string,
-    err,
-    blank,
-};
 const Col = Sheet.Column;
 
 const Term = spoon.Term;
 
 term: Term,
 update_flags: UpdateFlags = .all,
+
+/// Used by rendering to store all cells currently visible on the screen
+cells: std.ArrayListUnmanaged(Sheet.CellHandle) = .empty,
+
+/// Used by rendering to store all columns currently visible on the screen
+cols: std.ArrayListUnmanaged(Sheet.Column.Handle) = .empty,
 
 const UpdateFlags = packed struct {
     command: bool,
@@ -39,28 +39,31 @@ const UpdateFlags = packed struct {
     };
 };
 
-const styles = blk: {
-    const T = std.enums.EnumArray(CellType, [2]spoon.Style);
-    var array = T.initUndefined();
-    array.set(.number, .{
+const CellType = enum {
+    number,
+    string,
+    err,
+    blank,
+};
+
+const styles = std.EnumArray(CellType, [2]spoon.Style).init(.{
+    .number = .{
         .{ .fg = .white, .bg = .black },
         .{ .fg = .black, .bg = .blue },
-    });
-    array.set(.string, .{
+    },
+    .string = .{
         .{ .fg = .green, .bg = .black },
         .{ .fg = .black, .bg = .blue },
-    });
-    array.set(.err, .{
+    },
+    .err = .{
         .{ .fg = .red, .bg = .black },
         .{ .fg = .red, .bg = .blue },
-    });
-    array.set(.blank, .{
+    },
+    .blank = .{
         .{ .fg = .white, .bg = .black },
         .{ .fg = .black, .bg = .blue },
-    });
-    assert(@typeInfo(CellType).@"enum".fields.len == 4);
-    break :blk array;
-};
+    },
+});
 
 const Self = @This();
 const RenderContext = Term.RenderContext(8192);
@@ -89,6 +92,8 @@ pub fn init(allocator: Allocator) InitError!Self {
 
 pub fn deinit(self: *Self, allocator: Allocator) void {
     self.term.deinit(allocator);
+    self.cells.deinit(allocator);
+    self.cols.deinit(allocator);
     self.* = undefined;
 }
 
@@ -100,7 +105,7 @@ pub fn update(tui: *Self, comptime fields: []const std.meta.FieldEnum(UpdateFlag
 
 pub const RenderError = Term.WriteError;
 
-pub fn render(self: *Self, zc: *ZC) RenderError!void {
+pub fn render(self: *Self, allocator: Allocator, zc: *ZC) !void {
     if (needs_resize) {
         try self.term.fetchSize();
         zc.clampScreenToCursor();
@@ -129,8 +134,7 @@ pub fn render(self: *Self, zc: *ZC) RenderError!void {
         self.update_flags.row_numbers = false;
     }
     if (self.update_flags.cells) {
-        try self.renderCells(&rc, zc);
-        try renderCursor(&rc, zc);
+        try self.renderCells(allocator, &rc, zc);
         self.update_flags.cells = false;
         self.update_flags.cursor = false;
     } else if (self.update_flags.cursor) {
@@ -291,6 +295,7 @@ pub fn renderColumnHeadings(
 
     try rc.setStyle(.{ .fg = .blue, .bg = .black });
 
+    // TODO: Clean up these calls to getColumn
     while (w < self.term.width) : (x += 1) {
         const col: Col = zc.sheet.getColumn(x) orelse .{};
         const width = @min(self.term.width - reserved_cols, col.width);
@@ -372,11 +377,13 @@ pub fn renderCursor(
         try rc.setStyle(.{ .fg = .white, .bg = .black });
 
         try rc.moveCursorTo(prev_y, prev_x);
-        _ = try renderCell(rc, zc, zc.prev_cursor);
+        const col_handle = zc.sheet.cols.findEntry(&.{zc.prev_cursor.x});
+        const col = if (col_handle.isValid()) zc.sheet.cols.valuePtr(col_handle).* else Sheet.Column{};
+        const cell_handle: Sheet.CellHandle = zc.sheet.getCellHandleByPos(zc.prev_cursor) orelse .invalid;
+        try renderCell(rc, zc, zc.prev_cursor, cell_handle, col_handle, col.width);
 
         try rc.setStyle(.{ .fg = .blue, .bg = .black });
 
-        const col: Col = zc.sheet.getColumn(zc.prev_cursor.x) orelse .{};
         const width = @min(col.width, rc.term.width - left);
 
         try rc.moveCursorTo(ZC.col_heading_line, prev_x);
@@ -403,10 +410,12 @@ pub fn renderCursor(
 
     // Render the cells and headings at the current cursor position with a specific colour.
     try rc.moveCursorTo(y, x);
-    _ = try renderCell(rc, zc, zc.cursor);
+    const col_handle = zc.sheet.cols.findEntry(&.{zc.cursor.x});
+    const col = if (col_handle.isValid()) zc.sheet.cols.valuePtr(col_handle).* else Sheet.Column{};
+    const cell_handle: Sheet.CellHandle = zc.sheet.getCellHandleByPos(zc.cursor) orelse .invalid;
+    try renderCell(rc, zc, zc.cursor, cell_handle, col_handle, col.width);
     try rc.setStyle(.{ .fg = .black, .bg = .blue });
 
-    const col: Col = zc.sheet.getColumn(zc.cursor.x) orelse .{};
     const width = @min(col.width, rc.term.width - left);
     try rc.moveCursorTo(ZC.col_heading_line, x);
     try writer.print("{s: ^[1]}", .{
@@ -426,62 +435,203 @@ fn isSelected(zc: ZC, pos: Position) bool {
     };
 }
 
+/// Returns the number of columns currently visible on screen.
+fn screenColumnWidth(self: Self, zc: *ZC) u32 {
+    const reserved_cols = zc.leftReservedColumns();
+    var cols_iter = zc.sheet.cols.iteratorAt(.{zc.screen_pos.x});
+    var width: u16 = 0;
+    var col_count: u32 = 0;
+    var last = zc.screen_pos.x;
+    const cells_width = self.term.width - reserved_cols;
+
+    while (cols_iter.next()) |handle| {
+        assert(last >= zc.screen_pos.x);
+
+        const col = zc.sheet.cols.point(handle)[0];
+        if (col < zc.screen_pos.x) return std.math.divCeil(
+            u16,
+            cells_width,
+            Sheet.Column.default_width,
+        ) catch unreachable;
+
+        const diff: u16 = @intCast(col - last);
+        const diff_w = diff * Sheet.Column.default_width;
+        const col_w = zc.sheet.cols.valuePtr(handle).width;
+        const w = diff_w + col_w;
+
+        if (width + w >= cells_width) {
+            const remaining_width = cells_width - width;
+            if (remaining_width > diff_w) {
+                col_count += diff + 1;
+            } else {
+                col_count += std.math.divCeil(
+                    u16,
+                    remaining_width,
+                    Sheet.Column.default_width,
+                ) catch unreachable;
+            }
+
+            break;
+        }
+        width += w;
+        col_count += diff + 1;
+        last = col +% 1;
+    } else {
+        col_count += std.math.divCeil(
+            u16,
+            cells_width -| width,
+            Sheet.Column.default_width,
+        ) catch unreachable;
+    }
+
+    return col_count;
+}
+
 pub fn renderCells(
-    self: Self,
+    self: *Self,
+    allocator: Allocator,
     rc: *RenderContext,
     zc: *ZC,
-) RenderError!void {
-    const reserved_cols = zc.leftReservedColumns();
-
+) !void {
     try rc.setStyle(.{ .fg = .white, .bg = .black });
 
-    // TODO: This really sucks
-    for (ZC.content_line..self.term.height, zc.screen_pos.y..) |line, y| {
-        try rc.moveCursorTo(@intCast(line), reserved_cols);
+    var cols: std.ArrayList(Sheet.Columns.Handle) = self.cols.toManaged(allocator);
+    var cells: std.ArrayList(Sheet.CellHandle) = self.cells.toManaged(allocator);
+    cols.clearRetainingCapacity();
+    cells.clearRetainingCapacity();
 
-        var w = reserved_cols;
-        for (zc.screen_pos.x..@as(Position.HashInt, std.math.maxInt(Position.Int)) + 1) |x| {
-            const pos = Position{ .y = @intCast(y), .x = @intCast(x) };
-            w += try renderCell(rc, zc, pos);
-            if (w >= self.term.width) break;
-        } else {
-            // Hit maxInt(Position.Int) and didn't go past the end of the screen, so we clear the
-            // rest of the line to remove any artifacts
-            try rc.setStyle(.{ .fg = .white, .bg = .black });
-            try rc.clearToEol();
+    defer {
+        self.cols = cols.moveToUnmanaged();
+        self.cells = cells.moveToUnmanaged();
+    }
+
+    const col_count = self.screenColumnWidth(zc);
+    const height = self.term.height -| ZC.content_line;
+    const cell_count = col_count * height;
+    try cols.ensureTotalCapacity(col_count);
+    try cells.ensureTotalCapacity(cell_count);
+
+    zc.sheet.cell_tree.queryWindow(
+        &.{ zc.screen_pos.x, zc.screen_pos.y },
+        &.{ zc.screen_pos.x +| (col_count - 1), zc.screen_pos.y +| (self.term.height - ZC.content_line - 1) },
+        &cells,
+    ) catch unreachable;
+
+    zc.sheet.cols.queryWindow(
+        &.{zc.screen_pos.x},
+        &.{zc.screen_pos.x +| (col_count - 1)},
+        &cols,
+    ) catch unreachable;
+
+    const sheet = zc.sheet;
+
+    var i = cols.items.len;
+    const old_cols_len = cols.items.len;
+    cols.items.len = col_count;
+    @memset(cols.items[old_cols_len..], .invalid);
+    while (i > 0) {
+        i -= 1;
+        const handle = cols.items[i];
+        const new_index = sheet.cols.point(handle)[0] - zc.screen_pos.x;
+        cols.items[new_index] = handle;
+        cols.items[i] = .invalid;
+    }
+
+    const SortContext = struct {
+        sheet: *Sheet,
+
+        pub fn lessThan(ctx: @This(), a: Sheet.CellHandle, b: Sheet.CellHandle) bool {
+            const p1 = ctx.sheet.cell_tree.point(a);
+            const p2 = ctx.sheet.cell_tree.point(b);
+            if (p1[1] == p2[1]) return p1[0] < p2[0];
+            return p1[1] < p2[1];
+        }
+    };
+
+    std.mem.sortUnstable(
+        Sheet.CellHandle,
+        cells.items,
+        SortContext{ .sheet = zc.sheet },
+        SortContext.lessThan,
+    );
+
+    i = cells.items.len;
+    const old_cells_len = cells.items.len;
+    cells.items.len = cell_count;
+    @memset(cells.items[old_cells_len..], .invalid);
+    while (i > 0) {
+        i -= 1;
+        const handle = cells.items[i];
+        const p = sheet.cell_tree.point(handle);
+        const x = p[0] - zc.screen_pos.x;
+        const y = p[1] - zc.screen_pos.y;
+        const new_index = y * col_count + x;
+        assert(new_index >= i);
+        cells.items[i] = .invalid;
+        cells.items[new_index] = handle;
+    }
+
+    const screen_col_start = zc.leftReservedColumns();
+    const cells_width = self.term.width - screen_col_start;
+    i = 0;
+    var y = zc.screen_pos.y;
+    var j: usize = 0;
+    while (y - zc.screen_pos.y < height) : (y += 1) {
+        const screen_line = ZC.content_line + (y - zc.screen_pos.y);
+        try rc.moveCursorTo(@intCast(screen_line), screen_col_start);
+
+        var w: u16 = 0;
+        var x = zc.screen_pos.x;
+        while (x - zc.screen_pos.x < col_count) : ({
+            x += 1;
+            j += 1;
+        }) {
+            // const rel_y = y - zc.screen_pos.y;
+            const rel_x = x - zc.screen_pos.x;
+
+            const col_handle = cols.items[rel_x];
+            const col = colFromHandle(sheet, col_handle);
+            const cell_handle = cells.items[j];
+
+            const pos: Position = .init(x, y);
+            if (cell_handle.isValid()) {
+                assert(pos.eql(sheet.posFromCellHandle(cell_handle)));
+            }
+            const cell_width = @min(col.width, cells_width - w);
+            try renderCell(rc, zc, pos, cell_handle, col_handle, cell_width);
+            w += col.width;
         }
     }
 }
 
-pub fn renderCell(
+inline fn colFromHandle(sheet: *Sheet, handle: Sheet.Column.Handle) Sheet.Column {
+    return if (handle.isValid())
+        sheet.cols.valuePtr(handle).*
+    else
+        Sheet.Column{};
+}
+
+fn renderCell(
     rc: *RenderContext,
-    zc: *ZC,
+    zc: *ZC, // TODO: This should be a field of Self
     pos: Position,
-) RenderError!u16 {
-    const selected = isSelected(zc.*, pos);
+    cell_handle: Sheet.CellHandle,
+    col_handle: Sheet.Column.Handle,
+    width: u16,
+) !void {
+    const sheet = zc.sheet;
+    const selected = Position.eql(pos, zc.cursor);
 
-    const col = zc.sheet.getColumn(pos.x) orelse {
-        // No cells in this column, render blank cell
-        try rc.setStyle(styles.get(.blank)[@intFromBool(selected)]);
-        const width = Sheet.Column.default_width;
-        try rc.buffer.writer().writeByteNTimes(' ', width);
-        return width;
-    };
-
-    const width = getColWidth: {
-        var width: u16 = 0;
-        for (zc.screen_pos.x..pos.x) |x| {
-            const c: Col = zc.sheet.getColumn(@intCast(x)) orelse .{};
-            width += c.width;
-        }
-        const screen_width = rc.term.width - zc.leftReservedColumns();
-        break :getColWidth @min(col.width, screen_width - width);
-    };
+    const col = if (col_handle.isValid())
+        sheet.cols.valuePtr(col_handle).*
+    else
+        Sheet.Column{};
 
     var rpw = rc.cellWriter(width);
     const writer = rpw.writer();
 
-    if (zc.sheet.getCell(pos)) |cell| {
+    if (cell_handle.isValid()) {
+        const cell: *const Sheet.Cell = sheet.getCellFromHandle(cell_handle);
         const tag: CellType = @enumFromInt(@intFromEnum(cell.value_type));
         try rc.setStyle(styles.get(tag)[@intFromBool(selected)]);
 
@@ -493,7 +643,7 @@ pub fn renderCell(
                 try rpw.pad();
             },
             .string => {
-                const text = zc.sheet.cellStringValue(&cell);
+                const text = zc.sheet.cellStringValue(cell);
                 const text_width = utils.strWidth(text, width);
                 const left_pad = (width - text_width) / 2;
                 try writer.writeByteNTimes(' ', left_pad);
@@ -523,26 +673,14 @@ pub fn renderCell(
         try writer.print("{s: >[1]}", .{ "", width });
         try rpw.pad();
     }
-    return width;
 }
 
 pub fn isOnScreen(tui: *Self, zc: *ZC, pos: Position) bool {
     if (pos.x < zc.screen_pos.x or pos.y < zc.screen_pos.y)
         return false;
 
-    var w = zc.leftReservedColumns();
-    const end_col = blk: {
-        var i = zc.screen_pos.x;
-        while (true) : (i += 1) {
-            const col: Col = zc.sheet.getColumn(i) orelse .{};
-            w += col.width;
-            if (w >= tui.term.width or i == std.math.maxInt(Position.Int))
-                break :blk i;
-        }
-        unreachable;
-    };
-    if (w >= tui.term.width and pos.x > end_col) return false;
+    const col_count = tui.screenColumnWidth(zc);
+    const height = tui.term.height -| ZC.content_line;
 
-    const end_row = zc.screen_pos.y +| (tui.term.height - ZC.content_line);
-    return pos.y <= end_row;
+    return pos.x <= zc.screen_pos.x +| col_count and pos.y <= zc.screen_pos.y +| height;
 }

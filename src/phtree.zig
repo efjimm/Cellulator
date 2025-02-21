@@ -464,6 +464,22 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             return .invalid;
         }
 
+        pub fn findEntryOrParent(tree: *@This(), p: *const Point) struct { Handle, u8 } {
+            var h = tree.root;
+            var parent: Handle = .invalid;
+            var address: u8 = 0;
+            while (h.isValid()) {
+                const node = tree.nodePtr(h);
+                parent = h;
+                address = calculateHypercubeAddress(p, node.postfix_length);
+                h = node.children[address];
+                if (node.isLeaf()) return .{ parent, address };
+            }
+
+            assert(parent.isValid());
+            return .{ parent, address };
+        }
+
         const Self = @This();
 
         pub const Iterator = struct {
@@ -471,19 +487,14 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             current: Handle,
             index: u8,
 
-            pub fn next(iter: *Iterator) ?KV {
+            pub fn next(iter: *Iterator) ?Handle {
                 const node = iter.tree.nodePtr(iter.current);
                 if (node.isLeaf()) {
                     for (node.children[iter.index..], iter.index..) |child_handle, i| {
                         if (!child_handle.isValid()) continue;
 
                         iter.index = @intCast(i + 1);
-                        const p = iter.tree.entries.items(.point)[child_handle.n];
-                        const value = iter.tree.entries.items(.data)[child_handle.n].value;
-                        return .{
-                            .key = p,
-                            .value = value,
-                        };
+                        return child_handle;
                     }
                 } else {
                     for (node.children[iter.index..]) |child_handle| {
@@ -519,6 +530,15 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
                 .tree = tree,
                 .current = tree.root,
                 .index = 0,
+            };
+        }
+
+        pub fn iteratorAt(tree: *Self, start: Point) Iterator {
+            const handle, const index = tree.findEntryOrParent(&start);
+            return .{
+                .tree = tree,
+                .current = handle,
+                .index = index,
             };
         }
 
@@ -684,10 +704,12 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
         }
 
         pub fn valuePtr(tree: *@This(), handle: Handle) *V {
+            assert(handle.isValid());
             return &tree.entries.items(.data)[handle.n].value;
         }
 
         pub fn point(tree: *@This(), handle: Handle) Point {
+            assert(handle.isValid());
             return tree.entries.items(.point)[handle.n];
         }
 
@@ -778,6 +800,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             return pointGreaterOrEqual(p, min) and pointLessOrEqual(p, max);
         }
 
+        // TODO: Adapt this function to a range iterator
         fn queryNodeWindow(
             tree: *@This(),
             handle: Handle,
@@ -861,6 +884,19 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             }
 
             pub const invalid: Handle = .{ .n = std.math.maxInt(u32) };
+
+            pub fn format(
+                handle: Handle,
+                comptime _: []const u8,
+                _: std.fmt.FormatOptions,
+                writer: anytype,
+            ) !void {
+                if (handle.isValid()) {
+                    try writer.print("{d}", .{handle.n});
+                } else {
+                    try writer.writeAll("none");
+                }
+            }
         };
     };
 }

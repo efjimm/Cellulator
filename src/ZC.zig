@@ -167,6 +167,7 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
 
     if (options.filepath) |filepath| {
         try zc.sheet.loadFile(filepath);
+        zc.sheet.endUndoGroup();
     }
 
     log.debug("Finished init", .{});
@@ -228,7 +229,7 @@ pub fn inputBufSlice(self: *Self) Allocator.Error![:0]const u8 {
 pub fn run(self: *Self) !void {
     while (self.running) {
         try self.updateCells();
-        try self.tui.render(self);
+        try self.tui.render(self.allocator, self);
         try self.handleInput();
     }
 }
@@ -759,12 +760,11 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
         .delete_column => {
             try self.sheet.deleteColumnRange(self.cursor.x, self.cursor.x, .{});
             self.sheet.endUndoGroup();
-            self.tui.update(&.{ .column_headings, .cells, .cursor });
+            self.tui.update(&.{ .column_headings, .cells });
         },
         .delete_row => {
             try self.sheet.deleteRowRange(self.cursor.y, self.cursor.y, .{});
-            self.sheet.endUndoGroup();
-            self.tui.update(&.{ .column_headings, .cells, .cursor });
+            self.tui.update(&.{ .column_headings, .cells });
         },
         .insert_column => {
             self.sheet.insertColumns(self.cursor.x, self.getCount(), .{}) catch |err| switch (err) {
@@ -772,7 +772,7 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
                 else => |e| return e,
             };
             self.sheet.endUndoGroup();
-            self.tui.update(&.{ .column_headings, .cells, .cursor });
+            self.tui.update(&.{ .column_headings, .cells });
         },
         .insert_row => {
             self.sheet.insertRows(self.cursor.y, self.getCount(), .{}) catch |err| switch (err) {
@@ -780,7 +780,7 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
                 else => |e| return e,
             };
             self.sheet.endUndoGroup();
-            self.tui.update(&.{ .row_numbers, .cells, .cursor });
+            self.tui.update(&.{ .row_numbers, .cells });
         },
 
         .delete_cell => self.deleteCell() catch |err| switch (err) {
@@ -1080,7 +1080,7 @@ fn runDebugCommand(self: *Self, cmd_str: []const u8, iter: *utils.WordIterator) 
             const pos = self.cursor;
             if (self.sheet.getCellHandleByPos(pos)) |handle| {
                 try self.sheet.enqueueUpdate(handle);
-                self.tui.update(&.{ .cells, .cursor });
+                self.tui.update(&.{.cells});
             }
         },
     }
@@ -1166,7 +1166,7 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
                 });
                 self.sheet.queued_cells.items.len = 0;
                 self.sheet.endUndoGroup();
-                self.tui.update(&.{ .cells, .cursor });
+                self.tui.update(&.{.cells});
                 return;
             };
 
@@ -1175,7 +1175,7 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
 
             try self.sheet.insertIncrementingCellRange(range, value, increment, .{});
             self.sheet.endUndoGroup();
-            self.tui.update(&.{ .cells, .cursor });
+            self.tui.update(&.{.cells});
         },
         .fill_expr => {
             const arg1 = iter.next() orelse return error.InvalidSyntax;
@@ -1352,6 +1352,7 @@ pub fn loadCmd(self: *Self, filepath: []const u8) !void {
         self.setStatusMessage(.err, "Could not open file: {s}", .{@errorName(err)});
         return;
     };
+    self.sheet.endUndoGroup();
 }
 
 pub fn writeFile(self: *Self, filepath: ?[]const u8) !void {
