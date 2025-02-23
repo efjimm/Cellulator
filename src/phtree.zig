@@ -921,7 +921,7 @@ test "Basics" {
     try std.testing.expectEqual(null, tree.find(&.{ 1, 1 }));
 }
 
-fn fuzz(input: []const u8) anyerror!void {
+fn fuzz(_: void, input: []const u8) anyerror!void {
     // const file = try std.fs.cwd().createFile("out.txt", .{ .truncate = true });
     // defer file.close();
 
@@ -950,7 +950,7 @@ fn fuzz(input: []const u8) anyerror!void {
 }
 
 test "Fuzz phtree" {
-    try std.testing.fuzz(fuzz, .{});
+    try std.testing.fuzz({}, fuzz, .{});
 }
 
 test "phtree crash" {

@@ -6,12 +6,12 @@ might be an interesting read so I committed it. The stuff at the top is probably
 - Eliminate recursion
   - Will run into stack overflows with big data. An older implementation of `markDirty` caused
     one on a large input sheet.
-- Support for justifying strings
 - Generate fuzzer output files from the build system
 - Store undos and redos in a single list and just keep an index into where the current undo is.
   When an undo happens we can just invert the Undo operation at the index and decrement the index
   by one. When a redo happens we invert the operation at index+1 and increment the index by one.
 - Unify command and statement parsing
+- Multithreading
 
 - Batch undo cell inserts / deletes
 - Improve fill implementation

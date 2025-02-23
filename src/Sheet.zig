@@ -4002,7 +4002,7 @@ test "Fuzzer input" {
     try fuzzNumbers(buf[0..len]);
 }
 
-fn fuzzNumbers(input: []const u8) !void {
+fn fuzzNumbers(_: void, input: []const u8) !void {
     if (map) |m| {
         const len: *u64 = @ptrCast(m.ptr);
         len.* = input.len;
@@ -4086,7 +4086,7 @@ test "Fuzz sheet" {
             0,
         );
     }
-    try std.testing.fuzz(fuzzNumbers, .{});
+    try std.testing.fuzz({}, fuzzNumbers, .{});
 }
 
 test "insert column overflow" {
