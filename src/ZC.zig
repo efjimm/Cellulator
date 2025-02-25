@@ -1650,7 +1650,7 @@ pub inline fn cursorDecWidth(self: *Self) Allocator.Error!void {
 
 pub fn cursorExpandWidth(self: *Self) Allocator.Error!void {
     const handle = self.sheet.getColumnHandle(self.cursor.x) orelse return;
-    const col = self.sheet.cols.valuePtr(handle);
+    const col = self.sheet.cols.getValue(handle);
 
     const max_width = self.tui.term.width - self.leftReservedColumns();
     const width_needed = try self.sheet.widthNeededForColumn(self.cursor.x, col.precision, max_width);
@@ -2327,4 +2327,13 @@ test "Sheet operations" {
         std.debug.print("Testing file {s}\n", .{path});
         try testFile(path);
     }
+}
+
+test "Something" {
+    var zc: Self = undefined;
+    try zc.init(std.testing.allocator, .{ .ui = false });
+    defer zc.deinit();
+
+    try zc.parseCommand("let C4 = 0");
+    try zc.parseCommand("let ZZZ0 = 5");
 }

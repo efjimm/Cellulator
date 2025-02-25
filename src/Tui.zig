@@ -378,7 +378,7 @@ pub fn renderCursor(
 
         try rc.moveCursorTo(prev_y, prev_x);
         const col_handle = zc.sheet.cols.findEntry(&.{zc.prev_cursor.x});
-        const col = if (col_handle.isValid()) zc.sheet.cols.valuePtr(col_handle).* else Sheet.Column{};
+        const col = if (col_handle.isValid()) zc.sheet.cols.getValue(col_handle).* else Sheet.Column{};
         const cell_handle: Sheet.CellHandle = zc.sheet.getCellHandleByPos(zc.prev_cursor) orelse .invalid;
         try renderCell(rc, zc, zc.prev_cursor, cell_handle, col_handle, col.width);
 
@@ -411,7 +411,7 @@ pub fn renderCursor(
     // Render the cells and headings at the current cursor position with a specific colour.
     try rc.moveCursorTo(y, x);
     const col_handle = zc.sheet.cols.findEntry(&.{zc.cursor.x});
-    const col = if (col_handle.isValid()) zc.sheet.cols.valuePtr(col_handle).* else Sheet.Column{};
+    const col = if (col_handle.isValid()) zc.sheet.cols.getValue(col_handle).* else Sheet.Column{};
     const cell_handle: Sheet.CellHandle = zc.sheet.getCellHandleByPos(zc.cursor) orelse .invalid;
     try renderCell(rc, zc, zc.cursor, cell_handle, col_handle, col.width);
     try rc.setStyle(.{ .fg = .black, .bg = .blue });
@@ -447,7 +447,7 @@ fn screenColumnWidth(self: Self, zc: *ZC) u32 {
     while (cols_iter.next()) |handle| {
         assert(last >= zc.screen_pos.x);
 
-        const col = zc.sheet.cols.point(handle)[0];
+        const col = zc.sheet.cols.getPoint(handle)[0];
         if (col < zc.screen_pos.x) return std.math.divCeil(
             u16,
             cells_width,
@@ -456,7 +456,7 @@ fn screenColumnWidth(self: Self, zc: *ZC) u32 {
 
         const diff: u16 = @intCast(col - last);
         const diff_w = diff * Sheet.Column.default_width;
-        const col_w = zc.sheet.cols.valuePtr(handle).width;
+        const col_w = zc.sheet.cols.getValue(handle).width;
         const w = diff_w + col_w;
 
         if (width + w >= cells_width) {
@@ -495,7 +495,7 @@ pub fn renderCells(
 ) !void {
     try rc.setStyle(.{ .fg = .white, .bg = .black });
 
-    var cols: std.ArrayList(Sheet.Columns.Handle) = self.cols.toManaged(allocator);
+    var cols: std.ArrayList(Sheet.Column.Handle) = self.cols.toManaged(allocator);
     var cells: std.ArrayList(Sheet.CellHandle) = self.cells.toManaged(allocator);
     cols.clearRetainingCapacity();
     cells.clearRetainingCapacity();
@@ -532,7 +532,7 @@ pub fn renderCells(
     while (i > 0) {
         i -= 1;
         const handle = cols.items[i];
-        const new_index = sheet.cols.point(handle)[0] - zc.screen_pos.x;
+        const new_index = sheet.cols.getPoint(handle)[0] - zc.screen_pos.x;
         cols.items[new_index] = handle;
         cols.items[i] = .invalid;
     }
@@ -541,8 +541,8 @@ pub fn renderCells(
         sheet: *Sheet,
 
         pub fn lessThan(ctx: @This(), a: Sheet.CellHandle, b: Sheet.CellHandle) bool {
-            const p1 = ctx.sheet.cell_tree.point(a);
-            const p2 = ctx.sheet.cell_tree.point(b);
+            const p1 = ctx.sheet.cell_tree.getPoint(a);
+            const p2 = ctx.sheet.cell_tree.getPoint(b);
             if (p1[1] == p2[1]) return p1[0] < p2[0];
             return p1[1] < p2[1];
         }
@@ -562,7 +562,7 @@ pub fn renderCells(
     while (i > 0) {
         i -= 1;
         const handle = cells.items[i];
-        const p = sheet.cell_tree.point(handle);
+        const p = sheet.cell_tree.getPoint(handle);
         const x = p[0] - zc.screen_pos.x;
         const y = p[1] - zc.screen_pos.y;
         const new_index = y * col_count + x;
@@ -606,7 +606,7 @@ pub fn renderCells(
 
 inline fn colFromHandle(sheet: *Sheet, handle: Sheet.Column.Handle) Sheet.Column {
     return if (handle.isValid())
-        sheet.cols.valuePtr(handle).*
+        sheet.cols.getValue(handle).*
     else
         Sheet.Column{};
 }
@@ -623,7 +623,7 @@ fn renderCell(
     const selected = Position.eql(pos, zc.cursor);
 
     const col = if (col_handle.isValid())
-        sheet.cols.valuePtr(col_handle).*
+        sheet.cols.getValue(col_handle).*
     else
         Sheet.Column{};
 
