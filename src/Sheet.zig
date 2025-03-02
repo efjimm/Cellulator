@@ -24,7 +24,7 @@ allocator: Allocator,
 has_changes: bool,
 
 /// List of cells that need to be re-evaluated.
-queued_cells: std.ArrayListUnmanaged(CellHandle),
+queued_cells: std.ArrayListUnmanaged(struct { CellHandle, CellHandle.Int }),
 
 /// Stores the null terminated text of string literals. Cells contain an index into this buffer.
 strings_buf: std.ArrayListUnmanaged(u8),
@@ -66,9 +66,9 @@ pub const Dep = extern struct {
     next: DepIndex,
 };
 
-pub const Columns = PhTree(Column, 1);
-pub const Dependents = PhTree(DepIndex, 4);
-pub const CellTree = @import("phtree.zig").PhTree(Cell, 2);
+pub const Columns = PhTree(Column, 1, u32);
+pub const Dependents = PhTree(DepIndex, 4, usize);
+pub const CellTree = @import("phtree.zig").PhTree(Cell, 2, usize);
 pub const CellHandle = CellTree.ValueHandle;
 
 fn createDep(sheet: *Sheet, dep: Dep) !DepIndex {
@@ -343,8 +343,8 @@ pub const Undo = extern struct {
         bulk_cell_insert_contiguous: CellHandleInterval,
 
         const CellHandleInterval = extern struct {
-            start: u32,
-            end: u32,
+            start: CellHandle.Int,
+            end: CellHandle.Int,
         };
     };
 };
@@ -579,9 +579,10 @@ pub fn interpretSource(sheet: *Sheet, reader: anytype) !void {
         tokens.clearRetainingCapacity();
         const ast_nodes_start: u32 = @intCast(sheet.ast_nodes.len);
         const total_strings_len = try sheet.bulkParse(src, arena, &tokens, arena, &cells);
+        assert(cells.len > 0);
 
         const dependent_count = blk: {
-            var dependent_count: u32 = 0;
+            var dependent_count: CellHandle.Int = 0;
             for (sheet.ast_nodes.items(.tag)[ast_nodes_start..]) |tag| {
                 if (tag == .pos) dependent_count += 1;
             }
@@ -589,13 +590,13 @@ pub fn interpretSource(sheet: *Sheet, reader: anytype) !void {
         };
 
         try sheet.cell_tree.ensureUnusedCapacity(sheet.allocator, @intCast(cells.len));
-        try sheet.dependents.ensureUnusedCapacity(sheet.allocator, dependent_count);
+        try sheet.dependents.ensureUnusedCapacity(sheet.allocator, @intCast(dependent_count));
         try sheet.deps.ensureUnusedCapacity(sheet.allocator, dependent_count);
         try sheet.undos.ensureUnusedCapacity(sheet.allocator, cells.len);
 
         try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, total_strings_len);
         try sheet.cols.ensureUnusedCapacity(sheet.allocator, @intCast(cells.len));
-        try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, cells.len);
+        try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, 1);
         errdefer comptime unreachable;
 
         const cells_slice = cells.slice();
@@ -615,15 +616,13 @@ pub fn interpretSource(sheet: *Sheet, reader: anytype) !void {
 
         // Queue up all the to-be-inserted cells for update
         const start_node_index = sheet.cell_tree.values.len;
-        const queue_start_index = sheet.queued_cells.items.len;
-        sheet.queued_cells.items.len += cells.len;
         sheet.cell_tree.values.len += cells.len;
-        assert(sheet.queued_cells.items.len <= sheet.queued_cells.capacity);
         assert(sheet.cell_tree.values.len <= sheet.cell_tree.values.capacity);
 
-        for (sheet.queued_cells.items[queue_start_index..], start_node_index..) |*queued, i| {
-            queued.* = .from(@intCast(i));
-        }
+        sheet.queued_cells.appendAssumeCapacity(.{
+            .from(@intCast(start_node_index)),
+            @intCast(cells.len),
+        });
 
         sheet.has_changes = true;
 
@@ -1218,7 +1217,7 @@ fn bulkDeleteCellHandles(sheet: *Sheet, handles: []const CellHandle) void {
     }
 }
 
-fn bulkDeleteCellHandlesContiguous(sheet: *Sheet, start: u32, end: u32) void {
+fn bulkDeleteCellHandlesContiguous(sheet: *Sheet, start: CellHandle.Int, end: CellHandle.Int) void {
     assert(start < sheet.cell_tree.values.len);
     assert(end <= sheet.cell_tree.values.len);
 
@@ -1237,7 +1236,9 @@ fn bulkDeleteCellHandlesContiguous(sheet: *Sheet, start: u32, end: u32) void {
 // Asserts that the cell tree, dependents tree, have enough capacity.
 // Enqueues the cells for update.
 fn bulkInsertCellHandles(sheet: *Sheet, handles: []const CellHandle) void {
-    sheet.queued_cells.appendSliceAssumeCapacity(handles);
+    for (handles) |handle| {
+        sheet.queued_cells.appendAssumeCapacity(.{ handle, 1 });
+    }
 
     for (handles) |handle| {
         const cell = sheet.getCellFromHandle(handle);
@@ -1249,10 +1250,11 @@ fn bulkInsertCellHandles(sheet: *Sheet, handles: []const CellHandle) void {
     }
 }
 
-fn bulkInsertCellHandlesContiguous(sheet: *Sheet, start: u32, end: u32) void {
+fn bulkInsertCellHandlesContiguous(sheet: *Sheet, start: CellHandle.Int, end: CellHandle.Int) void {
     assert(start < sheet.cell_tree.values.len);
     assert(end <= sheet.cell_tree.values.len);
 
+    sheet.queued_cells.appendAssumeCapacity(.{ .from(start), end - start });
     for (start..end) |i| {
         const handle: CellHandle = .from(@intCast(i));
         const cell = sheet.getCellFromHandle(handle);
@@ -1260,7 +1262,6 @@ fn bulkInsertCellHandlesContiguous(sheet: *Sheet, start: u32, end: u32) void {
         const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
         assert(!removed.isValid());
         sheet.addExpressionDependents(handle, cell.expr_root);
-        sheet.queued_cells.appendAssumeCapacity(handle);
         cell.state = .enqueued;
     }
 }
@@ -1560,7 +1561,7 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
     try sheet.ensureUnusedAstNodeCapacity(area);
     // One for deleting existing cells, one for inserting new cells
     try sheet.ensureUnusedUndoCapacity(2);
-    try sheet.ensureUnusedCellQueueCapacity(area);
+    try sheet.ensureUnusedCellQueueCapacity(1);
     try sheet.ensureUnusedCellBufferCapacity(area + 1);
     try sheet.ensureUnusedColumnCapacity(range.width());
     errdefer comptime unreachable;
@@ -1584,6 +1585,7 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
     sheet.createColumnRangeAssumeCapacity(range);
 
     const cells_start = sheet.bulkCreateCellRange(range);
+    sheet.queued_cells.appendAssumeCapacity(.{ cells_start, area });
     for (0..area) |i| {
         const handle: CellHandle = .from(@intCast(i + cells_start.n));
         const expr: ast.Index = .from(@intCast(i + ast_start));
@@ -1592,7 +1594,6 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
             .expr_root = expr,
             .strings = .invalid,
         };
-        sheet.queued_cells.appendAssumeCapacity(handle);
     }
 
     sheet.bulkInsertContiguousCells(cells_start, opts);
@@ -1606,7 +1607,7 @@ pub fn bulkCreateCellRange(sheet: *Sheet, range: Rect) CellHandle {
     const start: CellHandle = .from(@intCast(sheet.cell_tree.values.len));
     sheet.cell_tree.values.len += area;
 
-    var i: u32 = start.n;
+    var i = start.n;
     var y: u64 = range.tl.y;
     while (y <= range.br.y) : (y += 1) {
         var x: u64 = range.tl.x;
@@ -1692,7 +1693,7 @@ pub fn bulkSetCellExpr(
     try sheet.ensureUnusedCellCapacity(area);
     try sheet.ensureUnusedStringsCapacity(@intCast(source.len));
     if (need_cell_eval)
-        try sheet.ensureUnusedCellQueueCapacity(area);
+        try sheet.ensureUnusedCellQueueCapacity(1);
     try sheet.ensureExpressionDependentsCapacity(expr);
     try sheet.ensureUnusedColumnCapacity(width);
     try sheet.ensureUnusedUndoCapacity(2);
@@ -1728,6 +1729,7 @@ pub fn bulkSetCellExpr(
         const start = sheet.deps.items.len;
         sheet.deps.items.len += area;
         const new_deps = sheet.deps.items[start..];
+        // TODO: Make this suck less
         for (new_deps, 1.., handles_start..) |*dep, i, handle_index| {
             dep.* = .{
                 .handle = .from(@intCast(handle_index)),
@@ -1739,13 +1741,7 @@ pub fn bulkSetCellExpr(
     }
 
     if (need_cell_eval) {
-        for (
-            utils.appendManyAssumeCapacity(CellHandle, &sheet.queued_cells, area),
-            handles_start..,
-        ) |*queued_cell, handle_index| {
-            const handle: CellHandle = .from(@intCast(handle_index));
-            queued_cell.* = handle;
-        }
+        sheet.queued_cells.appendAssumeCapacity(.{ .from(@intCast(handles_start)), area });
     }
 
     sheet.createColumnRangeAssumeCapacity(range);
@@ -2034,11 +2030,13 @@ pub fn deleteColumnRange(
         assert(n.isValid());
         while (n.isValid()) : (n = sheet.deps.items[n.n].next) {
             const cell_handle = sheet.deps.items[n.n].handle;
-            sheet.queued_cells.appendAssumeCapacity(cell_handle);
+            sheet.queued_cells.appendAssumeCapacity(.{ cell_handle, 1 });
             sheet.getCellFromHandle(cell_handle).state = .enqueued;
         }
     }
-    sheet.queued_cells.appendSliceAssumeCapacity(cells.items);
+    for (cells.items) |handle| {
+        sheet.queued_cells.appendAssumeCapacity(.{ handle, 1 });
+    }
 
     for (cells.items) |handle| {
         const p = sheet.cell_tree.getPoint(handle);
@@ -2280,11 +2278,13 @@ pub fn deleteRowRange(
         assert(n.isValid());
         while (n.isValid()) : (n = sheet.deps.items[n.n].next) {
             const cell_handle = sheet.deps.items[n.n].handle;
-            sheet.queued_cells.appendAssumeCapacity(cell_handle);
+            sheet.queued_cells.appendAssumeCapacity(.{ cell_handle, 1 });
             sheet.getCellFromHandle(cell_handle).state = .enqueued;
         }
     }
-    sheet.queued_cells.appendSliceAssumeCapacity(cells.items);
+    for (cells.items) |handle| {
+        sheet.queued_cells.appendAssumeCapacity(.{ handle, 1 });
+    }
 
     for (cells.items) |handle| {
         const p = sheet.cell_tree.getPoint(handle);
@@ -2762,8 +2762,12 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
     var dirty_cells: std.ArrayList(CellHandle) = .init(sfa.get());
     defer dirty_cells.deinit();
 
-    for (sheet.queued_cells.items) |cell| {
-        try sheet.markDirty(cell, &dirty_cells);
+    for (sheet.queued_cells.items) |data| {
+        const cell_start, const len = data;
+        for (cell_start.n..cell_start.n + len) |i| {
+            const handle: CellHandle = .from(@intCast(i));
+            try sheet.markDirty(handle, &dirty_cells);
+        }
     }
 
     while (dirty_cells.pop()) |cell| {
@@ -2772,17 +2776,21 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
     // log.debug("Finished marking", .{});
 
     // All dirty cells are reachable from the cells in queued_cells
-    while (sheet.queued_cells.pop()) |handle| {
-        _ = sheet.evalCellByHandle(handle) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.CyclicalReference => {
-                // const point = sheet.cell_tree.getPoint(handle).*;
-                // log.info("Cyclical reference encountered while evaluating {}", .{
-                //     Position.init(point[0], point[1]),
-                // });
-            },
-            else => {},
-        };
+    while (sheet.queued_cells.pop()) |data| {
+        const handle_start, const len = data;
+        for (handle_start.n..handle_start.n + len) |i| {
+            const handle: CellHandle = .from(@intCast(i));
+            _ = sheet.evalCellByHandle(handle) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.CyclicalReference => {
+                    // const point = sheet.cell_tree.getPoint(handle).*;
+                    // log.info("Cyclical reference encountered while evaluating {}", .{
+                    //     Position.init(point[0], point[1]),
+                    // });
+                },
+                else => {},
+            };
+        }
     }
 
     if (builtin.mode == .Debug) {
@@ -2796,7 +2804,7 @@ pub fn enqueueUpdate(
     sheet: *Sheet,
     handle: CellHandle,
 ) Allocator.Error!void {
-    try sheet.queued_cells.append(sheet.allocator, handle);
+    try sheet.queued_cells.append(sheet.allocator, .{ handle, 1 });
     sheet.getCellFromHandle(handle).state = .enqueued;
 }
 
@@ -2970,7 +2978,7 @@ fn queueDependents(sheet: *Sheet, rect: Rect) Allocator.Error!void {
             const cell = sheet.getCellFromHandle(handle);
             if (cell.state == .dirty) {
                 cell.state = .enqueued;
-                try sheet.queued_cells.append(sheet.allocator, handle);
+                try sheet.queued_cells.append(sheet.allocator, .{ handle, 1 });
             }
         }
     }

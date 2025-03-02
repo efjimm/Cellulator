@@ -1,6 +1,7 @@
 .{
-    .name = "Cellulator",
+    .name = .cellulator,
     .version = "0.0.1",
+    .fingerprint = 0x8fddb1270ef3230f,
     .paths = .{
         "src",
         "build.zig",
@@ -8,16 +9,15 @@
     },
     .dependencies = .{
         .shovel = .{
-            .url = "git+https://github.com/efjimm/shovel?ref=master#e2ea13176ed75e8219cbd7f7102485222b89c797",
-            .hash = "12209644c9a6831e506ac35a000eae0f48760bdef765632f6ffba76049d4d56be4dd",
+            .url = "git+https://github.com/efjimm/shovel?ref=master#cacf89267206d2dd52197f6b922b7cf69c18687e",
+            .hash = "shovel-0.1.0-WAlYzH3UBQCYfFJ9Tm-74kt7irkNl3jclnLlgx66sf1v",
         },
         .wcwidth = .{
-            .url = "git+https://github.com/efjimm/zig-wcwidth?ref=master#d3fde4f6d76d6208cee59ac570772275339d3c10",
-            .hash = "12200686ad8c1d0cb234f282a6ac3cfd38071b81fab2b7c74654d7a2bf3655575929",
+            .url = "git+https://github.com/efjimm/zig-wcwidth?ref=master#2872d6dfd5b4c6e2785065a851d744fd3b670ca1",
+            .hash = "wcwidth-1.0.0--VafOOvKAABO48aMATSMlqEhATb_QqKgJ6Pjz_JqMBPU",
         },
         .ziglua = .{
-            .url = "git+https://github.com/natecraddock/ziglua?ref=main#00a3c39c587b1b853748c05b5f5c1dc68f5f3683",
-            .hash = "1220ee6d36df8c7847234ff5212eb7fc857d284b0d2eccb47cb9ba04ce089d4d1472",
+            .path = "ziglua",
         },
     },
 }

@@ -10,11 +10,11 @@ const runtime_safety = switch (@import("builtin").mode) {
     .ReleaseFast, .ReleaseSmall => false,
 };
 
-pub fn PhTree(comptime V: type, comptime dims: usize) type {
+pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) type {
     return struct {
         root: Handle,
         free: Handle,
-        free_count: u32,
+        free_count: Handle.Int,
         values: std.MultiArrayList(Value).Slice,
         nodes: std.MultiArrayList(Node).Slice,
 
@@ -45,14 +45,12 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
         pub const Point = [dims]u32;
 
         const Handle = packed struct {
-            n: u32,
+            n: Int,
 
-            fn toAscii(h: Handle) u8 {
-                return @intCast(h.n + 'A');
-            }
+            const Int = HandleInt;
 
-            pub fn from(n: u32) Handle {
-                assert(n != std.math.maxInt(u32));
+            pub fn from(n: Int) Handle {
+                assert(n != std.math.maxInt(Int));
                 return .{ .n = n };
             }
 
@@ -60,7 +58,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
                 return handle != invalid;
             }
 
-            pub const invalid: Handle = .{ .n = std.math.maxInt(u32) };
+            pub const invalid: Handle = .{ .n = std.math.maxInt(Int) };
 
             pub fn format(
                 handle: Handle,
@@ -77,14 +75,12 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
         };
 
         pub const ValueHandle = packed struct {
-            n: u32,
+            n: Int,
 
-            fn toAscii(h: ValueHandle) u8 {
-                return @intCast(h.n + 'A');
-            }
+            pub const Int = Handle.Int;
 
-            pub fn from(n: u32) ValueHandle {
-                assert(n != std.math.maxInt(u32));
+            pub fn from(n: Int) ValueHandle {
+                assert(n != std.math.maxInt(Int));
                 return .{ .n = n };
             }
 
@@ -92,7 +88,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
                 return handle != invalid;
             }
 
-            pub const invalid: ValueHandle = .{ .n = std.math.maxInt(u32) };
+            pub const invalid: ValueHandle = .{ .n = std.math.maxInt(Int) };
 
             pub fn format(
                 handle: ValueHandle,
@@ -226,14 +222,11 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             const handle = tree.createEntryAssumeCapacity();
             assert(handle.isValid());
 
-            const one: u32 = 1;
-            const max: u32 = std.math.maxInt(u32);
-            const pl: u5 = @intCast(postfix_length);
-            const key_mask = if (pl < 31) (max << (pl + 1)) else 0;
+            const key_mask = std.math.shl(u32, std.math.maxInt(u32), postfix_length + 1);
             var new_point = p.*;
             for (&new_point) |*v| {
                 v.* &= key_mask;
-                v.* |= one << pl;
+                v.* |= @as(u32, 1) << @intCast(postfix_length);
             }
 
             tree.nodes.set(handle.n, .{
@@ -378,8 +371,8 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             return tree.handleNodeCollision(handle, child_node, p, kv);
         }
 
-        pub fn ensureUnusedCapacity(tree: *@This(), allocator: Allocator, n: u32) Allocator.Error!void {
-            const count = std.math.mul(u32, n, 2) catch return error.OutOfMemory;
+        pub fn ensureUnusedCapacity(tree: *@This(), allocator: Allocator, n: Handle.Int) Allocator.Error!void {
+            const count = std.math.mul(Handle.Int, n, 2) catch return error.OutOfMemory;
             if (tree.nodes.len + count > tree.nodes.capacity) {
                 var m = tree.nodes.toMultiArrayList();
                 try m.setCapacity(allocator, m.len * 2 + count);
@@ -464,11 +457,6 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
             return tree.insertAssumeCapacity(p, kv);
         }
 
-        fn hasCapacity(tree: *@This(), n: u32) bool {
-            const unused_entries = tree.nodes.capacity - tree.nodes.len;
-            return n <= tree.free_count + unused_entries;
-        }
-
         pub fn insertAssumeCapacity(tree: *@This(), p: *const Point, kv: ValueHandle) ValueHandle {
             // assert(tree.hasCapacity(2));
             assert(tree.root.isValid());
@@ -530,7 +518,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
                             i,
                             child_entry.data.value,
                             child_entry.point,
-                            child_entry.parent.toAscii(),
+                            @as(u8, @intCast(child_entry.parent.n + 'A')),
                         });
                     } else {
                         std.debug.print("  {b:0>2}: invalid\n", .{i});
@@ -823,13 +811,13 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
         }
 
         pub const Header = extern struct {
-            nodes_len: u32,
-            nodes_cap: u32,
-            values_len: u32,
-            values_cap: u32,
+            nodes_len: Handle.Int,
+            nodes_cap: Handle.Int,
+            values_len: Handle.Int,
+            values_cap: Handle.Int,
             root: Handle,
             free: Handle,
-            free_count: u32,
+            free_count: Handle.Int,
         };
 
         pub const IoVecs = blk: {
@@ -977,7 +965,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize) type {
 }
 
 test "Basics" {
-    var tree: PhTree([*:0]const u8, 2) = try .init(std.testing.allocator);
+    var tree: PhTree([*:0]const u8, 2, u32) = try .init(std.testing.allocator);
     defer tree.deinit(std.testing.allocator);
 
     const kv1 = try tree.createValue(std.testing.allocator, &.{ 1, 1 }, "1, 1! :D");
@@ -1000,11 +988,11 @@ fn fuzz(_: void, input: []const u8) anyerror!void {
     // const file = try std.fs.cwd().createFile("out.txt", .{ .truncate = true });
     // defer file.close();
 
-    var tree: PhTree(u32, 4) = try .init(std.testing.allocator);
+    var tree: PhTree(u32, 4, u32) = try .init(std.testing.allocator);
     defer tree.deinit(std.testing.allocator);
 
     const KV = extern struct {
-        p: PhTree(u32, 4).Point,
+        p: PhTree(u32, 4, u32).Point,
         value: u32,
     };
 
@@ -1030,7 +1018,7 @@ test "Fuzz phtree" {
 
 test "phtree crash" {
     const expect = std.testing.expect;
-    var tree: PhTree(u32, 1) = try .init(std.testing.allocator);
+    var tree: PhTree(u32, 1, u32) = try .init(std.testing.allocator);
     defer tree.deinit(std.testing.allocator);
 
     try tree.ensureUnusedCapacity(std.testing.allocator, 2);
