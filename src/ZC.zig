@@ -764,6 +764,7 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
         },
         .delete_row => {
             try self.sheet.deleteRowRange(self.cursor.y, self.cursor.y, .{});
+            self.sheet.endUndoGroup();
             self.tui.update(&.{ .column_headings, .cells });
         },
         .insert_column => {
@@ -2329,11 +2330,6 @@ test "Sheet operations" {
     }
 }
 
-test "Something" {
-    var zc: Self = undefined;
-    try zc.init(std.testing.allocator, .{ .ui = false });
-    defer zc.deinit();
-
-    try zc.parseCommand("let C4 = 0");
-    try zc.parseCommand("let ZZZ0 = 5");
+test "germthing" {
+    try testFile(test_files[6]);
 }

@@ -659,7 +659,7 @@ pub fn loadFile(sheet: *Sheet, filepath: []const u8) !void {
     sheet.setFilePath(filepath);
     defer sheet.has_changes = false;
 
-    // log.debug("Loading file {s}", .{filepath});
+    log.debug("Loading file {s}", .{filepath});
 
     sheet.clearRetainingCapacity();
     try sheet.interpretSource(file.reader());
@@ -2040,8 +2040,7 @@ pub fn deleteColumnRange(
 
     for (cells.items) |handle| {
         const p = sheet.cell_tree.getPoint(handle);
-        if (!sheet.cell_tree.isOrphaned(handle))
-            sheet.cell_tree.removeHandle(handle, p);
+        sheet.cell_tree.removeHandle(handle, p);
 
         if (p[0] >= start and p[0] <= end) {
             sheet.removeExprDependents(handle, sheet.getCellFromHandle(handle).expr_root);
@@ -2065,8 +2064,7 @@ pub fn deleteColumnRange(
         const p = sheet.cols.getPoint(handle);
         assert(p[0] >= start);
 
-        if (!sheet.cols.isOrphaned(handle))
-            sheet.cols.removeHandle(handle, p);
+        sheet.cols.removeHandle(handle, p);
 
         if (p[0] > end) {
             p[0] -= end - start + 1;
@@ -2084,12 +2082,11 @@ pub fn deleteColumnRange(
     //  Deletion is before range and does not intersect it
     //   -> Range start and end needs to be decremented, no undo
     for (deps.items) |handle| {
-        if (handle.n >= sheet.dependents.values.len or sheet.dependents.isOrphaned(handle))
+        if (handle.n >= sheet.dependents.values.len)
             continue;
 
         const p = sheet.dependents.getPoint(handle);
-        if (!sheet.dependents.isOrphaned(handle))
-            sheet.dependents.removeHandle(handle, p);
+        sheet.dependents.removeHandle(handle, p);
         if (p[0] >= start) {
             if (p[2] <= end) {
                 // Deletion entirely contains range
@@ -2288,8 +2285,7 @@ pub fn deleteRowRange(
 
     for (cells.items) |handle| {
         const p = sheet.cell_tree.getPoint(handle);
-        if (!sheet.cell_tree.isOrphaned(handle))
-            sheet.cell_tree.removeHandle(handle, p);
+        sheet.cell_tree.removeHandle(handle, p);
 
         if (p[1] >= start and p[1] <= end) {
             sheet.removeExprDependents(handle, sheet.getCellFromHandle(handle).expr_root);
@@ -2318,12 +2314,11 @@ pub fn deleteRowRange(
     //  Deletion is before range and does not intersect it
     //   -> Range start and end needs to be decremented, no undo
     for (deps.items) |handle| {
-        if (handle.n >= sheet.dependents.values.len or sheet.dependents.isOrphaned(handle))
+        if (handle.n >= sheet.dependents.values.len)
             continue;
 
         const p = sheet.dependents.getPoint(handle);
-        if (!sheet.dependents.isOrphaned(handle))
-            sheet.dependents.removeHandle(handle, p);
+        sheet.dependents.removeHandle(handle, p);
         if (p[1] >= start) {
             if (p[3] <= end) {
                 // Deletion entirely contains range
@@ -2992,6 +2987,8 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: CellHandle) ast.EvalError!ast.Eva
         .enqueued, .dirty => {
             cell.state = .computing;
 
+            const pos = sheet.posFromCellHandle(handle);
+            log.debug("eval {}", .{pos});
             // Queue dependents before evaluating to ensure that errors are propagated to
             // dependents.
             try sheet.queueDependents(sheet.rectFromCellHandle(handle));
