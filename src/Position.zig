@@ -46,7 +46,7 @@ pub const Position = packed struct {
     }
 
     pub fn eql(p1: Position, p2: Position) bool {
-        return @as(HashInt, @bitCast(p1)) == @as(HashInt, @bitCast(p2));
+        return p1 == p2;
     }
 
     pub fn topLeft(pos1: Position, pos2: Position) Position {

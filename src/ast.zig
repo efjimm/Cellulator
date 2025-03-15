@@ -683,7 +683,7 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var total: f64 = 0;
-            var results: std.ArrayList(Sheet.CellHandle) = .init(self.allocator);
+            var results: std.ArrayList(Sheet.Cell.Handle) = .init(self.allocator);
             defer results.deinit();
             try self.sheet.cell_tree.queryWindow(
                 &.{ range.tl.x, range.tl.y },
@@ -721,7 +721,7 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var total: f64 = 1;
-            var results: std.ArrayList(Sheet.CellHandle) = .init(self.allocator);
+            var results: std.ArrayList(Sheet.Cell.Handle) = .init(self.allocator);
             defer results.deinit();
             try self.sheet.cell_tree.queryWindow(
                 &.{ range.tl.x, range.tl.y },
@@ -796,7 +796,7 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var max: ?f64 = null;
-            var results: std.ArrayList(Sheet.CellHandle) = .init(self.allocator);
+            var results: std.ArrayList(Sheet.Cell.Handle) = .init(self.allocator);
             defer results.deinit();
             try self.sheet.cell_tree.queryWindow(
                 &.{ range.tl.x, range.tl.y },
@@ -839,7 +839,7 @@ pub fn EvalContext(comptime Context: type) type {
             const range = self.toPosRange(r);
 
             var min: ?f64 = null;
-            var results: std.ArrayList(Sheet.CellHandle) = .init(self.allocator);
+            var results: std.ArrayList(Sheet.Cell.Handle) = .init(self.allocator);
             defer results.deinit();
             try self.sheet.cell_tree.queryWindow(
                 &.{ range.tl.x, range.tl.y },
@@ -904,7 +904,7 @@ pub fn eval(
 test "Parse and Eval Expression" {
     const t = std.testing;
     const Context = struct {
-        pub fn evalCellByHandle(_: @This(), _: Sheet.CellHandle) !EvalResult {
+        pub fn evalCellByHandle(_: @This(), _: Sheet.Cell.Handle) !EvalResult {
             unreachable;
         }
 
@@ -1053,7 +1053,7 @@ test "Functions on Ranges" {
 //             return .none;
 //         }
 
-//         pub fn evalCellByHandle(_: @This(), _: Sheet.CellHandle) !EvalResult {
+//         pub fn evalCellByHandle(_: @This(), _: Sheet.Cell.Handle) !EvalResult {
 //             return .none;
 //         }
 //     };

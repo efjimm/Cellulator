@@ -10,7 +10,8 @@ const PosInt = Position.Int;
 const wcWidth = @import("wcwidth").wcWidth;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
-const Col = Sheet.Column;
+const Cell = Sheet.Cell;
+const Column = Sheet.Column;
 
 const Term = spoon.Term;
 
@@ -18,7 +19,7 @@ term: Term,
 update_flags: UpdateFlags = .all,
 
 /// Used by rendering to store all cells currently visible on the screen
-cells: std.ArrayListUnmanaged(Sheet.CellHandle) = .empty,
+cells: std.ArrayListUnmanaged(Cell.Handle) = .empty,
 
 /// Used by rendering to store all columns currently visible on the screen
 cols: std.ArrayListUnmanaged(Sheet.Column.Handle) = .empty,
@@ -297,7 +298,7 @@ pub fn renderColumnHeadings(
 
     // TODO: Clean up these calls to getColumn
     while (w < self.term.width) : (x += 1) {
-        const col: Col = zc.sheet.getColumn(x) orelse .{};
+        const col: Column = zc.sheet.getColumn(x) orelse .{};
         const width = @min(self.term.width - reserved_cols, col.width);
 
         var buf: [Position.max_str_len]u8 = undefined;
@@ -368,19 +369,24 @@ pub fn renderCursor(
         const prev_x = blk: {
             var x: u16 = left;
             for (zc.screen_pos.x..zc.prev_cursor.x) |i| {
-                const col: Col = zc.sheet.getColumn(@intCast(i)) orelse .{};
+                const col: Column = zc.sheet.getColumn(@intCast(i)) orelse .{};
                 x += col.width;
             }
             break :blk x;
         };
 
         try rc.setStyle(.{ .fg = .white, .bg = .black });
-
         try rc.moveCursorTo(prev_y, prev_x);
+
         const col_handle = zc.sheet.cols.findEntry(&.{zc.prev_cursor.x});
-        const col = if (col_handle.isValid()) zc.sheet.cols.getValue(col_handle).* else Sheet.Column{};
-        const cell_handle: Sheet.CellHandle = zc.sheet.getCellHandleByPos(zc.prev_cursor) orelse .invalid;
-        try renderCell(rc, zc, zc.prev_cursor, cell_handle, col_handle, col.width);
+        const col =
+            if (col_handle.isValid())
+                zc.sheet.cols.getValue(col_handle).*
+            else
+                Sheet.Column{};
+
+        const cell_handle: Cell.Handle = zc.sheet.getCellHandleByPos(zc.prev_cursor) orelse .invalid;
+        try renderCell(rc, zc, zc.prev_cursor, cell_handle, col.precision, col.width);
 
         try rc.setStyle(.{ .fg = .blue, .bg = .black });
 
@@ -402,7 +408,7 @@ pub fn renderCursor(
 
         var x: u16 = left;
         for (zc.screen_pos.x..zc.cursor.x) |i| {
-            const col: Col = zc.sheet.getColumn(@intCast(i)) orelse .{};
+            const col: Column = zc.sheet.getColumn(@intCast(i)) orelse .{};
             x += col.width;
         }
         break :blk x;
@@ -412,8 +418,8 @@ pub fn renderCursor(
     try rc.moveCursorTo(y, x);
     const col_handle = zc.sheet.cols.findEntry(&.{zc.cursor.x});
     const col = if (col_handle.isValid()) zc.sheet.cols.getValue(col_handle).* else Sheet.Column{};
-    const cell_handle: Sheet.CellHandle = zc.sheet.getCellHandleByPos(zc.cursor) orelse .invalid;
-    try renderCell(rc, zc, zc.cursor, cell_handle, col_handle, col.width);
+    const cell_handle: Cell.Handle = zc.sheet.getCellHandleByPos(zc.cursor) orelse .invalid;
+    try renderCell(rc, zc, zc.cursor, cell_handle, col.precision, col.width);
     try rc.setStyle(.{ .fg = .black, .bg = .blue });
 
     const width = @min(col.width, rc.term.width - left);
@@ -428,8 +434,8 @@ pub fn renderCursor(
     try rc.setStyle(.{ .fg = .white, .bg = .black });
 }
 
-fn isSelected(zc: ZC, pos: Position) bool {
-    return pos.hash() == zc.cursor.hash() or switch (zc.mode) {
+fn isSelected(zc: *const ZC, pos: Position) bool {
+    return pos == zc.cursor or switch (zc.mode) {
         .visual, .select => pos.intersects(zc.anchor, zc.cursor),
         else => false,
     };
@@ -493,10 +499,40 @@ pub fn renderCells(
     rc: *RenderContext,
     zc: *ZC,
 ) !void {
+    const ColContext = struct {
+        zc: *ZC,
+        sheet: *Sheet,
+
+        pub fn newIndex(ctx: @This(), handle: Column.Handle) usize {
+            return ctx.sheet.cols.getPoint(handle)[0] - ctx.zc.screen_pos.x;
+        }
+    };
+
+    const CellContext = struct {
+        sheet: *Sheet,
+        zc: *ZC,
+        col_count: u32,
+
+        pub fn lessThan(ctx: @This(), a: Cell.Handle, b: Cell.Handle) bool {
+            const p1 = ctx.sheet.cell_tree.getPoint(a);
+            const p2 = ctx.sheet.cell_tree.getPoint(b);
+            if (p1[1] == p2[1]) return p1[0] < p2[0];
+            return p1[1] < p2[1];
+        }
+
+        pub fn newIndex(ctx: @This(), handle: Cell.Handle) usize {
+            const p = ctx.sheet.cell_tree.getPoint(handle);
+            const x = p[0] - ctx.zc.screen_pos.x;
+            const y = p[1] - ctx.zc.screen_pos.y;
+            return y * ctx.col_count + x;
+        }
+    };
+
+    const sheet = zc.sheet;
     try rc.setStyle(.{ .fg = .white, .bg = .black });
 
     var cols: std.ArrayList(Sheet.Column.Handle) = self.cols.toManaged(allocator);
-    var cells: std.ArrayList(Sheet.CellHandle) = self.cells.toManaged(allocator);
+    var cells: std.ArrayList(Cell.Handle) = self.cells.toManaged(allocator);
     cols.clearRetainingCapacity();
     cells.clearRetainingCapacity();
 
@@ -511,69 +547,34 @@ pub fn renderCells(
     try cols.ensureTotalCapacity(col_count);
     try cells.ensureTotalCapacity(cell_count);
 
-    zc.sheet.cell_tree.queryWindow(
+    sheet.cell_tree.queryWindow(
         &.{ zc.screen_pos.x, zc.screen_pos.y },
-        &.{ zc.screen_pos.x +| (col_count - 1), zc.screen_pos.y +| (self.term.height - ZC.content_line - 1) },
+        &.{
+            zc.screen_pos.x +| (col_count - 1),
+            zc.screen_pos.y +| (self.term.height - ZC.content_line - 1),
+        },
         &cells,
     ) catch unreachable;
 
-    zc.sheet.cols.queryWindow(
+    sheet.cols.queryWindow(
         &.{zc.screen_pos.x},
         &.{zc.screen_pos.x +| (col_count - 1)},
         &cols,
     ) catch unreachable;
 
-    const sheet = zc.sheet;
-
-    var i = cols.items.len;
-    const old_cols_len = cols.items.len;
-    cols.items.len = col_count;
-    @memset(cols.items[old_cols_len..], .invalid);
-    while (i > 0) {
-        i -= 1;
-        const handle = cols.items[i];
-        const new_index = sheet.cols.getPoint(handle)[0] - zc.screen_pos.x;
-        cols.items[new_index] = handle;
-        cols.items[i] = .invalid;
-    }
-
-    const SortContext = struct {
-        sheet: *Sheet,
-
-        pub fn lessThan(ctx: @This(), a: Sheet.CellHandle, b: Sheet.CellHandle) bool {
-            const p1 = ctx.sheet.cell_tree.getPoint(a);
-            const p2 = ctx.sheet.cell_tree.getPoint(b);
-            if (p1[1] == p2[1]) return p1[0] < p2[0];
-            return p1[1] < p2[1];
-        }
-    };
-
+    const cell_context: CellContext = .{ .sheet = sheet, .zc = zc, .col_count = col_count };
     std.mem.sortUnstable(
-        Sheet.CellHandle,
+        Cell.Handle,
         cells.items,
-        SortContext{ .sheet = zc.sheet },
-        SortContext.lessThan,
+        cell_context,
+        CellContext.lessThan,
     );
 
-    i = cells.items.len;
-    const old_cells_len = cells.items.len;
-    cells.items.len = cell_count;
-    @memset(cells.items[old_cells_len..], .invalid);
-    while (i > 0) {
-        i -= 1;
-        const handle = cells.items[i];
-        const p = sheet.cell_tree.getPoint(handle);
-        const x = p[0] - zc.screen_pos.x;
-        const y = p[1] - zc.screen_pos.y;
-        const new_index = y * col_count + x;
-        assert(new_index >= i);
-        cells.items[i] = .invalid;
-        cells.items[new_index] = handle;
-    }
+    utils.padList(Cell.Handle, &cells, .invalid, cell_count, cell_context);
+    utils.padList(Column.Handle, &cols, .invalid, col_count, ColContext{ .zc = zc, .sheet = sheet });
 
     const screen_col_start = zc.leftReservedColumns();
     const cells_width = self.term.width - screen_col_start;
-    i = 0;
     var y = zc.screen_pos.y;
     var j: usize = 0;
     while (y - zc.screen_pos.y < height) : (y += 1) {
@@ -586,59 +587,47 @@ pub fn renderCells(
             x += 1;
             j += 1;
         }) {
-            // const rel_y = y - zc.screen_pos.y;
             const rel_x = x - zc.screen_pos.x;
 
             const col_handle = cols.items[rel_x];
-            const col = colFromHandle(sheet, col_handle);
+            const col = if (col_handle.isValid())
+                sheet.cols.getValue(col_handle).*
+            else
+                Sheet.Column{};
             const cell_handle = cells.items[j];
 
             const pos: Position = .init(x, y);
-            if (cell_handle.isValid()) {
-                assert(pos.eql(sheet.posFromCellHandle(cell_handle)));
-            }
+            assert(!cell_handle.isValid() or pos.eql(sheet.posFromCellHandle(cell_handle)));
             const cell_width = @min(col.width, cells_width - w);
-            try renderCell(rc, zc, pos, cell_handle, col_handle, cell_width);
+            try renderCell(rc, zc, pos, cell_handle, col.precision, cell_width);
             w += col.width;
         }
     }
 }
 
-inline fn colFromHandle(sheet: *Sheet, handle: Sheet.Column.Handle) Sheet.Column {
-    return if (handle.isValid())
-        sheet.cols.getValue(handle).*
-    else
-        Sheet.Column{};
-}
-
 fn renderCell(
     rc: *RenderContext,
-    zc: *ZC, // TODO: This should be a field of Self
+    zc: *ZC,
     pos: Position,
-    cell_handle: Sheet.CellHandle,
-    col_handle: Sheet.Column.Handle,
-    width: u16,
+    cell_handle: Cell.Handle,
+    precision: @FieldType(Column, "precision"),
+    width: @FieldType(Column, "width"),
 ) !void {
     const sheet = zc.sheet;
-    const selected = Position.eql(pos, zc.cursor);
-
-    const col = if (col_handle.isValid())
-        sheet.cols.getValue(col_handle).*
-    else
-        Sheet.Column{};
+    const selected = isSelected(zc, pos);
 
     var rpw = rc.cellWriter(width);
     const writer = rpw.writer();
 
     if (cell_handle.isValid()) {
-        const cell: *const Sheet.Cell = sheet.getCellFromHandle(cell_handle);
+        const cell: *const Cell = sheet.getCellFromHandle(cell_handle);
         const tag: CellType = @enumFromInt(@intFromEnum(cell.value_type));
         try rc.setStyle(styles.get(tag)[@intFromBool(selected)]);
 
         switch (cell.value_type) {
             .number => {
                 try writer.print("{d: >[1].[2]}", .{
-                    cell.value.number, width, col.precision,
+                    cell.value.number, width, precision,
                 });
                 try rpw.pad();
             },
@@ -648,14 +637,14 @@ fn renderCell(
                 const left_pad = (width - text_width) / 2;
                 try writer.writeByteNTimes(' ', left_pad);
                 if (cell.isError()) {
-                    if (pos.hash() == zc.cursor.hash()) {
+                    if (pos == zc.cursor) {
                         try writer.writeAll(text);
                         try rpw.pad();
                     } else {
                         try writer.writeAll(text);
                         try rpw.pad();
                     }
-                } else if (pos.hash() != zc.cursor.hash()) {
+                } else if (pos != zc.cursor) {
                     try writer.writeAll(text);
                     try rpw.pad();
                 } else {

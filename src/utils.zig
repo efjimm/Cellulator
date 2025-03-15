@@ -312,3 +312,27 @@ pub fn trimMatchingQuotes(string: []const u8) []const u8 {
 
     return str;
 }
+
+/// Given a list, sets the length to `new_length` and moves each old element to a new index
+/// calculated from the function `ctx.newIndex`. Sets every other index to `empty_value`.
+pub fn padList(
+    comptime T: type,
+    list: anytype,
+    empty_value: T,
+    new_length: usize,
+    ctx: anytype,
+) void {
+    const old_len = list.items.len;
+    var i = old_len;
+    assert(new_length >= old_len);
+    list.items.len = new_length;
+    @memset(list.items[old_len..], empty_value);
+    while (i > 0) {
+        i -= 1;
+        const value = list.items[i];
+        const new_index = ctx.newIndex(value);
+        assert(new_index >= i);
+        list.items[i] = empty_value;
+        list.items[new_index] = value;
+    }
+}
