@@ -36,12 +36,20 @@ pub fn main() !void {
         }
     }
 
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const a = gpa.allocator();
-    // const a = std.heap.c_allocator;
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
-    try zc.init(a, .{ .filepath = filepath, .ui = true });
+    const gpa, const is_debug = gpa: {
+        if (@import("builtin").os.tag == .wasi) break :gpa .{ std.heap.wasm_allocator, false };
+        break :gpa switch (builtin.mode) {
+            .Debug, .ReleaseSafe => .{ debug_allocator.allocator(), true },
+            .ReleaseFast, .ReleaseSmall => .{ std.heap.smp_allocator, false },
+        };
+    };
+    defer if (is_debug) {
+        _ = debug_allocator.deinit();
+    };
+
+    try zc.init(gpa, .{ .filepath = filepath, .ui = true });
     defer zc.deinit();
 
     try zc.run();
