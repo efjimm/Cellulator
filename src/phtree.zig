@@ -25,7 +25,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
         };
 
         pub const Node = extern struct {
-            // TODO: Get rid of this
+            // TODO: Investigate if it's possible to remove this field.
             point: Point,
             parent: Handle,
             children: [1 << dims]Handle,
@@ -66,7 +66,6 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             }
         }
 
-        // TODO: Also set parent reference
         pub fn setChild(
             tree: *const @This(),
             handle: Handle,
@@ -328,20 +327,17 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             }
         }
 
-        // TODO: Make the return type a normal struct instead of a tuple.
+        pub const GetOrPutResult = struct {
+            handle: ValueHandle,
+            value_ptr: *V,
+            found_existing: bool,
+        };
+
         pub fn getOrPut(
             tree: *@This(),
             allocator: Allocator,
             p: *const Point,
-        ) Allocator.Error!struct {
-            /// True if this point already existed in the tree
-            bool,
-            /// Pointer to the value associated with `p`. If no entry previously existed for `p`,
-            /// the value pointed to is undefined.
-            *V,
-            /// Handle of the `Entry` associated with `p`.
-            ValueHandle,
-        } {
+        ) Allocator.Error!GetOrPutResult {
             try tree.ensureUnusedCapacity(allocator, 1);
             return tree.getOrPutAssumeCapacity(p);
         }
@@ -366,19 +362,15 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             return &tree.values.items(.parent)[handle.n];
         }
 
-        pub fn getOrPutAssumeCapacity(tree: *@This(), p: *const Point) struct {
-            /// True if this point already existed in the tree
-            bool,
-            /// Pointer to the value associated with `p`. If no entry previously existed for `p`,
-            /// the value pointed to is undefined.
-            *V,
-            /// Handle of the `Entry` associated with `p`.
-            ValueHandle,
-        } {
+        pub fn getOrPutAssumeCapacity(tree: *@This(), p: *const Point) GetOrPutResult {
             // TODO: This lookup is redundant when the value does not exist
             const h = tree.findEntry(p);
             if (h.isValid()) {
-                return .{ true, tree.getValue(h), h };
+                return .{
+                    .handle = h,
+                    .value_ptr = tree.getValue(h),
+                    .found_existing = true,
+                };
             }
 
             const handle = tree.createValueAssumeCapacity(p, undefined);
@@ -386,7 +378,11 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             assert(!removed_kv.isValid());
 
             const value_ptr = tree.getValue(handle);
-            return .{ false, value_ptr, handle };
+            return .{
+                .handle = handle,
+                .value_ptr = value_ptr,
+                .found_existing = false,
+            };
         }
 
         pub fn insert(
@@ -496,7 +492,6 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
                 const child = child_handle.branch;
                 assert(child.n != handle.n);
 
-                // TODO: Couldn't we derive infix length by comparing parent and child's postfix length?
                 if (tree.getInfixLength(child) == 0) {
                     handle = child;
                     continue;
@@ -760,8 +755,8 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             return null;
         }
 
-        // TODO: Remove redundant point parameter
-        pub fn removeHandle(tree: *@This(), handle: ValueHandle, p: *const Point) void {
+        pub fn removeHandle(tree: *@This(), handle: ValueHandle) void {
+            const p: *const Point = tree.getPoint(handle);
             const parent = tree.getValueParent(handle).*;
             tree.getValueParent(handle).* = .invalid;
             if (!parent.isValid()) {
@@ -808,7 +803,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
         pub fn remove(tree: *@This(), p: *const Point) ?ValueHandle {
             const handle = tree.findEntry(p);
             if (!handle.isValid()) return null;
-            tree.removeHandle(handle, p);
+            tree.removeHandle(handle);
             return handle;
         }
 
@@ -880,18 +875,6 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             .nodes = .empty,
             .values = .empty,
         };
-
-        // TODO: Remove this
-        pub fn init(_: std.mem.Allocator) !@This() {
-            const ret: @This() = .{
-                .root = .{ .leaf = .invalid },
-                .free = .invalid,
-                .free_count = 0,
-                .nodes = .empty,
-                .values = .empty,
-            };
-            return ret;
-        }
 
         pub fn deinit(tree: *@This(), allocator: Allocator) void {
             tree.nodes.deinit(allocator);
@@ -1053,7 +1036,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
 }
 
 test "Basics" {
-    var tree: PhTree([*:0]const u8, 2, u32) = try .init(std.testing.allocator);
+    var tree: PhTree([*:0]const u8, 2, u32) = .empty;
     defer tree.deinit(std.testing.allocator);
 
     const kv1 = try tree.createValue(std.testing.allocator, &.{ 1, 1 }, "1, 1! :D");
@@ -1076,7 +1059,7 @@ fn fuzz(_: void, input: []const u8) anyerror!void {
     // const file = try std.fs.cwd().createFile("out.txt", .{ .truncate = true });
     // defer file.close();
 
-    var tree: PhTree(u32, 4, u32) = try .init(std.testing.allocator);
+    var tree: PhTree(u32, 4, u32) = .empty;
     defer tree.deinit(std.testing.allocator);
 
     const KV = extern struct {
@@ -1088,8 +1071,8 @@ fn fuzz(_: void, input: []const u8) anyerror!void {
     // try file.writeAll(input[0..len]);
     const slice = std.mem.bytesAsSlice(KV, input[0..len]);
     for (slice) |kv| {
-        _, const v, _ = try tree.getOrPut(std.testing.allocator, &kv.p);
-        v.* = kv.value;
+        const res = try tree.getOrPut(std.testing.allocator, &kv.p);
+        res.value_ptr.* = kv.value;
         const value = tree.find(&kv.p).?;
         try std.testing.expectEqual(kv.value, value.*);
     }
@@ -1159,9 +1142,9 @@ test "phtree iterator" {
     };
 
     for (positions, 0..) |pos, i| {
-        const found, const v, _ = try tree.getOrPut(std.testing.allocator, &.{pos});
-        try expect(!found);
-        v.* = i;
+        const res = try tree.getOrPut(std.testing.allocator, &.{pos});
+        try expect(!res.found_existing);
+        res.value_ptr.* = i;
     }
 
     var iter = tree.iterator();
@@ -1178,14 +1161,14 @@ test "phtree iterator" {
 test "phtree query" {
     const a = std.testing.allocator;
     const Tree = PhTree(void, 1, u32);
-    var tree: Tree = try .init(undefined);
+    var tree: Tree = .empty;
     defer tree.deinit(a);
 
     try tree.ensureUnusedCapacity(a, 1000);
 
     for (0..1000) |i| {
-        const found, _, _ = tree.getOrPutAssumeCapacity(&.{@intCast(i)});
-        try std.testing.expect(!found);
+        const res = tree.getOrPutAssumeCapacity(&.{@intCast(i)});
+        try std.testing.expect(!res.found_existing);
     }
 
     const ranges = [_][2]u32{

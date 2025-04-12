@@ -159,25 +159,18 @@ pub fn init(allocator: Allocator) !Sheet {
         .undos = .empty,
         .redos = .empty,
 
-        .cell_tree = undefined,
-        .dependents = undefined,
+        .cell_tree = .empty,
+        .dependents = .empty,
         .ast_nodes = .empty,
         .string_values = .empty,
 
-        .cols = undefined,
+        .cols = .empty,
 
         .search_buffer = .empty,
 
         .arena = .init(allocator),
         .filepath = .{},
     };
-
-    sheet.cols = try .init(allocator);
-    errdefer sheet.cols.deinit(allocator);
-    sheet.cell_tree = try .init(allocator);
-    errdefer sheet.cell_tree.deinit(allocator);
-    sheet.dependents = try .init(allocator);
-    errdefer sheet.dependents.deinit(allocator);
 
     try sheet.undos.ensureTotalCapacity(allocator, 1);
     errdefer sheet.undos.deinit(allocator);
@@ -716,8 +709,9 @@ fn addRangeDependents(
         range.tl.x, range.tl.y,
         range.br.x, range.br.y,
     };
-    const found_existing, const head_ptr, _ = sheet.dependents.getOrPutAssumeCapacity(&p);
-    if (!found_existing) {
+    const res = sheet.dependents.getOrPutAssumeCapacity(&p);
+    const head_ptr = res.value_ptr;
+    if (!res.found_existing) {
         head_ptr.* = .none;
     }
 
@@ -1132,7 +1126,7 @@ pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
 
             const p = sheet.dependents.getPoint(handle);
 
-            _ = sheet.dependents.removeHandle(handle, p);
+            _ = sheet.dependents.removeHandle(handle);
             p.* = new_point;
             _ = sheet.dependents.insertAssumeCapacity(p, handle);
         },
@@ -1168,12 +1162,11 @@ pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
 
 fn bulkDeleteCellHandles(sheet: *Sheet, handles: []const Cell.Handle) void {
     for (handles) |handle| {
-        const p = sheet.cell_tree.getPoint(handle).*;
         const cell = sheet.getCellFromHandle(handle);
         // TODO: Doing this in a separate loop from removeHandle might be better
         sheet.removeExprDependents(handle, cell.expr_root);
         sheet.setCellError(cell);
-        sheet.cell_tree.removeHandle(handle, &p);
+        sheet.cell_tree.removeHandle(handle);
     }
 }
 
@@ -1183,12 +1176,11 @@ fn bulkDeleteCellHandlesContiguous(sheet: *Sheet, start: Cell.Handle.Int, end: C
 
     for (start..end) |i| {
         const handle: Cell.Handle = .from(@intCast(i));
-        const p = sheet.cell_tree.getPoint(handle).*;
         const cell = sheet.getCellFromHandle(handle);
         // TODO: Doing this in a separate loop from removeHandle might be better
         sheet.removeExprDependents(handle, cell.expr_root);
         sheet.setCellError(cell);
-        sheet.cell_tree.removeHandle(handle, &p);
+        sheet.cell_tree.removeHandle(handle);
     }
 }
 
@@ -1503,10 +1495,9 @@ fn deleteCellRangeAssumeCapacity(sheet: *Sheet, range: Rect, opts: UndoOpts) voi
     };
 
     for (existing_cells) |cell_handle| {
-        const p = sheet.cell_tree.getPoint(cell_handle).*;
         const old_cell = sheet.getCellFromHandle(cell_handle);
         sheet.removeExprDependents(cell_handle, old_cell.expr_root);
-        sheet.cell_tree.removeHandle(cell_handle, &p);
+        sheet.cell_tree.removeHandle(cell_handle);
         sheet.setCellError(old_cell);
     }
 
@@ -1622,13 +1613,13 @@ fn createColumnRangeAssumeCapacity(sheet: *Sheet, range: Rect) void {
     for (sheet.cols.values.items(.point)[cols_start..], range.tl.x.., cols_start..) |*p, x, i| {
         p.* = .{@intCast(x)};
         const handle: Column.Handle = .from(@intCast(i));
-        const found_existing, const col_ptr, _ = sheet.cols.getOrPutAssumeCapacity(p);
-        if (found_existing) {
+        const res = sheet.cols.getOrPutAssumeCapacity(p);
+        if (res.found_existing) {
             // Put the new column in the free list
             sheet.cols.destroyValue(handle);
         }
 
-        col_ptr.* = .{};
+        res.value_ptr.* = .{};
     }
 }
 
@@ -1683,8 +1674,9 @@ pub fn bulkSetCellExpr(
             expr_range.tl.x, expr_range.tl.y,
             expr_range.br.x, expr_range.br.y,
         };
-        const found_existing, const head, _ = sheet.dependents.getOrPutAssumeCapacity(&p);
-        if (!found_existing) head.* = .none;
+        const res = sheet.dependents.getOrPutAssumeCapacity(&p);
+        const head = res.value_ptr;
+        if (!res.found_existing) head.* = .none;
 
         const start = sheet.deps.items.len;
         sheet.deps.items.len += area;
@@ -1800,8 +1792,9 @@ pub fn setCell2(
             range.tl.x, range.tl.y,
             range.br.x, range.br.y,
         };
-        const found_existing, const head_ptr, _ = sheet.dependents.getOrPutAssumeCapacity(&p);
-        if (!found_existing) {
+        const res = sheet.dependents.getOrPutAssumeCapacity(&p);
+        const head_ptr = res.value_ptr;
+        if (!res.found_existing) {
             head_ptr.* = .none;
         }
 
@@ -1853,7 +1846,6 @@ pub fn deleteCellByHandle(
     handle: Cell.Handle,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
-    const point = sheet.cell_tree.getPoint(handle).*;
     const cell = sheet.getCellFromHandle(handle);
 
     try sheet.ensureUnusedUndoCapacity(1);
@@ -1862,7 +1854,7 @@ pub fn deleteCellByHandle(
     sheet.removeExprDependents(handle, cell.expr_root);
 
     sheet.setCellError(cell);
-    _ = sheet.cell_tree.removeHandle(handle, &point);
+    _ = sheet.cell_tree.removeHandle(handle);
 
     sheet.pushUndo(.init(.set_cell, handle), undo_opts) catch unreachable;
     sheet.has_changes = true;
@@ -2000,7 +1992,7 @@ pub fn deleteColumnRange(
 
     for (cells.items) |handle| {
         const p = sheet.cell_tree.getPoint(handle);
-        sheet.cell_tree.removeHandle(handle, p);
+        sheet.cell_tree.removeHandle(handle);
 
         if (p[0] >= start and p[0] <= end) {
             sheet.removeExprDependents(handle, sheet.getCellFromHandle(handle).expr_root);
@@ -2024,7 +2016,7 @@ pub fn deleteColumnRange(
         const p = sheet.cols.getPoint(handle);
         assert(p[0] >= start);
 
-        sheet.cols.removeHandle(handle, p);
+        sheet.cols.removeHandle(handle);
 
         if (p[0] > end) {
             p[0] -= end - start + 1;
@@ -2046,7 +2038,7 @@ pub fn deleteColumnRange(
             continue;
 
         const p = sheet.dependents.getPoint(handle);
-        sheet.dependents.removeHandle(handle, p);
+        sheet.dependents.removeHandle(handle);
         if (p[0] >= start) {
             if (p[2] <= end) {
                 // Deletion entirely contains range
@@ -2245,7 +2237,7 @@ pub fn deleteRowRange(
 
     for (cells.items) |handle| {
         const p = sheet.cell_tree.getPoint(handle);
-        sheet.cell_tree.removeHandle(handle, p);
+        sheet.cell_tree.removeHandle(handle);
 
         if (p[1] >= start and p[1] <= end) {
             sheet.removeExprDependents(handle, sheet.getCellFromHandle(handle).expr_root);
@@ -2278,7 +2270,7 @@ pub fn deleteRowRange(
             continue;
 
         const p = sheet.dependents.getPoint(handle);
-        sheet.dependents.removeHandle(handle, p);
+        sheet.dependents.removeHandle(handle);
         if (p[1] >= start) {
             if (p[3] <= end) {
                 // Deletion entirely contains range
@@ -2451,8 +2443,7 @@ pub fn insertColumns(sheet: *Sheet, index: u32, n: u32, undo_opts: UndoOpts) !vo
 
     // Remove affected cols
     for (cols.items) |handle| {
-        const p = sheet.cols.getPoint(handle);
-        sheet.cols.removeHandle(handle, p);
+        sheet.cols.removeHandle(handle);
     }
 
     // Reinsert affected cols with adjusted positions
@@ -2471,7 +2462,7 @@ pub fn insertColumns(sheet: *Sheet, index: u32, n: u32, undo_opts: UndoOpts) !vo
     for (cells.items) |handle| {
         const p = sheet.cell_tree.getPoint(handle);
         assert(p[0] >= index);
-        sheet.cell_tree.removeHandle(handle, p);
+        sheet.cell_tree.removeHandle(handle);
     }
 
     // Re-insert affected cells with adjusted positions
@@ -2486,7 +2477,7 @@ pub fn insertColumns(sheet: *Sheet, index: u32, n: u32, undo_opts: UndoOpts) !vo
     for (deps.items) |handle| {
         const p = sheet.dependents.getPoint(handle);
         assert(p[2] >= p[0]);
-        sheet.dependents.removeHandle(handle, p);
+        sheet.dependents.removeHandle(handle);
     }
 
     // Re-insert affected dependency ranges with adjustments
@@ -2613,7 +2604,7 @@ pub fn insertRows(sheet: *Sheet, index: u32, n: u32, undo_opts: UndoOpts) !void 
     for (cells.items) |handle| {
         const p = sheet.cell_tree.getPoint(handle);
         assert(p[1] >= index);
-        sheet.cell_tree.removeHandle(handle, p);
+        sheet.cell_tree.removeHandle(handle);
     }
 
     // Re-insert affected cells with adjusted positions
@@ -2628,7 +2619,7 @@ pub fn insertRows(sheet: *Sheet, index: u32, n: u32, undo_opts: UndoOpts) !void 
     for (deps.items) |handle| {
         const p = sheet.dependents.getPoint(handle);
         assert(p[3] >= p[1]);
-        sheet.dependents.removeHandle(handle, p);
+        sheet.dependents.removeHandle(handle);
     }
 
     // Re-insert affected dependency ranges with adjustments
@@ -3046,21 +3037,21 @@ fn setRowOrColumn(
 }
 
 pub fn createColumn(sheet: *Sheet, index: PosInt) !Column.Handle {
-    const found, const value_ptr, const handle = try sheet.cols.getOrPut(sheet.allocator, &.{index});
-    if (!found) {
+    const res = try sheet.cols.getOrPut(sheet.allocator, &.{index});
+    if (!res.found_existing) {
         log.debug("Created column {}", .{index});
-        value_ptr.* = .{};
+        res.value_ptr.* = .{};
     }
-    return handle;
+    return res.handle;
 }
 
 pub fn createColumnAssumeCapacity(sheet: *Sheet, index: PosInt) Column.Handle {
-    const found, const value_ptr, const handle = sheet.cols.getOrPutAssumeCapacity(&.{index});
-    if (!found) {
+    const res = sheet.cols.getOrPutAssumeCapacity(&.{index});
+    if (!res.found_existing) {
         log.debug("Created column {}", .{index});
-        value_ptr.* = .{};
+        res.value_ptr.* = .{};
     }
-    return handle;
+    return res.handle;
 }
 
 pub fn getColumn(sheet: *Sheet, index: PosInt) ?Column {
