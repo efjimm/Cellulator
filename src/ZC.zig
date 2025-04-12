@@ -31,7 +31,7 @@ lua_ptr: *Lua,
 
 running: bool = true,
 
-sheet: *Sheet,
+sheet: Sheet,
 tui: Tui,
 
 prev_mode: Mode = .normal,
@@ -145,21 +145,19 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
 
     if (options.ui) try tui.term.uncook(.{});
 
-    const sheet = try Sheet.create(allocator);
-    errdefer sheet.destroy();
-
     var lua_state = try lua.init(zc);
     errdefer lua_state.deinit();
 
     zc.* = Self{
+        .sheet = try .init(allocator),
         .lua_ptr = lua_state,
-        .sheet = sheet,
         .tui = tui,
         .allocator = allocator,
         .keymaps = keys.sheet_keys,
         .command_keymaps = keys.command_keys,
         .input_buf_sfa = std.heap.stackFallback(input_buf_len, allocator),
     };
+    errdefer zc.sheet.deinit();
 
     zc.sourceLua() catch |err| log.err("Could not source init.lua: {}", .{err});
 
@@ -204,7 +202,7 @@ pub fn deinit(self: *Self) void {
     self.keymaps.deinit(self.allocator);
     self.command_keymaps.deinit(self.allocator);
 
-    self.sheet.destroy();
+    self.sheet.deinit();
     self.* = undefined;
 }
 
@@ -257,7 +255,7 @@ pub fn setCell(
 /// Sets the cell at `pos` to the expression represented by `expr`.
 pub fn setCellString(self: *Self, pos: Position, expr: [:0]const u8, opts: ChangeCellOpts) !void {
     // TODO: This leaks memory if `setCell` fails, which can only happen on OOM.
-    const expr_root = try ast.fromExpression(self.sheet, expr);
+    const expr_root = try ast.fromExpression(&self.sheet, expr);
 
     try self.setCell(pos, expr, expr_root, opts);
 }
@@ -876,7 +874,7 @@ fn parseCommand(self: *Self, str: [:0]const u8) !void {
         }
     }
 
-    const expr_root = try ast.fromSource(self.sheet, str);
+    const expr_root = try ast.fromSource(&self.sheet, str);
 
     const pos = self.sheet.ast_nodes.items(.data)[expr_root.n].assignment;
 
@@ -1155,8 +1153,8 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
 
             const arg2 = iter.next() orelse {
                 // TODO: Clean this up on failure
-                // No incrment was provided, so all cells can share the same expression
-                const expr = try ast.fromExpression(self.sheet, str[arg1_start..]);
+                // No increment was provided, so all cells can share the same expression
+                const expr = try ast.fromExpression(&self.sheet, str[arg1_start..]);
                 const node = self.sheet.ast_nodes.get(expr.n);
                 if (node.tag != .number) return error.InvalidSyntax;
 
@@ -1184,7 +1182,7 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
 
             const range = try parseRangeOrPoint(arg1);
 
-            const expr = try ast.fromExpression(self.sheet, expr_str);
+            const expr = try ast.fromExpression(&self.sheet, expr_str);
             try self.sheet.bulkSetCellExpr(range, expr_str, expr, .{});
             self.sheet.endUndoGroup();
             self.tui.update(&.{ .cursor, .cells });
@@ -1338,9 +1336,9 @@ pub fn loadCmdBinary(self: *Self, filepath: []const u8) !void {
     const file = try std.fs.cwd().openFile(filepath, .{});
     defer file.close();
 
-    const old_sheet = self.sheet;
+    var old_sheet = self.sheet;
     self.sheet = try .deserialize(self.allocator, file);
-    old_sheet.destroy();
+    old_sheet.deinit();
 }
 
 pub fn loadCmd(self: *Self, filepath: []const u8) !void {

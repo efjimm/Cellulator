@@ -148,11 +148,8 @@ pub fn rectFromCellHandle(sheet: *Sheet, handle: Cell.Handle) Rect {
     return .initSinglePos(pos);
 }
 
-pub fn create(allocator: Allocator) !*Sheet {
-    const sheet = try allocator.create(Sheet);
-    errdefer allocator.destroy(sheet);
-
-    sheet.* = .{
+pub fn init(allocator: Allocator) !Sheet {
+    var sheet: Sheet = .{
         .allocator = allocator,
         .has_changes = false,
 
@@ -174,6 +171,7 @@ pub fn create(allocator: Allocator) !*Sheet {
         .arena = .init(allocator),
         .filepath = .{},
     };
+
     sheet.cols = try .init(allocator);
     errdefer sheet.cols.deinit(allocator);
     sheet.cell_tree = try .init(allocator);
@@ -188,43 +186,7 @@ pub fn create(allocator: Allocator) !*Sheet {
     return sheet;
 }
 
-pub fn createNoAlloc(allocator: Allocator) !*Sheet {
-    const sheet = try allocator.create(Sheet);
-    errdefer allocator.destroy(sheet);
-
-    sheet.* = .{
-        .allocator = allocator,
-        .has_changes = false,
-
-        .queued_cells = .empty,
-        .strings_buf = .empty,
-
-        .undos = .empty,
-        .redos = .empty,
-
-        .cell_tree = undefined,
-        .dependents = undefined,
-        .ast_nodes = .empty,
-        .string_values = .empty,
-
-        .cols = undefined,
-
-        .search_buffer = .empty,
-
-        .arena = .init(allocator),
-        .filepath = .{},
-    };
-    sheet.cols = try .init(allocator);
-    errdefer sheet.cols.deinit(allocator);
-    sheet.cell_tree = try .init(allocator);
-    errdefer sheet.cell_tree.deinit(allocator);
-    sheet.dependents = try .init(allocator);
-    errdefer sheet.dependents.deinit(allocator);
-
-    return sheet;
-}
-
-pub fn destroy(sheet: *Sheet) void {
+pub fn deinit(sheet: *Sheet) void {
     sheet.strings_buf.deinit(sheet.allocator);
     sheet.search_buffer.deinit(sheet.allocator);
 
@@ -243,7 +205,6 @@ pub fn destroy(sheet: *Sheet) void {
     sheet.deps.deinit(sheet.allocator);
     sheet.cell_buffer.deinit(sheet.allocator);
     sheet.arena.deinit();
-    sheet.allocator.destroy(sheet);
 }
 
 pub fn getCellFromHandle(sheet: *Sheet, handle: Cell.Handle) *Cell {
@@ -416,14 +377,14 @@ pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
     try file.writevAll(&iovecs);
 }
 
-pub fn deserialize(allocator: Allocator, file: std.fs.File) !*Sheet {
+pub fn deserialize(allocator: Allocator, file: std.fs.File) !Sheet {
     const header = try file.reader().readStruct(SerializeHeader);
 
     if (header.magic != SerializeHeader.magic_number) return error.InvalidFile;
     if (header.version != SerializeHeader.binary_version) return error.InvalidVersion;
 
-    const sheet = try createNoAlloc(allocator);
-    errdefer sheet.destroy();
+    var sheet = try Sheet.init(allocator);
+    errdefer sheet.deinit();
 
     sheet.free_deps = header.deps_free;
 
@@ -2941,7 +2902,7 @@ pub const Cell = extern struct {
     };
 
     pub fn fromExpression(sheet: *Sheet, expr: []const u8) !Cell {
-        return .{ .expr_root = try ast.fromExpression(sheet, expr) };
+        return .{ .expr_root = try ast.fromExpression(&sheet, expr) };
     }
 
     pub fn isError(cell: Cell) bool {
@@ -3166,13 +3127,13 @@ pub fn widthNeededForColumn(
 test "Sheet basics" {
     const t = std.testing;
 
-    const sheet = try Sheet.create(t.allocator);
-    defer sheet.destroy();
+    var sheet = try Sheet.init(t.allocator);
+    defer sheet.deinit();
 
     const exprs: []const [:0]const u8 = &.{ "50 + 5", "500 * 2 / 34 + 1", "a0", "a2 * a1" };
 
     for (exprs, 0..) |expr, i| {
-        const root = try ast.fromExpression(sheet, expr);
+        const root = try ast.fromExpression(&sheet, expr);
         try sheet.setCell(.{ .x = 0, .y = @intCast(i) }, expr, root, .{});
     }
 
@@ -3183,18 +3144,18 @@ test "setCell allocations" {
     const t = std.testing;
     const Test = struct {
         fn testSetCellAllocs(a: Allocator) !void {
-            const sheet = try Sheet.create(a);
-            defer sheet.destroy();
+            var sheet = try Sheet.init(a);
+            defer sheet.deinit();
 
             {
                 const expr = "a4 * a1 * a3";
-                const expr_root = try ast.fromExpression(sheet, expr);
+                const expr_root = try ast.fromExpression(&sheet, expr);
                 try sheet.setCell(.{ .x = 0, .y = 0 }, expr, expr_root, .{});
             }
 
             {
                 const expr = "a2 * a1 * a3";
-                const expr_root = try ast.fromExpression(sheet, expr);
+                const expr_root = try ast.fromExpression(&sheet, expr);
                 try sheet.setCell(.{ .x = 1, .y = 0 }, expr, expr_root, .{});
             }
 
@@ -3209,13 +3170,13 @@ test "setCell allocations" {
 
 test "Update values" {
     const t = std.testing;
-    const sheet = try Sheet.create(t.allocator);
-    defer sheet.destroy();
+    var sheet = try Sheet.init(t.allocator);
+    defer sheet.deinit();
 
     try sheet.setCell(
         try Position.fromAddress("C0"),
         "@sum(A0:B0)",
-        try ast.fromExpression(sheet, "@sum(A0:B0)"),
+        try ast.fromExpression(&sheet, "@sum(A0:B0)"),
         .{},
     );
 
@@ -3224,13 +3185,13 @@ test "Update values" {
         try sheet.setCell(
             try Position.fromAddress("A0"),
             str,
-            try ast.fromExpression(sheet, str),
+            try ast.fromExpression(&sheet, str),
             .{},
         );
         try sheet.setCell(
             try Position.fromAddress("B0"),
             "A0",
-            try ast.fromExpression(sheet, "A0"),
+            try ast.fromExpression(&sheet, "A0"),
             .{},
         );
         try sheet.update();
@@ -3242,8 +3203,8 @@ test "Update values" {
 
 fn testCellEvaluation(a: Allocator) !void {
     const t = std.testing;
-    const sheet = try Sheet.create(a);
-    defer sheet.destroy();
+    var sheet = try Sheet.init(a);
+    defer sheet.deinit();
 
     // Set cell values in random order
     const set_cells =
@@ -3418,155 +3379,155 @@ fn testCellEvaluation(a: Allocator) !void {
         }
     }.testCell;
 
-    try testCell(sheet, "A0", 1.00);
-    try testCell(sheet, "B0", 2.00);
-    try testCell(sheet, "C0", 3.00);
-    try testCell(sheet, "D0", 4.00);
-    try testCell(sheet, "E0", 5.00);
-    try testCell(sheet, "F0", 6.00);
-    try testCell(sheet, "G0", 7.00);
-    try testCell(sheet, "H0", 8.00);
-    try testCell(sheet, "A1", 2.00);
-    try testCell(sheet, "B1", 4.00);
-    try testCell(sheet, "C1", 7.00);
-    try testCell(sheet, "D1", 11.00);
-    try testCell(sheet, "E1", 16.00);
-    try testCell(sheet, "F1", 22.00);
-    try testCell(sheet, "G1", 29.00);
-    try testCell(sheet, "A2", 3.00);
-    try testCell(sheet, "B2", 7.00);
-    try testCell(sheet, "C2", 14.00);
-    try testCell(sheet, "D2", 25.00);
-    try testCell(sheet, "E2", 41.00);
-    try testCell(sheet, "F2", 63.00);
-    try testCell(sheet, "G2", 92.00);
-    try testCell(sheet, "A3", 4.00);
-    try testCell(sheet, "B3", 11.00);
-    try testCell(sheet, "C3", 25.00);
-    try testCell(sheet, "D3", 50.00);
-    try testCell(sheet, "E3", 91.00);
-    try testCell(sheet, "F3", 154.00);
-    try testCell(sheet, "G3", 246.00);
-    try testCell(sheet, "A4", 5.00);
-    try testCell(sheet, "B4", 16.00);
-    try testCell(sheet, "C4", 41.00);
-    try testCell(sheet, "D4", 91.00);
-    try testCell(sheet, "E4", 182.00);
-    try testCell(sheet, "F4", 336.00);
-    try testCell(sheet, "G4", 582.00);
-    try testCell(sheet, "A5", 6.00);
-    try testCell(sheet, "B5", 22.00);
-    try testCell(sheet, "C5", 63.00);
-    try testCell(sheet, "D5", 154.00);
-    try testCell(sheet, "E5", 336.00);
-    try testCell(sheet, "F5", 672.00);
-    try testCell(sheet, "G5", 1254.00);
-    try testCell(sheet, "A6", 7.00);
-    try testCell(sheet, "B6", 29.00);
-    try testCell(sheet, "C6", 92.00);
-    try testCell(sheet, "D6", 246.00);
-    try testCell(sheet, "E6", 582.00);
-    try testCell(sheet, "F6", 1254.00);
-    try testCell(sheet, "G6", 2508.00);
-    try testCell(sheet, "A7", 8.00);
-    try testCell(sheet, "B7", 37.00);
-    try testCell(sheet, "C7", 129.00);
-    try testCell(sheet, "D7", 375.00);
-    try testCell(sheet, "E7", 957.00);
-    try testCell(sheet, "F7", 2211.00);
-    try testCell(sheet, "G7", 4719.00);
-    try testCell(sheet, "A8", 9.00);
-    try testCell(sheet, "B8", 46.00);
-    try testCell(sheet, "C8", 175.00);
-    try testCell(sheet, "D8", 550.00);
-    try testCell(sheet, "E8", 1507.00);
-    try testCell(sheet, "F8", 3718.00);
-    try testCell(sheet, "G8", 8437.00);
-    try testCell(sheet, "A9", 10.00);
-    try testCell(sheet, "B9", 56.00);
-    try testCell(sheet, "C9", 231.00);
-    try testCell(sheet, "D9", 781.00);
-    try testCell(sheet, "E9", 2288.00);
-    try testCell(sheet, "F9", 6006.00);
-    try testCell(sheet, "G9", 14443.00);
-    try testCell(sheet, "A10", 11.00);
-    try testCell(sheet, "B10", 67.00);
-    try testCell(sheet, "C10", 298.00);
-    try testCell(sheet, "D10", 1079.00);
-    try testCell(sheet, "E10", 3367.00);
-    try testCell(sheet, "F10", 9373.00);
-    try testCell(sheet, "G10", 23816.00);
-    try testCell(sheet, "A11", 12.00);
-    try testCell(sheet, "B11", 79.00);
-    try testCell(sheet, "C11", 377.00);
-    try testCell(sheet, "D11", 1456.00);
-    try testCell(sheet, "E11", 4823.00);
-    try testCell(sheet, "F11", 14196.00);
-    try testCell(sheet, "G11", 38012.00);
-    try testCell(sheet, "A12", 13.00);
-    try testCell(sheet, "B12", 92.00);
-    try testCell(sheet, "C12", 469.00);
-    try testCell(sheet, "D12", 1925.00);
-    try testCell(sheet, "E12", 6748.00);
-    try testCell(sheet, "F12", 20944.00);
-    try testCell(sheet, "G12", 58956.00);
-    try testCell(sheet, "A13", 14.00);
-    try testCell(sheet, "B13", 106.00);
-    try testCell(sheet, "C13", 575.00);
-    try testCell(sheet, "D13", 2500.00);
-    try testCell(sheet, "E13", 9248.00);
-    try testCell(sheet, "F13", 30192.00);
-    try testCell(sheet, "G13", 89148.00);
-    try testCell(sheet, "A14", 15.00);
-    try testCell(sheet, "B14", 121.00);
-    try testCell(sheet, "C14", 696.00);
-    try testCell(sheet, "D14", 3196.00);
-    try testCell(sheet, "E14", 12444.00);
-    try testCell(sheet, "F14", 42636.00);
-    try testCell(sheet, "G14", 131784.00);
-    try testCell(sheet, "A15", 16.00);
-    try testCell(sheet, "B15", 137.00);
-    try testCell(sheet, "C15", 833.00);
-    try testCell(sheet, "D15", 4029.00);
-    try testCell(sheet, "E15", 16473.00);
-    try testCell(sheet, "F15", 59109.00);
-    try testCell(sheet, "G15", 190893.00);
-    try testCell(sheet, "A16", 17.00);
-    try testCell(sheet, "B16", 154.00);
-    try testCell(sheet, "C16", 987.00);
-    try testCell(sheet, "D16", 5016.00);
-    try testCell(sheet, "E16", 21489.00);
-    try testCell(sheet, "F16", 80598.00);
-    try testCell(sheet, "G16", 271491.00);
-    try testCell(sheet, "A17", 18.00);
-    try testCell(sheet, "B17", 172.00);
-    try testCell(sheet, "C17", 1159.00);
-    try testCell(sheet, "D17", 6175.00);
-    try testCell(sheet, "E17", 27664.00);
-    try testCell(sheet, "F17", 108262.00);
-    try testCell(sheet, "G17", 379753.00);
-    try testCell(sheet, "A18", 19.00);
-    try testCell(sheet, "B18", 191.00);
-    try testCell(sheet, "C18", 1350.00);
-    try testCell(sheet, "D18", 7525.00);
-    try testCell(sheet, "E18", 35189.00);
-    try testCell(sheet, "F18", 143451.00);
-    try testCell(sheet, "G18", 523204.00);
-    try testCell(sheet, "A19", 20.00);
-    try testCell(sheet, "B19", 211.00);
-    try testCell(sheet, "C19", 1561.00);
-    try testCell(sheet, "D19", 9086.00);
-    try testCell(sheet, "E19", 44275.00);
-    try testCell(sheet, "F19", 187726.00);
-    try testCell(sheet, "G19", 710930.00);
-    try testCell(sheet, "A20", 21.00);
-    try testCell(sheet, "B20", 232.00);
-    try testCell(sheet, "C20", 1793.00);
-    try testCell(sheet, "D20", 10879.00);
-    try testCell(sheet, "E20", 55154.00);
-    try testCell(sheet, "F20", 242880.00);
-    try testCell(sheet, "G20", 953810.00);
-    try testCell(sheet, "A22", 4668856.00);
+    try testCell(&sheet, "A0", 1.00);
+    try testCell(&sheet, "B0", 2.00);
+    try testCell(&sheet, "C0", 3.00);
+    try testCell(&sheet, "D0", 4.00);
+    try testCell(&sheet, "E0", 5.00);
+    try testCell(&sheet, "F0", 6.00);
+    try testCell(&sheet, "G0", 7.00);
+    try testCell(&sheet, "H0", 8.00);
+    try testCell(&sheet, "A1", 2.00);
+    try testCell(&sheet, "B1", 4.00);
+    try testCell(&sheet, "C1", 7.00);
+    try testCell(&sheet, "D1", 11.00);
+    try testCell(&sheet, "E1", 16.00);
+    try testCell(&sheet, "F1", 22.00);
+    try testCell(&sheet, "G1", 29.00);
+    try testCell(&sheet, "A2", 3.00);
+    try testCell(&sheet, "B2", 7.00);
+    try testCell(&sheet, "C2", 14.00);
+    try testCell(&sheet, "D2", 25.00);
+    try testCell(&sheet, "E2", 41.00);
+    try testCell(&sheet, "F2", 63.00);
+    try testCell(&sheet, "G2", 92.00);
+    try testCell(&sheet, "A3", 4.00);
+    try testCell(&sheet, "B3", 11.00);
+    try testCell(&sheet, "C3", 25.00);
+    try testCell(&sheet, "D3", 50.00);
+    try testCell(&sheet, "E3", 91.00);
+    try testCell(&sheet, "F3", 154.00);
+    try testCell(&sheet, "G3", 246.00);
+    try testCell(&sheet, "A4", 5.00);
+    try testCell(&sheet, "B4", 16.00);
+    try testCell(&sheet, "C4", 41.00);
+    try testCell(&sheet, "D4", 91.00);
+    try testCell(&sheet, "E4", 182.00);
+    try testCell(&sheet, "F4", 336.00);
+    try testCell(&sheet, "G4", 582.00);
+    try testCell(&sheet, "A5", 6.00);
+    try testCell(&sheet, "B5", 22.00);
+    try testCell(&sheet, "C5", 63.00);
+    try testCell(&sheet, "D5", 154.00);
+    try testCell(&sheet, "E5", 336.00);
+    try testCell(&sheet, "F5", 672.00);
+    try testCell(&sheet, "G5", 1254.00);
+    try testCell(&sheet, "A6", 7.00);
+    try testCell(&sheet, "B6", 29.00);
+    try testCell(&sheet, "C6", 92.00);
+    try testCell(&sheet, "D6", 246.00);
+    try testCell(&sheet, "E6", 582.00);
+    try testCell(&sheet, "F6", 1254.00);
+    try testCell(&sheet, "G6", 2508.00);
+    try testCell(&sheet, "A7", 8.00);
+    try testCell(&sheet, "B7", 37.00);
+    try testCell(&sheet, "C7", 129.00);
+    try testCell(&sheet, "D7", 375.00);
+    try testCell(&sheet, "E7", 957.00);
+    try testCell(&sheet, "F7", 2211.00);
+    try testCell(&sheet, "G7", 4719.00);
+    try testCell(&sheet, "A8", 9.00);
+    try testCell(&sheet, "B8", 46.00);
+    try testCell(&sheet, "C8", 175.00);
+    try testCell(&sheet, "D8", 550.00);
+    try testCell(&sheet, "E8", 1507.00);
+    try testCell(&sheet, "F8", 3718.00);
+    try testCell(&sheet, "G8", 8437.00);
+    try testCell(&sheet, "A9", 10.00);
+    try testCell(&sheet, "B9", 56.00);
+    try testCell(&sheet, "C9", 231.00);
+    try testCell(&sheet, "D9", 781.00);
+    try testCell(&sheet, "E9", 2288.00);
+    try testCell(&sheet, "F9", 6006.00);
+    try testCell(&sheet, "G9", 14443.00);
+    try testCell(&sheet, "A10", 11.00);
+    try testCell(&sheet, "B10", 67.00);
+    try testCell(&sheet, "C10", 298.00);
+    try testCell(&sheet, "D10", 1079.00);
+    try testCell(&sheet, "E10", 3367.00);
+    try testCell(&sheet, "F10", 9373.00);
+    try testCell(&sheet, "G10", 23816.00);
+    try testCell(&sheet, "A11", 12.00);
+    try testCell(&sheet, "B11", 79.00);
+    try testCell(&sheet, "C11", 377.00);
+    try testCell(&sheet, "D11", 1456.00);
+    try testCell(&sheet, "E11", 4823.00);
+    try testCell(&sheet, "F11", 14196.00);
+    try testCell(&sheet, "G11", 38012.00);
+    try testCell(&sheet, "A12", 13.00);
+    try testCell(&sheet, "B12", 92.00);
+    try testCell(&sheet, "C12", 469.00);
+    try testCell(&sheet, "D12", 1925.00);
+    try testCell(&sheet, "E12", 6748.00);
+    try testCell(&sheet, "F12", 20944.00);
+    try testCell(&sheet, "G12", 58956.00);
+    try testCell(&sheet, "A13", 14.00);
+    try testCell(&sheet, "B13", 106.00);
+    try testCell(&sheet, "C13", 575.00);
+    try testCell(&sheet, "D13", 2500.00);
+    try testCell(&sheet, "E13", 9248.00);
+    try testCell(&sheet, "F13", 30192.00);
+    try testCell(&sheet, "G13", 89148.00);
+    try testCell(&sheet, "A14", 15.00);
+    try testCell(&sheet, "B14", 121.00);
+    try testCell(&sheet, "C14", 696.00);
+    try testCell(&sheet, "D14", 3196.00);
+    try testCell(&sheet, "E14", 12444.00);
+    try testCell(&sheet, "F14", 42636.00);
+    try testCell(&sheet, "G14", 131784.00);
+    try testCell(&sheet, "A15", 16.00);
+    try testCell(&sheet, "B15", 137.00);
+    try testCell(&sheet, "C15", 833.00);
+    try testCell(&sheet, "D15", 4029.00);
+    try testCell(&sheet, "E15", 16473.00);
+    try testCell(&sheet, "F15", 59109.00);
+    try testCell(&sheet, "G15", 190893.00);
+    try testCell(&sheet, "A16", 17.00);
+    try testCell(&sheet, "B16", 154.00);
+    try testCell(&sheet, "C16", 987.00);
+    try testCell(&sheet, "D16", 5016.00);
+    try testCell(&sheet, "E16", 21489.00);
+    try testCell(&sheet, "F16", 80598.00);
+    try testCell(&sheet, "G16", 271491.00);
+    try testCell(&sheet, "A17", 18.00);
+    try testCell(&sheet, "B17", 172.00);
+    try testCell(&sheet, "C17", 1159.00);
+    try testCell(&sheet, "D17", 6175.00);
+    try testCell(&sheet, "E17", 27664.00);
+    try testCell(&sheet, "F17", 108262.00);
+    try testCell(&sheet, "G17", 379753.00);
+    try testCell(&sheet, "A18", 19.00);
+    try testCell(&sheet, "B18", 191.00);
+    try testCell(&sheet, "C18", 1350.00);
+    try testCell(&sheet, "D18", 7525.00);
+    try testCell(&sheet, "E18", 35189.00);
+    try testCell(&sheet, "F18", 143451.00);
+    try testCell(&sheet, "G18", 523204.00);
+    try testCell(&sheet, "A19", 20.00);
+    try testCell(&sheet, "B19", 211.00);
+    try testCell(&sheet, "C19", 1561.00);
+    try testCell(&sheet, "D19", 9086.00);
+    try testCell(&sheet, "E19", 44275.00);
+    try testCell(&sheet, "F19", 187726.00);
+    try testCell(&sheet, "G19", 710930.00);
+    try testCell(&sheet, "A20", 21.00);
+    try testCell(&sheet, "B20", 232.00);
+    try testCell(&sheet, "C20", 1793.00);
+    try testCell(&sheet, "D20", 10879.00);
+    try testCell(&sheet, "E20", 55154.00);
+    try testCell(&sheet, "F20", 242880.00);
+    try testCell(&sheet, "G20", 953810.00);
+    try testCell(&sheet, "A22", 4668856.00);
 
     const commands =
         \\let A0 = '1'
@@ -3836,49 +3797,49 @@ pub fn expectCellError(sheet: *Sheet, address: []const u8) !void {
 }
 
 test "Cell error propagation" {
-    const sheet = try Sheet.create(std.testing.allocator);
-    defer sheet.destroy();
+    var sheet = try Sheet.init(std.testing.allocator);
+    defer sheet.deinit();
 
     try sheet.setCell(
         .fromValidAddress("A0"),
         "10",
-        try ast.fromExpression(sheet, "10"),
+        try ast.fromExpression(&sheet, "10"),
         .{},
     );
 
     try sheet.update();
-    try expectCellEquals(sheet, "A0", 10);
+    try expectCellEquals(&sheet, "A0", 10);
 
     try sheet.setCell(
         .fromValidAddress("B0"),
         "A0",
-        try ast.fromExpression(sheet, "A0"),
+        try ast.fromExpression(&sheet, "A0"),
         .{},
     );
 
     try sheet.update();
-    try expectCellEquals(sheet, "B0", 10);
+    try expectCellEquals(&sheet, "B0", 10);
 
     try sheet.setCell(
         .fromValidAddress("A0"),
         "A0",
-        try ast.fromExpression(sheet, "A0"),
+        try ast.fromExpression(&sheet, "A0"),
         .{},
     );
 
     try sheet.update();
-    try expectCellError(sheet, "A0");
-    try expectCellError(sheet, "B0");
+    try expectCellError(&sheet, "A0");
+    try expectCellError(&sheet, "B0");
 }
 
 test "DupeStrings" {
     const t = std.testing;
-    const sheet = try Sheet.create(t.allocator);
-    defer sheet.destroy();
+    var sheet = try Sheet.init(t.allocator);
+    defer sheet.deinit();
 
     {
         const source = "let a0 = 'this is epic' # 'nice' # 'string!'";
-        const expr_root = try ast.fromSource(sheet, source);
+        const expr_root = try ast.fromSource(&sheet, source);
 
         try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, source.len);
         const strings = sheet.dupeAstStrings(
@@ -3892,7 +3853,7 @@ test "DupeStrings" {
 
     {
         const source = "let a0 = b0";
-        const expr_root = try ast.fromSource(sheet, source);
+        const expr_root = try ast.fromSource(&sheet, source);
 
         try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, source.len);
         const strings = sheet.dupeAstStrings(
@@ -3906,8 +3867,8 @@ test "DupeStrings" {
 
 test "Overwrite with string" {
     const t = std.testing;
-    const sheet = try Sheet.create(t.allocator);
-    defer sheet.destroy();
+    var sheet = try Sheet.init(t.allocator);
+    defer sheet.deinit();
 
     inline for (.{
         .{ "A0", "'one'" },
@@ -3917,7 +3878,7 @@ test "Overwrite with string" {
         try sheet.setCell(
             .fromValidAddress(address),
             source,
-            try ast.fromExpression(sheet, source),
+            try ast.fromExpression(&sheet, source),
             .{},
         );
 
@@ -3934,8 +3895,8 @@ test "Overwrite with string" {
 
 test "Overwrite with reference" {
     const t = std.testing;
-    const sheet = try Sheet.create(t.allocator);
-    defer sheet.destroy();
+    var sheet = try Sheet.init(t.allocator);
+    defer sheet.deinit();
 
     inline for (.{
         .{ "A0", "'one'" },
@@ -3945,7 +3906,7 @@ test "Overwrite with reference" {
         try sheet.setCell(
             .fromValidAddress(address),
             source,
-            try ast.fromExpression(sheet, source),
+            try ast.fromExpression(&sheet, source),
             .{},
         );
 
@@ -3972,23 +3933,23 @@ test "Dependencies" {
 
     var fbs = std.io.fixedBufferStream(bytes);
 
-    const sheet = try create(std.testing.allocator);
-    defer sheet.destroy();
+    var sheet = try init(std.testing.allocator);
+    defer sheet.deinit();
 
     try sheet.interpretSource(fbs.reader().any());
     try sheet.update();
 
-    try testSetCell(sheet, "A2", "A0 * 3");
+    try testSetCell(&sheet, "A2", "A0 * 3");
     try sheet.update();
 
-    try testSetCell(sheet, "b0", "2");
+    try testSetCell(&sheet, "b0", "2");
     try sheet.update();
 
-    try expectCellEquals(sheet, "A0", 10);
-    try expectCellEquals(sheet, "A1", 20);
-    try expectCellEquals(sheet, "A2", 30);
-    try expectCellEquals(sheet, "B0", 2);
-    try expectCellEquals(sheet, "B1", 4);
+    try expectCellEquals(&sheet, "A0", 10);
+    try expectCellEquals(&sheet, "A1", 20);
+    try expectCellEquals(&sheet, "A2", 30);
+    try expectCellEquals(&sheet, "B0", 2);
+    try expectCellEquals(&sheet, "B1", 4);
 }
 
 test "Fuzzer input" {
@@ -4012,8 +3973,8 @@ fn fuzzNumbers(_: void, input: []const u8) !void {
         @memcpy(m[8..][0..input.len], input);
     }
 
-    const sheet = try create(std.testing.allocator);
-    defer sheet.destroy();
+    var sheet = try init(std.testing.allocator);
+    defer sheet.deinit();
 
     const Insert = extern struct {
         pos: Position,
@@ -4055,7 +4016,7 @@ fn fuzzNumbers(_: void, input: []const u8) !void {
                 try buf.append(0);
                 const null_terminated_expr = buf.buffer[0 .. buf.len - 1 :0];
 
-                const a = try ast.fromExpression(sheet, null_terminated_expr);
+                const a = try ast.fromExpression(&sheet, null_terminated_expr);
                 try sheet.setCell(pos, buf.constSlice(), a, .{});
             },
             .delete => |pos| {
@@ -4093,38 +4054,38 @@ test "Fuzz sheet" {
 }
 
 test "insert column overflow" {
-    const sheet = try create(std.testing.allocator);
-    defer sheet.destroy();
+    var sheet = try init(std.testing.allocator);
+    defer sheet.deinit();
 
-    try sheet.setCell(.init(std.math.maxInt(u32) - 1, 0), "5", try ast.fromExpression(sheet, "5"), .{});
+    try sheet.setCell(.init(std.math.maxInt(u32) - 1, 0), "5", try ast.fromExpression(&sheet, "5"), .{});
     const res = sheet.insertColumns(0, 2, .{});
     try std.testing.expectError(error.Overflow, res);
 }
 
 test "insert row overflow" {
-    const sheet = try create(std.testing.allocator);
-    defer sheet.destroy();
+    var sheet = try init(std.testing.allocator);
+    defer sheet.deinit();
 
-    try sheet.setCell(.init(0, std.math.maxInt(u32) - 1), "5", try ast.fromExpression(sheet, "5"), .{});
+    try sheet.setCell(.init(0, std.math.maxInt(u32) - 1), "5", try ast.fromExpression(&sheet, "5"), .{});
     try sheet.insertRows(0, 1, .{});
     try std.testing.expectError(error.Overflow, sheet.insertRows(0, 1, .{}));
 }
 
 test "delete col dependency data" {
-    const sheet = try create(std.testing.allocator);
-    defer sheet.destroy();
+    var sheet = try init(std.testing.allocator);
+    defer sheet.deinit();
 
-    try sheet.setCell(.init(0, 0), "b0", try ast.fromExpression(sheet, "b0"), .{});
+    try sheet.setCell(.init(0, 0), "b0", try ast.fromExpression(&sheet, "b0"), .{});
     try std.testing.expect(sheet.dependents.find(&.{ 1, 0, 1, 0 }) != null);
     try sheet.deleteColumnRange(0, 0, .{});
     try std.testing.expect(sheet.dependents.find(&.{ 1, 0, 1, 0 }) == null);
 }
 
 test "delete row dependency data" {
-    const sheet = try create(std.testing.allocator);
-    defer sheet.destroy();
+    var sheet = try init(std.testing.allocator);
+    defer sheet.deinit();
 
-    try sheet.setCell(.init(0, 0), "a1", try ast.fromExpression(sheet, "a1"), .{});
+    try sheet.setCell(.init(0, 0), "a1", try ast.fromExpression(&sheet, "a1"), .{});
     try std.testing.expect(sheet.dependents.find(&.{ 0, 1, 0, 1 }) != null);
     try sheet.deleteRowRange(0, 0, .{});
     try std.testing.expect(sheet.dependents.find(&.{ 0, 1, 0, 1 }) == null);

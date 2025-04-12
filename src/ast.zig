@@ -917,10 +917,10 @@ test "Parse and Eval Expression" {
 
     const testExpr = struct {
         fn func(expected: Error!f64, expr: [:0]const u8) !void {
-            const sheet = try Sheet.create(t.allocator);
-            defer sheet.destroy();
+            var sheet = try Sheet.init(t.allocator);
+            defer sheet.deinit();
 
-            const expr_root = fromExpression(sheet, expr) catch |err| {
+            const expr_root = fromExpression(&sheet, expr) catch |err| {
                 return if (err != expected) err else {};
             };
 
@@ -928,7 +928,7 @@ test "Parse and Eval Expression" {
                 sheet.ast_nodes,
                 expr_root,
                 .init(0, 0),
-                sheet,
+                &sheet,
                 expr,
                 Context{},
             ) catch |err| {
@@ -971,24 +971,24 @@ test "Functions on Ranges" {
     const t = std.testing;
     const Test = struct {
         fn testSheetExpr(expected: f64, expr: [:0]const u8) !void {
-            const sheet = try Sheet.create(t.allocator);
-            defer sheet.destroy();
+            var sheet = try Sheet.init(t.allocator);
+            defer sheet.deinit();
 
-            try sheet.setCell(try Position.fromAddress("A0"), "0", try fromExpression(sheet, "0"), .{});
-            try sheet.setCell(try Position.fromAddress("B0"), "100", try fromExpression(sheet, "100"), .{});
-            try sheet.setCell(try Position.fromAddress("A1"), "500", try fromExpression(sheet, "500"), .{});
-            try sheet.setCell(try Position.fromAddress("B1"), "333.33", try fromExpression(sheet, "333.33"), .{});
+            try sheet.setCell(try Position.fromAddress("A0"), "0", try fromExpression(&sheet, "0"), .{});
+            try sheet.setCell(try Position.fromAddress("B0"), "100", try fromExpression(&sheet, "100"), .{});
+            try sheet.setCell(try Position.fromAddress("A1"), "500", try fromExpression(&sheet, "500"), .{});
+            try sheet.setCell(try Position.fromAddress("B1"), "333.33", try fromExpression(&sheet, "333.33"), .{});
 
-            const expr_root = try fromExpression(sheet, expr);
+            const expr_root = try fromExpression(&sheet, expr);
 
             try sheet.update();
             const res = try eval(
                 sheet.ast_nodes,
                 expr_root,
                 .init(0, 0),
-                sheet,
+                &sheet,
                 "",
-                sheet,
+                &sheet,
             );
             try std.testing.expectApproxEqRel(expected, res.number, 0.0001);
         }
@@ -1058,8 +1058,8 @@ test "Functions on Ranges" {
 //         }
 //     };
 
-//     const sheet = try Sheet.create(t.allocator);
-//     defer sheet.destroy();
+//     const sheet = try Sheet.init(t.allocator);
+//     defer sheet.deinit();
 
 //     const expr_root = try fromSource(sheet, "let a0 = 100 * 3 + 5 / 2 + @avg(1, 10)");
 //     const root_node = sheet.ast_nodes.get(expr_root.n);
@@ -1200,15 +1200,15 @@ test "Print" {
         .{ "@max(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)", "@max(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)" },
     };
 
-    const sheet = try Sheet.create(t.allocator);
-    defer sheet.destroy();
+    var sheet = try Sheet.init(t.allocator);
+    defer sheet.deinit();
 
     inline for (data) |d| {
         const expr, const expected = d;
-        const expr_root = try fromExpression(sheet, expr);
+        const expr_root = try fromExpression(&sheet, expr);
 
         var buf = std.BoundedArray(u8, 4096){};
-        try print(sheet.ast_nodes, expr_root, sheet, expr, buf.writer());
+        try print(sheet.ast_nodes, expr_root, &sheet, expr, buf.writer());
         try t.expectEqualStrings(expected, buf.constSlice());
     }
 }

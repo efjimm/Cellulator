@@ -528,7 +528,7 @@ pub fn renderCells(
         }
     };
 
-    const sheet = zc.sheet;
+    const sheet = &zc.sheet;
     try rc.setStyle(.{ .fg = .white, .bg = .black });
 
     var cols: std.ArrayList(Sheet.Column.Handle) = self.cols.toManaged(allocator);
@@ -613,7 +613,7 @@ fn renderCell(
     precision: @FieldType(Column, "precision"),
     width: @FieldType(Column, "width"),
 ) !void {
-    const sheet = zc.sheet;
+    const sheet = &zc.sheet;
     const selected = isSelected(zc, pos);
 
     var rpw = rc.cellWriter(width);
