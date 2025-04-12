@@ -18,11 +18,7 @@ const Term = spoon.Term;
 term: Term,
 update_flags: UpdateFlags = .all,
 
-/// Used by rendering to store all cells currently visible on the screen
-cells: std.ArrayListUnmanaged(Cell.Handle) = .empty,
-
-/// Used by rendering to store all columns currently visible on the screen
-cols: std.ArrayListUnmanaged(Sheet.Column.Handle) = .empty,
+arena: std.heap.ArenaAllocator,
 
 const UpdateFlags = packed struct {
     command: bool,
@@ -86,15 +82,15 @@ pub fn init(allocator: Allocator) InitError!Self {
         .flags = 0,
     }, null);
 
-    return Self{
+    return .{
         .term = try Term.init(allocator, .{}),
+        .arena = .init(allocator),
     };
 }
 
 pub fn deinit(self: *Self, allocator: Allocator) void {
     self.term.deinit(allocator);
-    self.cells.deinit(allocator);
-    self.cols.deinit(allocator);
+    self.arena.deinit();
     self.* = undefined;
 }
 
@@ -106,7 +102,7 @@ pub fn update(tui: *Self, comptime fields: []const std.meta.FieldEnum(UpdateFlag
 
 pub const RenderError = Term.WriteError;
 
-pub fn render(self: *Self, allocator: Allocator, zc: *ZC) !void {
+pub fn render(self: *Self, zc: *ZC) !void {
     if (needs_resize) {
         try self.term.fetchSize();
         zc.clampScreenToCursor();
@@ -135,7 +131,7 @@ pub fn render(self: *Self, allocator: Allocator, zc: *ZC) !void {
         self.update_flags.row_numbers = false;
     }
     if (self.update_flags.cells) {
-        try self.renderCells(allocator, &rc, zc);
+        try self.renderCells(&rc, zc);
         self.update_flags.cells = false;
         self.update_flags.cursor = false;
     } else if (self.update_flags.cursor) {
@@ -386,7 +382,11 @@ pub fn renderCursor(
                 Sheet.Column{};
 
         const cell_handle: Cell.Handle = zc.sheet.getCellHandleByPos(zc.prev_cursor) orelse .invalid;
-        try renderCell(rc, zc, zc.prev_cursor, cell_handle, col.precision, col.width);
+        const text_attrs_handle = zc.sheet.text_attrs.findEntry(&.{
+            zc.prev_cursor.x,
+            zc.prev_cursor.y,
+        });
+        try renderCell(rc, zc, zc.prev_cursor, cell_handle, col.precision, col.width, text_attrs_handle);
 
         try rc.setStyle(.{ .fg = .blue, .bg = .black });
 
@@ -417,9 +417,18 @@ pub fn renderCursor(
     // Render the cells and headings at the current cursor position with a specific colour.
     try rc.moveCursorTo(y, x);
     const col_handle = zc.sheet.cols.findEntry(&.{zc.cursor.x});
-    const col = if (col_handle.isValid()) zc.sheet.cols.getValue(col_handle).* else Sheet.Column{};
+    const col =
+        if (col_handle.isValid())
+            zc.sheet.cols.getValue(col_handle).*
+        else
+            Sheet.Column{};
+
     const cell_handle: Cell.Handle = zc.sheet.getCellHandleByPos(zc.cursor) orelse .invalid;
-    try renderCell(rc, zc, zc.cursor, cell_handle, col.precision, col.width);
+    const text_attrs_handle = zc.sheet.text_attrs.findEntry(&.{
+        zc.cursor.x,
+        zc.cursor.y,
+    });
+    try renderCell(rc, zc, zc.cursor, cell_handle, col.precision, col.width, text_attrs_handle);
     try rc.setStyle(.{ .fg = .black, .bg = .blue });
 
     const width = @min(col.width, rc.term.width - left);
@@ -493,9 +502,31 @@ fn screenColumnWidth(self: Self, zc: *ZC) u32 {
     return col_count;
 }
 
+fn SheetTreeContext(comptime field_name: []const u8) type {
+    const Handle = @FieldType(Sheet, field_name).ValueHandle;
+    return struct {
+        sheet: *Sheet,
+        zc: *ZC,
+        col_count: u32,
+
+        pub fn lessThan(ctx: @This(), a: Handle, b: Handle) bool {
+            const p1 = @field(ctx.sheet, field_name).getPoint(a);
+            const p2 = @field(ctx.sheet, field_name).getPoint(b);
+            if (p1[1] == p2[1]) return p1[0] < p2[0];
+            return p1[1] < p2[1];
+        }
+
+        pub fn newIndex(ctx: @This(), handle: Handle) usize {
+            const p = @field(ctx.sheet, field_name).getPoint(handle);
+            const x = p[0] - ctx.zc.screen_pos.x;
+            const y = p[1] - ctx.zc.screen_pos.y;
+            return y * ctx.col_count + x;
+        }
+    };
+}
+
 pub fn renderCells(
     self: *Self,
-    allocator: Allocator,
     rc: *RenderContext,
     zc: *ZC,
 ) !void {
@@ -508,61 +539,38 @@ pub fn renderCells(
         }
     };
 
-    const CellContext = struct {
-        sheet: *Sheet,
-        zc: *ZC,
-        col_count: u32,
-
-        pub fn lessThan(ctx: @This(), a: Cell.Handle, b: Cell.Handle) bool {
-            const p1 = ctx.sheet.cell_tree.getPoint(a);
-            const p2 = ctx.sheet.cell_tree.getPoint(b);
-            if (p1[1] == p2[1]) return p1[0] < p2[0];
-            return p1[1] < p2[1];
-        }
-
-        pub fn newIndex(ctx: @This(), handle: Cell.Handle) usize {
-            const p = ctx.sheet.cell_tree.getPoint(handle);
-            const x = p[0] - ctx.zc.screen_pos.x;
-            const y = p[1] - ctx.zc.screen_pos.y;
-            return y * ctx.col_count + x;
-        }
-    };
+    const CellContext = SheetTreeContext("cell_tree");
+    const TextAttrsContext = SheetTreeContext("text_attrs");
 
     const sheet = &zc.sheet;
     try rc.setStyle(.{ .fg = .white, .bg = .black });
 
-    var cols: std.ArrayList(Sheet.Column.Handle) = self.cols.toManaged(allocator);
-    var cells: std.ArrayList(Cell.Handle) = self.cells.toManaged(allocator);
-    cols.clearRetainingCapacity();
-    cells.clearRetainingCapacity();
-
-    defer {
-        self.cols = cols.moveToUnmanaged();
-        self.cells = cells.moveToUnmanaged();
-    }
+    const arena = self.arena.allocator();
+    defer _ = self.arena.reset(.{ .retain_with_limit = comptime std.math.pow(usize, 2, 20) });
 
     const col_count = self.screenColumnWidth(zc);
     const height = self.term.height -| ZC.content_line;
     const cell_count = col_count * height;
-    try cols.ensureTotalCapacity(col_count);
-    try cells.ensureTotalCapacity(cell_count);
 
-    sheet.cell_tree.queryWindow(
-        &.{ zc.screen_pos.x, zc.screen_pos.y },
-        &.{
-            zc.screen_pos.x +| (col_count - 1),
-            zc.screen_pos.y +| (self.term.height - ZC.content_line - 1),
-        },
-        &cells,
-    ) catch unreachable;
+    var cols: std.ArrayList(Sheet.Column.Handle) = try .initCapacity(arena, col_count);
+    var cells: std.ArrayList(Cell.Handle) = try .initCapacity(arena, cell_count);
+    var text_attrs: std.ArrayList(Sheet.TextAttrs.Handle) = try .initCapacity(arena, cell_count);
 
-    sheet.cols.queryWindow(
-        &.{zc.screen_pos.x},
-        &.{zc.screen_pos.x +| (col_count - 1)},
-        &cols,
-    ) catch unreachable;
+    const tl: [2]u32 = .{ zc.screen_pos.x, zc.screen_pos.y };
+    const br: [2]u32 = .{
+        zc.screen_pos.x +| (col_count - 1),
+        zc.screen_pos.y +| (self.term.height - ZC.content_line - 1),
+    };
 
-    const cell_context: CellContext = .{ .sheet = sheet, .zc = zc, .col_count = col_count };
+    sheet.cols.queryWindow(&.{tl[0]}, &.{br[0]}, &cols) catch unreachable;
+    sheet.cell_tree.queryWindow(&tl, &br, &cells) catch unreachable;
+    sheet.text_attrs.queryWindow(&tl, &br, &text_attrs) catch unreachable;
+
+    const cell_context: CellContext = .{
+        .sheet = sheet,
+        .zc = zc,
+        .col_count = col_count,
+    };
     std.mem.sortUnstable(
         Cell.Handle,
         cells.items,
@@ -570,8 +578,27 @@ pub fn renderCells(
         CellContext.lessThan,
     );
 
+    const text_context: TextAttrsContext = .{
+        .sheet = sheet,
+        .zc = zc,
+        .col_count = col_count,
+    };
+    std.mem.sortUnstable(
+        Sheet.TextAttrs.Handle,
+        text_attrs.items,
+        text_context,
+        TextAttrsContext.lessThan,
+    );
+
     utils.padList(Cell.Handle, &cells, .invalid, cell_count, cell_context);
-    utils.padList(Column.Handle, &cols, .invalid, col_count, ColContext{ .zc = zc, .sheet = sheet });
+    utils.padList(Sheet.TextAttrs.Handle, &text_attrs, .invalid, cell_count, text_context);
+    utils.padList(
+        Column.Handle,
+        &cols,
+        .invalid,
+        col_count,
+        ColContext{ .zc = zc, .sheet = sheet },
+    );
 
     const screen_col_start = zc.leftReservedColumns();
     const cells_width = self.term.width - screen_col_start;
@@ -590,16 +617,18 @@ pub fn renderCells(
             const rel_x = x - zc.screen_pos.x;
 
             const col_handle = cols.items[rel_x];
-            const col = if (col_handle.isValid())
-                sheet.cols.getValue(col_handle).*
-            else
-                Sheet.Column{};
+            const col =
+                if (col_handle.isValid())
+                    sheet.cols.getValue(col_handle).*
+                else
+                    Sheet.Column{};
             const cell_handle = cells.items[j];
+            const text_attrs_handle = text_attrs.items[j];
 
             const pos: Position = .init(x, y);
             assert(!cell_handle.isValid() or pos.eql(sheet.posFromCellHandle(cell_handle)));
             const cell_width = @min(col.width, cells_width - w);
-            try renderCell(rc, zc, pos, cell_handle, col.precision, cell_width);
+            try renderCell(rc, zc, pos, cell_handle, col.precision, cell_width, text_attrs_handle);
             w += col.width;
         }
     }
@@ -612,6 +641,7 @@ fn renderCell(
     cell_handle: Cell.Handle,
     precision: @FieldType(Column, "precision"),
     width: @FieldType(Column, "width"),
+    text_attrs_handle: Sheet.TextAttrs.Handle,
 ) !void {
     const sheet = &zc.sheet;
     const selected = isSelected(zc, pos);
@@ -634,7 +664,18 @@ fn renderCell(
             .string => {
                 const text = zc.sheet.cellStringValue(cell);
                 const text_width = utils.strWidth(text, width);
-                const left_pad = (width - text_width) / 2;
+
+                const attrs: Sheet.TextAttrs =
+                    if (text_attrs_handle.isValid())
+                        sheet.text_attrs.getValue(text_attrs_handle).*
+                    else
+                        .default;
+
+                const left_pad = switch (attrs.alignment) {
+                    .left => 0,
+                    .right => width - text_width,
+                    .center => (width - text_width) / 2,
+                };
                 try writer.writeByteNTimes(' ', left_pad);
                 if (cell.isError()) {
                     if (pos == zc.cursor) {

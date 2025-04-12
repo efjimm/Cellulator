@@ -119,6 +119,10 @@ pub const Action = union(enum) {
     insert_column,
     insert_row,
 
+    text_align_left,
+    text_align_right,
+    text_align_center,
+
     visual_move_left,
     visual_move_right,
     visual_move_up,
@@ -376,6 +380,9 @@ const sheet_keys = [_]KeyMaps{
         .parents = &.{},
         .keys = &.{
             .{ "x", .delete_cell },
+            .{ "<<", .text_align_left },
+            .{ ">", .text_align_right },
+            .{ "|", .text_align_center },
         },
     },
     .{
@@ -417,7 +424,7 @@ const sheet_keys = [_]KeyMaps{
     },
     .{
         .type = .normal,
-        .parents = &.{.common_motions},
+        .parents = &.{ .common_keys, .common_motions },
         .keys = &.{
             .{ "<C-[>", .dismiss_count_or_status_message },
             .{ "<Escape>", .dismiss_count_or_status_message },
@@ -442,7 +449,7 @@ const sheet_keys = [_]KeyMaps{
     },
     .{
         .type = .visual,
-        .parents = &.{ .common_motions, .visual_motions },
+        .parents = &.{ .common_keys, .common_motions, .visual_motions },
         .keys = &.{
             .{ "<C-[>", .enter_normal_mode },
             .{ "<Escape>", .enter_normal_mode },

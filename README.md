@@ -76,6 +76,8 @@ implemented commands. Values surrounded in {} are optional.
 - `bw {filepath}` Save to the given filepath in a binary format. This format is significantly
    faster to save/load. Filepath must be specified.
 - `be {filepath}` Load from the given filepath in a binary format.
+- `text-align [cell address] left|right|center` Set the alignment of the text in the specified cell.
+   If the cell address is not given, the cell under the cursor is affected.
 
 ## Expressions
 
@@ -210,6 +212,9 @@ will repeat the following motion that many times. This does not currently work f
 - `aa` Fit column width to contents
 - `u` Undo
 - `U` Redo
+- `<` Align text under cursor to the left
+- `>` Align text under cursor to the right
+- `|` Align text undor cursor to the center
 
 ### Visual Mode
 

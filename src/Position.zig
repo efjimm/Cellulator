@@ -148,7 +148,6 @@ pub const Position = packed struct {
     }
 
     pub const FromAddressError = error{
-        Overflow,
         InvalidCellAddress,
     };
 
@@ -164,7 +163,10 @@ pub const Position = packed struct {
             ret = ret *| 26 +| (std.ascii.toUpper(c) - 'A' + 1);
         }
 
-        return if (ret > @as(HashInt, MAX) + 1) error.Overflow else @intCast(ret - 1);
+        return if (ret > @as(HashInt, MAX) + 1)
+            error.InvalidCellAddress
+        else
+            @intCast(ret - 1);
     }
 
     pub fn fromAddress(address: []const u8) FromAddressError!Position {
@@ -177,10 +179,8 @@ pub const Position = packed struct {
 
         return .{
             .x = try columnFromAddress(address[0..letters_end]),
-            .y = std.fmt.parseInt(Int, address[letters_end..], 0) catch |err| switch (err) {
-                error.Overflow => return error.Overflow,
-                error.InvalidCharacter => return error.InvalidCellAddress,
-            },
+            .y = std.fmt.parseInt(Int, address[letters_end..], 0) catch
+                return error.InvalidCellAddress,
         };
     }
 

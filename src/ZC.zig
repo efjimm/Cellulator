@@ -63,6 +63,9 @@ input_buf: std.ArrayListUnmanaged(u8) = .{},
 status_message_type: StatusMessageType = .info,
 status_message: std.BoundedArray(u8, 256) = .{},
 
+/// Used as scratch space
+arena: std.heap.ArenaAllocator,
+
 const input_buf_len = 256;
 
 pub const status_line = 0;
@@ -148,7 +151,7 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
     var lua_state = try lua.init(zc);
     errdefer lua_state.deinit();
 
-    zc.* = Self{
+    zc.* = .{
         .sheet = try .init(allocator),
         .lua_ptr = lua_state,
         .tui = tui,
@@ -156,6 +159,7 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
         .keymaps = keys.sheet_keys,
         .command_keymaps = keys.command_keys,
         .input_buf_sfa = std.heap.stackFallback(input_buf_len, allocator),
+        .arena = .init(allocator),
     };
     errdefer zc.sheet.deinit();
 
@@ -203,6 +207,7 @@ pub fn deinit(self: *Self) void {
     self.command_keymaps.deinit(self.allocator);
 
     self.sheet.deinit();
+    self.arena.deinit();
     self.* = undefined;
 }
 
@@ -227,7 +232,7 @@ pub fn inputBufSlice(self: *Self) Allocator.Error![:0]const u8 {
 pub fn run(self: *Self) !void {
     while (self.running) {
         try self.updateCells();
-        try self.tui.render(self.allocator, self);
+        try self.tui.render(self);
         try self.handleInput();
     }
 }
@@ -804,6 +809,10 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
             }
         },
         .count => |count| self.setCount(count),
+
+        .text_align_left => try self.setTextAlignment(self.anyCursorRange(), .left),
+        .text_align_right => try self.setTextAlignment(self.anyCursorRange(), .right),
+        .text_align_center => try self.setTextAlignment(self.anyCursorRange(), .center),
         else => {},
     }
 }
@@ -847,6 +856,10 @@ fn doVisualMode(self: *Self, action: Action) Allocator.Error!void {
         .visual_move_down => self.selectionDown(),
         .visual_move_left => self.selectionLeft(),
         .visual_move_right => self.selectionRight(),
+
+        .text_align_left => try self.setTextAlignment(self.anyCursorRange(), .left),
+        .text_align_right => try self.setTextAlignment(self.anyCursorRange(), .right),
+        .text_align_center => try self.setTextAlignment(self.anyCursorRange(), .center),
 
         .delete_cell => {
             defer self.setMode(.normal);
@@ -986,6 +999,7 @@ const Cmd = enum {
     delete_rows,
     insert_columns,
     insert_rows,
+    set_text_align,
 };
 
 const cmds = std.StaticStringMap(Cmd).initComptime(.{
@@ -1007,6 +1021,7 @@ const cmds = std.StaticStringMap(Cmd).initComptime(.{
     .{ "delete-rows", .delete_rows },
     .{ "insert-cols", .insert_columns },
     .{ "insert-rows", .insert_rows },
+    .{ "text-align", .set_text_align },
 });
 
 const DebugCmd = enum {
@@ -1325,7 +1340,52 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
                 self.tui.update(&.{ .cells, .row_numbers, .cursor });
             }
         },
+        .set_text_align => {
+            const usage = "Usage: text-align [cell address or range] left|right|center";
+            const map = std.StaticStringMap(Sheet.TextAttrs.Alignment).initComptime(.{
+                .{ "left", .left },
+                .{ "right", .right },
+                .{ "center", .center },
+            });
+
+            const arg1 = iter.next() orelse {
+                self.setStatusMessage(.err, usage, .{});
+                return;
+            };
+
+            const rect, const value_str =
+                if (iter.next()) |arg2|
+                    .{ try parseRangeOrPoint(arg1), arg2 }
+                else
+                    .{ self.anyCursorRange(), arg1 };
+
+            const new_alignment = map.get(value_str) orelse {
+                self.setStatusMessage(.err, usage, .{});
+                return;
+            };
+            try self.setTextAlignment(rect, new_alignment);
+        },
     }
+}
+
+fn resetArena(self: *Self) void {
+    _ = self.arena.reset(.{
+        .retain_with_limit = comptime std.math.pow(usize, 2, 20),
+    });
+}
+
+// TODO: Integrate with undos and serialization
+fn setTextAlignment(self: *Self, r: Rect, alignment: Sheet.TextAttrs.Alignment) !void {
+    var cells: std.ArrayList(Sheet.Cell.Handle) = .init(self.arena.allocator());
+    defer self.resetArena();
+
+    try self.sheet.cell_tree.queryWindow(&.{ r.tl.x, r.tl.y }, &.{ r.br.x, r.br.y }, &cells);
+    try self.sheet.text_attrs.ensureUnusedCapacity(self.sheet.allocator, cells.items.len);
+
+    for (cells.items) |cell|
+        self.sheet.setTextAlignment(cell, alignment) catch unreachable;
+
+    self.tui.update(&.{.cells});
 }
 
 pub fn loadCmdBinary(self: *Self, filepath: []const u8) !void {

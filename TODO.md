@@ -3,9 +3,8 @@ working on cellulator. It's completely unorganised and some parts are very outda
 might be an interesting read so I committed it. The stuff at the top is probably newer.
 
 - Make kcov reports a flag rather than a separate step
-- Eliminate recursion
-  - Will run into stack overflows with big data. An older implementation of `markDirty` caused
-    one on a large input sheet.
+- Eliminate recursion in the parser
+  - Is this really a serious concern? I should try and reproduce a stack overflow with malicious input
 - Generate fuzzer output files from the build system
 - Store undos and redos in a single list and just keep an index into where the current undo is.
   When an undo happens we can just invert the Undo operation at the index and decrement the index
@@ -13,19 +12,17 @@ might be an interesting read so I committed it. The stuff at the top is probably
 - Unify command and statement parsing
 - Multithreading
 
-- Batch undo cell inserts / deletes
-- Improve fill implementation
-- Remove critbit tree implementation in favour of 1d PH-tree
-  - Add prefix functions to phtree
-
 - Features
-  - Justify text
+  - Align text in cells
+    - Integrate with undos
+    - Integrate with serialization
   - Copy cells
     - Absolute references
     - Virtual copies of cell expressions
       - Would significantly reduce memory usage when copying many cells
       - Requires making cell references in AST nodes relative
   - 'Precision as shown' option
+  - Random numbers
   - Insert cells feature from libreoffice
   - Highlight cells in expression of hovered cell
 

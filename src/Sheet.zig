@@ -59,6 +59,39 @@ filepath: std.BoundedArray(u8, std.fs.max_path_bytes),
 /// Used for temporary allocations
 arena: std.heap.ArenaAllocator,
 
+text_attrs: PhTree(TextAttrs, 2, Cell.Handle.Int),
+
+pub const TextAttrs = extern struct {
+    alignment: Alignment,
+
+    pub const Alignment = enum(u8) {
+        left,
+        right,
+        center,
+    };
+
+    pub const default: TextAttrs = .{
+        .alignment = .center,
+    };
+
+    pub const Handle = @FieldType(Sheet, "text_attrs").ValueHandle;
+};
+
+pub fn setTextAlignment(
+    sheet: *Sheet,
+    cell: Cell.Handle,
+    new_alignment: TextAttrs.Alignment,
+) !void {
+    const res = try sheet.text_attrs.getOrPut(sheet.allocator, sheet.cell_tree.getPoint(cell));
+    if (!res.found_existing)
+        res.value_ptr.* = .default;
+    res.value_ptr.alignment = new_alignment;
+}
+
+pub fn clearTextAttrs(sheet: *Sheet, cell: Cell.Handle) void {
+    _ = sheet.text_attrs.remove(cell);
+}
+
 const arena_retain_size = std.math.pow(usize, 2, 20);
 
 pub const Dep = extern struct {
@@ -170,6 +203,8 @@ pub fn init(allocator: Allocator) !Sheet {
 
         .arena = .init(allocator),
         .filepath = .{},
+
+        .text_attrs = .empty,
     };
 
     try sheet.undos.ensureTotalCapacity(allocator, 1);
@@ -197,6 +232,7 @@ pub fn deinit(sheet: *Sheet) void {
     sheet.string_values.deinit(sheet.allocator);
     sheet.deps.deinit(sheet.allocator);
     sheet.cell_buffer.deinit(sheet.allocator);
+    sheet.text_attrs.deinit(sheet.allocator);
     sheet.arena.deinit();
 }
 
