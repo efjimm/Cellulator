@@ -1027,6 +1027,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             var mask_upper: u32 = 0;
 
             for (p, min, max) |v, minv, maxv| {
+                assert(minv <= maxv);
                 mask_lower = (mask_lower << 1) | @intFromBool(minv >= v);
                 mask_upper = (mask_upper << 1) | @intFromBool(maxv >= v);
             }
@@ -1172,4 +1173,41 @@ test "phtree iterator" {
         try std.testing.expectEqual(i, value.*);
     }
     try std.testing.expectEqual(positions.len, i);
+}
+
+test "phtree query" {
+    const a = std.testing.allocator;
+    const Tree = PhTree(void, 1, u32);
+    var tree: Tree = try .init(undefined);
+    defer tree.deinit(a);
+
+    try tree.ensureUnusedCapacity(a, 1000);
+
+    for (0..1000) |i| {
+        const found, _, _ = tree.getOrPutAssumeCapacity(&.{@intCast(i)});
+        try std.testing.expect(!found);
+    }
+
+    const ranges = [_][2]u32{
+        .{ 1, 1 },
+        .{ 2, 100 },
+        .{ 0, 999 },
+        .{ 1, 999 },
+        .{ 2, 3 },
+    };
+
+    var results: std.ArrayList(Tree.ValueHandle) = .init(a);
+    defer results.deinit();
+
+    for (ranges) |range| {
+        results.clearRetainingCapacity();
+
+        const min, const max = range;
+        try tree.queryWindow(&.{min}, &.{max}, &results);
+        try std.testing.expectEqual(max - min + 1, results.items.len);
+        for (results.items, min..) |item, i| {
+            const p = tree.getPoint(item);
+            try std.testing.expectEqual(i, p[0]);
+        }
+    }
 }
