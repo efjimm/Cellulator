@@ -2387,7 +2387,3 @@ test "Sheet operations" {
         try testFile(path);
     }
 }
-
-test "germthing" {
-    try testFile(test_files[6]);
-}

@@ -1,5 +1,5 @@
 const std = @import("std");
-const ZC = @import("zc");
+const ZC = @import("zc").ZC;
 
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;

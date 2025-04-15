@@ -3,7 +3,7 @@ const utils = @import("utils.zig");
 const Allocator = std.mem.Allocator;
 const Motion = @import("text.zig").Motion;
 const critbit = @import("critbit.zig");
-const shovel = @import("spoon");
+const shovel = @import("shovel");
 const inputParser = shovel.inputParser;
 const Term = shovel.Term;
 

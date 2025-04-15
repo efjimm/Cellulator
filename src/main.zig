@@ -1,23 +1,22 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const ZC = @import("ZC.zig");
+pub const ZC = @import("ZC.zig");
 
-// TODO: Move this to build.zig
-const use_logfile = builtin.mode == .Debug;
-
-var zc: ZC = undefined;
+const log_level = @import("build").log_level;
+const logfile_path = @import("build").logfile_path;
+const use_logfile = logfile_path != null;
 var logfile: if (use_logfile) std.fs.File else void = undefined;
 
+var zc: ZC = undefined;
+
 pub fn main() !void {
-    if (use_logfile) {
-        logfile = try std.fs.cwd().createFile("log.txt", .{});
+    if (logfile_path) |path| {
+        logfile = try std.fs.cwd().createFile(path, .{});
     }
-    defer {
-        if (use_logfile) {
-            logfile.close();
-        }
-    }
+    defer if (use_logfile) {
+        logfile.close();
+    };
 
     var filepath: ?[]const u8 = null;
     var iter = std.process.args();
@@ -63,10 +62,10 @@ fn panic(msg: []const u8, ret_addr: ?usize) noreturn {
 
 pub const Panic = std.debug.FullPanic(panic);
 
-pub const std_options: std.Options = if (use_logfile) .{
-    .log_level = .debug,
+pub const std_options: std.Options = .{
+    .log_level = @field(std.log.Level, @tagName(log_level)),
     .logFn = log,
-} else .{};
+};
 
 pub fn log(
     comptime level: std.log.Level,
@@ -74,6 +73,7 @@ pub fn log(
     comptime format: []const u8,
     args: anytype,
 ) void {
+    if (!use_logfile) return;
     const writer = logfile.writer();
     writer.print("[{s}] {s}: ", .{ @tagName(scope), @tagName(level) }) catch {};
     writer.print(format, args) catch {};
@@ -82,7 +82,5 @@ pub fn log(
 
 // Reference all tests in other modules
 test {
-    if (comptime builtin.is_test) {
-        std.testing.refAllDecls(ZC);
-    }
+    std.testing.refAllDecls(ZC);
 }

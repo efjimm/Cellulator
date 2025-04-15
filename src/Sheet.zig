@@ -661,31 +661,33 @@ pub fn writeFile(
     },
 ) !void {
     const filepath = opts.filepath orelse sheet.filepath.slice();
-    if (filepath.len == 0) {
+    if (filepath.len == 0)
         return error.EmptyFileName;
-    }
 
     var atomic_file = try std.fs.cwd().atomicFile(filepath, .{});
     defer atomic_file.deinit();
 
-    var buf = std.io.bufferedWriter(atomic_file.file.writer());
-    const writer = buf.writer();
+    try sheet.writeContents(atomic_file.file.writer());
+    try atomic_file.finish();
+
+    if (opts.filepath) |path|
+        sheet.setFilePath(path);
+}
+
+pub fn writeContents(sheet: *Sheet, writer: anytype) !void {
+    var buf = std.io.bufferedWriter(writer);
+    const buf_writer = buf.writer();
 
     var iter = sheet.cell_tree.iterator();
     while (iter.next()) |handle| {
         const p = sheet.cell_tree.getPoint(handle).*;
         const pos: Position = .init(p[0], p[1]);
-        try writer.print("let {}=", .{pos});
-        try sheet.printCellExpression(pos, writer);
-        try writer.writeByte('\n');
+        try buf_writer.print("let {}=", .{pos});
+        try sheet.printCellExpression(pos, buf_writer);
+        try buf_writer.writeByte('\n');
     }
 
     try buf.flush();
-    try atomic_file.finish();
-
-    if (opts.filepath) |path| {
-        sheet.setFilePath(path);
-    }
 }
 
 /// Iterator over the cells referenced by an expression, as ranges.

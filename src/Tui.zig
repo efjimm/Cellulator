@@ -1,6 +1,6 @@
 // TODO: this whole file sucks
 const std = @import("std");
-const spoon = @import("spoon");
+const shovel = @import("shovel");
 const utils = @import("utils.zig");
 const bufutils = @import("buffer_utils.zig");
 const ZC = @import("ZC.zig");
@@ -13,7 +13,7 @@ const assert = std.debug.assert;
 const Cell = Sheet.Cell;
 const Column = Sheet.Column;
 
-const Term = spoon.Term;
+const Term = shovel.Term;
 
 term: Term,
 update_flags: UpdateFlags = .all,
@@ -43,7 +43,7 @@ const CellType = enum {
     blank,
 };
 
-const styles = std.EnumArray(CellType, [2]spoon.Style).init(.{
+const styles = std.EnumArray(CellType, [2]shovel.Style).init(.{
     .number = .{
         .{ .fg = .white, .bg = .black },
         .{ .fg = .black, .bg = .blue },
