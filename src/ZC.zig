@@ -12,7 +12,7 @@ const Position = @import("Position.zig").Position;
 const Rect = Position.Rect;
 const PosInt = Position.Int;
 const lua = @import("lua.zig");
-const Lua = @import("ziglua").Lua;
+const Lua = @import("zlua").Lua;
 
 const input = @import("input.zig");
 const Action = input.Action;

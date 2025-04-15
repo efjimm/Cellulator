@@ -15,18 +15,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }).module("wcwidth");
 
-    const ziglua = b.dependency("ziglua", .{
+    const zlua = b.dependency("zlua", .{
         .target = target,
         .optimize = optimize,
         .lang = .lua54,
-    }).module("ziglua");
+    }).module("zlua");
     const zc_mod = b.createModule(.{
         .root_source_file = b.path("src/ZC.zig"),
         .target = target,
         .optimize = optimize,
     });
     zc_mod.addImport("zc", zc_mod);
-    zc_mod.addImport("ziglua", ziglua);
+    zc_mod.addImport("zlua", zlua);
     zc_mod.addImport("spoon", spoon);
     zc_mod.addImport("wcwidth", wcwidth);
 
@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
             .use_lld = !use_native_backend,
         });
 
-        exe.root_module.addImport("ziglua", ziglua);
+        exe.root_module.addImport("zlua", zlua);
         exe.root_module.addImport("spoon", spoon);
         exe.root_module.addImport("wcwidth", wcwidth);
 
@@ -69,7 +69,7 @@ pub fn build(b: *std.Build) void {
             .use_lld = !use_native_backend,
         });
 
-        exe.root_module.addImport("ziglua", ziglua);
+        exe.root_module.addImport("zlua", zlua);
         exe.root_module.addImport("spoon", spoon);
         exe.root_module.addImport("wcwidth", wcwidth);
 
@@ -107,7 +107,7 @@ pub fn build(b: *std.Build) void {
         opts.addOption([]const u8, "temp_dir", temp_dir);
 
         tests.root_module.addOptions("build", opts);
-        tests.root_module.addImport("ziglua", ziglua);
+        tests.root_module.addImport("zlua", zlua);
         tests.root_module.addImport("spoon", spoon);
         tests.root_module.addImport("wcwidth", wcwidth);
 
@@ -153,7 +153,7 @@ pub fn build(b: *std.Build) void {
         });
 
         fill_exe.root_module.addImport("zc", zc_mod);
-        fill_exe.root_module.addImport("ziglua", ziglua);
+        fill_exe.root_module.addImport("zlua", zlua);
         fill_exe.root_module.addImport("spoon", spoon);
         fill_exe.root_module.addImport("wcwidth", wcwidth);
 

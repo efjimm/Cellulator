@@ -1,6 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const Lua = @import("ziglua").Lua;
+const Lua = @import("zlua").Lua;
 
 pub const Position = packed struct {
     pub const Int = u32;
