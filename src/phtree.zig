@@ -346,6 +346,11 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             return &tree.values.items(.point)[handle.n];
         }
 
+        pub fn getValueOrNull(tree: *const @This(), handle: ValueHandle) ?V {
+            if (!handle.isValid()) return null;
+            return tree.getValue(handle).*;
+        }
+
         pub fn getValue(tree: *const @This(), handle: ValueHandle) *V {
             return &tree.values.items(.value)[handle.n];
         }
@@ -967,8 +972,8 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             var p1 = a.*;
             var p2 = b.*;
             for (&p1, &p2) |*v1, *v2| {
-                v1.* >>= @intCast(postfix_length + 1);
-                v2.* >>= @intCast(postfix_length + 1);
+                v1.* = std.math.shr(u32, v1.*, postfix_length + 1);
+                v2.* = std.math.shr(u32, v2.*, postfix_length + 1);
             }
 
             return pointGreaterOrEqual(&p1, &p2);
@@ -978,8 +983,8 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             var p1 = a.*;
             var p2 = b.*;
             for (&p1, &p2) |*v1, *v2| {
-                v1.* >>= @intCast(postfix_length + 1);
-                v2.* >>= @intCast(postfix_length + 1);
+                v1.* = std.math.shr(u32, v1.*, postfix_length + 1);
+                v2.* = std.math.shr(u32, v2.*, postfix_length + 1);
             }
 
             return pointLessOrEqual(&p1, &p2);

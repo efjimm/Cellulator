@@ -56,7 +56,7 @@ pub fn main() !void {
 
 fn panic(msg: []const u8, ret_addr: ?usize) noreturn {
     @branchHint(.cold);
-    zc.tui.term.cook() catch {};
+    zc.ui.term.cook() catch {};
     std.debug.defaultPanic(msg, ret_addr);
 }
 

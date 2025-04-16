@@ -195,14 +195,13 @@ fn checkCellAddress(state: *Lua, raw_index: i32) Position {
         const x = state.toInteger(-2) catch state.typeError(2, "integer");
         const y = state.toInteger(-1) catch state.typeError(2, "integer");
 
-        // NOTE: values here need to be updated when Position's fields are changed to u32
         switch (x) {
-            0...std.math.maxInt(u16) => {},
-            else => state.argError(index, "Invalid x value (min: 0, max: 65535)"),
+            0...std.math.maxInt(Position.Int) => {},
+            else => state.argError(index, "Invalid x value (min: 0, max: 2^32 - 1)"),
         }
         switch (y) {
-            0...std.math.maxInt(u16) => {},
-            else => state.argError(index, "Invalid y value (min: 0, max: 65535)"),
+            0...std.math.maxInt(Position.Int) => {},
+            else => state.argError(index, "Invalid y value (min: 0, max: 2^32 - 1)"),
         }
 
         return .{ .x = @intCast(x), .y = @intCast(y) };

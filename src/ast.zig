@@ -126,7 +126,7 @@ pub fn fromSource2(
     source: [:0]const u8,
     token_tags: []const Token.Tag,
     token_starts: []const u32,
-) ParseError!struct {
+) ParseError!struct { // TODO: Make this a normal struct instead of a tuple
     /// Total byte length of all parsed string literals
     u32,
     u32,

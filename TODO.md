@@ -13,6 +13,7 @@ might be an interesting read so I committed it. The stuff at the top is probably
 - Multithreading
 
 - Features
+  - Rows spanning multiple lines
   - Align text in cells
     - Integrate with undos
     - Integrate with serialization

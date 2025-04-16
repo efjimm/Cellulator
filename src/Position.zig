@@ -77,6 +77,14 @@ pub const Position = packed struct {
         };
     }
 
+    /// Adds the values of two positions. Asserts that the values do not overflow.
+    pub fn add(p1: Position, p2: Position) Position {
+        return .{
+            .x = p1.x + p2.x,
+            .y = p1.y + p2.y,
+        };
+    }
+
     pub fn anyMatch(p1: Position, p2: Position) bool {
         return p1.x == p2.x or p1.y == p2.y;
     }

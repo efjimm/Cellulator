@@ -13,8 +13,8 @@
             .hash = "wcwidth-1.0.0--VafOOvKAABO48aMATSMlqEhATb_QqKgJ6Pjz_JqMBPU",
         },
         .shovel = .{
-            .url = "git+https://github.com/efjimm/shovel?ref=master#8b8a3a8f0474d57ef4704c26d470b0fb2dd4cdf5",
-            .hash = "shovel-0.1.0-WAlYzDnVBQDhoGGWGofrqoZN6-EU09-mIjiD1iKGgEyR",
+            .url = "git+https://github.com/efjimm/shovel?ref=master#e1db7a4195def63c6a205ff705ea06576b5f8be2",
+            .hash = "shovel-0.1.0-WAlYzF_VBQCUcTpUDUhrT0HBOJPUJRWnav6aY3Gh2O95",
         },
         .zlua = .{
             .url = "git+https://github.com/natecraddock/ziglua?ref=main#891945ef9c2bffcd06050c4836d414428ed7d95a",

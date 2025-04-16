@@ -32,7 +32,9 @@ lua_ptr: *Lua,
 running: bool = true,
 
 sheet: Sheet,
-tui: Tui,
+
+// TODO: Use an interface here so we can swap out different UIs
+ui: Tui,
 
 prev_mode: Mode = .normal,
 mode: Mode = .normal,
@@ -67,11 +69,6 @@ status_message: std.BoundedArray(u8, 256) = .{},
 arena: std.heap.ArenaAllocator,
 
 const input_buf_len = 256;
-
-pub const status_line = 0;
-pub const input_line = 1;
-pub const col_heading_line = 2;
-pub const content_line = 3;
 
 pub const Mode = enum {
     normal,
@@ -115,6 +112,22 @@ pub const Mode = enum {
         };
     }
 
+    pub fn isVisual(mode: Mode) bool {
+        return switch (mode) {
+            .visual, .select => true,
+            .normal,
+            .command_normal,
+            .command_insert,
+            .command_change,
+            .command_delete,
+            .command_to_forwards,
+            .command_to_backwards,
+            .command_until_forwards,
+            .command_until_backwards,
+            => false,
+        };
+    }
+
     pub fn format(
         mode: Mode,
         comptime _: []const u8,
@@ -154,7 +167,7 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
     zc.* = .{
         .sheet = try .init(allocator),
         .lua_ptr = lua_state,
-        .tui = tui,
+        .ui = tui,
         .allocator = allocator,
         .keymaps = keys.sheet_keys,
         .command_keymaps = keys.command_keys,
@@ -194,7 +207,7 @@ pub fn sourceLua(self: *Self) !void {
 }
 
 pub fn deinit(self: *Self) void {
-    self.tui.deinit(self.allocator);
+    self.ui.deinit(self.allocator);
 
     // Don't need to free memory on exit, the OS will do it for us :^)
     if (!std.debug.runtime_safety) return;
@@ -232,7 +245,7 @@ pub fn inputBufSlice(self: *Self) Allocator.Error![:0]const u8 {
 pub fn run(self: *Self) !void {
     while (self.running) {
         try self.updateCells();
-        try self.tui.render(self);
+        try self.ui.render(self);
         try self.handleInput();
     }
 }
@@ -251,8 +264,8 @@ pub fn setCell(
     opts: ChangeCellOpts,
 ) !void {
     try self.sheet.setCell(pos, source, expr_root, .{});
-    self.tui.update_flags.cursor = true;
-    self.tui.update_flags.cells = true;
+    self.ui.update_flags.cursor = true;
+    self.ui.update_flags.cells = true;
     if (opts.emit_event)
         self.emitEvent("SetCell", .{pos});
 }
@@ -268,8 +281,8 @@ pub fn setCellString(self: *Self, pos: Position, expr: [:0]const u8, opts: Chang
 // TODO: merge this and `deleteCell`
 pub fn deleteCell2(self: *Self, pos: Position, opts: ChangeCellOpts) !void {
     try self.sheet.deleteCell(pos, opts.undo_opts);
-    self.tui.update_flags.cursor = true;
-    self.tui.update_flags.cells = true;
+    self.ui.update_flags.cursor = true;
+    self.ui.update_flags.cells = true;
     if (opts.emit_event)
         self.emitEvent("DeleteCell", .{pos});
 }
@@ -291,12 +304,12 @@ pub fn setStatusMessage(
     self.status_message_type = t;
     const writer = self.status_message.writer();
     writer.print(fmt, args) catch {};
-    self.tui.update_flags.command = true;
+    self.ui.update_flags.command = true;
 }
 
 pub fn dismissStatusMessage(self: *Self) void {
     self.status_message.len = 0;
-    self.tui.update_flags.command = true;
+    self.ui.update_flags.command = true;
 }
 
 pub fn updateCells(self: *Self) Allocator.Error!void {
@@ -307,9 +320,9 @@ pub fn setMode(self: *Self, new_mode: Mode) void {
     switch (self.mode) {
         .normal => {},
         .visual, .select => {
-            self.tui.update_flags.cells = true;
-            self.tui.update_flags.column_headings = true;
-            self.tui.update_flags.row_numbers = true;
+            self.ui.update_flags.cells = true;
+            self.ui.update_flags.column_headings = true;
+            self.ui.update_flags.row_numbers = true;
         },
         .command_normal,
         .command_insert,
@@ -319,7 +332,7 @@ pub fn setMode(self: *Self, new_mode: Mode) void {
         .command_to_backwards,
         .command_until_forwards,
         .command_until_backwards,
-        => self.tui.update_flags.command = true,
+        => self.ui.update_flags.command = true,
     }
 
     self.prev_mode = self.mode;
@@ -338,7 +351,7 @@ const GetActionResult = union(enum) {
     not_found,
 };
 
-fn getAction(self: Self, bytes: [:0]const u8) GetActionResult {
+fn getAction(self: *const Self, bytes: [:0]const u8) GetActionResult {
     if (self.mode.isCommandMode()) {
         const keymap_type: CommandMapType = switch (self.mode) {
             .command_normal => .normal,
@@ -378,10 +391,10 @@ fn handleInput(self: *Self) !void {
     assert(self.sheet.redos.len == 0 or self.sheet.redos.items(.tag)[self.sheet.redos.len - 1] == .sentinel);
 
     var buf: [input_buf_len / 2]u8 = undefined;
-    const slice = try self.tui.term.readInput(&buf);
+    const slice = try self.ui.term.readInput(&buf);
 
     const writer = self.input_buf.writer(self.allocator);
-    try input.parse(&self.tui.term, slice, writer);
+    try input.parse(&self.ui.term, slice, writer);
 
     const bytes = try self.inputBufSlice();
     const res = self.getAction(bytes);
@@ -469,7 +482,7 @@ fn clampScreenToCommandCursor(self: *Self) void {
         for (0..builder.desired_len) |i| _ = builder.appendByte(self.command.get(x + @as(u3, @intCast(i))));
         w += wcWidth(builder.codepoint());
 
-        if (w > self.tui.term.width) {
+        if (w > self.ui.term.width) {
             if (prev > self.command_screen_pos) self.command_screen_pos = prev;
             break;
         }
@@ -737,7 +750,7 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
             try writer.print("let {} = ", .{self.cursor});
             try self.sheet.printCellExpression(self.cursor, writer);
         },
-        .fit_text => try self.cursorExpandWidth(),
+        .fit_text => try self.expandWidthAtCursor(),
         .enter_visual_mode => self.setMode(.visual),
         .enter_normal_mode => {},
         .dismiss_count_or_status_message => {
@@ -763,12 +776,12 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
         .delete_column => {
             try self.sheet.deleteColumnRange(self.cursor.x, self.cursor.x, .{});
             self.sheet.endUndoGroup();
-            self.tui.update(&.{ .column_headings, .cells });
+            self.ui.update(&.{ .column_headings, .cells });
         },
         .delete_row => {
             try self.sheet.deleteRowRange(self.cursor.y, self.cursor.y, .{});
             self.sheet.endUndoGroup();
-            self.tui.update(&.{ .column_headings, .cells });
+            self.ui.update(&.{ .column_headings, .cells });
         },
         .insert_column => {
             self.sheet.insertColumns(self.cursor.x, self.getCount(), .{}) catch |err| switch (err) {
@@ -776,7 +789,7 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
                 else => |e| return e,
             };
             self.sheet.endUndoGroup();
-            self.tui.update(&.{ .column_headings, .cells });
+            self.ui.update(&.{ .column_headings, .cells });
         },
         .insert_row => {
             self.sheet.insertRows(self.cursor.y, self.getCount(), .{}) catch |err| switch (err) {
@@ -784,7 +797,7 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
                 else => |e| return e,
             };
             self.sheet.endUndoGroup();
-            self.tui.update(&.{ .row_numbers, .cells });
+            self.ui.update(&.{ .row_numbers, .cells });
         },
 
         .delete_cell => self.deleteCell() catch |err| switch (err) {
@@ -906,14 +919,14 @@ fn interpretCommands(self: *Self, commands: []const u8) !void {
     }
 }
 
-pub fn isSelectedCell(self: Self, pos: Position) bool {
+pub fn isSelectedCell(self: *const Self, pos: Position) bool {
     return switch (self.mode) {
         .visual, .select => pos.intersects(self.anchor, self.cursor),
         else => self.cursor.hash() == pos.hash(),
     };
 }
 
-pub fn isSelectedCol(self: Self, x: PosInt) bool {
+pub fn isSelectedCol(self: *const Self, x: PosInt) bool {
     return switch (self.mode) {
         .visual, .select => {
             const min = @min(self.cursor.x, self.anchor.x);
@@ -924,7 +937,7 @@ pub fn isSelectedCol(self: Self, x: PosInt) bool {
     };
 }
 
-pub fn isSelectedRow(self: Self, y: PosInt) bool {
+pub fn isSelectedRow(self: *const Self, y: PosInt) bool {
     return switch (self.mode) {
         .visual, .select => {
             const min = @min(self.cursor.y, self.anchor.y);
@@ -968,11 +981,11 @@ pub fn setCount(self: *Self, count: u4) void {
     self.count = self.count *| 10 +| count;
 }
 
-pub fn getCount(self: Self) u32 {
+pub fn getCount(self: *const Self) u32 {
     return if (self.count == 0) 1 else self.count;
 }
 
-pub fn getCountPos(self: Self) PosInt {
+pub fn getCountPos(self: *const Self) PosInt {
     return @intCast(@min(std.math.maxInt(PosInt), self.getCount()));
 }
 
@@ -1092,9 +1105,9 @@ fn runDebugCommand(self: *Self, cmd_str: []const u8, iter: *utils.WordIterator) 
         },
         .update_cell => {
             const pos = self.cursor;
-            if (self.sheet.getCellHandleByPos(pos)) |handle| {
+            if (self.sheet.getCellHandleByPosOrNull(pos)) |handle| {
                 try self.sheet.enqueueUpdate(handle);
-                self.tui.update(&.{.cells});
+                self.ui.update(&.{.cells});
             }
         },
     }
@@ -1180,7 +1193,7 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
                 });
                 self.sheet.queued_cells.items.len = 0;
                 self.sheet.endUndoGroup();
-                self.tui.update(&.{.cells});
+                self.ui.update(&.{.cells});
                 return;
             };
 
@@ -1189,7 +1202,7 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
 
             try self.sheet.insertIncrementingCellRange(range, value, increment, .{});
             self.sheet.endUndoGroup();
-            self.tui.update(&.{.cells});
+            self.ui.update(&.{.cells});
         },
         .fill_expr => {
             const arg1 = iter.next() orelse return error.InvalidSyntax;
@@ -1200,7 +1213,7 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
             const expr = try ast.fromExpression(&self.sheet, expr_str);
             try self.sheet.bulkSetCellExpr(range, expr_str, expr, .{});
             self.sheet.endUndoGroup();
-            self.tui.update(&.{ .cursor, .cells });
+            self.ui.update(&.{ .cursor, .cells });
         },
         inline .undo, .redo => |tag| {
             const count = blk: {
@@ -1257,7 +1270,7 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
 
             try self.sheet.deleteColumnRange(start, end, .{});
             self.sheet.endUndoGroup();
-            self.tui.update(&.{ .cells, .column_headings, .cursor });
+            self.ui.update(&.{ .cells, .column_headings, .cursor });
         },
         .delete_rows => {
             const start, const end = blk: {
@@ -1282,7 +1295,7 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
 
             try self.sheet.deleteRowRange(start, end, .{});
             self.sheet.endUndoGroup();
-            self.tui.update(&.{ .cells, .row_numbers, .cursor });
+            self.ui.update(&.{ .cells, .row_numbers, .cursor });
         },
         .insert_columns => {
             const column, const count = blk: {
@@ -1309,7 +1322,7 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
                     else => |e| return e,
                 };
                 self.sheet.endUndoGroup();
-                self.tui.update(&.{ .cells, .column_headings, .cursor });
+                self.ui.update(&.{ .cells, .column_headings, .cursor });
             }
         },
         .insert_rows => {
@@ -1337,7 +1350,7 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
                     else => |e| return e,
                 };
                 self.sheet.endUndoGroup();
-                self.tui.update(&.{ .cells, .row_numbers, .cursor });
+                self.ui.update(&.{ .cells, .row_numbers, .cursor });
             }
         },
         .set_text_align => {
@@ -1385,13 +1398,13 @@ fn setTextAlignment(self: *Self, r: Rect, alignment: Sheet.TextAttrs.Alignment) 
     for (cells.items) |cell|
         self.sheet.setTextAlignment(cell, alignment) catch unreachable;
 
-    self.tui.update(&.{.cells});
+    self.ui.update(&.{.cells});
 }
 
 pub fn loadCmdBinary(self: *Self, filepath: []const u8) !void {
     if (filepath.len == 0) return error.EmptyFileName;
 
-    self.tui.update_flags.cells = true;
+    self.ui.update_flags.cells = true;
 
     const file = try std.fs.cwd().openFile(filepath, .{});
     defer file.close();
@@ -1405,7 +1418,7 @@ pub fn loadCmd(self: *Self, filepath: []const u8) !void {
     if (filepath.len == 0) return error.EmptyFileName;
 
     self.sheet.clearRetainingCapacity();
-    self.tui.update_flags.cells = true;
+    self.ui.update_flags.cells = true;
 
     self.sheet.loadFile(filepath) catch |err| {
         self.setStatusMessage(.err, "Could not open file: {s}", .{@errorName(err)});
@@ -1420,7 +1433,7 @@ pub fn writeFile(self: *Self, filepath: ?[]const u8) !void {
 
 pub fn undo(self: *Self) Allocator.Error!void {
     defer self.resetCount();
-    self.tui.update(&.{ .cells, .column_headings, .row_numbers });
+    self.ui.update(&.{ .cells, .column_headings, .row_numbers });
 
     for (0..self.getCount()) |_| {
         try self.sheet.undo();
@@ -1429,7 +1442,7 @@ pub fn undo(self: *Self) Allocator.Error!void {
 
 pub fn redo(self: *Self) Allocator.Error!void {
     defer self.resetCount();
-    self.tui.update(&.{ .cells, .column_headings, .row_numbers });
+    self.ui.update(&.{ .cells, .column_headings, .row_numbers });
 
     for (0..self.getCount()) |_| {
         try self.sheet.redo();
@@ -1452,14 +1465,14 @@ pub fn deleteCell(self: *Self) Allocator.Error!void {
     try self.sheet.deleteCell(self.cursor, .{});
     self.sheet.endUndoGroup();
 
-    self.tui.update(&.{ .cells, .cursor });
+    self.ui.update(&.{ .cells, .cursor });
 }
 
 pub fn deleteCellRange(self: *Self, rect: Rect) Allocator.Error!void {
     try self.sheet.deleteCellRange(rect, .{});
     self.sheet.endUndoGroup();
 
-    self.tui.update(&.{ .cells, .cursor });
+    self.ui.update(&.{ .cells, .cursor });
 }
 
 pub fn setCursor(self: *Self, new_pos: Position) void {
@@ -1467,10 +1480,10 @@ pub fn setCursor(self: *Self, new_pos: Position) void {
     self.cursor = new_pos;
     self.clampScreenToCursor();
 
-    self.tui.update(&.{ .column_headings, .row_numbers, .cursor });
+    self.ui.update(&.{ .column_headings, .row_numbers, .cursor });
 
     switch (self.mode) {
-        .visual, .select => self.tui.update(&.{.cells}),
+        .visual, .select => self.ui.update(&.{.cells}),
         else => {},
     }
 }
@@ -1563,12 +1576,9 @@ pub fn selectionRight(self: *Self) void {
     self.resetCount();
 }
 
-pub inline fn contentHeight(self: Self) u16 {
-    return self.tui.term.height -| content_line;
-}
-
-pub fn leftReservedColumns(self: Self) u16 {
-    const y = self.screen_pos.y +| self.contentHeight() -| 1;
+// FIXME: The Y value is incorrect when clamping screen to cursor?
+pub fn leftReservedColumns(self: *const Self) u16 {
+    const y = self.screen_pos.y +| self.ui.contentHeight() -| 1;
 
     if (y == 0)
         return 2;
@@ -1582,81 +1592,60 @@ pub fn clampScreenToCursor(self: *Self) void {
 }
 
 pub fn clampScreenToCursorY(self: *Self) void {
-    const height = self.contentHeight();
+    const height = self.ui.contentHeight();
     if (height == 0) return;
 
     if (self.cursor.y < self.screen_pos.y) {
-        const old_max = self.screen_pos.y + (height - 1);
         self.screen_pos.y = self.cursor.y;
-        const new_max = self.screen_pos.y + (height - 1);
-
-        if (std.math.log10(old_max) != std.math.log10(new_max)) {
-            self.tui.update_flags.column_headings = true;
-        }
-
-        self.tui.update_flags.row_numbers = true;
-        self.tui.update_flags.cells = true;
+    } else if (self.cursor.y - self.screen_pos.y >= height) {
+        self.screen_pos.y = self.cursor.y - (height - 1);
+    } else {
         return;
     }
-
-    if (self.cursor.y - self.screen_pos.y >= height) {
-        const old_max = self.screen_pos.y + (height - 1);
-        self.screen_pos.y = self.cursor.y - (height - 1);
-        const new_max = self.screen_pos.y + (height - 1);
-
-        if (std.math.log10(old_max) != std.math.log10(new_max)) {
-            self.tui.update_flags.column_headings = true;
-        }
-
-        self.tui.update_flags.row_numbers = true;
-        self.tui.update_flags.cells = true;
-    }
+    self.ui.update(&.{ .column_headings, .row_numbers, .cells });
 }
 
 pub fn clampScreenToCursorX(self: *Self) void {
     if (self.cursor.x < self.screen_pos.x) {
         self.screen_pos.x = self.cursor.x;
-        self.tui.update_flags.column_headings = true;
-        self.tui.update_flags.cells = true;
+        self.ui.update(&.{ .column_headings, .cells });
         return;
     }
 
     var w = self.leftReservedColumns();
     var x = self.cursor.x;
 
-    while (true) : (x -= 1) {
-        if (x < self.screen_pos.x) return;
-
+    const view_width = self.ui.term.width -| self.leftReservedColumns();
+    while (x >= self.screen_pos.x) : (x -= 1) {
         const col: Sheet.Column = self.sheet.getColumn(x) orelse .{};
-        w += @min(self.tui.term.width -| self.leftReservedColumns(), col.width);
+        w += @min(view_width, col.width);
 
-        if (w > self.tui.term.width) break;
-        if (x == 0) return;
-    }
-
-    if (x < self.cursor.x and (x >= self.screen_pos.x or x == self.screen_pos.x)) {
-        self.screen_pos.x = x +| 1;
-        self.tui.update_flags.column_headings = true;
-        self.tui.update_flags.cells = true;
+        if (w > self.ui.term.width) {
+            if (x < self.cursor.x) {
+                self.screen_pos.x = x +| 1;
+                self.ui.update(&.{ .column_headings, .cells });
+            }
+            break;
+        }
+        if (x == 0) break;
     }
 }
-
 pub fn setPrecision(self: *Self, column: PosInt, new_precision: u8) Allocator.Error!void {
     try self.sheet.setPrecision(column, new_precision, .{});
     self.sheet.endUndoGroup();
-    self.tui.update_flags.cells = true;
+    self.ui.update_flags.cells = true;
 }
 
 pub fn incPrecision(self: *Self, column: PosInt, count: u8) Allocator.Error!void {
     try self.sheet.incPrecision(column, count, .{});
     self.sheet.endUndoGroup();
-    self.tui.update_flags.cells = true;
+    self.ui.update_flags.cells = true;
 }
 
 pub fn decPrecision(self: *Self, column: PosInt, count: u8) Allocator.Error!void {
     try self.sheet.decPrecision(column, count, .{});
     self.sheet.endUndoGroup();
-    self.tui.update_flags.cells = true;
+    self.ui.update_flags.cells = true;
 }
 
 pub inline fn cursorIncPrecision(self: *Self) Allocator.Error!void {
@@ -1674,21 +1663,22 @@ pub inline fn cursorDecPrecision(self: *Self) Allocator.Error!void {
 pub fn incWidth(self: *Self, column: PosInt, n: u8) Allocator.Error!void {
     try self.sheet.incWidth(column, n, .{});
     self.sheet.endUndoGroup();
-    self.tui.update_flags.cells = true;
-    self.tui.update_flags.column_headings = true;
+    self.ui.update_flags.cells = true;
+    self.ui.update_flags.column_headings = true;
 }
 
 pub fn decWidth(self: *Self, column: PosInt, n: u8) Allocator.Error!void {
     try self.sheet.decWidth(column, n, .{});
     self.sheet.endUndoGroup();
-    self.tui.update_flags.cells = true;
-    self.tui.update_flags.column_headings = true;
+    self.ui.update_flags.cells = true;
+    self.ui.update_flags.column_headings = true;
 }
 
 pub inline fn cursorIncWidth(self: *Self) Allocator.Error!void {
     const count: u8 = @intCast(@min(std.math.maxInt(u8), self.getCount()));
     try self.incWidth(self.cursor.x, count);
     self.resetCount();
+    self.clampScreenToCursorX();
 }
 
 pub inline fn cursorDecWidth(self: *Self) Allocator.Error!void {
@@ -1697,17 +1687,16 @@ pub inline fn cursorDecWidth(self: *Self) Allocator.Error!void {
     self.resetCount();
 }
 
-pub fn cursorExpandWidth(self: *Self) Allocator.Error!void {
+pub fn expandWidthAtCursor(self: *Self) Allocator.Error!void {
     const handle = self.sheet.getColumnHandle(self.cursor.x) orelse return;
     const col = self.sheet.cols.getValue(handle);
 
-    const max_width = self.tui.term.width - self.leftReservedColumns();
+    const max_width = self.ui.term.width - self.leftReservedColumns();
     const width_needed = try self.sheet.widthNeededForColumn(self.cursor.x, col.precision, max_width);
     try self.sheet.setColWidth(handle, self.cursor.x, width_needed, .{});
     self.sheet.endUndoGroup();
     self.clampScreenToCursorX();
-    self.tui.update_flags.cells = true;
-    self.tui.update_flags.column_headings = true;
+    self.ui.update(&.{ .cells, .column_headings });
 }
 
 pub fn cursorToFirstCellInRow(self: *Self) !void {
