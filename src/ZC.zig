@@ -1420,9 +1420,7 @@ pub fn writeFile(self: *Self, filepath: ?[]const u8) !void {
 
 pub fn undo(self: *Self) Allocator.Error!void {
     defer self.resetCount();
-    self.tui.update_flags.cells = true;
-    self.tui.update_flags.column_headings = true;
-    self.tui.update_flags.row_numbers = true;
+    self.tui.update(&.{ .cells, .column_headings, .row_numbers });
 
     for (0..self.getCount()) |_| {
         try self.sheet.undo();
@@ -1431,9 +1429,7 @@ pub fn undo(self: *Self) Allocator.Error!void {
 
 pub fn redo(self: *Self) Allocator.Error!void {
     defer self.resetCount();
-    self.tui.update_flags.cells = true;
-    self.tui.update_flags.column_headings = true;
-    self.tui.update_flags.row_numbers = true;
+    self.tui.update(&.{ .cells, .column_headings, .row_numbers });
 
     for (0..self.getCount()) |_| {
         try self.sheet.redo();
@@ -1456,16 +1452,14 @@ pub fn deleteCell(self: *Self) Allocator.Error!void {
     try self.sheet.deleteCell(self.cursor, .{});
     self.sheet.endUndoGroup();
 
-    self.tui.update_flags.cells = true;
-    self.tui.update_flags.cursor = true;
+    self.tui.update(&.{ .cells, .cursor });
 }
 
 pub fn deleteCellRange(self: *Self, rect: Rect) Allocator.Error!void {
     try self.sheet.deleteCellRange(rect, .{});
     self.sheet.endUndoGroup();
 
-    self.tui.update_flags.cells = true;
-    self.tui.update_flags.cursor = true;
+    self.tui.update(&.{ .cells, .cursor });
 }
 
 pub fn setCursor(self: *Self, new_pos: Position) void {
@@ -1473,15 +1467,11 @@ pub fn setCursor(self: *Self, new_pos: Position) void {
     self.cursor = new_pos;
     self.clampScreenToCursor();
 
+    self.tui.update(&.{ .column_headings, .row_numbers, .cursor });
+
     switch (self.mode) {
-        .visual, .select => {
-            self.tui.update_flags.cells = true;
-            self.tui.update_flags.column_headings = true;
-            self.tui.update_flags.row_numbers = true;
-        },
-        else => {
-            self.tui.update_flags.cursor = true;
-        },
+        .visual, .select => self.tui.update(&.{.cells}),
+        else => {},
     }
 }
 
