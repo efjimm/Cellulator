@@ -41,3 +41,8 @@ zc.events = {
 zc.events:register('Init')
 zc.events:register('Start')
 zc.events:register('SetCell')
+zc.events:register('UpdateFilePath')
+
+zc.events:subscribe('UpdateFilePath', function(new_path)
+  zc.sheet.path = new_path
+end)

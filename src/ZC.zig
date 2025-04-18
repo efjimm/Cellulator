@@ -27,14 +27,59 @@ const log = std.log.scoped(.zc);
 
 const Self = @This();
 
+pub const Ui = struct {
+    ptr: *anyopaque,
+    vtable: *const Vtable,
+
+    pub const ApplyThemeError = error{
+        Unsupported,
+        Failed,
+    };
+
+    pub const Vtable = struct {
+        /// When a user sets a theme, the path
+        /// `${XDG_CONFIG_HOME}/cellulator/themes/${UI}/${THEME_NAME}` is passed to this function.
+        /// The UI backend is then responsible for applying the theme in this file.
+        applyTheme: *const fn (*anyopaque, [:0]const u8) ApplyThemeError!void,
+
+        /// Apply the default theme.
+        applyDefaultTheme: *const fn (*anyopaque) ApplyThemeError!void,
+
+        // Yes these are a little bit cursed to put in a vtable but this is better than calling
+        // a virtual function to get these.
+        theme_file_extension: []const u8,
+        ui_name: []const u8,
+    };
+
+    // TODO: Better error handling and reporting
+    pub fn applyTheme(ui: Ui, theme_filepath: [:0]const u8) ApplyThemeError!void {
+        return ui.vtable.applyTheme(ui.ptr, theme_filepath);
+    }
+
+    pub fn applyDefaultTheme(ui: Ui) ApplyThemeError!void {
+        return ui.vtable.applyDefaultTheme(ui.ptr);
+    }
+
+    /// Returns the file extension for the theme files used by this UI backend. Returned memory
+    /// should be statically allocated.
+    pub fn getThemeFileExtension(ui: Ui) []const u8 {
+        return ui.vtable.theme_file_extension;
+    }
+
+    pub fn getUiName(ui: Ui) []const u8 {
+        return ui.vtable.ui_name;
+    }
+};
+
 lua_ptr: *Lua,
 
 running: bool = true,
 
 sheet: Sheet,
 
-// TODO: Use an interface here so we can swap out different UIs
+// TODO: Move all calls from this to the interface and remove this field
 ui: Tui,
+ui_interface: Ui,
 
 prev_mode: Mode = .normal,
 mode: Mode = .normal,
@@ -168,6 +213,7 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
         .sheet = try .init(allocator),
         .lua_ptr = lua_state,
         .ui = tui,
+        .ui_interface = undefined,
         .allocator = allocator,
         .keymaps = keys.sheet_keys,
         .command_keymaps = keys.command_keys,
@@ -175,14 +221,14 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
         .arena = .init(allocator),
     };
     errdefer zc.sheet.deinit();
+    zc.ui_interface = zc.ui.ui();
 
     zc.sourceLua() catch |err| log.err("Could not source init.lua: {}", .{err});
 
     zc.emitEvent("Init", .{});
 
     if (options.filepath) |filepath| {
-        try zc.sheet.loadFile(filepath);
-        zc.sheet.endUndoGroup();
+        try zc.loadFile(filepath);
     }
 
     log.debug("Finished init", .{});
@@ -203,7 +249,11 @@ pub fn sourceLua(self: *Self) !void {
 
     const path = try std.fs.path.joinZ(allocator, paths);
     log.debug("Sourcing lua file '{s}'", .{path});
-    try self.lua_ptr.doFile(path);
+    self.lua_ptr.doFile(path) catch |err| {
+        const msg = self.lua_ptr.checkString(-1);
+        std.log.err("ERROR: {s}", .{msg});
+        return err;
+    };
 }
 
 pub fn deinit(self: *Self) void {
@@ -287,11 +337,7 @@ pub fn deleteCell2(self: *Self, pos: Position, opts: ChangeCellOpts) !void {
         self.emitEvent("DeleteCell", .{pos});
 }
 
-pub const StatusMessageType = enum {
-    info,
-    warn,
-    err,
-};
+pub const StatusMessageType = enum { info, warn, err };
 
 // TODO: Use std.log for this, and also output to file in debug mode
 pub fn setStatusMessage(
@@ -1013,6 +1059,8 @@ const Cmd = enum {
     insert_columns,
     insert_rows,
     set_text_align,
+    set,
+    unset,
 };
 
 const cmds = std.StaticStringMap(Cmd).initComptime(.{
@@ -1035,6 +1083,8 @@ const cmds = std.StaticStringMap(Cmd).initComptime(.{
     .{ "insert-cols", .insert_columns },
     .{ "insert-rows", .insert_rows },
     .{ "text-align", .set_text_align },
+    .{ "set", .set },
+    .{ "unset", .unset },
 });
 
 const DebugCmd = enum {
@@ -1053,12 +1103,17 @@ const debug_cmds: std.StaticStringMap(DebugCmd) = .initComptime(.{
     .{ "update-cell", .update_cell },
 });
 
-pub const RunCommandError = error{
+const RunCommandError = error{
     InvalidCommand,
     InvalidSyntax,
     InvalidCellAddress,
     EmptyFileName,
 } || Allocator.Error;
+
+const SetProperty = enum {
+    theme,
+    truecolor,
+};
 
 // TODO: This parses differently than ranges in assignments, due to using a WordIterator
 fn parseRangeOrPoint(bytes: []const u8) !Rect {
@@ -1124,7 +1179,86 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
         return self.runDebugCommand(cmd_str, &iter);
     };
 
+    // TODO: Implement a better system for displaying usage information for commands, which is
+    //       invoked whenver a malformed command is encountered.
     switch (cmd) {
+        // Set a property back to its default value
+        .unset => {
+            const usage = "Usage: unset PROPERTY";
+            const arg1 = iter.next() orelse {
+                self.setStatusMessage(.err, "{s}", .{usage});
+                return;
+            };
+
+            const property = std.meta.stringToEnum(SetProperty, arg1) orelse {
+                self.setStatusMessage(.err, "Invalid property '{s}'", .{arg1});
+                return;
+            };
+
+            // TODO: Check if the property is actually set before unsetting it.
+            switch (property) {
+                .theme => {
+                    self.setDefaultTheme() catch |err| switch (err) {
+                        error.Unsupported => {
+                            self.setStatusMessage(
+                                .err,
+                                "User interface '{s}' does not support themes",
+                                .{self.ui_interface.getUiName()},
+                            );
+                        },
+                        error.Failed => {
+                            self.setStatusMessage(.err, "Could not restore default theme", .{});
+                        },
+                    };
+                },
+                .truecolor => {
+                    self.ui.term.truecolor_enabled = false;
+                    self.ui.update_flags = .all;
+                },
+            }
+        },
+        .set => {
+            const usage = "Usage: set PROPERTY VALUE";
+            const arg1 = iter.next() orelse {
+                self.setStatusMessage(.err, "{s}", .{usage});
+                return;
+            };
+
+            const property = std.meta.stringToEnum(SetProperty, arg1) orelse {
+                self.setStatusMessage(.err, "Invalid property '{s}'", .{arg1});
+                return;
+            };
+
+            const arg2 = iter.next() orelse {
+                switch (property) {
+                    .truecolor => {
+                        self.ui.term.truecolor_enabled = true;
+                        self.ui.update_flags = .all;
+                    },
+                    else => {
+                        self.setStatusMessage(.err, "{s}", .{usage});
+                    },
+                }
+                return;
+            };
+
+            switch (property) {
+                .theme => {
+                    self.setTheme(arg2) catch {
+                        self.setStatusMessage(.err, "Couldn't set theme", .{});
+                    };
+                },
+                .truecolor => {
+                    if (std.ascii.eqlIgnoreCase(arg2, "true")) {
+                        self.ui.term.truecolor_enabled = true;
+                    } else if (std.ascii.eqlIgnoreCase(arg2, "false")) {
+                        self.ui.term.truecolor_enabled = false;
+                    } else return;
+
+                    self.ui.update_flags = .all;
+                },
+            }
+        },
         .quit => {
             if (self.sheet.has_changes) {
                 self.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
@@ -1414,24 +1548,59 @@ pub fn loadCmdBinary(self: *Self, filepath: []const u8) !void {
     old_sheet.deinit();
 }
 
-pub fn loadCmd(self: *Self, filepath: []const u8) !void {
+pub fn loadCmd(zc: *Self, filepath: []const u8) !void {
     if (filepath.len == 0) return error.EmptyFileName;
 
-    self.sheet.clearRetainingCapacity();
-    self.ui.update_flags.cells = true;
+    zc.sheet.clearRetainingCapacity();
+    zc.ui.update_flags.cells = true;
 
-    self.sheet.loadFile(filepath) catch |err| {
-        self.setStatusMessage(.err, "Could not open file: {s}", .{@errorName(err)});
-        return;
+    zc.loadFile(filepath) catch |err| {
+        zc.setStatusMessage(.err, "Could not open file: {s}", .{@errorName(err)});
     };
+}
+
+fn writeFile(self: *Self, filepath: ?[]const u8) !void {
+    try self.sheet.writeFile(.{ .filepath = filepath });
+    self.emitEvent("UpdateFilePath", .{filepath});
+}
+
+fn loadFile(self: *Self, filepath: []const u8) !void {
+    try self.sheet.loadFile(filepath);
     self.sheet.endUndoGroup();
+    self.emitEvent("UpdateFilePath", .{filepath});
 }
 
-pub fn writeFile(self: *Self, filepath: ?[]const u8) !void {
-    return self.sheet.writeFile(.{ .filepath = filepath });
+fn setDefaultTheme(self: *Self) !void {
+    try self.ui_interface.applyDefaultTheme();
 }
 
-pub fn undo(self: *Self) Allocator.Error!void {
+fn setTheme(
+    self: *Self,
+    /// Base name of the theme file to set.
+    theme_name: []const u8,
+) !void {
+    const ui_name = self.ui_interface.getUiName();
+    const extension = self.ui_interface.getThemeFileExtension();
+
+    var name_buf: std.BoundedArray(u8, std.fs.max_name_bytes) = .{};
+    name_buf.writer().print("{s}{s}", .{ theme_name, extension }) catch
+        return error.NameTooLong;
+
+    const file_name = name_buf.constSlice();
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&buf);
+    const path = std.fs.path.joinZ(fba.allocator(), &.{
+        "/home/evan/.config/cellulator",
+        "themes",
+        ui_name,
+        file_name,
+    }) catch return error.NameTooLong;
+
+    try self.ui_interface.applyTheme(path);
+}
+
+fn undo(self: *Self) Allocator.Error!void {
     defer self.resetCount();
     self.ui.update(&.{ .cells, .column_headings, .row_numbers });
 
@@ -1440,7 +1609,7 @@ pub fn undo(self: *Self) Allocator.Error!void {
     }
 }
 
-pub fn redo(self: *Self) Allocator.Error!void {
+fn redo(self: *Self) Allocator.Error!void {
     defer self.resetCount();
     self.ui.update(&.{ .cells, .column_headings, .row_numbers });
 
@@ -1480,7 +1649,7 @@ pub fn setCursor(self: *Self, new_pos: Position) void {
     self.cursor = new_pos;
     self.clampScreenToCursor();
 
-    self.ui.update(&.{ .column_headings, .row_numbers, .cursor });
+    self.ui.update(&.{.cursor});
 
     switch (self.mode) {
         .visual, .select => self.ui.update(&.{.cells}),

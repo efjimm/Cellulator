@@ -74,6 +74,10 @@ pub fn log(
     args: anytype,
 ) void {
     if (!use_logfile) return;
+    switch (scope) {
+        .shovel_perf => return,
+        else => {},
+    }
     const writer = logfile.writer();
     writer.print("[{s}] {s}: ", .{ @tagName(scope), @tagName(level) }) catch {};
     writer.print(format, args) catch {};

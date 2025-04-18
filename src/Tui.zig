@@ -7,6 +7,8 @@
 //! for all input and drawing at once. Modern terminal emulators have a `sync` feature that allows
 //! them to avoid flickering in these cases, but this isn't supported on older terminal emulators
 //! including xterm and the Linux tty.
+
+// TODO: Reduce number of bytes sent for updates
 const std = @import("std");
 const assert = std.debug.assert;
 
@@ -128,6 +130,97 @@ fn resizeHandler(_: c_int) callconv(.C) void {
     needs_resize.store(true, .monotonic);
 }
 
+pub fn ui(tui: *Tui) ZC.Ui {
+    return .{
+        .ptr = tui,
+        .vtable = &.{
+            .applyTheme = applyTheme,
+            .applyDefaultTheme = applyDefaultTheme,
+            .theme_file_extension = ".lua",
+            .ui_name = "terminal",
+        },
+    };
+}
+
+const Lua = @import("zlua").Lua;
+
+/// Executes the file at `path` via the Lua interpreter. The file should return a table
+/// describing the TUI theme. The table should have keys matching the names of the fields in
+/// `Theme`. Fields from `Theme` which are not present in the table will be left at their
+/// default style.   The value of each field should be a table with the following keys:
+/// `fg`, `bg`, and  `attrs`. `fg` and `bg` should be strings representing a colour that are
+/// accepted  by `shovel.Style.Colour.fromDescription`. `attrs` should be an array of strings
+/// representing terminal text attributes. The accepted strings are the same as the fields of
+/// `shovel.Style.Attribute`.
+///
+/// Here is an example Lua theme definition:
+///
+/// ```lua
+/// local my_terminal_theme = {
+///   filepath = { fg = 'yellow', attrs = { 'bold', 'underline' } },
+///   column_heading_unselected = { fg = 'yellow', bg = 'black'  },
+///   column_heading_selected   = { fg = 'black',  bg = 'yellow' },
+///   row_heading_unselected    = { fg = 'yellow', bg = 'black'  },
+///   row_heading_selected      = { fg = 'black',  bg = 'yellow' },
+///   cell_blank_selected       = { fg = 'black',  bg = 'yellow' },
+///   cell_number_selected      = { fg = 'black',  bg = 'yellow' },
+///   cell_text_selected        = { fg = 'black',  bg = 'yellow' },
+///   cell_error_selected       = { fg = 'black',  bg = 'yellow' },
+///
+///   -- All unspecified fields are left at their default style
+/// }
+/// ```
+fn applyTheme(ptr: *anyopaque, path: [:0]const u8) ZC.Ui.ApplyThemeError!void {
+    const tui: *Tui = @ptrCast(@alignCast(ptr));
+
+    const arena = tui.arena.allocator();
+    defer _ = tui.arena.reset(.retain_capacity);
+
+    const state = Lua.init(arena) catch return error.Failed;
+    defer state.deinit();
+
+    state.checkStack(3) catch return error.Failed;
+    state.pushFunction(@ptrCast(&applyThemeLua));
+    state.pushLightUserdata(tui);
+    state.doFile(path) catch return error.Failed;
+
+    state.protectedCall(.{ .args = 2 }) catch return error.Failed;
+}
+
+fn applyDefaultTheme(ptr: *anyopaque) ZC.Ui.ApplyThemeError!void {
+    const tui: *Tui = @ptrCast(@alignCast(ptr));
+    tui.styles = .init(default_theme);
+    tui.update_flags = .all;
+}
+
+fn applyThemeLua(state: *Lua) callconv(.c) c_int {
+    errdefer |err| state.raiseErrorStr("Unexpected error {s}", .{@errorName(err).ptr});
+    const tui = try state.toUserdata(Tui, 1);
+
+    var new_theme = default_theme;
+    inline for (@typeInfo(Theme).@"struct".fields) |field| {
+        var t = state.getField(2, field.name);
+        if (t != .nil) {
+            state.argExpected(t == .table, -1, "table");
+            const parseColourString = @import("lua.zig").parseColourString;
+
+            t = state.getField(-1, "fg");
+            const fg = parseColourString(state, t);
+
+            t = state.getField(-1, "bg");
+            const bg = parseColourString(state, t);
+
+            @field(new_theme, field.name) = .init(fg, bg, .none);
+            tui.update_flags = .all;
+        } else {
+            state.pop(1);
+        }
+    }
+    tui.styles = .init(new_theme);
+    state.setTop(0);
+    return 0;
+}
+
 pub const InitError = Term.InitError || Term.UncookError || error{OperationNotSupported};
 
 pub fn init(allocator: std.mem.Allocator) InitError!Tui {
@@ -140,7 +233,7 @@ pub fn init(allocator: std.mem.Allocator) InitError!Tui {
     }, null);
 
     return .{
-        .term = try Term.init(allocator, .{}),
+        .term = try .init(allocator, .{ .truecolour = .check }),
         .arena = .init(allocator),
         .styles = .init(default_theme),
     };
@@ -191,6 +284,7 @@ pub fn render(tui: *Tui, zc: *ZC) !void {
         tui.rc = null;
     }
 
+    // TODO: Don't update this every frame
     try tui.renderStatus();
     if (tui.update_flags.column_headings)
         try tui.renderColumnHeadings();
@@ -449,10 +543,7 @@ fn renderCursorAtPos(tui: *Tui, pos: Position) !void {
     const col = zc.sheet.getColumnByHandleOrDefault(col_handle);
 
     const cell_handle = zc.sheet.getCellHandleByPos(pos);
-    const text_attrs_handle = zc.sheet.text_attrs.findEntry(&.{
-        pos.x,
-        pos.y,
-    });
+    const text_attrs_handle = zc.sheet.text_attrs.findEntry(&.{ pos.x, pos.y });
     try tui.renderCell(
         pos,
         cell_handle,
@@ -473,6 +564,12 @@ fn renderCursorAtPos(tui: *Tui, pos: Position) !void {
     try writer.print("{s: ^[1]}", .{ Position.columnAddressBuf(pos.x, &buf), width });
 
     try rc.moveCursorTo(y, 0);
+    try tui.setStyle(
+        if (isSelected(zc, pos))
+            .row_heading_selected
+        else
+            .row_heading_unselected,
+    );
     try writer.print("{d: ^[1]}", .{ pos.y, left });
 }
 

@@ -2,7 +2,6 @@ This is a schizo document that contains basically every idea I thought should be
 working on cellulator. It's completely unorganised and some parts are very outdated. I thought it
 might be an interesting read so I committed it. The stuff at the top is probably newer.
 
-- Make kcov reports a flag rather than a separate step
 - Eliminate recursion in the parser
   - Is this really a serious concern? I should try and reproduce a stack overflow with malicious input
 - Generate fuzzer output files from the build system
@@ -11,8 +10,18 @@ might be an interesting read so I committed it. The stuff at the top is probably
   by one. When a redo happens we invert the operation at index+1 and increment the index by one.
 - Unify command and statement parsing
 - Multithreading
+- Handle commands better
+  - Usage text
+  - Command descriptions
+  - Standard way of signifying if parameters are required and what type they should be
+  - Automatically check validity of entered commands against a declared structure
+  - Allow registering new commands from lua
 
 - Features
+  - C-k bind in command line
+  - Better error reporting when setting themes
+  - Deduplicate repeated commands in command history
+  - Expandable, scrollable status messages for more verbose error messages and documentation
   - Rows spanning multiple lines
   - Align text in cells
     - Integrate with undos

@@ -6,9 +6,10 @@ const ZC = @import("ZC.zig");
 const Position = @import("Position.zig").Position;
 const assert = std.debug.assert;
 const _log = std.log.scoped(.lua);
+const Tui = @import("Tui.zig");
 
 pub fn init(zc: *ZC) !*Lua {
-    var state = try Lua.init(zc.allocator);
+    const state = try Lua.init(zc.allocator);
     errdefer state.deinit();
     try state.checkStack(2);
 
@@ -20,12 +21,30 @@ pub fn init(zc: *ZC) !*Lua {
     // Main 'zc' object is a reference to a ZC pointer, so we can use uservalues on it
     state.newUserdata(*ZC, 1).* = zc;
 
-    // zc metatable
-    try createMetatable(state, "zc");
-    state.setMetatable(1);
+    {
+        // zc metatable
+        try createMetatable(state, "zc");
+
+        {
+            // Tui
+            // Requires `zc` to be a stable pointer
+            state.newUserdata(*Tui, 1).* = &zc.ui;
+
+            try createMetatable(state, "tui");
+            state.setMetatable(-2);
+            state.setField(-2, "tui");
+        }
+
+        state.setMetatable(1);
+    }
 
     // zc uservalue
     state.createTable(0, 1);
+
+    // zc.current_sheet table
+    state.createTable(0, 1);
+    state.setField(-2, "sheet");
+
     try state.setUserValue(1, 1);
 
     state.setGlobal("zc");
@@ -102,7 +121,14 @@ fn pushArgument(state: *Lua, value: anytype) !i32 {
                 return 1;
             }
         },
-        else => @compileError("Could not deduce generic type"),
+        .optional => if (value) |v| {
+            if (@typeInfo(@TypeOf(v)) == .optional)
+                @compileError("Nested optionals are not supported");
+            _ = try pushArgument(state, v);
+        } else {
+            state.pushNil();
+        },
+        else => @compileError("Unsupported type passed to pushArgument"),
     }
     return 1;
 }
@@ -208,12 +234,6 @@ fn checkCellAddress(state: *Lua, raw_index: i32) Position {
     } else state.typeError(2, "string or table");
 }
 
-fn getZc(state: *Lua) *ZC {
-    _ = state.getGlobal("zc") catch unreachable;
-    defer state.pop(1);
-    return (state.toUserdata(*ZC, -1) catch unreachable).*;
-}
-
 const metatables = .{
     .zc = struct {
         pub fn __newindex(state: *Lua) callconv(.C) c_int {
@@ -221,55 +241,33 @@ const metatables = .{
         }
 
         pub fn __index(state: *Lua) callconv(.C) c_int {
-            if (state.isString(2)) {
-                const key = state.toString(2) catch unreachable;
-                const map = std.StaticStringMap(enum { current_sheet }).initComptime(
-                    .{
-                        .{ "current_sheet", .current_sheet },
-                    },
-                );
+            if (!state.isString(2)) return indexCommon(state);
 
-                if (map.get(key)) |tag| {
-                    const zc = (state.toUserdata(*ZC, 1) catch unreachable).*;
-                    switch (tag) {
-                        .current_sheet => {
-                            _ = state.getUserValue(1, 1) catch unreachable;
-                            _ = state.getField(-1, "current_sheet");
-                            const name = zc.sheet.filepath.constSlice();
-                            _ = state.pushString(name);
-                            state.setField(-2, "name");
-                            return 1;
-                        },
-                    }
-                }
-            }
+            // const key = state.toString(2) catch unreachable;
 
             return indexCommon(state);
         }
 
-        pub fn log(state: *Lua) callconv(.C) c_int {
-            state.checkType(1, .table);
-            _ = state.getIndex(1, 1);
+        pub fn status(state: *Lua) callconv(.C) c_int {
+            const zc = state.checkUserdata(*ZC, 1, "zc").*;
+            state.checkType(2, .table);
+            _ = state.getIndex(2, 1);
             const msg = state.checkString(-1);
-            _ = state.getField(1, "level");
-            const level_str = state.toString(-1) catch "info";
+            _ = state.getField(2, "level");
 
-            const map = std.StaticStringMap(std.log.Level).initComptime(.{
-                .{ "error", .err },
-                .{ "warn", .warn },
-                .{ "info", .info },
-                .{ "debug", .debug },
-            });
+            const level: ZC.StatusMessageType =
+                if (state.toString(-1)) |level_str| blk: {
+                    const map = std.StaticStringMap(ZC.StatusMessageType).initComptime(.{
+                        .{ "error", .err },
+                        .{ "warn", .warn },
+                        .{ "info", .info },
+                        // .{ "debug", .debug },
+                    });
 
-            const level = map.get(level_str) orelse .info;
+                    break :blk map.get(level_str) orelse .info;
+                } else |_| .info;
 
-            switch (level) {
-                .err => _log.err("{s}", .{msg}),
-                .warn => _log.warn("{s}", .{msg}),
-                .info => _log.info("{s}", .{msg}),
-                .debug => _log.debug("{s}", .{msg}),
-            }
-
+            zc.setStatusMessage(level, "{s}", .{msg});
             return 0;
         }
 
@@ -291,7 +289,7 @@ const metatables = .{
             zc.setCellString(pos, expr_str, .{ .emit_event = false }) catch |err| switch (err) {
                 error.InvalidCellAddress => unreachable,
                 error.UnexpectedToken => state.argError(2, "Unexpected token"),
-                error.OutOfMemory => return 0, // TODO: Make sure this is handle properly
+                error.OutOfMemory => return 0, // TODO: Make sure this is handled properly
             };
             return 0;
         }
@@ -302,9 +300,9 @@ const metatables = .{
 
             _ = state.getIndex(2, 1);
             const pos = checkCellAddress(state, -1);
-
             zc.deleteCell2(pos, .{ .emit_event = false }) catch {};
 
+            state.setTop(0);
             return 0;
         }
 
@@ -314,6 +312,15 @@ const metatables = .{
 
             zc.setCursor(pos);
 
+            state.setTop(0);
+            return 0;
+        }
+
+        pub fn command(state: *Lua) callconv(.C) c_int {
+            const zc = state.checkUserdata(*ZC, 1, "zc").*;
+            const cmd_str = state.checkString(2);
+            zc.runCommand(cmd_str) catch {};
+            state.setTop(0);
             return 0;
         }
 
@@ -386,7 +393,25 @@ const metatables = .{
             return 1;
         }
     },
+
+    .tui = struct {
+        pub fn __index(state: *Lua) callconv(.C) c_int {
+            return indexCommon(state);
+        }
+    },
 };
+
+const shovel = @import("shovel");
+
+pub fn parseColourString(state: *Lua, t: lua.LuaType) shovel.Style.Colour {
+    if (t == .nil) return .none;
+    const str = state.checkString(-1);
+    const colour = shovel.Style.Colour.fromDescription(str) catch {
+        state.raiseErrorStr("invalid colour string '%s'", .{str.ptr});
+    };
+    state.pop(1);
+    return colour;
+}
 
 // Exports all lua functions in `metatables` with unique names
 comptime {
