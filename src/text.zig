@@ -736,8 +736,8 @@ pub const Motion = union(enum(u8)) {
     fn wordBoundaryFn(comptime word_type: WordType) (fn (u8) bool) {
         return switch (word_type) {
             .normal => struct {
-                fn func(_c: u8) bool {
-                    return _c < 0x80 and !utils.isWord(_c);
+                fn func(c: u8) bool {
+                    return c < 0x80 and !utils.isWord(c);
                 }
             }.func,
             .long => isWhitespace,

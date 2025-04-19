@@ -24,6 +24,7 @@ might be an interesting read so I committed it. The stuff at the top is probably
   - Expandable, scrollable status messages for more verbose error messages and documentation
   - Rows spanning multiple lines
   - Align text in cells
+    - Correctly adjust when updating rows/columns
     - Integrate with undos
     - Integrate with serialization
   - Copy cells

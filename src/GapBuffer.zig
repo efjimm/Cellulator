@@ -219,6 +219,15 @@ pub fn GapBuffer(comptime T: type) type {
             self.insertSliceAtGap(new_items);
         }
 
+        pub fn deleteRange(self: *Self, start: u32, end: u32) void {
+            assert(start < self.len);
+            assert(end <= self.len);
+            const len = end - start;
+            self.setGap(start);
+            self.gap_len += len;
+            self.len -= len;
+        }
+
         pub fn clearRetainingCapacity(self: *Self) void {
             self.gap_len = self.capacity();
             self.len = 0;

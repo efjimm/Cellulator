@@ -90,7 +90,7 @@ pub fn prev(self: *Self, count: u32) void {
 /// Moves the current command down in the history. Does nothing if at the bottom.
 pub fn next(self: *Self, count: u32) void {
     if (self.index < self.history_indices.items.len) {
-        self.index = @min(self.index + count, @as(u32, @intCast(self.history_indices.items.len)));
+        self.index = @intCast(@min(self.index + count, self.history_indices.items.len));
 
         // Set copy-on-write if we are still referencing an existing history item.
         if (self.index != self.history_indices.items.len) {
@@ -197,7 +197,7 @@ pub fn deleteBackwards(self: *Self, allocator: Allocator, n: u32) Allocator.Erro
 
 pub fn deleteBackwardsAssumeCopied(self: *Self, n: u32) void {
     const new_cursor = self.cursor -| n;
-    self.buffer.replaceRange(undefined, new_cursor, self.cursor - new_cursor, &.{}) catch unreachable;
+    self.buffer.deleteRange(new_cursor, self.cursor);
     self.setCursor(new_cursor);
 }
 

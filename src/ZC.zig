@@ -732,6 +732,13 @@ fn doCommandInsertMode(self: *Self, action: CommandAction, keys: []const u8) !vo
             self.doCommandMotion(.normal_word_start_prev) catch unreachable;
         },
         .change_line => self.command.resetBuffer(),
+        .delete_to_eol => {
+            try self.command.copyIfNeeded(self.allocator);
+            self.command.buffer.shrinkRetainingCapacity(self.command.cursor);
+        },
+        .delete_to_bol => {
+            try self.command.deleteBackwards(self.allocator, self.command.cursor);
+        },
         else => {
             if (action.isMotion()) {
                 self.doCommandMotion(action.toMotion()) catch unreachable;
@@ -1184,7 +1191,7 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
     switch (cmd) {
         // Set a property back to its default value
         .unset => {
-            const usage = "Usage: unset PROPERTY";
+            const usage = "Usage: `:unset PROPERTY`";
             const arg1 = iter.next() orelse {
                 self.setStatusMessage(.err, "{s}", .{usage});
                 return;
@@ -1218,14 +1225,14 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
             }
         },
         .set => {
-            const usage = "Usage: set PROPERTY VALUE";
+            const usage = "Usage: `:set PROPERTY VALUE`";
             const arg1 = iter.next() orelse {
                 self.setStatusMessage(.err, "{s}", .{usage});
                 return;
             };
 
             const property = std.meta.stringToEnum(SetProperty, arg1) orelse {
-                self.setStatusMessage(.err, "Invalid property '{s}'", .{arg1});
+                self.setStatusMessage(.err, "Invalid property '{s}': " ++ usage, .{arg1});
                 return;
             };
 
