@@ -228,7 +228,7 @@ pub fn init(allocator: std.mem.Allocator) InitError!Tui {
         .handler = .{
             .handler = resizeHandler,
         },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = 0,
     }, null);
 
@@ -775,7 +775,6 @@ fn renderCell(
 
     if (!cell_handle.isValid()) {
         try tui.setStyle(if (selected) .cell_blank_selected else .cell_blank_unselected);
-        try writer.print("{s: >[1]}", .{ "", width });
         try rpw.pad();
         return;
     }

@@ -12,14 +12,13 @@
             .url = "git+https://github.com/efjimm/zig-wcwidth?ref=master#2872d6dfd5b4c6e2785065a851d744fd3b670ca1",
             .hash = "wcwidth-1.0.0--VafOOvKAABO48aMATSMlqEhATb_QqKgJ6Pjz_JqMBPU",
         },
-        .zlua = .{
-            .path = "../ziglua",
-            // .url = "git+https://github.com/natecraddock/ziglua?ref=main#891945ef9c2bffcd06050c4836d414428ed7d95a",
-            // .hash = "zlua-0.1.0-hGRpC2rgBACFhBjc9s9dGN37ZaTu7rNVZZqduwitv4O7",
-        },
         .shovel = .{
-            .url = "git+https://github.com/efjimm/shovel?ref=master#737afd12634602c0e70be0d2927ba47e56e04306",
-            .hash = "shovel-0.1.0-WAlYzErhBQDRsB7eG79ssEk2OGkMzMPQi2ZEfgxoSKrl",
+            .url = "git+https://github.com/efjimm/shovel?ref=master#115a5d42759862ad47066d2264fc65f0dac89ed9",
+            .hash = "shovel-0.1.0-WAlYzAIPBgDEAYHiUDeM4R6z3L9pgogGDzZJHwSoxf9W",
+        },
+        .zlua = .{
+            .url = "git+https://github.com/natecraddock/ziglua?ref=main#f7b3c90d026afd33b0a70debfd54ea50f1acfc1b",
+            .hash = "zlua-0.1.0-hGRpC-IZBQDD9MfKTbeRE3z_Qg-kI2SqnT1JaRl9W9Sq",
         },
     },
 }
