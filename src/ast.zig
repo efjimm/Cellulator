@@ -27,13 +27,9 @@ pub const Node = extern struct {
     data: Payload,
 
     pub const Tag = blk: {
-        const t = @typeInfo(std.meta.FieldEnum(Payload));
-        break :blk @Type(.{ .@"enum" = .{
-            .tag_type = u8,
-            .fields = t.@"enum".fields,
-            .decls = &.{},
-            .is_exhaustive = true,
-        } });
+        var t = @typeInfo(std.meta.FieldEnum(Payload));
+        t.@"enum".tag_type = u8;
+        break :blk @Type(t);
     };
 
     pub const Payload = extern union {
@@ -62,13 +58,9 @@ pub const Node = extern struct {
     }
 
     pub const Tagged = blk: {
-        const t = @typeInfo(Payload).@"union";
-        break :blk @Type(.{ .@"union" = .{
-            .layout = t.layout,
-            .fields = t.fields,
-            .decls = t.decls,
-            .tag_type = Tag,
-        } });
+        var t = @typeInfo(Payload);
+        t.@"union".tag_type = Tag;
+        break :blk @Type(t);
     };
 
     pub inline fn get(n: Node) Tagged {

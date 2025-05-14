@@ -262,28 +262,15 @@ pub const Undo = extern struct {
 
     pub const sentinel: Undo = .{ .tag = .sentinel, .payload = undefined };
 
-    pub const Tag = enum(u8) {
-        set_cell,
-        delete_cell,
-        set_column_width,
-        set_column_precision,
-        sentinel,
-        delete_columns,
-        insert_columns,
-        delete_rows,
-        insert_rows,
-        update_range,
-        update_pos,
-        insert_dep,
-        update_dep,
-        insert_cell,
-        bulk_cell_delete,
-        bulk_cell_insert,
-        bulk_cell_delete_contiguous,
-        bulk_cell_insert_contiguous,
+    pub const Tag = blk: {
+        const AutoTag = std.meta.FieldEnum(Payload);
+        var info = @typeInfo(AutoTag);
+        info.@"enum".tag_type = u8;
+        break :blk @Type(info);
     };
 
     pub const Payload = extern union {
+        sentinel: void,
         set_cell: Cell.Handle,
         delete_cell: Position,
 
@@ -2896,13 +2883,9 @@ pub const Cell = extern struct {
         err: Error,
 
         pub const Tag = blk: {
-            const t = @typeInfo(std.meta.FieldEnum(Value)).@"enum";
-            break :blk @Type(.{ .@"enum" = .{
-                .tag_type = u8,
-                .fields = t.fields,
-                .decls = &.{},
-                .is_exhaustive = t.is_exhaustive,
-            } });
+            var t = @typeInfo(std.meta.FieldEnum(Value));
+            t.@"enum".tag_type = u8;
+            break :blk @Type(t);
         };
     };
 
@@ -2910,15 +2893,9 @@ pub const Cell = extern struct {
         tag: Tag,
 
         pub const Tag = blk: {
-            const t = @typeInfo(std.meta.FieldEnum(ast.EvalError));
-            break :blk @Type(.{
-                .@"enum" = .{
-                    .tag_type = u8,
-                    .fields = t.@"enum".fields,
-                    .decls = &.{},
-                    .is_exhaustive = true,
-                },
-            });
+            var t = @typeInfo(std.meta.FieldEnum(ast.EvalError));
+            t.@"enum".tag_type = u8;
+            break :blk @Type(t);
         };
 
         pub fn fromError(err: ast.EvalError) Error {
