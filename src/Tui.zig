@@ -232,6 +232,8 @@ pub fn init(allocator: std.mem.Allocator) InitError!Tui {
         .flags = 0,
     }, null);
 
+    try shovel.initUnicodeData(allocator);
+
     return .{
         .term = try .init(allocator, .{ .truecolour = .check }),
         .arena = .init(allocator),
@@ -242,6 +244,7 @@ pub fn init(allocator: std.mem.Allocator) InitError!Tui {
 pub fn deinit(tui: *Tui, allocator: std.mem.Allocator) void {
     tui.term.deinit(allocator);
     tui.arena.deinit();
+    shovel.deinitUnicodeData(allocator);
     tui.* = undefined;
 }
 

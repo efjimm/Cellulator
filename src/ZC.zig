@@ -204,7 +204,7 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
     var tui = try Tui.init(allocator);
     errdefer tui.deinit(allocator);
 
-    if (options.ui) try tui.term.uncook(.{});
+    if (options.ui) try tui.term.uncook(allocator, .{});
 
     var lua_state = try lua.init(zc);
     errdefer lua_state.deinit();
