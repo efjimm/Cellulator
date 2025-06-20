@@ -101,7 +101,7 @@ pub const Dep = extern struct {
 
 pub const Columns = PhTree(Column, 1, u32);
 pub const Dependents = PhTree(DepIndex, 4, usize);
-pub const CellTree = @import("phtree.zig").PhTree(Cell, 2, usize);
+pub const CellTree = PhTree(Cell, 2, usize);
 
 fn createDep(sheet: *Sheet, dep: Dep) !DepIndex {
     if (sheet.free_deps.isValid()) {
@@ -568,7 +568,7 @@ pub fn interpretSource(sheet: *Sheet, reader: anytype) !void {
         try sheet.cell_tree.ensureUnusedCapacity(sheet.allocator, @intCast(cells.len));
         try sheet.dependents.ensureUnusedCapacity(sheet.allocator, @intCast(dependent_count));
         try sheet.deps.ensureUnusedCapacity(sheet.allocator, dependent_count);
-        try sheet.undos.ensureUnusedCapacity(sheet.allocator, cells.len);
+        try sheet.undos.ensureUnusedCapacity(sheet.allocator, cells.len + 1); // + 1 for sentinel
 
         try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, total_strings_len);
         try sheet.cols.ensureUnusedCapacity(sheet.allocator, @intCast(cells.len));
@@ -719,8 +719,7 @@ const ExprRangeIterator = struct {
     }
 };
 
-/// Adds `dependent_range` as a dependent of all cells in `range`.
-fn addRangeDependents(
+fn addCellAsDependentOfRange(
     sheet: *Sheet,
     dependent: Cell.Handle,
     range: Rect,
@@ -747,14 +746,14 @@ fn addRangeDependents(
     head_ptr.* = index;
 }
 
-fn addExpressionDependents(
+fn addCellAsDependentOfExprRanges(
     sheet: *Sheet,
     dependent: Cell.Handle,
     expr_root: ast.Index,
 ) void {
     var iter: ExprRangeIterator = .init(sheet, expr_root);
     while (iter.next()) |range| {
-        sheet.addRangeDependents(dependent, range);
+        sheet.addCellAsDependentOfRange(dependent, range);
     }
 }
 
@@ -771,10 +770,11 @@ fn ensureExpressionDependentsCapacity(sheet: *Sheet, expr_root: ast.Index) Alloc
 }
 
 /// Removes `cell` as a dependent of all cells in `rect`
-fn removeRangeDependents(
+fn removeCellAsDependentOfRange(
     sheet: *Sheet,
     dependent: Cell.Handle,
     range: Rect,
+    comptime destroy: bool,
 ) void {
     // log.debug("Removing {} as a dependent of {}", .{
     //     sheet.rectFromCellHandle(dependent),
@@ -784,7 +784,7 @@ fn removeRangeDependents(
         range.tl.x, range.tl.y,
         range.br.x, range.br.y,
     };
-    const head = (sheet.dependents.find(&p) orelse return);
+    const head = sheet.dependents.find(&p) orelse return;
 
     while (head.isValid() and sheet.deps.items[head.n].handle == dependent) {
         const old_head = head.*;
@@ -793,8 +793,9 @@ fn removeRangeDependents(
     }
 
     if (!head.isValid()) {
-        if (sheet.dependents.remove(&p)) |kv_handle|
-            sheet.dependents.destroyValue(kv_handle);
+        if (sheet.dependents.remove(&p)) |kv_handle| {
+            if (destroy) sheet.dependents.destroyValue(kv_handle);
+        }
         return;
     }
 
@@ -812,19 +813,19 @@ fn removeRangeDependents(
 
     if (!head.isValid()) {
         if (sheet.dependents.remove(&p)) |kv_handle|
-            sheet.dependents.destroyValue(kv_handle);
+            if (destroy) sheet.dependents.destroyValue(kv_handle);
     }
 }
 
-/// Removes `cell` as a dependent of all ranges referenced by `expr`.
-fn removeExprDependents(
+fn removeCellAsDependentOfExpr(
     sheet: *Sheet,
     dependent: Cell.Handle,
     expr_root: ast.Index,
+    comptime destroy: bool,
 ) void {
     var iter = ExprRangeIterator.init(sheet, expr_root);
     while (iter.next()) |range| {
-        sheet.removeRangeDependents(dependent, range);
+        sheet.removeCellAsDependentOfRange(dependent, range, destroy);
     }
 }
 
@@ -1143,6 +1144,11 @@ pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
             const handle = u.payload.insert_dep;
             const p = sheet.dependents.getPoint(handle).*;
             _ = try sheet.dependents.insert(sheet.allocator, &p, handle);
+            var n = sheet.dependents.getValue(handle).*;
+            while (n.isValid()) : (n = sheet.deps.items[n.n].next) {
+                const cell = sheet.deps.items[n.n].handle;
+                try sheet.enqueueUpdate(cell);
+            }
         },
         .update_dep => {
             const handle = u.payload.update_dep.handle;
@@ -1189,7 +1195,7 @@ fn bulkDeleteCellHandles(sheet: *Sheet, handles: []const Cell.Handle) void {
     for (handles) |handle| {
         const cell = sheet.getCellFromHandle(handle);
         // TODO: Doing this in a separate loop from removeHandle might be better
-        sheet.removeExprDependents(handle, cell.expr_root);
+        sheet.removeCellAsDependentOfExpr(handle, cell.expr_root, true);
         sheet.setCellError(cell);
         sheet.cell_tree.removeHandle(handle);
     }
@@ -1203,7 +1209,7 @@ fn bulkDeleteCellHandlesContiguous(sheet: *Sheet, start: Cell.Handle.Int, end: C
         const handle: Cell.Handle = .from(@intCast(i));
         const cell = sheet.getCellFromHandle(handle);
         // TODO: Doing this in a separate loop from removeHandle might be better
-        sheet.removeExprDependents(handle, cell.expr_root);
+        sheet.removeCellAsDependentOfExpr(handle, cell.expr_root, true);
         sheet.setCellError(cell);
         sheet.cell_tree.removeHandle(handle);
     }
@@ -1222,7 +1228,7 @@ fn bulkInsertCellHandles(sheet: *Sheet, handles: []const Cell.Handle) void {
         const p = sheet.cell_tree.getPoint(handle).*;
         const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
         assert(!removed.isValid());
-        sheet.addExpressionDependents(handle, cell.expr_root);
+        sheet.addCellAsDependentOfExprRanges(handle, cell.expr_root);
         cell.state = .enqueued;
     }
 }
@@ -1238,7 +1244,7 @@ fn bulkInsertCellHandlesContiguous(sheet: *Sheet, start: Cell.Handle.Int, end: C
         const p = sheet.cell_tree.getPoint(handle).*;
         const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
         assert(!removed.isValid());
-        sheet.addExpressionDependents(handle, cell.expr_root);
+        sheet.addCellAsDependentOfExprRanges(handle, cell.expr_root);
         cell.state = .enqueued;
     }
 }
@@ -1521,7 +1527,7 @@ fn deleteCellRangeAssumeCapacity(sheet: *Sheet, range: Rect, opts: UndoOpts) voi
 
     for (existing_cells) |cell_handle| {
         const old_cell = sheet.getCellFromHandle(cell_handle);
-        sheet.removeExprDependents(cell_handle, old_cell.expr_root);
+        sheet.removeCellAsDependentOfExpr(cell_handle, old_cell.expr_root, true);
         sheet.cell_tree.removeHandle(cell_handle);
         sheet.setCellError(old_cell);
     }
@@ -1618,7 +1624,7 @@ pub fn bulkInsertContiguousCells(
         const p = sheet.cell_tree.getPoint(handle).*;
         const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
         assert(!removed.isValid());
-        sheet.addExpressionDependents(handle, sheet.getCellFromHandle(handle).expr_root);
+        sheet.addCellAsDependentOfExprRanges(handle, sheet.getCellFromHandle(handle).expr_root);
         sheet.getCellFromHandle(handle).state = .enqueued;
     }
 
@@ -1846,15 +1852,15 @@ pub fn insertCellNode(
     var u: Undo = undefined;
     if (!old_handle.isValid()) {
         // log.debug("Creating cell {}", .{pos});
-        sheet.addExpressionDependents(handle, cell_ptr.expr_root);
+        sheet.addCellAsDependentOfExprRanges(handle, cell_ptr.expr_root);
 
         u = .init(.delete_cell, pos);
     } else {
         // log.debug("Overwriting cell {}", .{pos});
 
         const old_cell_ptr = sheet.getCellFromHandle(old_handle);
-        sheet.removeExprDependents(handle, old_cell_ptr.expr_root);
-        sheet.addExpressionDependents(handle, cell_ptr.expr_root);
+        sheet.removeCellAsDependentOfExpr(handle, old_cell_ptr.expr_root, true);
+        sheet.addCellAsDependentOfExprRanges(handle, cell_ptr.expr_root);
 
         sheet.setCellError(old_cell_ptr);
 
@@ -1876,7 +1882,7 @@ pub fn deleteCellByHandle(
     try sheet.ensureUnusedUndoCapacity(1);
 
     try sheet.enqueueUpdate(handle);
-    sheet.removeExprDependents(handle, cell.expr_root);
+    sheet.removeCellAsDependentOfExpr(handle, cell.expr_root, true);
 
     sheet.setCellError(cell);
     _ = sheet.cell_tree.removeHandle(handle);
@@ -1962,6 +1968,7 @@ pub fn deleteColumnRange(
         }
 
         for (deps.items) |handle| {
+            assert(handle != sheet.dependents.free_values);
             const p = sheet.dependents.getPoint(handle).*;
             const needs_resize_or_delete = !(p[0] > end or (p[0] < start and p[2] > end));
             undo_count += @intFromBool(needs_resize_or_delete);
@@ -2024,15 +2031,14 @@ pub fn deleteColumnRange(
         sheet.cell_tree.removeHandle(handle);
 
         if (p[0] >= start and p[0] <= end) {
-            sheet.removeExprDependents(handle, sheet.getCellFromHandle(handle).expr_root);
+            sheet.removeCellAsDependentOfExpr(handle, sheet.getCellFromHandle(handle).expr_root, false);
         }
     }
 
     for (cells.items) |handle| {
         const p = sheet.cell_tree.getPoint(handle);
-
         if (p[0] >= start and p[0] <= end) {
-            // TODO: batch these cell inserts
+            // TODO: batch these inserts
             sheet.pushUndoAssumeCapacity(.init(.set_cell, handle), undo_opts);
         } else {
             p[0] -= deleted_cols;
@@ -2065,6 +2071,7 @@ pub fn deleteColumnRange(
     for (deps.items) |handle| {
         if (handle.n >= sheet.dependents.values.len)
             continue;
+        assert(handle != sheet.dependents.free_values);
 
         const p = sheet.dependents.getPoint(handle);
         sheet.dependents.removeHandle(handle);
@@ -2269,7 +2276,7 @@ pub fn deleteRowRange(
         sheet.cell_tree.removeHandle(handle);
 
         if (p[1] >= start and p[1] <= end) {
-            sheet.removeExprDependents(handle, sheet.getCellFromHandle(handle).expr_root);
+            sheet.removeCellAsDependentOfExpr(handle, sheet.getCellFromHandle(handle).expr_root, false);
         }
     }
 
@@ -4117,4 +4124,62 @@ test "delete row dependency data" {
     try std.testing.expect(sheet.dependents.find(&.{ 0, 1, 0, 1 }) != null);
     try sheet.deleteRowRange(0, 0, .{});
     try std.testing.expect(sheet.dependents.find(&.{ 0, 1, 0, 1 }) == null);
+}
+
+test "undo delete column" {
+    var sheet = try init(std.testing.allocator);
+    defer sheet.deinit();
+
+    try sheet.setCell(try .fromAddress("B0"), "A0", try ast.fromExpression(&sheet, "A0"), .{});
+    sheet.endUndoGroup();
+    try sheet.update();
+
+    try sheet.expectCellEquals("B0", 0);
+    try sheet.deleteColumnRange(0, 0, .{});
+    sheet.endUndoGroup();
+    try sheet.update();
+
+    try sheet.expectCellError("A0");
+    try sheet.undo();
+    try sheet.update();
+
+    const kv = sheet.dependents.findEntry(&.{ 0, 0, 0, 0 });
+    try std.testing.expect(kv.isValid());
+    const head = sheet.deps.items[kv.n];
+    try std.testing.expectEqualSlices(u32, &.{ 1, 0 }, sheet.cell_tree.getPoint(head.handle));
+
+    try sheet.expectCellEquals("B0", 0);
+}
+
+test "something" {
+    var sheet = try init(std.testing.allocator);
+    defer sheet.deinit();
+
+    const c1 = "@sum(B0:D0)";
+    try sheet.setCell(try .fromAddress("E1"), c1, try ast.fromExpression(&sheet, c1), .{});
+    sheet.endUndoGroup();
+
+    try sheet.deleteColumnRange(3, 3, .{});
+    sheet.endUndoGroup();
+
+    try sheet.undo();
+
+    try sheet.redo();
+
+    const c2 = "D0";
+    try sheet.setCell(try .fromAddress("E2"), c2, try ast.fromExpression(&sheet, c2), .{});
+    sheet.endUndoGroup();
+
+    try sheet.deleteColumnRange(2, 2, .{});
+    sheet.endUndoGroup();
+
+    try sheet.undo();
+    try sheet.redo();
+
+    const c3 = "D0";
+    try sheet.setCell(try .fromAddress("E2"), c3, try ast.fromExpression(&sheet, c3), .{});
+    sheet.endUndoGroup();
+
+    try sheet.deleteColumnRange(1, 3, .{});
+    sheet.endUndoGroup();
 }

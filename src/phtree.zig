@@ -13,6 +13,8 @@ const runtime_safety = switch (@import("builtin").mode) {
 pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) type {
     return struct {
         root: HandleUnion,
+        free_values: ValueHandle,
+        free_values_count: ValueHandle.Int,
         free: Handle,
         free_count: Handle.Int,
         values: std.MultiArrayList(Value).Slice,
@@ -40,6 +42,16 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
 
             pub const FlagInt = std.meta.Int(.unsigned, @max(1 << dims, 8));
             pub const Tag = enum(u8) { leaf, branch };
+        };
+
+        pub const empty: @This() = .{
+            .root = .{ .leaf = .invalid },
+            .free_values = .invalid,
+            .free_values_count = 0,
+            .free = .invalid,
+            .free_count = 0,
+            .nodes = .empty,
+            .values = .empty,
         };
 
         fn getFlags(tree: *const @This(), handle: Handle) *Node.FlagInt {
@@ -178,6 +190,9 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
         };
 
         fn calculateHypercubeAddress(p: *const Point, postfix_length: u8) u8 {
+            if (postfix_length > std.math.maxInt(u5)) {
+                std.debug.print("{x}\n", .{postfix_length});
+            }
             const pl: u5 = @intCast(postfix_length);
             const bit_mask = @as(u32, 1) << pl;
             var address: u32 = 0;
@@ -201,6 +216,24 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
         }
 
         pub fn createValueAssumeCapacity(tree: *@This(), p: *const Point, value: V) ValueHandle {
+            if (tree.free_values.isValid()) {
+                assert(tree.free_values_count > 0);
+                const ret = tree.free_values;
+                tree.free_values = .{ .n = tree.getValueParent(ret).n };
+                tree.free_values_count -= 1;
+
+                tree.values.set(ret.n, .{
+                    .point = p.*,
+                    .parent = .invalid,
+                    .value = value,
+                });
+
+                assert(tree.root == .branch or tree.root.leaf != ret);
+                assert(tree.free_values != ret);
+                assert(!tree.free_values.isValid() or tree.free_values.n < tree.values.len);
+                return ret;
+            }
+
             assert(tree.values.capacity > tree.values.len);
             const handle: ValueHandle = .from(@intCast(tree.values.len));
             tree.values.len += 1;
@@ -240,16 +273,25 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
         }
 
         pub fn destroyValue(tree: *@This(), handle: ValueHandle) void {
-            // TODO: Implement freelist for values
-            tree.getValueParent(handle).* = .invalid;
+            assert(tree.root == .branch or tree.root.leaf != handle);
             if (handle.n == tree.values.len - 1) {
+                tree.getValueParent(handle).* = .invalid;
                 tree.values.len -= 1;
+            } else {
+                // if (dims == 4 and handle.n == 0) std.debug.dumpCurrentStackTrace(null);
+                tree.values.set(handle.n, .{
+                    .point = @splat(0),
+                    .parent = .{ .n = tree.free_values.n },
+                    .value = undefined,
+                });
+                tree.free_values = handle;
+                tree.free_values_count += 1;
             }
         }
 
         fn destroyHandle(tree: *@This(), handle: Handle) void {
-            tree.getNodeParent(handle).* = .invalid;
             if (handle.n == tree.nodes.len - 1) {
+                tree.getNodeParent(handle).* = .invalid;
                 tree.nodes.len -= 1;
             } else {
                 tree.nodes.set(handle.n, undefined);
@@ -379,7 +421,9 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             }
 
             const handle = tree.createValueAssumeCapacity(p, undefined);
+            assert(tree.root == .branch or handle.n != tree.root.leaf.n);
             const removed_kv = tree.insertAssumeCapacity(p, handle);
+            if (dims == 4 and removed_kv.isValid()) std.debug.print("ERM {d}\n", .{removed_kv.n});
             assert(!removed_kv.isValid());
 
             const value_ptr = tree.getValue(handle);
@@ -400,64 +444,66 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             return tree.insertAssumeCapacity(p, kv);
         }
 
-        pub fn insertAssumeCapacity(tree: *@This(), _: *const Point, kv: ValueHandle) ValueHandle {
+        fn insertEmpty(tree: *@This(), kv: ValueHandle) ValueHandle {
+            assert(!tree.root.isValid());
+            tree.root = .{ .leaf = kv };
+            assert(kv != tree.free_values);
+            return .invalid;
+        }
+
+        fn insertWithLeafRoot(tree: *@This(), kv: ValueHandle) ValueHandle {
             const p = tree.getPoint(kv);
 
-            if (!tree.root.isValid()) {
-                tree.root = .{ .leaf = kv };
-                return .invalid;
-            }
-
-            if (tree.root == .leaf) {
-                const root = tree.root.leaf;
-                const root_point = tree.getPoint(root);
-                const root_conflicting_bit = firstDifferingBit(p, root_point);
-
-                // The points are the same
-                if (root_conflicting_bit == 0) {
-                    tree.root = .{ .leaf = kv };
-                    return root;
-                }
-
-                // Need to insert a new branch node above the current root node.
-                const pl = root_conflicting_bit - 1;
-                const new_root = tree.createNodeAssumeCapacity(.invalid, pl, p);
-                const address = calculateHypercubeAddress(p, pl);
-                tree.setChild(new_root, address, .leaf, kv);
-
-                const root_address = calculateHypercubeAddress(root_point, pl);
-                assert(address != root_address);
-                tree.setChild(new_root, root_address, .leaf, root);
-
-                tree.root = .{ .branch = new_root };
-                return .invalid;
-            }
-
-            const root = tree.root.branch;
-            const root_point = tree.getNodePoint(root);
+            const root = tree.root.leaf;
+            const root_point = tree.getPoint(root);
             const root_conflicting_bit = firstDifferingBit(p, root_point);
 
-            const root_pl = tree.getPostfixLength(root).*;
-            if (root_conflicting_bit > root_pl + 1) {
-                // Need to insert a new branch node above the current root node.
-                const pl = root_conflicting_bit - 1;
-                const new_root = tree.createNodeAssumeCapacity(.invalid, pl, p);
-
-                const address = calculateHypercubeAddress(p, pl);
-                tree.setChild(new_root, address, .leaf, kv);
-
-                const root_address = calculateHypercubeAddress(tree.getNodePoint(root), pl);
-                assert(address != root_address);
-                tree.setChild(new_root, root_address, .branch, root);
-
-                tree.root = .{ .branch = new_root };
-                return .invalid;
+            // The points are the same
+            if (root_conflicting_bit == 0) {
+                assert(std.mem.eql(u32, p, root_point));
+                tree.root = .{ .leaf = kv };
+                return root;
             }
 
+            // Need to insert a new branch node above the current root node.
+            const pl = root_conflicting_bit - 1;
+            const new_root = tree.createNodeAssumeCapacity(.invalid, pl, p);
+            const address = calculateHypercubeAddress(p, pl);
+            tree.setChild(new_root, address, .leaf, kv);
+
+            const root_address = calculateHypercubeAddress(root_point, pl);
+            assert(address != root_address);
+            tree.setChild(new_root, root_address, .leaf, root);
+
+            tree.root = .{ .branch = new_root };
+            return .invalid;
+        }
+
+        fn insertAboveRoot(tree: *@This(), kv: ValueHandle, root_conflicting_bit: u8) ValueHandle {
+            const p = tree.getPoint(kv);
+
+            // Need to insert a new branch node above the current root node.
+            const pl = root_conflicting_bit - 1;
+            const new_root = tree.createNodeAssumeCapacity(.invalid, pl, p);
+
+            const address = calculateHypercubeAddress(p, pl);
+            tree.setChild(new_root, address, .leaf, kv);
+
+            const root = tree.root.branch;
+            const root_address = calculateHypercubeAddress(tree.getNodePoint(root), pl);
+            assert(address != root_address);
+            tree.setChild(new_root, root_address, .branch, root);
+
+            tree.root = .{ .branch = new_root };
+            return .invalid;
+        }
+
+        fn insertGeneric(tree: *@This(), kv: ValueHandle) ValueHandle {
+            const p = tree.getPoint(kv);
             // PH trees cannot be deeper than the bit length of their keys.
             const max_depth = @typeInfo(@typeInfo(Point).array.child).int.bits;
             var last_pl: u8 = max_depth;
-            var handle = root;
+            var handle = tree.root.branch;
             for (0..max_depth) |_| {
                 const pl = tree.getPostfixLength(handle).*;
                 assert(last_pl > pl);
@@ -527,12 +573,36 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             unreachable;
         }
 
+        pub fn insertAssumeCapacity(tree: *@This(), _: *const Point, kv: ValueHandle) ValueHandle {
+            const p = tree.getPoint(kv);
+
+            if (!tree.root.isValid())
+                return tree.insertEmpty(kv);
+
+            if (tree.root == .leaf)
+                return tree.insertWithLeafRoot(kv);
+
+            const root = tree.root.branch;
+            const root_point = tree.getNodePoint(root);
+            const root_conflicting_bit = firstDifferingBit(p, root_point);
+
+            const root_pl = tree.getPostfixLength(root).*;
+            if (root_conflicting_bit > root_pl + 1) {
+                return tree.insertAboveRoot(kv, root_conflicting_bit);
+            }
+
+            return tree.insertGeneric(kv);
+        }
+
         pub fn clearRetainingCapacity(tree: *@This()) void {
             tree.nodes.len = 0;
             tree.values.len = 0;
 
             tree.root = .{ .leaf = .invalid };
             tree.free = .invalid;
+            tree.free_count = 0;
+            tree.free_values = .invalid;
+            tree.free_values_count = 0;
         }
 
         fn printNode(tree: *@This(), handle: Handle) void {
@@ -594,7 +664,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             var largest: ValueHandle = .invalid;
             for (tree.values.items(.point), 0..) |p, i| {
                 const handle: ValueHandle = .from(@intCast(i));
-                if ((!largest.isValid() or tree.getPoint(largest)[dim] < p[dim]))
+                if (!largest.isValid() or tree.getPoint(largest)[dim] < p[dim])
                     largest = handle;
             }
             return largest;
@@ -603,9 +673,9 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
         pub fn findEntry(tree: *@This(), p: *const Point) ValueHandle {
             if (!tree.root.isValid()) return .invalid;
             if (tree.root == .leaf) {
-                const value = tree.root.leaf;
-                const p2 = tree.getPoint(value);
-                return if (std.mem.eql(u32, p, p2)) value else .invalid;
+                const root = tree.root.leaf;
+                const p2 = tree.getPoint(root);
+                return if (std.mem.eql(u32, p, p2)) root else .invalid;
             }
 
             var h = tree.root.branch;
@@ -872,14 +942,6 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
         fn getChildren(tree: *const @This(), handle: Handle) *[1 << dims]Handle {
             return &tree.nodes.items(.children)[handle.n];
         }
-
-        pub const empty: @This() = .{
-            .root = .{ .leaf = .invalid },
-            .free = .invalid,
-            .free_count = 0,
-            .nodes = .empty,
-            .values = .empty,
-        };
 
         pub fn deinit(tree: *@This(), allocator: Allocator) void {
             tree.nodes.deinit(allocator);
