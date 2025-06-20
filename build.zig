@@ -1,7 +1,6 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const use_llvm = !(b.option(bool, "no-llvm", "Use native codegen backends") orelse false);
     const logfile = b.option([]const u8, "logging", "File to log to");
     const log_level = b.option(std.log.Level, "log-level", "Logging level") orelse .debug;
 
@@ -11,8 +10,8 @@ pub fn build(b: *std.Build) void {
 
     const main_mod = configureMainModule(b);
 
-    configureExe(b, main_mod, use_llvm);
-    configureTests(b, main_mod, use_llvm, opts);
+    configureExe(b, main_mod);
+    configureTests(b, main_mod, opts);
     configureBenchmarks(b, main_mod);
 
     main_mod.addOptions("build", opts);
@@ -53,13 +52,10 @@ fn configureMainModule(b: *std.Build) *std.Build.Module {
 fn configureExe(
     b: *std.Build,
     main_mod: *std.Build.Module,
-    use_llvm: bool,
 ) void {
     const exe = b.addExecutable(.{
         .name = "cellulator",
         .root_module = main_mod,
-        .use_llvm = use_llvm,
-        .use_lld = use_llvm,
     });
 
     const check_step = b.step("check", "");
@@ -78,7 +74,6 @@ fn configureExe(
 fn configureTests(
     b: *std.Build,
     main_mod: *std.Build.Module,
-    use_llvm: bool,
     opts: *std.Build.Step.Options,
 ) void {
     const fast_tests = b.option(bool, "fast-tests", "Skip slow tests") orelse false;
@@ -88,8 +83,6 @@ fn configureTests(
     const tests = b.addTest(.{
         .root_module = main_mod,
         .filter = test_filter,
-        .use_llvm = use_llvm,
-        .use_lld = use_llvm,
     });
 
     opts.addOption([]const []const u8, "test_files", &.{
