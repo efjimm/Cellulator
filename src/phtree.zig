@@ -20,6 +20,14 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
         values: std.MultiArrayList(Value).Slice,
         nodes: std.MultiArrayList(Node).Slice,
 
+        /// Prevents a mismatch between requested allocation size and actual allocation size.
+        /// We always allocate more than the requested alloc size for performance reasons, so this
+        /// variable is necessary to keep track of the actual requested size.
+        requested_values_alloc: if (runtime_safety) usize else u0,
+
+        /// See `requested_values_alloc`.
+        requested_nodes_alloc: if (runtime_safety) usize else u0,
+
         pub const Value = extern struct {
             point: Point,
             parent: Handle,
@@ -52,6 +60,8 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             .free_count = 0,
             .nodes = .empty,
             .values = .empty,
+            .requested_values_alloc = 0,
+            .requested_nodes_alloc = 0,
         };
 
         fn getFlags(tree: *const @This(), handle: Handle) *Node.FlagInt {
@@ -212,7 +222,13 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             var m = tree.values.toMultiArrayList();
             try m.ensureUnusedCapacity(allocator, 1);
             tree.values = m.toOwnedSlice();
+            if (runtime_safety)
+                tree.requested_values_alloc = @max(tree.requested_values_alloc, m.len + 1);
             return tree.createValueAssumeCapacity(p, value);
+        }
+
+        fn requestedCapacity(tree: *const @This()) usize {
+            return if (runtime_safety) tree.requested_values_alloc else tree.values.capacity;
         }
 
         pub fn createValueAssumeCapacity(tree: *@This(), p: *const Point, value: V) ValueHandle {
@@ -234,7 +250,7 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
                 return ret;
             }
 
-            assert(tree.values.capacity > tree.values.len);
+            assert(tree.requestedCapacity() > tree.values.len);
             const handle: ValueHandle = .from(@intCast(tree.values.len));
             tree.values.len += 1;
 
@@ -252,6 +268,8 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
                 defer tree.nodes = m.slice();
 
                 try m.ensureUnusedCapacity(allocator, 1);
+                if (runtime_safety)
+                    tree.requested_nodes_alloc = @max(tree.requested_nodes_alloc, m.len + 1);
             }
 
             return tree.createEntryAssumeCapacity();
@@ -362,11 +380,17 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
                 tree.nodes = m.slice();
             }
 
+            if (runtime_safety)
+                tree.requested_nodes_alloc = @max(tree.requested_nodes_alloc, tree.nodes.len + count);
+
             if (tree.values.len + n > tree.values.capacity) {
                 var m = tree.values.toMultiArrayList();
-                try m.setCapacity(allocator, m.len * 2 + count);
+                try m.setCapacity(allocator, m.len * 2 + n);
                 tree.values = m.slice();
             }
+
+            if (runtime_safety)
+                tree.requested_values_alloc = @max(tree.requested_values_alloc, tree.values.len + n);
         }
 
         pub const GetOrPutResult = struct {
@@ -423,7 +447,6 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             const handle = tree.createValueAssumeCapacity(p, undefined);
             assert(tree.root == .branch or handle.n != tree.root.leaf.n);
             const removed_kv = tree.insertAssumeCapacity(p, handle);
-            if (dims == 4 and removed_kv.isValid()) std.debug.print("ERM {d}\n", .{removed_kv.n});
             assert(!removed_kv.isValid());
 
             const value_ptr = tree.getValue(handle);
@@ -1012,6 +1035,11 @@ pub fn PhTree(comptime V: type, comptime dims: usize, comptime HandleInt: type) 
             };
             tree.free = header.free;
             tree.free_count = header.free_count;
+
+            if (runtime_safety) {
+                tree.requested_values_alloc = tree.values.capacity;
+                tree.requested_nodes_alloc = tree.nodes.capacity;
+            }
 
             return @bitCast(tree.iovecs());
         }

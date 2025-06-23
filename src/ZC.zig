@@ -827,12 +827,12 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
         .goto_col => self.cursorGotoCol(),
         .goto_row => self.cursorGotoRow(),
         .delete_column => {
-            try self.sheet.deleteColumnRange(self.cursor.x, self.cursor.x, .{});
+            try self.sheet.deleteColOrRowRange(self.cursor.x, self.cursor.x, .{}, .col);
             self.sheet.endUndoGroup();
             self.ui.update(&.{ .column_headings, .cells });
         },
         .delete_row => {
-            try self.sheet.deleteRowRange(self.cursor.y, self.cursor.y, .{});
+            try self.sheet.deleteColOrRowRange(self.cursor.y, self.cursor.y, .{}, .row);
             self.sheet.endUndoGroup();
             self.ui.update(&.{ .column_headings, .cells });
         },
@@ -1409,7 +1409,7 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
                 break :blk .{ first_col, first_col };
             };
 
-            try self.sheet.deleteColumnRange(start, end, .{});
+            try self.sheet.deleteColOrRowRange(start, end, .{}, .col);
             self.sheet.endUndoGroup();
             self.ui.update(&.{ .cells, .column_headings, .cursor });
         },
@@ -1434,7 +1434,7 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
                 break :blk .{ first_row, first_row };
             };
 
-            try self.sheet.deleteRowRange(start, end, .{});
+            try self.sheet.deleteColOrRowRange(start, end, .{}, .row);
             self.sheet.endUndoGroup();
             self.ui.update(&.{ .cells, .row_numbers, .cursor });
         },
