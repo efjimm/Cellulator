@@ -226,7 +226,7 @@ fn parseFunction(parser: *Parser) !Index {
     const start = try parser.expectTokenGet(.builtin);
     const end = try parser.expectTokenGet(.lparen);
 
-    const identifier = parser.src[start..end];
+    const identifier = parser.src[start + 1 .. end];
     const builtin = builtins.get(identifier) orelse return error.UnexpectedToken;
 
     const args_start = switch (builtin) {
@@ -274,6 +274,7 @@ fn parseNumber(parser: *Parser) !Index {
     // number token on invalid format.
     const num = std.fmt.parseFloat(f64, text) catch {
         std.debug.print("'{s}' ({x})\n", .{ text, text });
+        std.debug.print("Next token: {}\n", .{parser.token_tags[parser.tok_i]});
         unreachable;
     };
 

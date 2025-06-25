@@ -91,7 +91,7 @@ pub fn init(bytes: [:0]const u8) Tokenizer {
 pub fn next(tokenizer: *Tokenizer) Token {
     const eof: Token = .{
         .tag = .eof,
-        .start = @intCast(tokenizer.bytes.len),
+        .start = tokenizer.pos,
     };
 
     if (tokenizer.pos >= tokenizer.bytes.len)
@@ -125,7 +125,6 @@ pub fn next(tokenizer: *Tokenizer) Token {
             },
             '@' => {
                 tag = .builtin;
-                start += 1;
                 continue :state .builtin;
             },
             ',' => {

@@ -555,7 +555,10 @@ pub fn interpretSource(sheet: *Sheet, reader: anytype) !void {
         tokens.clearRetainingCapacity();
         const ast_nodes_start: u32 = @intCast(sheet.ast_nodes.len);
         const total_strings_len = try sheet.bulkParse(src, arena, &tokens, arena, &cells);
-        assert(cells.len > 0);
+        if (cells.len == 0) {
+            buf.len = 0;
+            continue;
+        }
 
         const dependent_count = blk: {
             var dependent_count: Cell.Handle.Int = 0;
@@ -622,7 +625,9 @@ pub fn interpretSource(sheet: *Sheet, reader: anytype) !void {
             });
 
             const removed = sheet.cell_tree.insertAssumeCapacity(&.{ pos.x, pos.y }, handle);
-            assert(!removed.isValid());
+            if (removed.isValid()) {
+                sheet.cell_tree.destroyValue(removed);
+            }
 
             sheet.addCellAsDependentOfExprRanges(handle, root);
         }
@@ -3903,4 +3908,20 @@ test "blergh" {
     sheet.endUndoGroup();
 
     try sheet.undo();
+}
+
+var fuzz_sheet: Sheet = undefined;
+
+var fuzz_dbg: std.heap.DebugAllocator(.{}) = .init;
+
+export fn zig_fuzz_init() void {
+    fuzz_sheet = Sheet.init(fuzz_dbg.allocator()) catch @panic("guh");
+}
+
+export fn zig_fuzz_test(ptr: [*]u8, len: isize) void {
+    const buf = ptr[0..@intCast(len)];
+
+    fuzz_sheet.clearRetainingCapacity();
+    var fbs = std.io.fixedBufferStream(buf);
+    fuzz_sheet.interpretSource(fbs.reader()) catch {};
 }
