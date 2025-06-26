@@ -3889,27 +3889,6 @@ test "delete same col twice with dependency" {
     sheet.endUndoGroup();
 }
 
-test "blergh" {
-    var sheet = try init(std.testing.allocator);
-    defer sheet.deinit();
-
-    try sheet.setCell(
-        try .fromAddress("C0"),
-        "@sum(A0:B0)",
-        try ast.fromExpression(&sheet, "@sum(A0:B0)"),
-        .{},
-    );
-    sheet.endUndoGroup();
-
-    try sheet.deleteColOrRowRange(0, 1, .{}, .col);
-    sheet.endUndoGroup();
-
-    try sheet.deleteColOrRowRange(0, 0, .{}, .col);
-    sheet.endUndoGroup();
-
-    try sheet.undo();
-}
-
 var fuzz_sheet: Sheet = undefined;
 
 var fuzz_dbg: std.heap.DebugAllocator(.{}) = .init;

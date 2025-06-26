@@ -2521,12 +2521,12 @@ fn testFile(path: []const u8) !void {
 
     var lines = std.mem.tokenizeScalar(u8, content, 0);
     while (lines.next()) |line| {
-        errdefer {
+        errdefer |err| {
             var line_number: usize = 1;
             for (content[0..lines.index]) |c| {
                 if (c == 0) line_number += 1;
             }
-            std.debug.print("Error at {s}:{d}\n", .{ path, line_number });
+            std.debug.print("Error {} at {s}:{d}\n", .{ err, path, line_number });
         }
         const null_terminated_line = line.ptr[0..line.len :0];
         try zc.parseCommand(null_terminated_line);

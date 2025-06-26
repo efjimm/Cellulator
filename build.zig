@@ -1,6 +1,9 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
     const logfile = b.option([]const u8, "logging", "File to log to");
     const log_level = b.option(std.log.Level, "log-level", "Logging level") orelse .debug;
 
@@ -8,18 +11,22 @@ pub fn build(b: *std.Build) void {
     opts.addOption(?[]const u8, "logfile_path", logfile);
     opts.addOption(std.log.Level, "log_level", log_level);
 
-    const main_mod = configureMainModule(b);
+    const main_mod = configureMainModule(b, target, optimize);
 
     configureExe(b, main_mod);
     configureTests(b, main_mod, opts);
     configureBenchmarks(b, main_mod);
 
     main_mod.addOptions("build", opts);
+
+    configureFuzzing(b, target, optimize);
 }
 
-fn configureMainModule(b: *std.Build) *std.Build.Module {
-    const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+fn configureMainModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Module {
     const shovel = b.dependency("shovel", .{
         .target = target,
         .optimize = optimize,
@@ -47,6 +54,34 @@ fn configureMainModule(b: *std.Build) *std.Build.Module {
     main_mod.addImport("wcwidth", wcwidth);
 
     return main_mod;
+}
+
+// zig-afl-kit doesn't work on my machine due to symbol errors and I am way too lazy to fix it.
+fn configureFuzzing(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    const fuzz = b.step("fuzz", "");
+
+    const afl_obj = b.addObject(.{
+        .name = "fuzz_obj",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/Sheet.zig"),
+            .target = target,
+            .optimize = optimize,
+            .fuzz = true,
+            .stack_check = false,
+        }),
+        .use_llvm = true,
+        .use_lld = true,
+    });
+
+    const run_afl_cc = b.addSystemCommand(&.{ "afl-cc", "-O3", "-o" });
+    const afl_fuzz = run_afl_cc.addOutputFileArg(afl_obj.name);
+    run_afl_cc.addFileArg(b.path("afl.c"));
+    run_afl_cc.addFileArg(afl_obj.getEmittedLlvmBc());
+    fuzz.dependOn(&b.addInstallBinFile(afl_fuzz, "myfuzz-afl").step);
 }
 
 fn configureExe(
@@ -86,6 +121,7 @@ fn configureTests(
     });
 
     opts.addOption([]const []const u8, "test_files", &.{
+        "test/bug.zc",
         "test/general.zc",
         "test/undo-redo.zc",
         "test/string.zc",

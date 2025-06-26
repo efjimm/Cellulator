@@ -108,8 +108,14 @@ pub fn next(tokenizer: *Tokenizer) Token {
                 continue :state .integer_number;
             },
             '.' => {
-                tag = .number;
-                continue :state .decimal_number;
+                tokenizer.pos += 1;
+                switch (tokenizer.bytes[tokenizer.pos]) {
+                    '0'...'9' => {
+                        tag = .number;
+                        continue :state .decimal_number;
+                    },
+                    else => {},
+                }
             },
             '=' => {
                 tag = .equals_sign;
