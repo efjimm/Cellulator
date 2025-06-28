@@ -638,7 +638,7 @@ fn contentWidth(tui: *const Tui) u16 {
 }
 
 fn SheetTreeContext(comptime field_name: []const u8) type {
-    const Handle = @FieldType(Sheet, field_name).ValueHandle;
+    const Handle = @FieldType(Sheet, field_name).Leaf.Handle;
     return struct {
         sheet: *Sheet,
         zc: *ZC,
@@ -749,7 +749,7 @@ fn renderCells(tui: *Tui) !void {
             const cell_width = @min(col.width, view_width - w);
 
             const pos = zc.screen_pos.add(.init(x, y));
-            assert(!cell_handle.isValid() or pos.eql(sheet.posFromCellHandle(cell_handle)));
+            assert(cell_handle == .invalid or pos.eql(sheet.posFromCellHandle(cell_handle)));
 
             try tui.renderCell(pos, cell_handle, col.precision, cell_width, attrs);
             w += col.width;
@@ -776,7 +776,7 @@ fn renderCell(
     var rpw = rc.cellWriter(width);
     const writer = rpw.writer();
 
-    if (!cell_handle.isValid()) {
+    if (cell_handle == .invalid) {
         try tui.setStyle(if (selected) .cell_blank_selected else .cell_blank_unselected);
         try rpw.pad();
         return;

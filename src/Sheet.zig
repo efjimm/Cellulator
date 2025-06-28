@@ -52,7 +52,7 @@ redos: UndoList,
 
 cell_buffer: std.ArrayListUnmanaged(Cell.Handle) = .empty,
 
-search_buffer: std.ArrayListUnmanaged(Dependents.ValueHandle),
+search_buffer: std.ArrayListUnmanaged(Dependents.Leaf.Handle),
 
 filepath: std.BoundedArray(u8, std.fs.max_path_bytes),
 
@@ -74,7 +74,7 @@ pub const TextAttrs = extern struct {
         .alignment = .center,
     };
 
-    pub const Handle = @FieldType(Sheet, "text_attrs").ValueHandle;
+    pub const Handle = @FieldType(Sheet, "text_attrs").Leaf.Handle;
 };
 
 pub fn setTextAlignment(
@@ -308,9 +308,9 @@ pub const Undo = extern struct {
             ast_node: ast.Index,
             pos: Position,
         },
-        insert_dep: Dependents.ValueHandle,
+        insert_dep: Dependents.Leaf.Handle,
         update_dep: extern struct {
-            handle: Dependents.ValueHandle,
+            handle: Dependents.Leaf.Handle,
             point: Dependents.Point,
         },
         bulk_cell_delete: u32,
@@ -594,9 +594,9 @@ pub fn interpretSource(sheet: *Sheet, reader: anytype) !void {
         }
 
         // Queue up all the to-be-inserted cells for update
-        const start_node_index = sheet.cell_tree.values.len;
-        sheet.cell_tree.values.len += cells.len;
-        assert(sheet.cell_tree.values.len <= sheet.cell_tree.values.capacity);
+        const start_node_index = sheet.cell_tree.leaves.len;
+        sheet.cell_tree.leaves.len += cells.len;
+        assert(sheet.cell_tree.leaves.len <= sheet.cell_tree.leaves.capacity);
 
         sheet.queued_cells.appendAssumeCapacity(.{
             .from(@intCast(start_node_index)),
@@ -614,7 +614,7 @@ pub fn interpretSource(sheet: *Sheet, reader: anytype) !void {
             const handle: Cell.Handle = .from(@intCast(i));
             _ = sheet.createColumnAssumeCapacity(pos.x);
 
-            sheet.cell_tree.values.set(handle.n, .{
+            sheet.cell_tree.leaves.set(handle.int(), .{
                 .point = .{ pos.x, pos.y },
                 .parent = .invalid,
                 .value = .{
@@ -625,7 +625,7 @@ pub fn interpretSource(sheet: *Sheet, reader: anytype) !void {
             });
 
             const removed = sheet.cell_tree.insertAssumeCapacity(&.{ pos.x, pos.y }, handle);
-            if (removed.isValid()) {
+            if (removed != .invalid) {
                 sheet.cell_tree.destroyValue(removed);
             }
 
@@ -1177,7 +1177,7 @@ pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
         .update_dep => {
             const handle = u.payload.update_dep.handle;
             const new_point = u.payload.update_dep.point;
-            assert(handle.isValid());
+            assert(handle != .invalid);
 
             const p = sheet.dependents.getPoint(handle);
 
@@ -1226,8 +1226,8 @@ fn bulkDeleteCellHandles(sheet: *Sheet, handles: []const Cell.Handle) void {
 }
 
 fn bulkDeleteCellHandlesContiguous(sheet: *Sheet, start: Cell.Handle.Int, end: Cell.Handle.Int) void {
-    assert(start < sheet.cell_tree.values.len);
-    assert(end <= sheet.cell_tree.values.len);
+    assert(start < sheet.cell_tree.leaves.len);
+    assert(end <= sheet.cell_tree.leaves.len);
 
     for (start..end) |i| {
         const handle: Cell.Handle = .from(@intCast(i));
@@ -1251,15 +1251,15 @@ fn bulkInsertCellHandles(sheet: *Sheet, handles: []const Cell.Handle) void {
         const cell = sheet.getCellFromHandle(handle);
         const p = sheet.cell_tree.getPoint(handle).*;
         const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
-        assert(!removed.isValid());
+        assert(removed == .invalid);
         sheet.addCellAsDependentOfExprRanges(handle, cell.expr_root);
         cell.state = .enqueued;
     }
 }
 
 fn bulkInsertCellHandlesContiguous(sheet: *Sheet, start: Cell.Handle.Int, end: Cell.Handle.Int) void {
-    assert(start < sheet.cell_tree.values.len);
-    assert(end <= sheet.cell_tree.values.len);
+    assert(start < sheet.cell_tree.leaves.len);
+    assert(end <= sheet.cell_tree.leaves.len);
 
     sheet.queued_cells.appendAssumeCapacity(.{ .from(start), end - start });
     for (start..end) |i| {
@@ -1267,7 +1267,7 @@ fn bulkInsertCellHandlesContiguous(sheet: *Sheet, start: Cell.Handle.Int, end: C
         const cell = sheet.getCellFromHandle(handle);
         const p = sheet.cell_tree.getPoint(handle).*;
         const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
-        assert(!removed.isValid());
+        assert(removed == .invalid);
         sheet.addCellAsDependentOfExprRanges(handle, cell.expr_root);
         cell.state = .enqueued;
     }
@@ -1275,7 +1275,7 @@ fn bulkInsertCellHandlesContiguous(sheet: *Sheet, start: Cell.Handle.Int, end: C
 
 fn getUndoCellsSlice(sheet: *Sheet, index: u32) []Cell.Handle {
     for (sheet.cell_buffer.items[index..], index..) |handle, i| {
-        if (!handle.isValid()) {
+        if (handle == .invalid) {
             assert(i > index);
             return sheet.cell_buffer.items[index..i];
         }
@@ -1593,7 +1593,7 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
     const cells_start = sheet.bulkCreateCellRange(range);
     sheet.queued_cells.appendAssumeCapacity(.{ cells_start, area });
     for (0..area) |i| {
-        const handle: Cell.Handle = .from(@intCast(i + cells_start.n));
+        const handle: Cell.Handle = .from(@intCast(i + cells_start.int()));
         const expr: ast.Index = .from(@intCast(i + ast_start));
         sheet.cell_tree.getValue(handle).* = .{
             .state = .enqueued,
@@ -1610,10 +1610,10 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
 pub fn bulkCreateCellRange(sheet: *Sheet, range: Rect) Cell.Handle {
     const area: u32 = @intCast(range.area());
     // assert(sheet.cell_tree.nodes.capacity - sheet.cell_tree.nodes.len >= area);
-    const start: Cell.Handle = .from(@intCast(sheet.cell_tree.values.len));
-    sheet.cell_tree.values.len += area;
+    const start: Cell.Handle = .from(@intCast(sheet.cell_tree.leaves.len));
+    sheet.cell_tree.leaves.len += area;
 
-    var i = start.n;
+    var i = start.int();
     var y: u64 = range.tl.y;
     while (y <= range.br.y) : (y += 1) {
         var x: u64 = range.tl.x;
@@ -1637,23 +1637,23 @@ pub fn bulkInsertContiguousCells(
     cells_start: Cell.Handle,
     opts: UndoOpts,
 ) void {
-    const cell_count = sheet.cell_tree.values.len - cells_start.n;
-    assert(sheet.cell_tree.values.len <= sheet.cell_tree.values.capacity);
+    const cell_count = sheet.cell_tree.leaves.len - cells_start.int();
+    assert(sheet.cell_tree.leaves.len <= sheet.cell_tree.leaves.capacity);
     assert(cell_count > 0);
     assert(sheet.cell_buffer.capacity - sheet.cell_buffer.items.len >= cell_count + 1);
 
-    const end = sheet.cell_tree.values.len;
-    for (cells_start.n..end) |i| {
+    const end = sheet.cell_tree.leaves.len;
+    for (cells_start.int()..end) |i| {
         const handle: Cell.Handle = .from(@intCast(i));
         const p = sheet.cell_tree.getPoint(handle).*;
         const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
-        assert(!removed.isValid());
+        assert(removed == .invalid);
         sheet.addCellAsDependentOfExprRanges(handle, sheet.getCellFromHandle(handle).expr_root);
         sheet.getCellFromHandle(handle).state = .enqueued;
     }
 
     sheet.pushUndoAssumeCapacity(.init(.bulk_cell_delete_contiguous, .{
-        .start = cells_start.n,
+        .start = cells_start.int(),
         .end = @intCast(end),
     }), opts);
 }
@@ -1661,26 +1661,26 @@ pub fn bulkInsertContiguousCells(
 /// Creates all the columns required by range.
 fn createColumnRangeAssumeCapacity(sheet: *Sheet, range: Rect) void {
     const width = range.width();
-    const cols_start = sheet.cols.values.len;
-    sheet.cols.values.len += width;
-    @memset(sheet.cols.values.items(.value)[cols_start..], .{});
+    const cols_start = sheet.cols.leaves.len;
+    sheet.cols.leaves.len += width;
+    @memset(sheet.cols.leaves.items(.value)[cols_start..], .{});
 
     for (
-        sheet.cols.values.items(.point)[cols_start..],
-        sheet.cols.values.items(.value)[cols_start..],
+        sheet.cols.leaves.items(.point)[cols_start..],
+        sheet.cols.leaves.items(.value)[cols_start..],
         range.tl.x..,
         cols_start..,
     ) |*p, *v, x, i| {
         p.* = .{@intCast(x)};
         const handle: Column.Handle = .from(@intCast(i));
         const existing = sheet.cols.findEntry(p);
-        if (existing.isValid()) {
+        if (existing != .invalid) {
             // Put the new column in the free list
             sheet.cols.destroyValue(handle);
         } else {
             v.* = .{};
             const removed = sheet.cols.insertAssumeCapacity(p, handle);
-            assert(!removed.isValid());
+            assert(removed == .invalid);
         }
     }
 }
@@ -1726,7 +1726,7 @@ pub fn bulkSetCellExpr(
     const ast_start_node = ast.leftMostChild(sheet.ast_nodes, expr);
     const strings = sheet.dupeAstStrings(source, ast_start_node, expr);
 
-    const handles_start = sheet.cell_tree.values.len;
+    const handles_start = sheet.cell_tree.leaves.len;
 
     // Create dependency information
     // For each range we depend on, prepend the cell handle of every cell we're creating
@@ -1767,16 +1767,16 @@ pub fn bulkSetCellExpr(
         .expr_root = expr,
         .strings = strings,
     };
-    sheet.cell_tree.values.len += area;
+    sheet.cell_tree.leaves.len += area;
     // All created cells share the same cell value
-    @memset(sheet.cell_tree.values.items(.value)[handles_start..], cell);
+    @memset(sheet.cell_tree.leaves.items(.value)[handles_start..], cell);
 
     // TODO: These inserts get slow when we start inserting millions of cells at once.
     //       Each insert does a separate lookup. We should find some way to exploit the internal
     //       layout of the phtree to make inserting consecutive points faster.
     //       We could build the tree bottom-up?
-    const end = sheet.cell_tree.values.len;
-    const point_slice = sheet.cell_tree.values.items(.point);
+    const end = sheet.cell_tree.leaves.len;
+    const point_slice = sheet.cell_tree.leaves.items(.point);
     var y: u64 = range.tl.y;
     while (y <= range.br.y) : (y += 1) {
         var x: u64 = range.tl.x;
@@ -1786,10 +1786,10 @@ pub fn bulkSetCellExpr(
             const off = y_off + x_off;
             const handle: Cell.Handle = .from(@intCast(handles_start + off));
             const p: CellTree.Point = .{ @intCast(x), @intCast(y) };
-            point_slice[handle.n] = p;
+            point_slice[handle.int()] = p;
 
             const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
-            assert(!removed.isValid());
+            assert(removed == .invalid);
         }
     }
 
@@ -1839,7 +1839,7 @@ pub fn insertCellNode(
     const old_handle = sheet.cell_tree.insertAssumeCapacity(&point, handle);
 
     var u: Undo = undefined;
-    if (!old_handle.isValid()) {
+    if (old_handle == .invalid) {
         // log.debug("Creating cell {}", .{pos});
         sheet.addCellAsDependentOfExprRanges(handle, cell_ptr.expr_root);
 
@@ -1887,7 +1887,7 @@ pub fn deleteCell(
 ) Allocator.Error!void {
     const handle = sheet.cell_tree.findEntry(&.{ pos.x, pos.y });
 
-    if (handle.isValid())
+    if (handle != .invalid)
         return sheet.deleteCellByHandle(handle, undo_opts);
 }
 
@@ -1911,7 +1911,7 @@ pub fn getCellHandleByPos(sheet: *Sheet, pos: Position) Cell.Handle {
 
 pub fn getCellHandleByPosOrNull(sheet: *Sheet, pos: Position) ?Cell.Handle {
     const handle = sheet.cell_tree.findEntry(&.{ pos.x, pos.y });
-    if (handle.isValid()) return handle;
+    if (handle != .invalid) return handle;
     return null;
 }
 
@@ -1936,9 +1936,9 @@ pub fn deleteColOrRowRange(
     // List of cells that are affected
     var cells: std.ArrayList(Cell.Handle) = .init(arena);
     // List of dependency ranges that need to be updated
-    var deps: std.ArrayList(Dependents.ValueHandle) = .init(arena);
+    var deps: std.ArrayList(Dependents.Leaf.Handle) = .init(arena);
     // List of dependency ranges whose depending cells will need to be re-calculated
-    var intersecting_deps: std.ArrayList(Dependents.ValueHandle) = .init(arena);
+    var intersecting_deps: std.ArrayList(Dependents.Leaf.Handle) = .init(arena);
     // List of columns whose position needs to be adjusted
     var cols: std.ArrayList(Column.Handle) = .init(arena);
 
@@ -1974,7 +1974,7 @@ pub fn deleteColOrRowRange(
         }
 
         for (deps.items) |handle| {
-            assert(handle != sheet.dependents.free_values);
+            assert(handle != sheet.dependents.freelist_head_leaf);
             const p = sheet.dependents.getPoint(handle).*;
             const needs_resize_or_delete = !(p[index] > end or (p[index] < start and p[index + 2] > end));
             undo_count += @intFromBool(needs_resize_or_delete);
@@ -2085,7 +2085,7 @@ pub fn deleteColOrRowRange(
     //  Deletion is before range and does not intersect it
     //   -> Range start and end needs to be decremented, no undo
     for (deps.items) |handle| {
-        if (handle.n >= sheet.dependents.values.len)
+        if (handle.int() >= sheet.dependents.leaves.len)
             continue;
 
         const p = sheet.dependents.getPoint(handle);
@@ -2227,7 +2227,7 @@ pub fn insertColsOrRows(
 
     // Check if columns would overflow
     const largest = sheet.cell_tree.largestDim(dim);
-    if (largest.isValid()) {
+    if (largest != .invalid) {
         const p = sheet.cell_tree.getPoint(largest).*[dim];
         if (std.math.maxInt(u32) - p < n)
             return error.Overflow;
@@ -2237,7 +2237,7 @@ pub fn insertColsOrRows(
     defer sheet.resetArena();
 
     var cells: std.ArrayList(Cell.Handle) = .init(arena);
-    var deps: std.ArrayList(Dependents.ValueHandle) = .init(arena);
+    var deps: std.ArrayList(Dependents.Leaf.Handle) = .init(arena);
     var cols: std.ArrayList(Column.Handle) = .init(arena);
 
     const f = switch (axis) {
@@ -2323,7 +2323,7 @@ pub fn insertColsOrRows(
         const p = sheet.cell_tree.getPoint(handle);
         p[dim] += n;
         const removed = sheet.cell_tree.insertAssumeCapacity(p, handle);
-        assert(!removed.isValid());
+        assert(removed == .invalid);
     }
 
     // Remove affected dependency ranges
@@ -2437,7 +2437,7 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
 
     for (sheet.queued_cells.items) |data| {
         const cell_start, const len = data;
-        for (cell_start.n..cell_start.n + len) |i| {
+        for (cell_start.int()..cell_start.int() + len) |i| {
             const handle: Cell.Handle = .from(@intCast(i));
             try sheet.markDirty(handle, &dirty_cells);
         }
@@ -2451,7 +2451,7 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
     // All dirty cells are reachable from the cells in queued_cells
     while (sheet.queued_cells.pop()) |data| {
         const handle_start, const len = data;
-        for (handle_start.n..handle_start.n + len) |i| {
+        for (handle_start.int()..handle_start.int() + len) |i| {
             const handle: Cell.Handle = .from(@intCast(i));
             _ = sheet.evalCellByHandle(handle) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -2571,7 +2571,7 @@ pub const Cell = extern struct {
     // TODO: We can encode this information in the string AST nodes themselves.
     strings: StringIndex = .invalid,
 
-    pub const Handle = CellTree.ValueHandle;
+    pub const Handle = CellTree.Leaf.Handle;
 
     // Non-extern unions get a hidden tag in safe builds which makes serialising them annoying.
     // So we use an extern union here.
@@ -2733,7 +2733,7 @@ pub const Column = extern struct {
     width: u16 = default_width,
     precision: u8 = 2,
 
-    pub const Handle = Columns.ValueHandle;
+    pub const Handle = Columns.Leaf.Handle;
 };
 
 fn setRowOrColumn(
@@ -2778,16 +2778,16 @@ pub fn getColumn(sheet: *Sheet, index: PosInt) ?Column {
 }
 
 pub inline fn getColumnByHandleOrDefault(sheet: *Sheet, handle: Column.Handle) Column {
-    return sheet.cols.getValueOrNull(handle) orelse .{};
+    return if (handle != .invalid) sheet.cols.getValue(handle).* else .{};
 }
 
 pub inline fn getTextAttrs(sheet: *Sheet, handle: TextAttrs.Handle) TextAttrs {
-    return sheet.text_attrs.getValueOrNull(handle) orelse .default;
+    return if (handle != .invalid) sheet.text_attrs.getValue(handle).* else .default;
 }
 
 pub fn getColumnHandle(sheet: *Sheet, index: PosInt) ?Column.Handle {
     const handle = sheet.cols.findEntry(&.{index});
-    if (handle.isValid())
+    if (handle != .invalid)
         return handle;
     return null;
 }
@@ -3678,107 +3678,6 @@ test "Dependencies" {
     try expectCellEquals(&sheet, "B1", 4);
 }
 
-test "Fuzzer input" {
-    if (true) return error.SkipZigTest;
-    const file = std.fs.cwd().openFile("sheet-fuzz-out", .{ .mode = .read_write }) catch
-        return error.SkipZigTest;
-    defer file.close();
-
-    const len = try file.reader().readInt(u64, .little);
-    var buf: [4096]u8 = undefined;
-    const bytes_read = try file.readAll(buf[0..len]);
-    if (bytes_read != len) return error.BadFile;
-
-    try fuzzNumbers(buf[0..len]);
-}
-
-fn fuzzNumbers(_: void, input: []const u8) !void {
-    if (map) |m| {
-        const len: *u64 = @ptrCast(m.ptr);
-        len.* = input.len;
-        @memcpy(m[8..][0..input.len], input);
-    }
-
-    var sheet = try init(std.testing.allocator);
-    defer sheet.deinit();
-
-    const Insert = extern struct {
-        pos: Position,
-        number_or_ref: extern union { f: u64, pos: Position },
-        rand: bool,
-    };
-
-    const Operation = union(enum(u2)) {
-        insert: Insert align(1),
-        delete: Position align(1),
-        delete_col: extern struct {
-            start: u32,
-            len: u32,
-        } align(1),
-        nothing: Insert align(1),
-    };
-
-    const slice: []align(1) const Operation = std.mem.bytesAsSlice(
-        Operation,
-        input[0 .. input.len - input.len % @sizeOf(Operation)],
-    );
-
-    for (slice) |t| {
-        switch (t) {
-            // Insert a random expression
-            .insert, .nothing => |data| {
-                const pos: Position = .init(data.pos.x % 10, data.pos.y % 10);
-
-                var buf: std.BoundedArray(u8, 1024) = .{};
-                if (data.rand) {
-                    try buf.writer().print("{d}", .{data.number_or_ref.f});
-                } else {
-                    const p: Position = .init(
-                        data.number_or_ref.pos.x % 10,
-                        data.number_or_ref.pos.y % 10,
-                    );
-                    try buf.writer().print("{}", .{p});
-                }
-                try buf.append(0);
-                const null_terminated_expr = buf.buffer[0 .. buf.len - 1 :0];
-
-                const a = try ast.fromExpression(&sheet, null_terminated_expr);
-                try sheet.setCell(pos, buf.constSlice(), a, .{});
-            },
-            .delete => |pos| {
-                try sheet.deleteCell(pos, .{});
-            },
-            .delete_col => |col| {
-                const start = col.start % 10;
-                const end = (start + col.len % 10);
-                try sheet.deleteColOrRowRange(start, end, .{}, .col);
-            },
-        }
-
-        try sheet.update();
-    }
-}
-
-var map: ?[]align(std.heap.page_size_min) u8 = null;
-
-test "Fuzz sheet" {
-    {
-        const file = try std.fs.cwd().createFile("sheet-fuzz-out", .{ .read = true });
-        defer file.close();
-
-        try std.posix.ftruncate(file.handle, 4096);
-        map = try std.posix.mmap(
-            null,
-            4096,
-            std.posix.PROT.READ | std.posix.PROT.WRITE,
-            .{ .TYPE = .SHARED },
-            file.handle,
-            0,
-        );
-    }
-    try std.testing.fuzz({}, fuzzNumbers, .{});
-}
-
 test "insert column overflow" {
     var sheet = try init(std.testing.allocator);
     defer sheet.deinit();
@@ -3835,8 +3734,8 @@ test "undo delete column" {
     try sheet.update();
 
     const kv = sheet.dependents.findEntry(&.{ 0, 0, 0, 0 });
-    try std.testing.expect(kv.isValid());
-    const head = sheet.deps.items[kv.n];
+    try std.testing.expect(kv != .invalid);
+    const head = sheet.deps.items[kv.int()];
     try std.testing.expectEqualSlices(u32, &.{ 1, 0 }, sheet.cell_tree.getPoint(head.handle));
 
     try sheet.expectCellEquals("B0", 0);
@@ -3893,11 +3792,11 @@ var fuzz_sheet: Sheet = undefined;
 
 var fuzz_dbg: std.heap.DebugAllocator(.{}) = .init;
 
-export fn zig_fuzz_init() void {
+fn zig_fuzz_init() void {
     fuzz_sheet = Sheet.init(fuzz_dbg.allocator()) catch @panic("guh");
 }
 
-export fn zig_fuzz_test(ptr: [*]u8, len: isize) void {
+fn zig_fuzz_test(ptr: [*]u8, len: isize) void {
     const buf = ptr[0..@intCast(len)];
 
     fuzz_sheet.clearRetainingCapacity();
