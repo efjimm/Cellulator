@@ -16,6 +16,20 @@ might be an interesting read so I committed it. The stuff at the top is probably
   - Automatically check validity of entered commands against a declared structure
   - Allow registering new commands from lua
 
+- Update the damn readme
+
+- Allow associating Lua data with cells
+
+- Allow providing a custom format function for displaying cells
+  - Would be exposed via the UI's Lua API, and differ depending on UI backend
+  - Doesn't need to be fast, as the number of cells on screen is small
+  - Web UI could have the function return HTML or CSS
+
+- Allow defining custom undo types in Lua
+
+- Text alignment
+  - Can be implemented via Lua with the three aformentioned features.
+
 - Features
   - C-k bind in command line
   - Better error reporting when setting themes
@@ -86,7 +100,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
     Going to the next populated cell can still be done, either by hitting `w` if the current/next cell
     is blank or pressing `l` if not.
 - Make string concat operator work on ranges
-- Alignment of string in text cells
 - String repeat builtin
 
 - Limits documentation

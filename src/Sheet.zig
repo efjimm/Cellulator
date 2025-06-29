@@ -3701,7 +3701,7 @@ test "delete col dependency data" {
     var sheet = try init(std.testing.allocator);
     defer sheet.deinit();
 
-    try sheet.setCell(.init(0, 0), "b0", try ast.fromExpression(&sheet, "b0"), .{});
+    try sheet.testSetCell("A0", "B0");
     try std.testing.expect(sheet.dependents.find(&.{ 1, 0, 1, 0 }) != null);
     try sheet.deleteColOrRowRange(0, 0, .{}, .col);
     try std.testing.expect(sheet.dependents.find(&.{ 1, 0, 1, 0 }) == null);
@@ -3711,7 +3711,7 @@ test "delete row dependency data" {
     var sheet = try init(std.testing.allocator);
     defer sheet.deinit();
 
-    try sheet.setCell(.init(0, 0), "a1", try ast.fromExpression(&sheet, "a1"), .{});
+    try sheet.testSetCell("A0", "A1");
     try std.testing.expect(sheet.dependents.find(&.{ 0, 1, 0, 1 }) != null);
     try sheet.deleteColOrRowRange(0, 0, .{}, .row);
     try std.testing.expect(sheet.dependents.find(&.{ 0, 1, 0, 1 }) == null);
@@ -3721,7 +3721,7 @@ test "undo delete column" {
     var sheet = try init(std.testing.allocator);
     defer sheet.deinit();
 
-    try sheet.setCell(try .fromAddress("B0"), "A0", try ast.fromExpression(&sheet, "A0"), .{});
+    try sheet.testSetCell("B0", "A0");
     sheet.endUndoGroup();
     try sheet.update();
 
@@ -3746,8 +3746,7 @@ test "something" {
     var sheet = try init(std.testing.allocator);
     defer sheet.deinit();
 
-    const c1 = "@sum(B0:D0)";
-    try sheet.setCell(try .fromAddress("E1"), c1, try ast.fromExpression(&sheet, c1), .{});
+    try sheet.testSetCell("E1", "@sum(B0:D0)");
     sheet.endUndoGroup();
 
     try sheet.deleteColOrRowRange(3, 3, .{}, .col);
@@ -3757,8 +3756,7 @@ test "something" {
 
     try sheet.redo();
 
-    const c2 = "D0";
-    try sheet.setCell(try .fromAddress("E2"), c2, try ast.fromExpression(&sheet, c2), .{});
+    try sheet.testSetCell("E2", "D0");
     sheet.endUndoGroup();
 
     try sheet.deleteColOrRowRange(2, 2, .{}, .col);
@@ -3767,8 +3765,7 @@ test "something" {
     try sheet.undo();
     try sheet.redo();
 
-    const c3 = "D0";
-    try sheet.setCell(try .fromAddress("E2"), c3, try ast.fromExpression(&sheet, c3), .{});
+    try sheet.testSetCell("E2", "D0");
     sheet.endUndoGroup();
 
     try sheet.deleteColOrRowRange(1, 3, .{}, .col);
@@ -3779,7 +3776,7 @@ test "delete same col twice with dependency" {
     var sheet = try init(std.testing.allocator);
     defer sheet.deinit();
 
-    try sheet.setCell(try .fromAddress("A0"), "B0", try ast.fromExpression(&sheet, "B0"), .{});
+    try sheet.testSetCell("A0", "B0");
     sheet.endUndoGroup();
 
     try sheet.deleteColOrRowRange(0, 0, .{}, .col);
