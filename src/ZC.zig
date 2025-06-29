@@ -2495,25 +2495,19 @@ test "Motions visual mode" {
 }
 
 // Test files at runtime so no recompilation is needed if the data changes
-fn testFile(path: []const u8) !void {
+fn testFile(gpa: std.mem.Allocator, path: []const u8) !void {
     var zc: Self = undefined;
-    try zc.init(std.testing.allocator, .{ .ui = false });
+    try zc.init(gpa, .{ .ui = false });
     defer zc.deinit();
 
     const file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
 
-    const bytes = try file.readToEndAlloc(std.testing.allocator, 100_000_000);
-    defer std.testing.allocator.free(bytes);
+    const bytes = try file.readToEndAlloc(gpa, 100_000_000);
+    defer gpa.free(bytes);
 
-    const content = try std.mem.replaceOwned(
-        u8,
-        std.testing.allocator,
-        bytes,
-        "$BUILD_TEMP_DIR",
-        build.temp_dir,
-    );
-    defer std.testing.allocator.free(content);
+    const content = try std.mem.replaceOwned(u8, gpa, bytes, "$BUILD_TEMP_DIR", build.temp_dir);
+    defer gpa.free(content);
 
     for (content) |*c| {
         if (c.* == '\n') c.* = 0;
@@ -2534,11 +2528,26 @@ fn testFile(path: []const u8) !void {
     }
 }
 
-const test_files = build.test_files;
+pub fn main() !u8 {
+    var dbg: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = dbg.deinit();
+    const gpa = dbg.allocator();
 
-test "Sheet operations" {
-    for (test_files) |path| {
-        std.debug.print("Testing file {s}\n", .{path});
-        try testFile(path);
+    const args = try std.process.argsAlloc(gpa);
+    defer std.process.argsFree(gpa, args);
+
+    if (args.len < 2) {
+        const out = std.io.getStdErr().writer();
+        try out.writeAll(
+            \\zc: no input files
+            \\
+        );
+        return 1;
     }
+
+    for (args[1..]) |arg| {
+        testFile(gpa, arg) catch return 1;
+    }
+
+    return 0;
 }

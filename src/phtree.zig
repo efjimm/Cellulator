@@ -803,7 +803,8 @@ pub fn PhTree(
             const parent = tree.leafItem(handle, .parent).*;
             tree.leafItem(handle, .parent).* = .invalid;
             if (parent == .invalid) {
-                tree.root = .invalid;
+                if (tree.root == .leaf and tree.root.leaf == handle)
+                    tree.root = .invalid;
                 return;
             }
 
@@ -1047,18 +1048,19 @@ pub fn PhTree(
             }
 
             for (tree.branchItem(handle, .children), 0..) |child_handle, i| {
-                if (child_handle == .invalid or ((i | mask_lower) & mask_upper) != i)
+                if (((i | mask_lower) & mask_upper) != i)
                     continue;
 
-                switch (tree.childTag(handle, @intCast(i))) {
-                    .leaf => {
-                        const child_point = tree.leafItem(.from(child_handle.int()), .point);
+                switch (tree.getChild(handle, @intCast(i))) {
+                    .invalid => {},
+                    .leaf => |leaf| {
+                        const child_point = tree.leafItem(leaf, .point);
                         if (entryInWindow(child_point, min, max)) {
                             try results.append(.from(child_handle.int()));
                         }
                     },
-                    .branch => {
-                        try tree.queryNodeWindow(child_handle, min, max, results);
+                    .branch => |branch| {
+                        try tree.queryNodeWindow(branch, min, max, results);
                     },
                 }
             }

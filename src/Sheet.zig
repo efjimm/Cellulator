@@ -2114,7 +2114,8 @@ pub fn deleteColOrRowRange(
                 // This is undone by the .insert undo
                 p[index] -= deleted_count;
                 p[index + 2] -= deleted_count;
-                _ = sheet.dependents.insertAssumeCapacity(p, handle);
+                const removed = sheet.dependents.insertAssumeCapacity(p, handle);
+                assert(removed == .invalid);
             }
         } else if (p[index + 2] <= end) {
             // Deletion contains range end
@@ -3786,6 +3787,41 @@ test "delete same col twice with dependency" {
 
     try sheet.deleteColOrRowRange(0, 0, .{}, .col);
     sheet.endUndoGroup();
+}
+
+test "tree root getting set to invalid" {
+    var sheet = try init(std.testing.allocator);
+    defer sheet.deinit();
+
+    try sheet.testSetCell("A0", "1");
+    try sheet.testSetCell("B0", "A0 * 2");
+    try sheet.testSetCell("C0", "B0 * 2");
+    try sheet.testSetCell("A1", "@sum(A0:C0)");
+    sheet.endUndoGroup();
+
+    try sheet.update();
+
+    try sheet.expectCellEquals("A0", 1);
+    try sheet.expectCellEquals("B0", 2);
+    try sheet.expectCellEquals("C0", 4);
+    try sheet.expectCellEquals("A1", 7);
+
+    try sheet.deleteColOrRowRange(0, 0, .{}, .col);
+    sheet.endUndoGroup();
+
+    try sheet.update();
+
+    try sheet.expectCellNonExtant("C0");
+    try sheet.expectCellError("A0");
+    try sheet.expectCellError("B0");
+
+    try sheet.undo();
+    try sheet.update();
+
+    try sheet.expectCellEquals("A0", 1);
+    try sheet.expectCellEquals("B0", 2);
+    try sheet.expectCellEquals("C0", 4);
+    try sheet.expectCellEquals("A1", 7);
 }
 
 var fuzz_sheet: Sheet = undefined;
