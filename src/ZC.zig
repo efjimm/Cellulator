@@ -472,6 +472,7 @@ fn handleInput(self: *Self) !void {
 }
 
 pub fn doCommandMode(self: *Self, action: CommandAction, keys: []const u8) !void {
+    defer self.clampScreenToCommandCursor();
     switch (self.mode) {
         .command_normal => try self.doCommandNormalMode(action),
         .command_insert => try self.doCommandInsertMode(action, keys),
