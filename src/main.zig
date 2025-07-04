@@ -10,12 +10,17 @@ var logfile: if (use_logfile) std.fs.File else void = undefined;
 
 const zg = @import("zg");
 
+const unicode_data: []const zg.UnicodeData = &.{
+    .graphemes,
+    .display_width,
+};
+
 pub fn initUnicodeData(allocator: std.mem.Allocator) !void {
-    try zg.initData(allocator, &.{.graphemes});
+    try zg.initData(allocator, unicode_data);
 }
 
 pub fn deinitUnicodeData(allocator: std.mem.Allocator) void {
-    zg.deinitData(allocator, &.{.graphemes});
+    zg.deinitData(allocator, unicode_data);
 }
 var zc: ZC = undefined;
 
