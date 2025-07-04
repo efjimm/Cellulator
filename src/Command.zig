@@ -1,5 +1,5 @@
 const std = @import("std");
-const GapBuffer = @import("GapBuffer.zig").GapBuffer;
+const GapBuffer = @import("gap_buffer.zig").GapBuffer;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
@@ -55,7 +55,7 @@ pub fn submit(self: *Self, allocator: Allocator) Allocator.Error![:0]const u8 {
     return self.history_buf.items[start_index .. self.history_buf.items.len - 1 :0];
 }
 
-pub fn getHistoryItem(self: Self, index: u32) [:0]const u8 {
+pub fn getHistoryItem(self: *const Self, index: u32) [:0]const u8 {
     assert(self.cow);
     const i = self.history_indices.items[index];
     const ptr: [*:0]const u8 = @ptrCast(self.history_buf.items[i..].ptr);
@@ -142,21 +142,33 @@ pub const WriterContext = struct {
     }
 };
 
-pub fn get(self: Self, index: u32) u8 {
+pub fn get(self: *const Self, index: u32) u8 {
     return if (self.cow)
         self.getHistoryItem(self.index)[index]
     else
         self.buffer.get(index);
 }
 
-pub fn length(self: Self) u32 {
+pub fn slice(self: *const Self, start: u32, len: u32) []const u8 {
+    if (self.cow) {
+        return self.getHistoryItem(self.index)[start..][0..len];
+    }
+
+    if (start < self.buffer.gap_start) {
+        return self.buffer.left()[start..][0..len];
+    } else {
+        return self.buffer.right()[start - self.buffer.gap_start ..][0..len];
+    }
+}
+
+pub fn length(self: *const Self) u32 {
     return if (self.cow)
         @intCast(self.getHistoryItem(self.index).len)
     else
         self.buffer.len;
 }
 
-pub fn indexOfPos(self: Self, pos: u32, needle: []const u8) ?u32 {
+pub fn indexOfPos(self: *const Self, pos: u32, needle: []const u8) ?u32 {
     if (self.cow) {
         const res = std.mem.indexOfPos(u8, self.getHistoryItem(self.index), pos, needle);
         if (res) |r| return @intCast(r);
@@ -165,7 +177,7 @@ pub fn indexOfPos(self: Self, pos: u32, needle: []const u8) ?u32 {
     return self.buffer.lastIndexOfPos(pos, needle);
 }
 
-pub fn lastIndexOfPos(self: Self, pos: u32, needle: []const u8) ?u32 {
+pub fn lastIndexOfPos(self: *const Self, pos: u32, needle: []const u8) ?u32 {
     if (self.cow) {
         const res = std.mem.lastIndexOfLinear(u8, self.getHistoryItem(self.index)[0..pos], needle);
         if (res) |r| return @intCast(r);
@@ -213,6 +225,36 @@ pub fn right(self: *const Self) []const u8 {
         ""
     else
         self.buffer.right();
+}
+
+const zg = @import("zg");
+
+pub fn nextCharacter(self: *const Self, index: u32, count: u32) u32 {
+    if (self.cow) {
+        const str = self.getHistoryItem(self.index);
+        var iter = zg.graphemes.iterator(str[index..]);
+        var n: u32 = 0;
+        for (0..count) |_| {
+            const g = iter.next() orelse break;
+            n += @intCast(g.len);
+        }
+        return n;
+    }
+    return self.buffer.nextCharacter(index, count);
+}
+
+pub fn prevCharacter(self: *const Self, index: u32, count: u32) u32 {
+    if (self.cow) {
+        const str = self.getHistoryItem(self.index);
+        var iter = zg.graphemes.reverseIterator(str[0..index]);
+        var n: u32 = index;
+        for (0..count) |_| {
+            const g = iter.prev() orelse break;
+            n = @intCast(g.offset);
+        }
+        return index - n;
+    }
+    return self.buffer.prevCharacter(index, count);
 }
 
 test "Command" {

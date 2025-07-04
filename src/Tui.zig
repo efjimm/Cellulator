@@ -7,8 +7,6 @@
 //! for all input and drawing at once. Modern terminal emulators have a `sync` feature that allows
 //! them to avoid flickering in these cases, but this isn't supported on older terminal emulators
 //! including xterm and the Linux tty.
-
-// TODO: Reduce number of bytes sent for updates
 const std = @import("std");
 const assert = std.debug.assert;
 
@@ -136,6 +134,7 @@ pub fn ui(tui: *Tui) ZC.Ui {
         .vtable = &.{
             .applyTheme = applyTheme,
             .applyDefaultTheme = applyDefaultTheme,
+            .stringWidth = stringWidth,
             .theme_file_extension = ".lua",
             .ui_name = "terminal",
         },
@@ -219,6 +218,10 @@ fn applyThemeLua(state: *Lua) callconv(.c) c_int {
     tui.styles = .init(new_theme);
     state.setTop(0);
     return 0;
+}
+
+pub fn stringWidth(_: *anyopaque, bytes: []const u8) u32 {
+    return @intCast(@import("zg").display_width.strWidth(bytes));
 }
 
 pub const InitError = Term.InitError || Term.UncookError || error{OperationNotSupported};
@@ -371,40 +374,34 @@ fn renderCommandLine(tui: *Tui) RenderError!void {
     const zc = tui.zc.?;
     try rc.moveCursorTo(input_line, 0);
     try rc.clearToEol();
-    var rpw = rc.cellWriter(rc.term.width);
-    const writer = rpw.writer();
+    const writer = rc.buffer.writer();
     try tui.setStyle(.command_line);
 
     if (zc.mode.isCommandMode()) {
         const left = zc.command.left();
-        const left_len: u32 = @intCast(left.len);
         const right = zc.command.right();
 
-        // TODO: don't write all of this, only write what fits on screen
         const i = zc.command_screen_pos;
-        if (i < left_len) {
-            try writer.print("{s}{s}", .{ left[i..], right });
+        const c = zc.command.cursor;
+        assert(c >= i);
+        if (i < left.len) {
+            if (c > left.len) {
+                try writer.writeAll(left[i..]);
+                try writer.writeAll(right[0 .. c - left.len]);
+                try rc.saveCursor();
+                try writer.writeAll(right[c - left.len ..]);
+            } else {
+                try writer.writeAll(left[i..c]);
+                try rc.saveCursor();
+                try writer.writeAll(left[c..]);
+                try writer.writeAll(right);
+            }
         } else {
-            try writer.writeAll(right[i - left.len ..]);
+            try writer.writeAll(right[i - left.len .. c - left.len]);
+            try rc.saveCursor();
+            try writer.writeAll(right[c - left.len ..]);
         }
 
-        const cursor_pos = blk: {
-            const bufutils = @import("buffer_utils.zig");
-            var iter: bufutils.Utf8Iterator(@TypeOf(zc.command)) = .{
-                .data = zc.command,
-                .index = zc.command_screen_pos,
-            };
-            var pos: u16 = 0;
-            while (iter.nextCodepoint()) |cp| {
-                if (iter.index > zc.command.cursor) break;
-                pos += @import("wcwidth").wcWidth(cp);
-            }
-
-            break :blk pos;
-        };
-        try rpw.finish();
-
-        try rc.moveCursorTo(input_line, cursor_pos);
         switch (zc.mode) {
             .normal, .visual, .select => unreachable,
             .command_normal => try rc.setCursorShape(.block),
@@ -417,6 +414,7 @@ fn renderCommandLine(tui: *Tui) RenderError!void {
             .command_delete,
             => try rc.setCursorShape(.underline),
         }
+        try rc.restoreCursor();
         try rc.showCursor();
     } else if (zc.status_message.len > 0) {
         switch (zc.status_message_type) {
@@ -435,7 +433,6 @@ fn renderCommandLine(tui: *Tui) RenderError!void {
         }
         try tui.setStyle(.command_line);
         try writer.writeAll(zc.status_message.slice());
-        try rpw.finish();
     }
 }
 
@@ -793,12 +790,12 @@ fn renderCell(
             try tui.setStyle(if (selected) .cell_text_selected else .cell_text_unselected);
 
             const text = zc.sheet.cellStringValue(cell);
-            const text_width = @import("utils.zig").strWidth(text, width);
+            const text_width = stringWidth(tui, text);
 
             const left_pad = switch (text_attrs.alignment) {
                 .left => 0,
-                .right => width - text_width,
-                .center => (width - text_width) / 2,
+                .right => width -| text_width,
+                .center => (width -| text_width) / 2,
             };
             try writer.writeByteNTimes(' ', left_pad);
             try writer.writeAll(text);

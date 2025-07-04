@@ -1,17 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const wcWidth = @import("wcwidth").wcWidth;
-
-const unicode = std.unicode;
-const mem = std.mem;
 const assert = std.debug.assert;
-
-pub fn appendManyAssumeCapacity(comptime T: type, list: *std.ArrayListUnmanaged(T), n: usize) []T {
-    const start = list.items.len;
-    list.items.len += n;
-    assert(list.items.len <= list.capacity);
-    return list.items[start..];
-}
 
 pub fn ptrToIoVec(ptr: anytype) std.posix.iovec_const {
     const p = @typeInfo(@TypeOf(ptr)).pointer;
@@ -142,50 +131,6 @@ pub fn dupeZ(comptime T: type, buf: anytype) [buf.len:0]T {
     return ret;
 }
 
-pub const CodepointBuilder = struct {
-    buf: [4]u8,
-    desired_len: u3,
-    len: u3,
-
-    pub const empty: CodepointBuilder = .{
-        .buf = undefined,
-        .desired_len = 0,
-        .len = 0,
-    };
-
-    pub fn appendByte(builder: *CodepointBuilder, byte: u8) bool {
-        if (builder.desired_len == 0) {
-            builder.desired_len = unicode.utf8ByteSequenceLength(byte) catch unreachable;
-        }
-        assert(builder.len + 1 <= builder.desired_len);
-        builder.buf[builder.len] = byte;
-        builder.len += 1;
-        return !(builder.len == builder.desired_len);
-    }
-
-    pub fn slice(builder: *const CodepointBuilder) []const u8 {
-        assert(builder.len == builder.desired_len);
-        return builder.buf[0..builder.len];
-    }
-
-    pub fn codepoint(builder: CodepointBuilder) u21 {
-        return unicode.utf8Decode(builder.slice()) catch unreachable;
-    }
-};
-
-pub fn strWidth(bytes: []const u8, max: u16) u16 {
-    var width: u16 = 0;
-    var cp_iter = std.unicode.Utf8Iterator{
-        .bytes = bytes,
-        .i = 0,
-    };
-    while (cp_iter.nextCodepoint()) |cp| {
-        width += wcWidth(cp);
-        if (width >= max) break;
-    }
-    return width;
-}
-
 pub fn packDoubleCp(cp1: u21, cp2: u21) [7]u8 {
     var buf: [7]u8 align(4) = undefined;
     @memcpy(buf[0..3], std.mem.asBytes(&cp1)[0..3]);
@@ -201,25 +146,8 @@ pub fn unpackDoubleCp(buf: []align(4) const u8) struct { u21, u21 } {
     };
 }
 
-/// Writes the utf-8 representation of a unicode codepoint to the given writer
-pub fn writeCodepoint(cp: u21, writer: anytype) !void {
-    var buf: [4]u8 = undefined;
-    const len = try std.unicode.utf8Encode(cp, &buf);
-
-    try writer.writeAll(buf[0..len]);
-}
-
-pub fn isWord(c: u8) bool {
-    return switch (c) {
-        '_', 'a'...'z', 'A'...'Z', '0'...'9' => true,
-        else => false,
-    };
-}
-
 pub fn wordIterator(string: []const u8) WordIterator {
-    return WordIterator{
-        .string = string,
-    };
+    return .{ .string = string };
 }
 
 /// An iterator over the words in a string. A word is defined as a continuous sequence of
@@ -231,7 +159,7 @@ pub const WordIterator = struct {
 
     pub fn init(string: []const u8) WordIterator {
         return WordIterator{
-            .string = mem.trim(u8, string, &std.ascii.whitespace),
+            .string = std.mem.trim(u8, string, &std.ascii.whitespace),
         };
     }
 
@@ -239,7 +167,7 @@ pub const WordIterator = struct {
         if (self.index >= self.string.len)
             return null;
 
-        const str = mem.trimLeft(u8, self.string[self.index..], &std.ascii.whitespace);
+        const str = std.mem.trimLeft(u8, self.string[self.index..], &std.ascii.whitespace);
         self.index = @intFromPtr(str.ptr) - @intFromPtr(self.string.ptr);
 
         if (str.len == 0)

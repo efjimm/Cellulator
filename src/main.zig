@@ -8,6 +8,15 @@ const logfile_path = @import("build").logfile_path;
 const use_logfile = logfile_path != null;
 var logfile: if (use_logfile) std.fs.File else void = undefined;
 
+const zg = @import("zg");
+
+pub fn initUnicodeData(allocator: std.mem.Allocator) !void {
+    try zg.initData(allocator, &.{.graphemes});
+}
+
+pub fn deinitUnicodeData(allocator: std.mem.Allocator) void {
+    zg.deinitData(allocator, &.{.graphemes});
+}
 var zc: ZC = undefined;
 
 pub fn main() !void {
@@ -44,9 +53,10 @@ pub fn main() !void {
             .ReleaseFast, .ReleaseSmall => .{ std.heap.smp_allocator, false },
         };
     };
-    defer if (is_debug) {
-        _ = debug_allocator.deinit();
-    };
+    defer _ = if (is_debug) debug_allocator.deinit();
+
+    try initUnicodeData(gpa);
+    defer if (is_debug) deinitUnicodeData(gpa);
 
     try zc.init(gpa, .{ .filepath = filepath, .ui = true });
     defer zc.deinit();
@@ -87,4 +97,5 @@ pub fn log(
 // Reference all tests in other modules
 test {
     std.testing.refAllDecls(ZC);
+    std.testing.refAllDecls(@import("gap_buffer.zig"));
 }

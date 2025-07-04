@@ -1,8 +1,6 @@
 const std = @import("std");
 const utils = @import("utils.zig");
 const bufutils = @import("buffer_utils.zig");
-const CodepointBuilder = utils.CodepointBuilder;
-const wcWidth = @import("wcwidth").wcWidth;
 const isWhitespace = std.ascii.isWhitespace;
 const unicode = std.unicode;
 const utf8Encode = unicode.utf8Encode;
@@ -32,37 +30,12 @@ pub fn prevCodepoint(buf: anytype, offset: u32) u32 {
     return offset - i;
 }
 
-// TODO: package & use libgrapheme for these
-//       waiting for https://github.com/ziglang/zig/issues/14719 to be fixed before this happens
 pub fn nextCharacter(buf: anytype, offset: u32, count: u32) u32 {
-    var i = offset;
-    for (0..count) |_| {
-        while (i < buf.length()) : (i += 1) {
-            var builder: CodepointBuilder = .empty;
-            var j = i;
-            while (builder.appendByte(buf.get(j))) : (j += 1) {}
-            i += builder.desired_len;
-            if (wcWidth(builder.codepoint()) != 0) break;
-        } else break;
-    }
-
-    return i - offset;
+    return buf.nextCharacter(offset, count);
 }
 
 pub fn prevCharacter(buf: anytype, offset: u32, count: u32) u32 {
-    var i = offset;
-    for (0..count) |_| {
-        while (i > 0) {
-            const len = prevCodepoint(buf, i);
-            i -= len;
-
-            var builder: CodepointBuilder = .empty;
-            for (i..i + len) |j| _ = builder.appendByte(buf.get(@intCast(j)));
-            if (wcWidth(builder.codepoint()) != 0) break;
-        } else break;
-    }
-
-    return offset - i;
+    return buf.prevCharacter(offset, count);
 }
 
 pub fn sliceToCp(slice: []const u8) [4]u8 {
@@ -737,15 +710,23 @@ pub const Motion = union(enum(u8)) {
         return switch (word_type) {
             .normal => struct {
                 fn func(c: u8) bool {
-                    return c < 0x80 and !utils.isWord(c);
+                    return c < 0x80 and !isWord(c);
                 }
             }.func,
             .long => isWhitespace,
         };
     }
+
+    pub fn isWord(c: u8) bool {
+        return switch (c) {
+            '_', 'a'...'z', 'A'...'Z', '0'...'9' => true,
+            else => false,
+        };
+    }
 };
 
-const GapBuffer = @import("GapBuffer.zig").GapBuffer;
+const gap_buffer = @import("gap_buffer.zig");
+const GapBuffer = gap_buffer.GapBuffer;
 
 fn testMotion(
     text: []const u8,
@@ -759,6 +740,7 @@ fn testMotion(
     defer buf.deinit(std.testing.allocator);
 
     try buf.appendSlice(std.testing.allocator, text);
+    assert(buf.gap_start == buf.len);
 
     const range = motion.do(buf, start, count);
     try std.testing.expectEqual(start_pos, range.start);
@@ -766,6 +748,10 @@ fn testMotion(
 }
 
 test "Motions" {
+    const main = @import("main.zig");
+    try main.initUnicodeData(std.testing.allocator);
+    defer main.deinitUnicodeData(std.testing.allocator);
+
     const text = "this漢字is .my. epic漢字. .漢字text";
 
     try testMotion(text, 0, 0, "th".len, .{ .to_forwards = 'i' }, 1);

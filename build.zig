@@ -32,26 +32,27 @@ fn configureMainModule(
         .optimize = optimize,
     }).module("shovel");
 
-    const wcwidth = b.dependency("wcwidth", .{
-        .target = target,
-        .optimize = optimize,
-    }).module("wcwidth");
-
     const zlua = b.dependency("zlua", .{
         .target = target,
         .optimize = optimize,
         .lang = .lua54,
     }).module("zlua");
 
+    const zg = b.dependency("zg", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("zg");
+
     const main_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zlua", .module = zlua },
+            .{ .name = "shovel", .module = shovel },
+            .{ .name = "zg", .module = zg },
+        },
     });
-
-    main_mod.addImport("zlua", zlua);
-    main_mod.addImport("shovel", shovel);
-    main_mod.addImport("wcwidth", wcwidth);
 
     return main_mod;
 }

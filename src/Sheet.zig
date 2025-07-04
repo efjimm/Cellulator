@@ -2793,54 +2793,6 @@ pub fn getColumnHandle(sheet: *Sheet, index: PosInt) ?Column.Handle {
     return null;
 }
 
-pub fn widthNeededForColumn(
-    sheet: *Sheet,
-    column_index: PosInt,
-    precision: u8,
-    max_width: u16,
-) !u16 {
-    var width: u16 = Column.default_width;
-
-    var results: std.ArrayList(Cell.Handle) = .init(sheet.allocator);
-    defer results.deinit();
-
-    try sheet.cell_tree.queryWindow(
-        &.{ column_index, 0 },
-        &.{ column_index, std.math.maxInt(u32) },
-        &results,
-    );
-
-    var buf: std.BoundedArray(u8, 512) = .{};
-    const writer = buf.writer();
-    for (results.items) |handle| {
-        const cell = sheet.getCellFromHandle(handle);
-        switch (cell.value_type) {
-            .err => {},
-            .number => {
-                const n = cell.value.number;
-                buf.len = 0;
-                writer.print("{d:.[1]}", .{ n, precision }) catch unreachable;
-                // Numbers are all ASCII, so 1 byte = 1 column
-                const len: u16 = @intCast(buf.len);
-                if (len > width) {
-                    width = len;
-                    if (width >= max_width) return width;
-                }
-            },
-            .string => {
-                const str = sheet.cellStringValue(cell);
-                const w = utils.strWidth(str, max_width);
-                if (w > width) {
-                    width = w;
-                    if (width >= max_width) return width;
-                }
-            },
-        }
-    }
-
-    return width;
-}
-
 test "Sheet basics" {
     const t = std.testing;
 

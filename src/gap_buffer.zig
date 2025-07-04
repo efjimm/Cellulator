@@ -251,6 +251,58 @@ pub fn GapBuffer(comptime T: type) type {
             self.setGap(self.len);
             return self.left();
         }
+
+        const zg = @import("zg");
+
+        pub fn nextCharacter(buf: *const GapBuffer(u8), index: u32, count: u32) u32 {
+            var n = count;
+            var i = index;
+            if (index < buf.gap_start) {
+                const slice = buf.left();
+                var iter = zg.graphemes.iterator(slice[index..]);
+                assert(slice[index] & 0xC0 != 0x80);
+                while (iter.next()) |grapheme| : (n -= 1) {
+                    if (n == 0) break;
+                    i += @intCast(grapheme.len);
+                }
+            }
+
+            const slice = buf.right();
+            var iter = zg.graphemes.iterator(slice[i -| buf.gap_start..]);
+            while (iter.next()) |grapheme| : (n -= 1) {
+                if (n == 0) break;
+                i += @intCast(grapheme.len);
+            }
+            assert(i <= buf.len);
+
+            return i - index;
+        }
+
+        pub fn prevCharacter(buf: *const GapBuffer(u8), index: u32, count: u32) u32 {
+            var n = count;
+            var i = index;
+            if (index >= buf.gap_start) {
+                const slice = buf.right();
+                var iter = zg.graphemes.reverseIterator(slice[0 .. index - buf.gap_start]);
+                while (iter.prev()) |grapheme| : (n -= 1) {
+                    if (n == 0) break;
+                    i -= @intCast(grapheme.len);
+                }
+
+                assert(i >= buf.gap_start);
+
+                if (i > buf.gap_start) return index - i;
+            }
+
+            const slice = buf.left();
+            var iter = zg.graphemes.reverseIterator(slice[0..i]);
+            while (iter.prev()) |grapheme| : (n -= 1) {
+                if (n == 0) break;
+                i -= @intCast(grapheme.len);
+            }
+
+            return index - i;
+        }
     };
 }
 

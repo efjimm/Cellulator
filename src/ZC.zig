@@ -6,7 +6,6 @@ const Sheet = @import("Sheet.zig");
 const Tui = @import("Tui.zig");
 const text = @import("text.zig");
 const Motion = text.Motion;
-const wcWidth = @import("wcwidth").wcWidth;
 const Command = @import("Command.zig");
 const Position = @import("Position.zig").Position;
 const Rect = Position.Rect;
@@ -45,6 +44,8 @@ pub const Ui = struct {
         /// Apply the default theme.
         applyDefaultTheme: *const fn (*anyopaque) ApplyThemeError!void,
 
+        stringWidth: *const fn (*anyopaque, []const u8) u32,
+
         // Yes these are a little bit cursed to put in a vtable but this is better than calling
         // a virtual function to get these.
         theme_file_extension: []const u8,
@@ -68,6 +69,10 @@ pub const Ui = struct {
 
     pub fn getUiName(ui: Ui) []const u8 {
         return ui.vtable.ui_name;
+    }
+
+    pub fn stringWidth(ui: Ui, bytes: []const u8) u32 {
+        return ui.vtable.stringWidth(ui.ptr, bytes);
     }
 };
 
@@ -500,6 +505,7 @@ fn clampCommandCursor(self: *Self) void {
     }
 }
 
+// TODO: Move this to the tui
 fn clampScreenToCommandCursor(self: *Self) void {
     if (self.command.cursor < self.command_screen_pos) {
         self.command_screen_pos = self.command.cursor;
@@ -510,24 +516,18 @@ fn clampScreenToCommandCursor(self: *Self) void {
     var x: u32 = self.command.cursor;
     // Reserve either the width of the character under the cursor, or 1 column if none.
     var w: u16 = if (self.command.cursor < len) blk: {
-        var builder: utils.CodepointBuilder = .empty;
-        var i: u32 = 0;
-        while (builder.appendByte(self.command.get(x + i))) : (i += 1) {}
-        break :blk wcWidth(builder.codepoint());
+        const grapheme_len = self.command.nextCharacter(x, 1);
+        const grapheme_slice = self.command.slice(x, grapheme_len);
+        break :blk @intCast(self.ui.term.graphemeWidth(grapheme_slice));
     } else 1;
 
     while (true) {
         const prev = x;
-        x -= text.prevCodepoint(self.command, prev);
+        x -= text.prevCharacter(&self.command, x, 1);
         if (prev == x or x < self.screen_pos.x) break;
 
-        var builder: utils.CodepointBuilder = .{
-            .buf = undefined,
-            .len = 0,
-            .desired_len = @intCast(prev - x),
-        };
-        for (0..builder.desired_len) |i| _ = builder.appendByte(self.command.get(x + @as(u3, @intCast(i))));
-        w += wcWidth(builder.codepoint());
+        const graphemeSlice = self.command.slice(x, prev - x);
+        w += @intCast(self.ui.term.graphemeWidth(graphemeSlice));
 
         if (w > self.ui.term.width) {
             if (prev > self.command_screen_pos) self.command_screen_pos = prev;
@@ -714,6 +714,7 @@ pub fn doCommandNormalMode(self: *Self, action: CommandAction) !void {
 }
 
 fn doCommandInsertMode(self: *Self, action: CommandAction, keys: []const u8) !void {
+    defer self.clampScreenToCommandCursor();
     try switch (action) {
         .none => {
             const writer = self.commandWriter();
@@ -1864,12 +1865,66 @@ pub inline fn cursorDecWidth(self: *Self) Allocator.Error!void {
     self.resetCount();
 }
 
+fn widthNeededForColumn(
+    self: *Self,
+    sheet: *Sheet,
+    column_index: PosInt,
+    precision: u8,
+    max_width: u16,
+) !u16 {
+    var width: u16 = Sheet.Column.default_width;
+
+    var results: std.ArrayList(Sheet.Cell.Handle) = .init(sheet.allocator);
+    defer results.deinit();
+
+    try sheet.cell_tree.queryWindow(
+        &.{ column_index, 0 },
+        &.{ column_index, std.math.maxInt(u32) },
+        &results,
+    );
+
+    var buf: std.BoundedArray(u8, 512) = .{};
+    const writer = buf.writer();
+    for (results.items) |handle| {
+        const cell = sheet.getCellFromHandle(handle);
+        switch (cell.value_type) {
+            .err => {},
+            .number => {
+                const n = cell.value.number;
+                buf.len = 0;
+                writer.print("{d:.[1]}", .{ n, precision }) catch unreachable;
+                // Numbers are all ASCII, so 1 byte = 1 column
+                const len: u16 = @intCast(buf.len);
+                if (len > width) {
+                    width = len;
+                    if (width >= max_width) return width;
+                }
+            },
+            .string => {
+                const str = sheet.cellStringValue(cell);
+                const w: u16 = @intCast(self.ui_interface.stringWidth(str)); // TODO: Make all widths u32
+                if (w > width) {
+                    width = w;
+                    if (width >= max_width) return width;
+                }
+            },
+        }
+    }
+
+    return width;
+}
+
 pub fn expandWidthAtCursor(self: *Self) Allocator.Error!void {
     const handle = self.sheet.getColumnHandle(self.cursor.x) orelse return;
     const col = self.sheet.cols.getValue(handle);
 
     const max_width = self.ui.term.width - self.leftReservedColumns();
-    const width_needed = try self.sheet.widthNeededForColumn(self.cursor.x, col.precision, max_width);
+    const width_needed = try self.widthNeededForColumn(
+        &self.sheet,
+        self.cursor.x,
+        col.precision,
+        max_width,
+    );
     try self.sheet.setColWidth(handle, self.cursor.x, width_needed, .{});
     self.sheet.endUndoGroup();
     self.clampScreenToCursorX();
