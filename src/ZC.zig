@@ -44,12 +44,21 @@ pub const Ui = struct {
         /// Apply the default theme.
         applyDefaultTheme: *const fn (*anyopaque) ApplyThemeError!void,
 
-        stringWidth: *const fn (*anyopaque, []const u8) u32,
+        stringWidth: *const fn (*anyopaque, []const u8, StringWidthOptions) StringWidthResult,
 
         // Yes these are a little bit cursed to put in a vtable but this is better than calling
         // a virtual function to get these.
         theme_file_extension: []const u8,
         ui_name: []const u8,
+    };
+
+    pub const StringWidthOptions = struct {
+        max_width: u32 = std.math.maxInt(u32),
+    };
+
+    pub const StringWidthResult = struct {
+        width: u32,
+        exceded_max_width: bool,
     };
 
     // TODO: Better error handling and reporting
@@ -71,8 +80,8 @@ pub const Ui = struct {
         return ui.vtable.ui_name;
     }
 
-    pub fn stringWidth(ui: Ui, bytes: []const u8) u32 {
-        return ui.vtable.stringWidth(ui.ptr, bytes);
+    pub fn stringWidth(ui: Ui, bytes: []const u8, opts: StringWidthOptions) StringWidthResult {
+        return ui.vtable.stringWidth(ui.ptr, bytes, opts);
     }
 };
 
@@ -1902,7 +1911,9 @@ fn widthNeededForColumn(
             },
             .string => {
                 const str = sheet.cellStringValue(cell);
-                const w: u16 = @intCast(self.ui_interface.stringWidth(str)); // TODO: Make all widths u32
+                const w: u16 = @intCast(self.ui_interface.stringWidth(str, .{
+                    .max_width = self.ui.term.width,
+                }).width); // TODO: Make all widths u32
                 if (w > width) {
                     width = w;
                     if (width >= max_width) return width;

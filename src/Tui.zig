@@ -220,8 +220,18 @@ fn applyThemeLua(state: *Lua) callconv(.c) c_int {
     return 0;
 }
 
-pub fn stringWidth(_: *anyopaque, bytes: []const u8) u32 {
-    return @intCast(@import("zg").display_width.strWidth(bytes));
+pub fn stringWidth(
+    _: *anyopaque,
+    bytes: []const u8,
+    opts: ZC.Ui.StringWidthOptions,
+) ZC.Ui.StringWidthResult {
+    const res = @import("zg").display_width.strWidth(bytes, .{
+        .max_width = opts.max_width,
+    });
+    return .{
+        .width = @intCast(res.width),
+        .exceded_max_width = res.exceded_max_width,
+    };
 }
 
 pub const InitError = Term.InitError || Term.UncookError || error{OperationNotSupported};
@@ -790,14 +800,21 @@ fn renderCell(
             try tui.setStyle(if (selected) .cell_text_selected else .cell_text_unselected);
 
             const text = zc.sheet.cellStringValue(cell);
-            const text_width = stringWidth(tui, text);
 
-            const left_pad = switch (text_attrs.alignment) {
+            const left_pad = sw: switch (text_attrs.alignment) {
                 .left => 0,
-                .right => width -| text_width,
-                .center => (width -| text_width) / 2,
+                .right => {
+                    const text_width = stringWidth(tui, text, .{ .max_width = width }).width;
+                    break :sw width -| text_width;
+                },
+                .center => {
+                    const text_width = stringWidth(tui, text, .{ .max_width = width }).width;
+                    break :sw (width -| text_width) / 2;
+                },
             };
-            try writer.writeByteNTimes(' ', left_pad);
+
+            if (left_pad > 0)
+                try writer.writeByteNTimes(' ', left_pad);
             try writer.writeAll(text);
         },
         .err => {
