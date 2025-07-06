@@ -192,11 +192,11 @@ pub fn printFromNode(
     // non-commutative operators with the same precedence need to be surrounded by parentheses.
     switch (node.get()) {
         .number => |n| try writer.print("{d}", .{n}),
-        .column => |col| try Position.writeColumnAddress(col, writer),
-        .pos => |pos| try pos.writeCellAddress(writer),
+        .column => |col| try writer.print("{}", .{Position.fmtColumnAddress(col)}),
+        .pos => |pos| try writer.print("{f}", .{pos}),
         .invalidated_pos => |pos| {
             // TODO: Print these differently
-            try pos.writeCellAddress(writer);
+            try writer.print("{f}", .{pos});
         },
 
         .string_literal => |str| {

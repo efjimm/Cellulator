@@ -58,7 +58,7 @@ pub const Ui = struct {
 
     pub const StringWidthResult = struct {
         width: u32,
-        exceded_max_width: bool,
+        len: usize,
     };
 
     // TODO: Better error handling and reporting
@@ -1667,6 +1667,7 @@ pub fn setCursor(self: *Self, new_pos: Position) void {
     self.cursor = new_pos;
     self.clampScreenToCursor();
 
+    if (self.mode.isVisual()) self.ui.update(&.{ .column_headings, .row_numbers });
     self.ui.update(&.{.cursor});
 
     switch (self.mode) {

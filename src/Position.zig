@@ -5,12 +5,13 @@ const Lua = @import("zlua").Lua;
 pub const Position = packed struct {
     pub const Int = u32;
     pub const HashInt = u64;
-    const MAX = std.math.maxInt(Int);
-    pub const max_str_len = blk: {
-        var buf: [64]u8 = undefined;
-        const slice = columnAddressBuf(std.math.maxInt(Int), &buf);
-        break :blk slice.len;
-    };
+
+    const max = std.math.maxInt(Int);
+
+    pub const max_str_len = std.fmt.count("{}", .{Position.init(
+        std.math.maxInt(u32),
+        std.math.maxInt(u32),
+    )});
 
     x: Int = 0,
     y: Int = 0,
@@ -32,17 +33,10 @@ pub const Position = packed struct {
         return 1;
     }
 
-    pub fn format(
-        pos: Position,
-        comptime _: []const u8,
-        _: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        try pos.writeCellAddress(writer);
-    }
+    pub const format = formatCellAddress;
 
     pub fn hash(position: Position) HashInt {
-        return @as(HashInt, position.y) * (MAX + 1) + position.x;
+        return @as(HashInt, position.y) * (max + 1) + position.x;
     }
 
     pub fn eql(p1: Position, p2: Position) bool {
@@ -63,30 +57,12 @@ pub const Position = packed struct {
         };
     }
 
-    pub fn min(p1: Position, p2: Position) Position {
-        return .{
-            .x = @min(p1.x, p2.x),
-            .y = @min(p1.y, p2.y),
-        };
-    }
-
-    pub fn max(p1: Position, p2: Position) Position {
-        return .{
-            .x = @max(p1.x, p2.x),
-            .y = @max(p1.y, p2.y),
-        };
-    }
-
     /// Adds the values of two positions. Asserts that the values do not overflow.
     pub fn add(p1: Position, p2: Position) Position {
         return .{
             .x = p1.x + p2.x,
             .y = p1.y + p2.y,
         };
-    }
-
-    pub fn anyMatch(p1: Position, p2: Position) bool {
-        return p1.x == p2.x or p1.y == p2.y;
     }
 
     pub fn area(pos1: Position, pos2: Position) HashInt {
@@ -103,21 +79,40 @@ pub const Position = packed struct {
         return pos.y >= tl.y and pos.y <= br.y and pos.x >= tl.x and pos.x <= br.x;
     }
 
-    /// Writes the cell address of this position to the given writer.
-    pub fn writeCellAddress(pos: Position, writer: anytype) @TypeOf(writer).Error!void {
-        try writeColumnAddress(pos.x, writer);
-        try writer.print("{d}", .{pos.y});
+    pub fn fmtCellAddress(pos: Position) std.fmt.Formatter(formatCellAddress) {
+        return .{ .data = pos };
+    }
+
+    pub fn formatCellAddress(
+        pos: Position,
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) @TypeOf(writer).Error!void {
+        try writer.print("{}{d}", .{
+            fmtColumnAddress(pos.x),
+            pos.y,
+        });
+    }
+
+    pub fn fmtColumnAddress(index: u32) std.fmt.Formatter(formatColumnAddress) {
+        return .{ .data = index };
     }
 
     /// Writes the alphabetic bijective base-26 representation of the given number to the passed
     /// writer.
-    pub fn writeColumnAddress(index: Int, writer: anytype) @TypeOf(writer).Error!void {
+    pub fn formatColumnAddress(
+        index: Int,
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
         if (index < 26) {
             try writer.writeByte('A' + @as(u8, @intCast(index)));
             return;
         }
 
-        var buf: [max_str_len]u8 = undefined;
+        var buf: [64]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buf);
         const bufwriter = stream.writer();
 
@@ -134,25 +129,9 @@ pub const Position = packed struct {
     }
 
     pub fn columnAddressBuf(index: Int, buf: []u8) []u8 {
-        if (index < 26) {
-            std.debug.assert(buf.len >= 1);
-            buf[0] = 'A' + @as(u8, @intCast(index));
-            return buf[0..1];
-        }
-
-        var stream = std.io.fixedBufferStream(buf);
-        const writer = stream.writer();
-
-        var i = @as(HashInt, index) + 1;
-        while (i > 0) : (i /= 26) {
-            i -= 1;
-            const r: u8 = @intCast(i % 26);
-            writer.writeByte('A' + r) catch break;
-        }
-
-        const slice = stream.getWritten();
-        std.mem.reverse(u8, slice);
-        return slice;
+        var fbs = std.io.fixedBufferStream(buf);
+        formatColumnAddress(index, "", .{}, fbs.writer()) catch unreachable;
+        return fbs.getWritten();
     }
 
     pub const FromAddressError = error{
@@ -171,7 +150,7 @@ pub const Position = packed struct {
             ret = ret *| 26 +| (std.ascii.toUpper(c) - 'A' + 1);
         }
 
-        return if (ret > @as(HashInt, MAX) + 1)
+        return if (ret > @as(HashInt, max) + 1)
             error.InvalidCellAddress
         else
             @intCast(ret - 1);
@@ -258,11 +237,6 @@ pub const Position = packed struct {
             return dx * dy;
         }
 
-        /// Returns true if any one of the coordinates in `r1` equals the corresponding coordinate in `r2`.
-        pub fn anyMatch(r1: Rect, r2: Rect) bool {
-            return Position.anyMatch(r1.tl, r2.tl) or Position.anyMatch(r1.br, r2.br);
-        }
-
         pub fn format(
             range: Rect,
             comptime _: []const u8,
@@ -270,51 +244,6 @@ pub const Position = packed struct {
             writer: anytype,
         ) !void {
             try writer.print("[{} -> {}]", .{ range.tl, range.br });
-        }
-
-        /// Removes all positions in `m` from `target`, returning 0-4 new ranges, or `null` if
-        /// `m` does not intersect `target`.
-        pub fn mask(
-            target: Rect,
-            m: Rect,
-        ) ?std.BoundedArray(Rect, 4) {
-            if (!m.intersects(target)) return null;
-
-            var ret: std.BoundedArray(Rect, 4) = .{};
-
-            // North
-            if (m.tl.y > target.tl.y) {
-                ret.appendAssumeCapacity(.{
-                    .tl = .{ .x = @max(target.tl.x, m.tl.x), .y = target.tl.y },
-                    .br = .{ .x = @min(target.br.x, m.br.x), .y = m.tl.y - 1 },
-                });
-            }
-
-            // West
-            if (m.tl.x > target.tl.x) {
-                ret.appendAssumeCapacity(.{
-                    .tl = .{ .x = target.tl.x, .y = target.tl.y },
-                    .br = .{ .x = m.tl.x - 1, .y = target.br.y },
-                });
-            }
-
-            // South
-            if (m.br.y < target.br.y) {
-                ret.appendAssumeCapacity(.{
-                    .tl = .{ .x = @max(target.tl.x, m.tl.x), .y = m.br.y + 1 },
-                    .br = .{ .x = @min(target.br.x, m.br.x), .y = target.br.y },
-                });
-            }
-
-            // East
-            if (m.br.x < target.br.x) {
-                ret.appendAssumeCapacity(.{
-                    .tl = .{ .x = m.br.x + 1, .y = target.tl.y },
-                    .br = .{ .x = target.br.x, .y = target.br.y },
-                });
-            }
-
-            return if (ret.len > 0) ret else null;
         }
 
         pub fn eql(r1: Rect, r2: Rect) bool {
@@ -338,13 +267,6 @@ pub const Position = packed struct {
             return .{
                 .tl = .{ .x = 0, .y = 0 },
                 .br = .{ .x = std.math.maxInt(Int), .y = std.math.maxInt(Int) },
-            };
-        }
-
-        pub fn merge(r1: Rect, r2: Rect) Rect {
-            return .{
-                .tl = Position.min(r1.tl, r2.tl),
-                .br = Position.max(r1.br, r2.br),
             };
         }
 
@@ -401,12 +323,12 @@ pub const Position = packed struct {
         const tuples = [_]struct { Position, HashInt }{
             .{ Position{ .x = 0, .y = 0 }, 0 },
             .{ Position{ .x = 1, .y = 0 }, 1 },
-            .{ Position{ .x = 1, .y = 1 }, MAX + 2 },
-            .{ Position{ .x = 500, .y = 300 }, (MAX + 1) * 300 + 500 },
-            .{ Position{ .x = 0, .y = 300 }, (MAX + 1) * 300 },
-            .{ Position{ .x = MAX, .y = 0 }, MAX },
-            .{ Position{ .x = 0, .y = MAX }, (MAX + 1) * MAX },
-            .{ Position{ .x = MAX, .y = MAX }, std.math.maxInt(HashInt) },
+            .{ Position{ .x = 1, .y = 1 }, max + 2 },
+            .{ Position{ .x = 500, .y = 300 }, (max + 1) * 300 + 500 },
+            .{ Position{ .x = 0, .y = 300 }, (max + 1) * 300 },
+            .{ Position{ .x = max, .y = 0 }, max },
+            .{ Position{ .x = 0, .y = max }, (max + 1) * max },
+            .{ Position{ .x = max, .y = max }, std.math.maxInt(HashInt) },
         };
 
         for (tuples) |tuple| {
@@ -414,8 +336,8 @@ pub const Position = packed struct {
         }
     }
 
-    test fromAddress {
-        const data = .{
+    test "conversions" {
+        const cases = .{
             .{ "A1", Position{ .y = 1, .x = 0 } },
             .{ "AA7865", Position{ .y = 7865, .x = 26 } },
             .{ "AAA1000", Position{ .y = 1000, .x = 702 } },
@@ -424,25 +346,19 @@ pub const Position = packed struct {
             .{ "AAAA0", Position{ .y = 0, .x = 18278 } },
             .{ "CRXO0", Position{ .y = 0, .x = 65534 } },
             .{ "CRXP0", Position{ .y = 0, .x = 65535 } },
-            .{ "MWLQKWU0", Position{ .y = 0, .x = std.math.maxInt(u32) - 1 } },
-            .{ "MWLQKWV0", Position{ .y = 0, .x = std.math.maxInt(u32) } },
+            .{ "MWLQKWU0", Position{ .y = 0, .x = (1 << 32) - 2 } },
+            .{ "MWLQKWV0", Position{ .y = 0, .x = (1 << 32) - 1 } },
         };
 
-        inline for (data) |tuple| {
-            try std.testing.expectEqual(tuple[1], try Position.fromAddress(tuple[0]));
+        inline for (cases) |data| {
+            const string, const pos = data;
+            try std.testing.expectEqual(pos, try Position.fromAddress(string));
+            try std.testing.expectFmt(string, "{}", .{pos});
+
+            const len = for (string, 0..) |c, i| {
+                if (c >= '0' and c <= '9') break i;
+            } else unreachable;
+            try std.testing.expectFmt(string[0..len], "{}", .{fmtColumnAddress(pos.x)});
         }
-    }
-
-    test columnAddressBuf {
-        const t = std.testing;
-        var buf: [max_str_len]u8 = undefined;
-
-        try t.expectEqualStrings("A", Position.columnAddressBuf(0, &buf));
-        try t.expectEqualStrings("AA", Position.columnAddressBuf(26, &buf));
-        try t.expectEqualStrings("AAA", Position.columnAddressBuf(702, &buf));
-        try t.expectEqualStrings("AAAA", Position.columnAddressBuf(18278, &buf));
-        try t.expectEqualStrings("CRXP", Position.columnAddressBuf(std.math.maxInt(u16), &buf));
-        try t.expectEqualStrings("MWLQKWU", Position.columnAddressBuf(std.math.maxInt(u32) - 1, &buf));
-        try t.expectEqualStrings("MWLQKWV", Position.columnAddressBuf(std.math.maxInt(u32), &buf));
     }
 };

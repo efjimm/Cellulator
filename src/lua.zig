@@ -379,7 +379,7 @@ const metatables = .{
         pub fn __tostring(state: *Lua) callconv(.C) c_int {
             const pos = checkCellAddress(state, 1);
             var buf = std.BoundedArray(u8, 64){};
-            pos.writeCellAddress(buf.writer()) catch unreachable;
+            buf.writer().print("{f}", .{pos}) catch unreachable;
 
             _ = state.pushString(buf.slice());
 

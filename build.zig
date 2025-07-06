@@ -6,6 +6,7 @@ pub fn build(b: *std.Build) void {
 
     const logfile = b.option([]const u8, "logging", "File to log to");
     const log_level = b.option(std.log.Level, "log-level", "Logging level") orelse .debug;
+    const use_llvm = b.option(bool, "llvm", "Use llvm for codegen");
 
     const opts = b.addOptions();
     opts.addOption(?[]const u8, "logfile_path", logfile);
@@ -13,7 +14,7 @@ pub fn build(b: *std.Build) void {
 
     const main_mod = configureMainModule(b, target, optimize);
 
-    configureExe(b, main_mod);
+    configureExe(b, main_mod, use_llvm);
     configureTests(b, main_mod, opts);
     configureBenchmarks(b, main_mod);
 
@@ -88,10 +89,12 @@ fn configureFuzzing(
 fn configureExe(
     b: *std.Build,
     main_mod: *std.Build.Module,
+    use_llvm: ?bool,
 ) void {
     const exe = b.addExecutable(.{
         .name = "cellulator",
         .root_module = main_mod,
+        .use_llvm = use_llvm,
     });
 
     const check_step = b.step("check", "");

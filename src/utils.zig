@@ -2,6 +2,12 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
+pub fn enumFromEnum(E: type, a: anytype) E {
+    return switch (a) {
+        inline else => |t| @field(E, @tagName(t)),
+    };
+}
+
 pub fn ptrToIoVec(ptr: anytype) std.posix.iovec_const {
     const p = @typeInfo(@TypeOf(ptr)).pointer;
     const bytes = blk: {
