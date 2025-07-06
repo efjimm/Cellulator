@@ -781,6 +781,7 @@ fn addCellAsDependentOfExprRanges(
     }
 }
 
+// TODO: This overcounts
 fn ensureExpressionDependentsCapacity(sheet: *Sheet, expr_root: ast.Index) Allocator.Error!void {
     const left = ast.leftMostChild(sheet.ast_nodes, expr_root);
     var dependent_count: u32 = 0;
@@ -1222,6 +1223,8 @@ fn bulkDeleteCellHandles(sheet: *Sheet, handles: []const Cell.Handle) void {
         sheet.removeCellAsDependentOfExpr(handle, cell.expr_root, true);
         sheet.setCellError(cell);
         sheet.cell_tree.removeHandle(handle);
+        cell.state = .enqueued;
+        sheet.queued_cells.appendAssumeCapacity(.{ handle, 1 });
     }
 }
 
@@ -1496,7 +1499,7 @@ fn dupeAstStrings(
     return ret;
 }
 
-fn ensureUnusedCellCapacity(sheet: *Sheet, n: u32) !void {
+fn ensureUnusedCellCapacity(sheet: *Sheet, n: usize) !void {
     try sheet.cell_tree.ensureUnusedCapacity(sheet.allocator, n);
 }
 
@@ -1504,7 +1507,7 @@ fn ensureUnusedStringsCapacity(sheet: *Sheet, n: u32) !void {
     try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, n + 1);
 }
 
-fn ensureUnusedCellQueueCapacity(sheet: *Sheet, n: u32) !void {
+fn ensureUnusedCellQueueCapacity(sheet: *Sheet, n: usize) !void {
     try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, n);
 }
 
@@ -1526,7 +1529,7 @@ fn ensureUnusedCellBufferCapacity(sheet: *Sheet, n: u32) !void {
 // TODO: This could be done without allocating by walking the ph-tree and removing as we go.
 /// Deletes a cell range, pushing a `.bulk_cell_insert` undo. Asserts that `undo_cell_buffer` and the
 /// respective undo stack has enough capacity.
-fn deleteCellRangeAssumeCapacity(sheet: *Sheet, range: Rect, opts: UndoOpts) void {
+fn deleteCellRangeAssumeCapacity(sheet: *Sheet, range: Rect, opts: UndoOpts) u32 {
     assert(sheet.cell_buffer.capacity - sheet.cell_buffer.items.len >= range.area() + 1);
     assert(opts.undo_type == .redo or sheet.undos.capacity - sheet.undos.len > 0);
     assert(opts.undo_type == .undo or sheet.redos.capacity - sheet.redos.len > 0);
@@ -1542,7 +1545,7 @@ fn deleteCellRangeAssumeCapacity(sheet: *Sheet, range: Rect, opts: UndoOpts) voi
         ) catch unreachable;
 
         if (buf.items.len == start) {
-            break :blk .{ &.{}, std.math.maxInt(u32) };
+            return std.math.maxInt(u32);
         }
 
         buf.appendAssumeCapacity(.invalid);
@@ -1554,11 +1557,14 @@ fn deleteCellRangeAssumeCapacity(sheet: *Sheet, range: Rect, opts: UndoOpts) voi
         sheet.removeCellAsDependentOfExpr(cell_handle, old_cell.expr_root, true);
         sheet.cell_tree.removeHandle(cell_handle);
         sheet.setCellError(old_cell);
+        old_cell.state = .enqueued;
     }
 
     if (existing_cells.len > 0) {
         sheet.pushUndoAssumeCapacity(.init(.bulk_cell_insert, deleted_index), opts);
     }
+
+    return deleted_index;
 }
 
 pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr: f64, opts: UndoOpts) !void {
@@ -1576,7 +1582,7 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
 
     // Delete existing cells
 
-    sheet.deleteCellRangeAssumeCapacity(range, opts);
+    _ = sheet.deleteCellRangeAssumeCapacity(range, opts);
 
     const ast_start = sheet.ast_nodes.len;
     sheet.ast_nodes.len += area;
@@ -1699,7 +1705,7 @@ pub fn bulkSetCellExpr(
     expr: ast.Index,
     opts: BulkSetCellOptions,
 ) !void {
-    const need_cell_eval = opts.tag != .err;
+    const need_cell_eval = opts.tag == .err;
     // Pre-allocate memory
     const area: u32 = @intCast(range.area());
     const width = range.width();
@@ -1721,7 +1727,7 @@ pub fn bulkSetCellExpr(
     try sheet.deps.ensureUnusedCapacity(sheet.allocator, area * ref_count);
     errdefer comptime unreachable;
 
-    sheet.deleteCellRangeAssumeCapacity(range, opts.undo_opts);
+    _ = sheet.deleteCellRangeAssumeCapacity(range, opts.undo_opts);
 
     const ast_start_node = ast.leftMostChild(sheet.ast_nodes, expr);
     const strings = sheet.dupeAstStrings(source, ast_start_node, expr);
@@ -1763,7 +1769,7 @@ pub fn bulkSetCellExpr(
     const cell: Cell = .{
         .value = opts.value,
         .value_type = opts.tag,
-        .state = if (opts.tag != .err) .enqueued else .up_to_date,
+        .state = if (need_cell_eval) .enqueued else .up_to_date,
         .expr_root = expr,
         .strings = strings,
     };
@@ -1894,7 +1900,11 @@ pub fn deleteCell(
 pub fn deleteCellRange(sheet: *Sheet, r: Rect, opts: UndoOpts) Allocator.Error!void {
     try sheet.ensureUnusedUndoCapacity(1);
     try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, r.area() + 1);
-    sheet.deleteCellRangeAssumeCapacity(r, opts);
+    try sheet.ensureUnusedCellQueueCapacity(r.area() + 1);
+    const n = sheet.deleteCellRangeAssumeCapacity(r, opts);
+    for (sheet.cell_buffer.items[n .. sheet.cell_buffer.items.len - 1]) |cell| {
+        sheet.queued_cells.appendAssumeCapacity(.{ cell, 1 });
+    }
 }
 
 pub fn getCell(sheet: *Sheet, pos: Position) ?Cell {
@@ -2551,6 +2561,7 @@ pub fn setCellError(sheet: *Sheet, cell: *Cell) void {
     cell.setValue(.err, .fromError(error.NotEvaluable));
 }
 
+// TODO: Theres' a bunch of wasted memory here
 pub const Cell = extern struct {
     /// Cached value of the cell
     value: Value = .{ .err = .fromError(error.NotEvaluable) },
@@ -2791,6 +2802,89 @@ pub fn getColumnHandle(sheet: *Sheet, index: PosInt) ?Column.Handle {
     if (handle != .invalid)
         return handle;
     return null;
+}
+
+pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Position) !void {
+    assert(!Position.eql(src.tl, dest));
+    defer sheet.resetArena();
+    const arena = sheet.arena.allocator();
+
+    var cells: std.ArrayList(Cell.Handle) = try .initCapacity(arena, 128);
+    try sheet.cell_tree.queryWindow(
+        &.{ src.tl.x, src.tl.y },
+        &.{ src.br.x, src.br.y },
+        &cells,
+    );
+
+    if (cells.items.len == 0) return;
+
+    try sheet.ensureUnusedUndoCapacity(2);
+    try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, cells.items.len + 1);
+
+    var total_deps: u32 = 0;
+    for (cells.items) |cell| { // TODO: This kinda sucks
+        const ast_root = sheet.getCellFromHandle(cell).expr_root;
+        var iter: ExprRangeIterator = .init(sheet, ast_root);
+        while (iter.next()) |_| total_deps += 1;
+    }
+
+    try sheet.ensureUnusedCellCapacity(cells.items.len);
+    try sheet.ensureUnusedCellQueueCapacity(cells.items.len);
+    try sheet.deps.ensureUnusedCapacity(sheet.allocator, total_deps);
+    try sheet.ensureUnusedCellQueueCapacity(cells.items.len);
+    errdefer comptime unreachable;
+
+    const new_cells = sheet.createShallowCellCopiesContiguous(cells.items, src.tl, dest);
+
+    const dest_range: Rect = .initPos(dest, .add(dest, .sub(src.br, src.tl)));
+    _ = sheet.deleteCellRangeAssumeCapacity(dest_range, .{});
+    sheet.bulkInsertCellHandlesContiguous(
+        new_cells.int(),
+        new_cells.int() + cells.items.len,
+    );
+    sheet.pushUndo(.init(.bulk_cell_delete_contiguous, .{
+        .start = new_cells.int(),
+        .end = new_cells.int() + cells.items.len,
+    }), .{}) catch unreachable;
+}
+
+/// Copies all the cells in `cell_handles`, returning the first cell handle created. The expression
+/// and strings are shared between the original and copied cells. The created cells are appended at
+/// the end of the cell tree's leaves array and as such have continuous handles. The cells are not
+/// inserted into the tree.
+///
+/// The point of each cell is set to src + (dest - origin).
+pub fn createShallowCellCopiesContiguous(
+    sheet: *Sheet,
+    cell_handles: []const Cell.Handle,
+    origin: Position,
+    dest: Position,
+) Cell.Handle {
+    const start: Cell.Handle = .from(@intCast(sheet.cell_tree.leaves.len));
+    sheet.cell_tree.leaves.len += cell_handles.len;
+
+    const x_diff, const y_diff = dest.diff(origin);
+
+    for (cell_handles, start.int()..) |src_handle, dest_handle_int| {
+        const src_point = sheet.cell_tree.getPoint(src_handle);
+        const src_cell = sheet.getCellFromHandle(src_handle).*;
+        const src_pos: Position = .init(src_point[0], src_point[1]);
+
+        const new_x: u32 = @intCast(@as(i33, src_pos.x) + x_diff);
+        const new_y: u32 = @intCast(@as(i33, src_pos.y) + y_diff);
+
+        sheet.cell_tree.leaves.set(dest_handle_int, .{
+            .point = .{ new_x, new_y },
+            .parent = .invalid,
+            .value = .{
+                .state = .enqueued,
+                .expr_root = src_cell.expr_root,
+                .strings = src_cell.strings,
+            },
+        });
+    }
+
+    return start;
 }
 
 test "Sheet basics" {

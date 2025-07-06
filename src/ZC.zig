@@ -127,6 +127,8 @@ status_message: std.BoundedArray(u8, 256) = .{},
 /// Used as scratch space
 arena: std.heap.ArenaAllocator,
 
+yank: ?Rect = null,
+
 const input_buf_len = 256;
 
 pub const Mode = enum {
@@ -827,6 +829,10 @@ pub fn doNormalMode(self: *Self, action: Action) !void {
 
         .undo => try self.undo(),
         .redo => try self.redo(),
+        .yank_cell => {
+            self.yank = self.anyCursorRange();
+        },
+        .put_cell => try self.put(self.cursor),
         .cell_cursor_up => self.cursorUp(),
         .cell_cursor_down => self.cursorDown(),
         .cell_cursor_left => self.cursorLeft(),
@@ -913,6 +919,11 @@ fn doVisualMode(self: *Self, action: Action) Allocator.Error!void {
             const br = Position.bottomRight(self.cursor, self.anchor);
 
             try writer.print("{}:{}", .{ tl, br });
+        },
+
+        .yank_cell => {
+            self.yank = self.anyCursorRange();
+            self.setMode(.normal);
         },
 
         .cell_cursor_up => self.cursorUp(),
@@ -1079,6 +1090,8 @@ const Cmd = enum {
     set_text_align,
     set,
     unset,
+    yank,
+    put,
 };
 
 const cmds = std.StaticStringMap(Cmd).initComptime(.{
@@ -1103,6 +1116,8 @@ const cmds = std.StaticStringMap(Cmd).initComptime(.{
     .{ "text-align", .set_text_align },
     .{ "set", .set },
     .{ "unset", .unset },
+    .{ "yank", .yank },
+    .{ "put", .put },
 });
 
 const DebugCmd = enum {
@@ -1200,6 +1215,21 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
     // TODO: Implement a better system for displaying usage information for commands, which is
     //       invoked whenver a malformed command is encountered.
     switch (cmd) {
+        .yank => {
+            const range = if (iter.next()) |arg|
+                try parseRangeOrPoint(arg)
+            else
+                self.anyCursorRange();
+
+            self.yank = range;
+        },
+        .put => {
+            const pos = if (iter.next()) |arg|
+                try Position.fromAddress(arg)
+            else
+                self.cursor;
+            try self.put(pos);
+        },
         // Set a property back to its default value
         .unset => {
             const usage = "Usage: `:unset PROPERTY`";
@@ -1616,6 +1646,16 @@ fn setTheme(
     }) catch return error.NameTooLong;
 
     try self.ui_interface.applyTheme(path);
+}
+
+fn put(self: *Self, dest: Position) !void {
+    if (self.yank) |yank| {
+        if (!yank.tl.eql(dest)) {
+            try self.sheet.copyRangeTo(yank, dest);
+            self.sheet.endUndoGroup();
+            self.ui.update(&.{.cells});
+        }
+    }
 }
 
 fn undo(self: *Self) Allocator.Error!void {
@@ -2596,26 +2636,8 @@ fn testFile(gpa: std.mem.Allocator, path: []const u8) !void {
     }
 }
 
-pub fn main() !u8 {
-    var dbg: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = dbg.deinit();
-    const gpa = dbg.allocator();
-
-    const args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, args);
-
-    if (args.len < 2) {
-        const out = std.io.getStdErr().writer();
-        try out.writeAll(
-            \\zc: no input files
-            \\
-        );
-        return 1;
+test "Sheet operations" {
+    for (build.test_files) |path| {
+        try testFile(std.testing.allocator, path);
     }
-
-    for (args[1..]) |arg| {
-        testFile(gpa, arg) catch return 1;
-    }
-
-    return 0;
 }

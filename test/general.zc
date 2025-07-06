@@ -90,3 +90,62 @@ let B4 = A4 * 2
 :redo 2
 :expect-eql-number A4 10
 :expect-eql-number B4 20
+
+# Test deletions
+
+let A5 = 5
+let B5 = 10
+
+:expect-eql-number A5 5
+:expect-eql-number B5 10
+
+:delete A5
+
+:expect-non-extant A5
+:expect-eql-number B5 10
+
+:delete B5
+
+:expect-non-extant A5
+:expect-non-extant B5
+
+:undo 2
+
+:expect-eql-number A5 5
+:expect-eql-number B5 10
+
+let C5 = @sum(A5:B5)
+
+:expect-eql-number C5 15
+
+:delete A5
+
+:expect-non-extant A5
+:expect-eql-number B5 10
+:expect-eql-number C5 10
+
+:undo
+
+:delete A5:B5
+
+:expect-non-extant A5
+:expect-non-extant B5
+:expect-eql-number C5 0
+
+:undo
+
+:expect-eql-number A5 5
+:expect-eql-number B5 10
+:expect-eql-number C5 15
+
+:delete A5:C5
+
+:expect-non-extant A5
+:expect-non-extant B5
+:expect-non-extant C5
+
+:undo
+
+:expect-eql-number A5 5
+:expect-eql-number B5 10
+:expect-eql-number C5 15

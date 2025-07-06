@@ -260,6 +260,13 @@ pub fn PhTree(
         }
 
         pub fn getOrPutAssumeCapacity(tree: *@This(), p: *const Point) GetOrPutResult {
+            const h = tree.findEntry(p);
+            if (h != .invalid) return .{
+                .handle = h,
+                .value_ptr = tree.getValue(h),
+                .found_existing = true,
+            };
+
             const handle = tree.createValueAssumeCapacity(p, undefined);
             const removed_kv = tree.insertAssumeCapacity(p, handle);
             if (removed_kv != .invalid) {

@@ -65,6 +65,17 @@ pub const Position = packed struct {
         };
     }
 
+    pub fn sub(p1: Position, p2: Position) Position {
+        return .{
+            .x = p1.x - p2.x,
+            .y = p1.y - p2.y,
+        };
+    }
+
+    pub fn diff(p1: Position, p2: Position) [2]i33 {
+        return .{ @as(i33, p1.x) - p2.x, @as(i33, p1.y) - p2.y };
+    }
+
     pub fn area(pos1: Position, pos2: Position) HashInt {
         const start = topLeft(pos1, pos2);
         const end = bottomRight(pos1, pos2);

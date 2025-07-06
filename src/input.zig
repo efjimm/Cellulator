@@ -92,6 +92,8 @@ pub const Action = union(enum) {
 
     undo,
     redo,
+    yank_cell,
+    put_cell,
 
     cell_cursor_up,
     cell_cursor_down,
@@ -384,6 +386,7 @@ const sheet_keys = [_]KeyMaps{
             .{ "<<", .text_align_left },
             .{ ">", .text_align_right },
             .{ "|", .text_align_center },
+            .{ "yy", .yank_cell },
         },
     },
     .{
@@ -446,6 +449,7 @@ const sheet_keys = [_]KeyMaps{
             .{ "ir", .insert_row },
             .{ "u", .undo },
             .{ "U", .redo },
+            .{ "p", .put_cell },
         },
     },
     .{
