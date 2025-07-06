@@ -1671,22 +1671,15 @@ fn createColumnRangeAssumeCapacity(sheet: *Sheet, range: Rect) void {
     sheet.cols.leaves.len += width;
     @memset(sheet.cols.leaves.items(.value)[cols_start..], .{});
 
-    for (
-        sheet.cols.leaves.items(.point)[cols_start..],
-        sheet.cols.leaves.items(.value)[cols_start..],
-        range.tl.x..,
-        cols_start..,
-    ) |*p, *v, x, i| {
-        p.* = .{@intCast(x)};
+    for (range.tl.x.., cols_start..sheet.cols.leaves.len) |x, i| {
         const handle: Column.Handle = .from(@intCast(i));
-        const existing = sheet.cols.findEntry(p);
+
+        const existing = sheet.cols.insertAssumeCapacity(&.{@intCast(x)}, handle);
         if (existing != .invalid) {
-            // Put the new column in the free list
-            sheet.cols.destroyValue(handle);
+            sheet.cols.getValue(handle).* = sheet.cols.getValue(existing).*;
+            sheet.cols.destroyValue(existing);
         } else {
-            v.* = .{};
-            const removed = sheet.cols.insertAssumeCapacity(p, handle);
-            assert(removed == .invalid);
+            sheet.cols.getValue(handle).* = .{};
         }
     }
 }

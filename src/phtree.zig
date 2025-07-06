@@ -317,9 +317,8 @@ pub fn PhTree(
             return tree.insertAssumeCapacity(p, kv);
         }
 
-        pub fn insertAssumeCapacity(tree: *@This(), _: *const Point, kv: Leaf.Handle) Leaf.Handle {
-            const p = tree.leafItem(kv, .point);
-
+        pub fn insertAssumeCapacity(tree: *@This(), p: *const Point, kv: Leaf.Handle) Leaf.Handle {
+            tree.leafItem(kv, .point).* = p.*;
             if (tree.root == .invalid)
                 return tree.insertEmpty(kv);
 
@@ -516,6 +515,7 @@ pub fn PhTree(
             assert(tree.root == .invalid);
             assert(kv != tree.freelist_head_leaf);
 
+            tree.leafItem(kv, .parent).* = .invalid;
             tree.root = .init(kv);
             return .invalid;
         }
