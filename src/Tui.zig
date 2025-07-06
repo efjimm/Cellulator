@@ -308,7 +308,9 @@ pub fn render(tui: *Tui, zc: *ZC) !void {
 
     if (tui.update_flags.cells) {
         try tui.renderCells();
-    } else if (tui.update_flags.cursor) {
+    }
+
+    if (tui.update_flags.cursor) {
         try tui.renderCursor();
     }
 
@@ -380,9 +382,9 @@ fn renderCommandLine(tui: *Tui) RenderError!void {
     const rc = tui.rc.?;
     const zc = tui.zc.?;
     try rc.moveCursorTo(input_line, 0);
+    try tui.setStyle(.command_line);
     try rc.clearToEol();
     const writer = rc.buffer.writer();
-    try tui.setStyle(.command_line);
 
     if (zc.mode.isCommandMode()) {
         const left = zc.command.left();
