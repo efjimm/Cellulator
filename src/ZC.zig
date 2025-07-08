@@ -1,30 +1,31 @@
 const std = @import("std");
-const build = @import("build");
-const utils = @import("utils.zig");
-const ast = @import("ast.zig");
-const Sheet = @import("Sheet.zig");
-const Tui = @import("Tui.zig");
-const text = @import("text.zig");
-const Motion = text.Motion;
-const Command = @import("Command.zig");
-const Position = @import("Position.zig").Position;
-const Rect = Position.Rect;
-const PosInt = Position.Int;
-const lua = @import("lua.zig");
-const Lua = @import("zlua").Lua;
+const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 
+const build = @import("build");
+const Lua = @import("zlua").Lua;
+const wcWidth = @import("wcwidth").wcWidth;
+
+const ast = @import("ast.zig");
+const Command = @import("Command.zig");
 const input = @import("input.zig");
 const Action = input.Action;
 const CommandAction = input.CommandAction;
 const KeyMap = input.KeyMap;
 const MapType = input.MapType;
 const CommandMapType = input.CommandMapType;
+const lua = @import("lua.zig");
+const Position = @import("Position.zig").Position;
+const Rect = Position.Rect;
+const Sheet = @import("Sheet.zig");
+const text = @import("text.zig");
+const Motion = text.Motion;
+const Tui = @import("Tui.zig");
+const utils = @import("utils.zig");
 
-const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 const log = std.log.scoped(.zc);
 
-const Self = @This();
+const ZC = @This();
 
 pub const Ui = struct {
     ptr: *anyopaque,
@@ -80,7 +81,11 @@ pub const Ui = struct {
         return ui.vtable.ui_name;
     }
 
-    pub fn stringWidth(ui: Ui, bytes: []const u8, opts: StringWidthOptions) StringWidthResult {
+    pub fn stringWidth(
+        ui: Ui,
+        bytes: []const u8,
+        opts: StringWidthOptions,
+    ) StringWidthResult {
         return ui.vtable.stringWidth(ui.ptr, bytes, opts);
     }
 };
@@ -89,7 +94,9 @@ lua_ptr: *Lua,
 
 running: bool = true,
 
-sheet: Sheet,
+current_sheet: usize,
+max_sheet_n: usize = 1,
+sheets: std.StringArrayHashMapUnmanaged(Sheet),
 
 // TODO: Move all calls from this to the interface and remove this field
 ui: Tui,
@@ -98,15 +105,14 @@ ui_interface: Ui,
 prev_mode: Mode = .normal,
 mode: Mode = .normal,
 
-/// The top left corner of the screen
-screen_pos: Position = .{},
+screen_pos: Position = .origin,
 
-anchor: Position = .{},
+anchor: Position = .origin,
 
-prev_cursor: Position = .{},
+prev_cursor: Position = .origin,
 
 /// The cell position of the cursor
-cursor: Position = .{},
+cursor: Position = .origin,
 
 count: u32 = 0,
 
@@ -119,7 +125,7 @@ command_keymaps: KeyMap(CommandAction, CommandMapType),
 allocator: Allocator,
 
 input_buf_sfa: std.heap.StackFallbackAllocator(input_buf_len),
-input_buf: std.ArrayListUnmanaged(u8) = .{},
+input_buf: std.ArrayListUnmanaged(u8) = .empty,
 
 status_message_type: StatusMessageType = .info,
 status_message: std.BoundedArray(u8, 256) = .{},
@@ -206,7 +212,7 @@ pub const InitOptions = struct {
 
 /// Initialises via a pointer rather than returning an instance, as we need a
 /// stable pointer to a ZC instance.
-pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
+pub fn init(zc: *ZC, allocator: Allocator, options: InitOptions) !void {
     errdefer zc.* = undefined;
 
     zc.allocator = allocator;
@@ -226,7 +232,8 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
     errdefer lua_state.deinit();
 
     zc.* = .{
-        .sheet = try .init(allocator),
+        .current_sheet = 0,
+        .sheets = .empty,
         .lua_ptr = lua_state,
         .ui = tui,
         .ui_interface = undefined,
@@ -236,7 +243,11 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
         .input_buf_sfa = std.heap.stackFallback(input_buf_len, allocator),
         .arena = .init(allocator),
     };
-    errdefer zc.sheet.deinit();
+    errdefer for (zc.sheets.values()) |*sheet| sheet.deinit();
+    errdefer zc.sheets.deinit(allocator);
+    const sheet = try zc.openSheet();
+    zc.setCurrentSheet(sheet);
+
     zc.ui_interface = zc.ui.ui();
 
     zc.sourceLua() catch |err| log.err("Could not source init.lua: {}", .{err});
@@ -244,14 +255,14 @@ pub fn init(zc: *Self, allocator: Allocator, options: InitOptions) !void {
     zc.emitEvent("Init", .{});
 
     if (options.filepath) |filepath| {
-        try zc.loadFile(filepath);
+        try zc.loadFile(zc.currentSheet(), filepath);
     }
 
     log.debug("Finished init", .{});
     zc.emitEvent("Start", .{});
 }
 
-pub fn sourceLua(self: *Self) !void {
+pub fn sourceLua(zc: *ZC) !void {
     var buf: [std.fs.max_path_bytes + 1]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     const allocator = fba.allocator();
@@ -265,54 +276,56 @@ pub fn sourceLua(self: *Self) !void {
 
     const path = try std.fs.path.joinZ(allocator, paths);
     log.debug("Sourcing lua file '{s}'", .{path});
-    self.lua_ptr.doFile(path) catch |err| {
-        const msg = self.lua_ptr.checkString(-1);
+    zc.lua_ptr.doFile(path) catch |err| {
+        const msg = zc.lua_ptr.checkString(-1);
         std.log.err("ERROR: {s}", .{msg});
         return err;
     };
 }
 
-pub fn deinit(self: *Self) void {
-    self.ui.deinit(self.allocator);
+pub fn deinit(zc: *ZC) void {
+    zc.ui.deinit(zc.allocator);
 
     // Don't need to free memory on exit, the OS will do it for us :^)
     if (!std.debug.runtime_safety) return;
 
-    self.lua_ptr.deinit();
-    self.command.deinit(self.allocator);
+    zc.lua_ptr.deinit();
+    zc.command.deinit(zc.allocator);
 
-    self.input_buf.deinit(self.allocator);
-    self.keymaps.deinit(self.allocator);
-    self.command_keymaps.deinit(self.allocator);
+    zc.input_buf.deinit(zc.allocator);
+    zc.keymaps.deinit(zc.allocator);
+    zc.command_keymaps.deinit(zc.allocator);
 
-    self.sheet.deinit();
-    self.arena.deinit();
-    self.* = undefined;
+    for (zc.sheets.keys()) |key| zc.allocator.free(key);
+    for (zc.sheets.values()) |*sheet| sheet.deinit();
+    zc.sheets.deinit(zc.allocator);
+    zc.arena.deinit();
+    zc.* = undefined;
 }
 
 /// Emits the given event, calling it's dispatcher with `args`.
-pub fn emitEvent(self: *Self, event: [:0]const u8, args: anytype) void {
+pub fn emitEvent(zc: *ZC, event: [:0]const u8, args: anytype) void {
     log.debug("Emitting event '{s}' with {d} arguments", .{ event, args.len });
-    lua.emitEvent(self.lua_ptr, event, args) catch {}; // TODO: Make sure handled correctly
+    lua.emitEvent(zc.lua_ptr, event, args) catch {}; // TODO: Make sure handled correctly
 }
 
-pub fn resetInputBuf(self: *Self) void {
-    self.input_buf.items.len = 0;
-    self.input_buf_sfa.fixed_buffer_allocator.reset();
+pub fn resetInputBuf(zc: *ZC) void {
+    zc.input_buf.items.len = 0;
+    zc.input_buf_sfa.fixed_buffer_allocator.reset();
 }
 
-pub fn inputBufSlice(self: *Self) Allocator.Error![:0]const u8 {
-    const len = self.input_buf.items.len;
-    try self.input_buf.append(self.allocator, 0);
-    self.input_buf.items.len = len;
-    return self.input_buf.items.ptr[0..len :0];
+pub fn inputBufSlice(zc: *ZC) Allocator.Error![:0]const u8 {
+    const len = zc.input_buf.items.len;
+    try zc.input_buf.append(zc.allocator, 0);
+    zc.input_buf.items.len = len;
+    return zc.input_buf.items.ptr[0..len :0];
 }
 
-pub fn run(self: *Self) !void {
-    while (self.running) {
-        try self.updateCells();
-        try self.ui.render(self);
-        try self.handleInput();
+pub fn run(zc: *ZC) !void {
+    while (zc.running) {
+        try zc.updateCells();
+        try zc.ui.render(zc);
+        try zc.handleInput();
     }
 }
 
@@ -323,68 +336,76 @@ pub const ChangeCellOpts = struct {
 
 /// Sets the cell at `pos` to the expression represented by `ast`.
 pub fn setCell(
-    self: *Self,
+    zc: *ZC,
     pos: Position,
     source: []const u8,
     expr_root: ast.Index,
     opts: ChangeCellOpts,
 ) !void {
-    try self.sheet.setCell(pos, source, expr_root, .{});
-    self.ui.update_flags.cursor = true;
-    self.ui.update_flags.cells = true;
+    try zc.currentSheet().setCell(pos, source, expr_root, .{});
+    zc.ui.update_flags.cursor = true;
+    zc.ui.update_flags.cells = true;
     if (opts.emit_event)
-        self.emitEvent("SetCell", .{pos});
+        zc.emitEvent("SetCell", .{pos});
+}
+
+pub fn getSheet(zc: *const ZC, index: usize) *Sheet {
+    return &zc.sheets.values()[index];
+}
+
+pub fn currentSheet(zc: *const ZC) *Sheet {
+    return &zc.sheets.values()[zc.current_sheet];
 }
 
 /// Sets the cell at `pos` to the expression represented by `expr`.
-pub fn setCellString(self: *Self, pos: Position, expr: [:0]const u8, opts: ChangeCellOpts) !void {
+pub fn setCellString(zc: *ZC, pos: Position, expr: [:0]const u8, opts: ChangeCellOpts) !void {
     // TODO: This leaks memory if `setCell` fails, which can only happen on OOM.
-    const expr_root = try ast.fromExpression(&self.sheet, expr);
+    const expr_root = try ast.fromExpression(zc.currentSheet(), expr);
 
-    try self.setCell(pos, expr, expr_root, opts);
+    try zc.setCell(pos, expr, expr_root, opts);
 }
 
 // TODO: merge this and `deleteCell`
-pub fn deleteCell2(self: *Self, pos: Position, opts: ChangeCellOpts) !void {
-    try self.sheet.deleteCell(pos, opts.undo_opts);
-    self.ui.update_flags.cursor = true;
-    self.ui.update_flags.cells = true;
+pub fn deleteCell2(zc: *ZC, pos: Position, opts: ChangeCellOpts) !void {
+    try zc.currentSheet().deleteCell(pos, opts.undo_opts);
+    zc.ui.update_flags.cursor = true;
+    zc.ui.update_flags.cells = true;
     if (opts.emit_event)
-        self.emitEvent("DeleteCell", .{pos});
+        zc.emitEvent("DeleteCell", .{pos});
 }
 
 pub const StatusMessageType = enum { info, warn, err };
 
 // TODO: Use std.log for this, and also output to file in debug mode
 pub fn setStatusMessage(
-    self: *Self,
+    zc: *ZC,
     t: StatusMessageType,
     comptime fmt: []const u8,
     args: anytype,
 ) void {
-    self.dismissStatusMessage();
-    self.status_message_type = t;
-    const writer = self.status_message.writer();
+    zc.dismissStatusMessage();
+    zc.status_message_type = t;
+    const writer = zc.status_message.writer();
     writer.print(fmt, args) catch {};
-    self.ui.update_flags.command = true;
+    zc.ui.update_flags.command = true;
 }
 
-pub fn dismissStatusMessage(self: *Self) void {
-    self.status_message.len = 0;
-    self.ui.update_flags.command = true;
+pub fn dismissStatusMessage(zc: *ZC) void {
+    zc.status_message.len = 0;
+    zc.ui.update_flags.command = true;
 }
 
-pub fn updateCells(self: *Self) Allocator.Error!void {
-    return self.sheet.update();
+pub fn updateCells(zc: *ZC) Allocator.Error!void {
+    return zc.currentSheet().update();
 }
 
-pub fn setMode(self: *Self, new_mode: Mode) void {
-    switch (self.mode) {
+pub fn setMode(zc: *ZC, new_mode: Mode) void {
+    switch (zc.mode) {
         .normal => {},
         .visual, .select => {
-            self.ui.update_flags.cells = true;
-            self.ui.update_flags.column_headings = true;
-            self.ui.update_flags.row_numbers = true;
+            zc.ui.update_flags.cells = true;
+            zc.ui.update_flags.column_headings = true;
+            zc.ui.update_flags.row_numbers = true;
         },
         .command_normal,
         .command_insert,
@@ -394,15 +415,15 @@ pub fn setMode(self: *Self, new_mode: Mode) void {
         .command_to_backwards,
         .command_until_forwards,
         .command_until_backwards,
-        => self.ui.update_flags.command = true,
+        => zc.ui.update_flags.command = true,
     }
 
-    self.prev_mode = self.mode;
-    self.anchor = self.cursor;
-    self.mode = new_mode;
+    zc.prev_mode = zc.mode;
+    zc.anchor = zc.cursor;
+    zc.mode = new_mode;
 
     if (new_mode.isCommandMode()) {
-        self.clampCommandCursor();
+        zc.clampCommandCursor();
     }
 }
 
@@ -413,9 +434,9 @@ const GetActionResult = union(enum) {
     not_found,
 };
 
-fn getAction(self: *const Self, bytes: [:0]const u8) GetActionResult {
-    if (self.mode.isCommandMode()) {
-        const keymap_type: CommandMapType = switch (self.mode) {
+fn getAction(zc: *const ZC, bytes: [:0]const u8) GetActionResult {
+    if (zc.mode.isCommandMode()) {
+        const keymap_type: CommandMapType = switch (zc.mode) {
             .command_normal => .normal,
             .command_insert => .insert,
             .command_change, .command_delete => .operator_pending,
@@ -427,176 +448,176 @@ fn getAction(self: *const Self, bytes: [:0]const u8) GetActionResult {
             else => unreachable,
         };
 
-        return switch (self.command_keymaps.get(keymap_type, bytes)) {
+        return switch (zc.command_keymaps.get(keymap_type, bytes)) {
             .value => |action| .{ .command = action },
             .prefix => .prefix,
             .not_found => .not_found,
         };
     }
 
-    const keymap_type: MapType = switch (self.mode) {
+    const keymap_type: MapType = switch (zc.mode) {
         .normal => .normal,
         .visual => .visual,
         .select => .select,
         else => unreachable,
     };
 
-    return switch (self.keymaps.get(keymap_type, bytes)) {
+    return switch (zc.keymaps.get(keymap_type, bytes)) {
         .value => |action| .{ .normal = action },
         .prefix => .prefix,
         .not_found => .not_found,
     };
 }
 
-fn handleInput(self: *Self) !void {
-    assert(self.sheet.undos.len == 0 or self.sheet.undos.items(.tag)[self.sheet.undos.len - 1] == .sentinel);
-    assert(self.sheet.redos.len == 0 or self.sheet.redos.items(.tag)[self.sheet.redos.len - 1] == .sentinel);
+fn handleInput(zc: *ZC) !void {
+    assert(zc.currentSheet().undos.len == 0 or zc.currentSheet().undos.items(.tag)[zc.currentSheet().undos.len - 1] == .sentinel);
+    assert(zc.currentSheet().redos.len == 0 or zc.currentSheet().redos.items(.tag)[zc.currentSheet().redos.len - 1] == .sentinel);
 
     var buf: [input_buf_len / 2]u8 = undefined;
-    const slice = try self.ui.term.readInput(&buf);
+    const slice = try zc.ui.term.readInput(&buf);
 
-    const writer = self.input_buf.writer(self.allocator);
-    try input.parse(&self.ui.term, slice, writer);
+    const writer = zc.input_buf.writer(zc.allocator);
+    try input.parse(&zc.ui.term, slice, writer);
 
-    const bytes = try self.inputBufSlice();
-    const res = self.getAction(bytes);
+    const bytes = try zc.inputBufSlice();
+    const res = zc.getAction(bytes);
     switch (res) {
-        .normal => |action| switch (self.mode) {
-            .normal => try self.doNormalMode(action),
-            .visual, .select => self.doVisualMode(action) catch |err| switch (err) {
-                error.OutOfMemory => self.setStatusMessage(.err, "Out of memory!", .{}),
+        .normal => |action| switch (zc.mode) {
+            .normal => try zc.doNormalMode(action),
+            .visual, .select => zc.doVisualMode(action) catch |err| switch (err) {
+                error.OutOfMemory => zc.setStatusMessage(.err, "Out of memory!", .{}),
             },
             else => unreachable,
         },
-        .command => |action| self.doCommandMode(action, self.input_buf.items) catch |err| switch (err) {
-            error.EmptyFileName => self.setStatusMessage(.err, "Empty file name", .{}),
-            error.InvalidCellAddress => self.setStatusMessage(.err, "Invalid cell address", .{}),
-            error.InvalidCommand => self.setStatusMessage(.err, "Invalid command", .{}),
-            error.OutOfMemory => self.setStatusMessage(.err, "Out of memory!", .{}),
-            error.UnexpectedToken => self.setStatusMessage(.err, "Unexpected token", .{}),
-            error.InvalidSyntax => self.setStatusMessage(.err, "Invalid syntax", .{}),
-            else => self.setStatusMessage(.err, "Unhandled error {}", .{err}),
+        .command => |action| zc.doCommandMode(action, zc.input_buf.items) catch |err| switch (err) {
+            error.EmptyFileName => zc.setStatusMessage(.err, "Empty file name", .{}),
+            error.InvalidCellAddress => zc.setStatusMessage(.err, "Invalid cell address", .{}),
+            error.InvalidCommand => zc.setStatusMessage(.err, "Invalid command", .{}),
+            error.OutOfMemory => zc.setStatusMessage(.err, "Out of memory!", .{}),
+            error.UnexpectedToken => zc.setStatusMessage(.err, "Unexpected token", .{}),
+            error.InvalidSyntax => zc.setStatusMessage(.err, "Invalid syntax", .{}),
+            else => zc.setStatusMessage(.err, "Unhandled error {}", .{err}),
         },
         .prefix => return,
         .not_found => {
-            if (self.mode.isCommandMode()) {
-                try self.doCommandMode(.none, bytes);
+            if (zc.mode.isCommandMode()) {
+                try zc.doCommandMode(.none, bytes);
             }
         },
     }
-    self.resetInputBuf();
+    zc.resetInputBuf();
 }
 
-pub fn doCommandMode(self: *Self, action: CommandAction, keys: []const u8) !void {
-    defer self.clampScreenToCommandCursor();
-    switch (self.mode) {
-        .command_normal => try self.doCommandNormalMode(action),
-        .command_insert => try self.doCommandInsertMode(action, keys),
-        .command_change, .command_delete => try self.doCommandOperatorPendingMode(action),
+pub fn doCommandMode(zc: *ZC, action: CommandAction, keys: []const u8) !void {
+    defer zc.clampScreenToCommandCursor();
+    switch (zc.mode) {
+        .command_normal => try zc.doCommandNormalMode(action),
+        .command_insert => try zc.doCommandInsertMode(action, keys),
+        .command_change, .command_delete => try zc.doCommandOperatorPendingMode(action),
         .command_to_forwards,
         .command_to_backwards,
         .command_until_forwards,
         .command_until_backwards,
-        => self.doCommandToMode(action),
+        => zc.doCommandToMode(action),
         else => unreachable,
     }
 }
 
-pub inline fn doCommandNormalMotion(self: *Self, range: text.Range) void {
-    self.setCommandCursor(if (range.start == self.command.cursor) range.end else range.start);
+pub inline fn doCommandNormalMotion(zc: *ZC, range: text.Range) void {
+    zc.setCommandCursor(if (range.start == zc.command.cursor) range.end else range.start);
 }
 
-fn clampCommandCursor(self: *Self) void {
-    if (self.mode == .command_normal) {
-        const len = self.command.length();
-        if (self.command.cursor == len) {
-            const new = len - text.prevCharacter(self.command, len, 1);
-            self.command.setCursor(new);
+fn clampCommandCursor(zc: *ZC) void {
+    if (zc.mode == .command_normal) {
+        const len = zc.command.length();
+        if (zc.command.cursor == len) {
+            const new = len - text.prevCharacter(zc.command, len, 1);
+            zc.command.setCursor(new);
         }
     }
 }
 
 // TODO: Move this to the tui
-fn clampScreenToCommandCursor(self: *Self) void {
-    if (self.command.cursor < self.command_screen_pos) {
-        self.command_screen_pos = self.command.cursor;
+fn clampScreenToCommandCursor(zc: *ZC) void {
+    if (zc.command.cursor < zc.command_screen_pos) {
+        zc.command_screen_pos = zc.command.cursor;
         return;
     }
 
-    const len = self.command.length();
-    var x: u32 = self.command.cursor;
+    const len = zc.command.length();
+    var x: u32 = zc.command.cursor;
     // Reserve either the width of the character under the cursor, or 1 column if none.
-    var w: u16 = if (self.command.cursor < len) blk: {
-        const grapheme_len = self.command.nextCharacter(x, 1);
-        const grapheme_slice = self.command.slice(x, grapheme_len);
-        break :blk @intCast(self.ui.term.graphemeWidth(grapheme_slice));
+    var w: u16 = if (zc.command.cursor < len) blk: {
+        const grapheme_len = zc.command.nextCharacter(x, 1);
+        const grapheme_slice = zc.command.slice(x, grapheme_len);
+        break :blk @intCast(zc.ui.term.graphemeWidth(grapheme_slice));
     } else 1;
 
     while (true) {
         const prev = x;
-        x -= text.prevCharacter(&self.command, x, 1);
-        if (prev == x or x < self.screen_pos.x) break;
+        x -= text.prevCharacter(&zc.command, x, 1);
+        if (prev == x or x < zc.screen_pos.x) break;
 
-        const graphemeSlice = self.command.slice(x, prev - x);
-        w += @intCast(self.ui.term.graphemeWidth(graphemeSlice));
+        const graphemeSlice = zc.command.slice(x, prev - x);
+        w += @intCast(zc.ui.term.graphemeWidth(graphemeSlice));
 
-        if (w > self.ui.term.width) {
-            if (prev > self.command_screen_pos) self.command_screen_pos = prev;
+        if (w > zc.ui.term.width) {
+            if (prev > zc.command_screen_pos) zc.command_screen_pos = prev;
             break;
         }
     }
 }
 
-pub fn setCommandCursor(self: *Self, pos: u32) void {
-    self.command.setCursor(pos);
-    self.clampCommandCursor();
-    self.clampScreenToCommandCursor();
+pub fn setCommandCursor(zc: *ZC, pos: u32) void {
+    zc.command.setCursor(pos);
+    zc.clampCommandCursor();
+    zc.clampScreenToCommandCursor();
 }
 
-pub fn commandWrite(self: *Self, bytes: []const u8) Allocator.Error!usize {
-    const ret = try self.command.write(self.allocator, bytes);
-    self.clampCommandCursor();
-    self.clampScreenToCommandCursor();
+pub fn commandWrite(zc: *ZC, bytes: []const u8) Allocator.Error!usize {
+    const ret = try zc.command.write(zc.allocator, bytes);
+    zc.clampCommandCursor();
+    zc.clampScreenToCommandCursor();
     return ret;
 }
 
-pub fn commandWriter(self: *Self) CommandWriter {
+pub fn commandWriter(zc: *ZC) CommandWriter {
     return .{
-        .context = self,
+        .context = zc,
     };
 }
 
-const CommandWriter = std.io.Writer(*Self, Allocator.Error, commandWrite);
+const CommandWriter = std.io.Writer(*ZC, Allocator.Error, commandWrite);
 
-pub fn submitCommand(self: *Self) !void {
-    assert(self.mode.isCommandMode());
-    self.dismissStatusMessage();
-    defer self.setMode(.normal);
+pub fn submitCommand(zc: *ZC) !void {
+    assert(zc.mode.isCommandMode());
+    zc.dismissStatusMessage();
+    defer zc.setMode(.normal);
 
-    const slice = try self.command.submit(self.allocator);
-    defer self.commandHistoryNext();
-    try self.parseCommand(slice);
+    const slice = try zc.command.submit(zc.allocator);
+    defer zc.commandHistoryNext();
+    try zc.parseCommand(slice);
 }
 
-pub fn commandHistoryNext(self: *Self) void {
-    self.command.next(self.getCount());
-    self.setCommandCursor(self.command.length());
-    self.resetCount();
+pub fn commandHistoryNext(zc: *ZC) void {
+    zc.command.next(zc.getCount());
+    zc.setCommandCursor(zc.command.length());
+    zc.resetCount();
 }
 
-pub fn commandHistoryPrev(self: *Self) void {
-    self.command.prev(self.getCount());
-    self.setCommandCursor(self.command.length());
-    self.resetCount();
+pub fn commandHistoryPrev(zc: *ZC) void {
+    zc.command.prev(zc.getCount());
+    zc.setCommandCursor(zc.command.length());
+    zc.resetCount();
 }
 
-pub fn doCommandMotion(self: *Self, motion: Motion) Allocator.Error!void {
-    const count = self.getCount();
-    switch (self.mode) {
+pub fn doCommandMotion(zc: *ZC, motion: Motion) Allocator.Error!void {
+    const count = zc.getCount();
+    switch (zc.mode) {
         .normal, .visual, .select => unreachable,
         .command_normal, .command_insert => {
-            const range = motion.do(self.command, self.command.cursor, count);
-            self.doCommandNormalMotion(range);
+            const range = motion.do(zc.command, zc.command.cursor, count);
+            zc.doCommandNormalMotion(range);
         },
         .command_change => {
             const m = switch (motion) {
@@ -604,7 +625,7 @@ pub fn doCommandMotion(self: *Self, motion: Motion) Allocator.Error!void {
                 .long_word_start_next => .long_word_end_next,
                 else => motion,
             };
-            const range = m.do(self.command, self.command.cursor, count);
+            const range = m.do(zc.command, zc.command.cursor, count);
 
             if (range.start != range.end) {
                 // We want the 'end' part of the range to be inclusive for some motions and
@@ -620,18 +641,18 @@ pub fn doCommandMotion(self: *Self, motion: Motion) Allocator.Error!void {
                     .until_forwards_utf8,
                     .until_backwards,
                     .until_backwards_utf8,
-                    => text.nextCharacter(self.command, range.end, 1),
+                    => text.nextCharacter(zc.command, range.end, 1),
                     else => 0,
                 };
 
                 assert(end >= range.start);
-                try self.command.replaceRange(self.allocator, range.start, end - range.start, &.{});
-                self.setCommandCursor(range.start);
+                try zc.command.replaceRange(zc.allocator, range.start, end - range.start, &.{});
+                zc.setCommandCursor(range.start);
             }
-            self.setMode(.command_insert);
+            zc.setMode(.command_insert);
         },
         .command_delete => {
-            const range = motion.do(self.command, self.command.cursor, count);
+            const range = motion.do(zc.command, zc.command.cursor, count);
             if (range.start != range.end) {
                 const end = range.end + switch (motion) {
                     .normal_word_end_next,
@@ -644,13 +665,13 @@ pub fn doCommandMotion(self: *Self, motion: Motion) Allocator.Error!void {
                     .until_forwards_utf8,
                     .until_backwards,
                     .until_backwards_utf8,
-                    => text.nextCharacter(self.command, range.end, 1),
+                    => text.nextCharacter(zc.command, range.end, 1),
                     else => 0,
                 };
-                try self.command.replaceRange(self.allocator, range.start, end - range.start, &.{});
-                self.setCommandCursor(range.start);
+                try zc.command.replaceRange(zc.allocator, range.start, end - range.start, &.{});
+                zc.setCommandCursor(range.start);
             }
-            self.setMode(.command_normal);
+            zc.setMode(.command_normal);
         },
         .command_to_forwards,
         .command_to_backwards,
@@ -658,143 +679,143 @@ pub fn doCommandMotion(self: *Self, motion: Motion) Allocator.Error!void {
         .command_until_backwards,
         => unreachable, // Attempted motion in 'to' mode
     }
-    self.resetCount();
+    zc.resetCount();
 }
 
-pub fn doCommandNormalMode(self: *Self, action: CommandAction) !void {
+pub fn doCommandNormalMode(zc: *ZC, action: CommandAction) !void {
     switch (action) {
-        .history_next => self.commandHistoryNext(),
-        .history_prev => self.commandHistoryPrev(),
-        .submit_command => try self.submitCommand(),
+        .history_next => zc.commandHistoryNext(),
+        .history_prev => zc.commandHistoryPrev(),
+        .submit_command => try zc.submitCommand(),
         .enter_normal_mode => {
-            self.command.resetBuffer();
-            self.setMode(.normal);
+            zc.command.resetBuffer();
+            zc.setMode(.normal);
         },
-        .enter_insert_mode => self.setMode(.command_insert),
+        .enter_insert_mode => zc.setMode(.command_insert),
         .enter_insert_mode_after => {
-            self.setMode(.command_insert);
-            self.doCommandMotion(.char_next) catch unreachable;
+            zc.setMode(.command_insert);
+            zc.doCommandMotion(.char_next) catch unreachable;
         },
         .enter_insert_mode_at_eol => {
-            self.setMode(.command_insert);
-            self.doCommandMotion(.eol) catch unreachable;
+            zc.setMode(.command_insert);
+            zc.doCommandMotion(.eol) catch unreachable;
         },
         .enter_insert_mode_at_bol => {
-            self.setMode(.command_insert);
-            self.doCommandMotion(.bol) catch unreachable;
+            zc.setMode(.command_insert);
+            zc.doCommandMotion(.bol) catch unreachable;
         },
-        .operator_delete => self.setMode(.command_delete),
-        .operator_change => self.setMode(.command_change),
+        .operator_delete => zc.setMode(.command_delete),
+        .operator_change => zc.setMode(.command_change),
         inline .delete_char, .change_char => |_, a| {
-            const len = text.nextCharacter(self.command, self.command.cursor, 1);
-            try self.command.replaceRange(self.allocator, self.command.cursor, len, &.{});
-            if (a == .change_char) self.setMode(.command_insert);
-            self.clampCommandCursor();
+            const len = text.nextCharacter(zc.command, zc.command.cursor, 1);
+            try zc.command.replaceRange(zc.allocator, zc.command.cursor, len, &.{});
+            if (a == .change_char) zc.setMode(.command_insert);
+            zc.clampCommandCursor();
         },
         .change_to_eol => {
-            try self.command.copyIfNeeded(self.allocator);
-            self.command.buffer.shrinkRetainingCapacity(self.command.cursor);
-            self.setMode(.command_insert);
+            try zc.command.copyIfNeeded(zc.allocator);
+            zc.command.buffer.shrinkRetainingCapacity(zc.command.cursor);
+            zc.setMode(.command_insert);
         },
         .delete_to_eol => {
-            try self.command.copyIfNeeded(self.allocator);
-            self.command.buffer.shrinkRetainingCapacity(self.command.cursor);
+            try zc.command.copyIfNeeded(zc.allocator);
+            zc.command.buffer.shrinkRetainingCapacity(zc.command.cursor);
         },
         .change_line => {
-            self.command.resetBuffer();
-            self.setMode(.command_insert);
+            zc.command.resetBuffer();
+            zc.setMode(.command_insert);
         },
-        .operator_to_forwards => self.setMode(.command_to_forwards),
-        .operator_to_backwards => self.setMode(.command_to_backwards),
-        .operator_until_forwards => self.setMode(.command_until_forwards),
-        .operator_until_backwards => self.setMode(.command_until_backwards),
+        .operator_to_forwards => zc.setMode(.command_to_forwards),
+        .operator_to_backwards => zc.setMode(.command_to_backwards),
+        .operator_until_forwards => zc.setMode(.command_until_forwards),
+        .operator_until_backwards => zc.setMode(.command_until_backwards),
         .zero => {
-            if (self.count == 0) {
-                self.setCommandCursor(0);
+            if (zc.count == 0) {
+                zc.setCommandCursor(0);
             } else {
-                self.setCount(0);
+                zc.setCount(0);
             }
         },
-        .count => |count| self.setCount(count),
+        .count => |count| zc.setCount(count),
         else => {
             if (action.isMotion()) {
-                self.doCommandMotion(action.toMotion()) catch unreachable;
+                zc.doCommandMotion(action.toMotion()) catch unreachable;
             }
         },
     }
 }
 
-fn doCommandInsertMode(self: *Self, action: CommandAction, keys: []const u8) !void {
-    defer self.clampScreenToCommandCursor();
+fn doCommandInsertMode(zc: *ZC, action: CommandAction, keys: []const u8) !void {
+    defer zc.clampScreenToCommandCursor();
     try switch (action) {
         .none => {
-            const writer = self.commandWriter();
+            const writer = zc.commandWriter();
             try writer.writeAll(keys);
         },
-        .history_next => self.commandHistoryNext(),
-        .history_prev => self.commandHistoryPrev(),
+        .history_next => zc.commandHistoryNext(),
+        .history_prev => zc.commandHistoryPrev(),
         .backspace => {
-            const len = text.prevCharacter(self.command, self.command.cursor, 1);
-            try self.command.deleteBackwards(self.allocator, len);
+            const len = text.prevCharacter(zc.command, zc.command.cursor, 1);
+            try zc.command.deleteBackwards(zc.allocator, len);
         },
-        .submit_command => self.submitCommand(),
-        .enter_normal_mode => self.setMode(.command_normal),
-        .enter_select_mode => self.setMode(.select),
+        .submit_command => zc.submitCommand(),
+        .enter_normal_mode => zc.setMode(.command_normal),
+        .enter_select_mode => zc.setMode(.select),
         .backwards_delete_word => {
-            self.setMode(.command_change);
-            self.doCommandMotion(.normal_word_start_prev) catch unreachable;
+            zc.setMode(.command_change);
+            zc.doCommandMotion(.normal_word_start_prev) catch unreachable;
         },
-        .change_line => self.command.resetBuffer(),
+        .change_line => zc.command.resetBuffer(),
         .delete_to_eol => {
-            try self.command.copyIfNeeded(self.allocator);
-            self.command.buffer.shrinkRetainingCapacity(self.command.cursor);
+            try zc.command.copyIfNeeded(zc.allocator);
+            zc.command.buffer.shrinkRetainingCapacity(zc.command.cursor);
         },
         .delete_to_bol => {
-            try self.command.deleteBackwards(self.allocator, self.command.cursor);
+            try zc.command.deleteBackwards(zc.allocator, zc.command.cursor);
         },
         else => {
             if (action.isMotion()) {
-                self.doCommandMotion(action.toMotion()) catch unreachable;
+                zc.doCommandMotion(action.toMotion()) catch unreachable;
             }
         },
     };
 }
 
 /// Handles common actions between operator modes
-fn doCommandOperatorPendingMode(self: *Self, action: CommandAction) Allocator.Error!void {
+fn doCommandOperatorPendingMode(zc: *ZC, action: CommandAction) Allocator.Error!void {
     switch (action) {
-        .enter_normal_mode => self.setMode(.command_normal),
+        .enter_normal_mode => zc.setMode(.command_normal),
 
-        .operator_to_forwards => self.setMode(.command_to_forwards),
-        .operator_to_backwards => self.setMode(.command_to_backwards),
-        .operator_until_forwards => self.setMode(.command_until_forwards),
-        .operator_until_backwards => self.setMode(.command_until_backwards),
+        .operator_to_forwards => zc.setMode(.command_to_forwards),
+        .operator_to_backwards => zc.setMode(.command_to_backwards),
+        .operator_until_forwards => zc.setMode(.command_until_forwards),
+        .operator_until_backwards => zc.setMode(.command_until_backwards),
 
-        .zero => if (self.count == 0) try self.doCommandMotion(.bol) else self.setCount(0),
-        .count => |count| self.setCount(count),
+        .zero => if (zc.count == 0) try zc.doCommandMotion(.bol) else zc.setCount(0),
+        .count => |count| zc.setCount(count),
 
-        .operator_delete => if (self.mode == .command_delete) try self.doCommandMotion(.line),
-        .operator_change => if (self.mode == .command_change) try self.doCommandMotion(.line),
+        .operator_delete => if (zc.mode == .command_delete) try zc.doCommandMotion(.line),
+        .operator_change => if (zc.mode == .command_change) try zc.doCommandMotion(.line),
         inline else => |_, tag| {
             if (comptime CommandAction.isMotionTag(tag)) {
-                try self.doCommandMotion(action.toMotion());
+                try zc.doCommandMotion(action.toMotion());
             }
         },
     }
 }
 
-pub fn doCommandToMode(self: *Self, action: CommandAction) void {
+pub fn doCommandToMode(zc: *ZC, action: CommandAction) void {
     switch (action) {
-        .enter_normal_mode => self.setMode(.command_normal),
+        .enter_normal_mode => zc.setMode(.command_normal),
         .none => {
-            const keys = self.input_buf.items;
+            const keys = zc.input_buf.items;
             if (keys.len > 0) {
-                self.setMode(self.prev_mode);
-                switch (self.prev_mode) {
-                    .command_to_forwards => self.doCommandMotion(.{ .to_forwards_utf8 = keys }) catch unreachable,
-                    .command_to_backwards => self.doCommandMotion(.{ .to_backwards_utf8 = keys }) catch unreachable,
-                    .command_until_forwards => self.doCommandMotion(.{ .until_forwards_utf8 = keys }) catch unreachable,
-                    .command_until_backwards => self.doCommandMotion(.{ .until_backwards_utf8 = keys }) catch unreachable,
+                zc.setMode(zc.prev_mode);
+                switch (zc.prev_mode) {
+                    .command_to_forwards => zc.doCommandMotion(.{ .to_forwards_utf8 = keys }) catch unreachable,
+                    .command_to_backwards => zc.doCommandMotion(.{ .to_backwards_utf8 = keys }) catch unreachable,
+                    .command_until_forwards => zc.doCommandMotion(.{ .until_forwards_utf8 = keys }) catch unreachable,
+                    .command_until_backwards => zc.doCommandMotion(.{ .until_backwards_utf8 = keys }) catch unreachable,
                     else => unreachable,
                 }
             }
@@ -803,161 +824,164 @@ pub fn doCommandToMode(self: *Self, action: CommandAction) void {
     }
 }
 
-pub fn doNormalMode(self: *Self, action: Action) !void {
+pub fn doNormalMode(zc: *ZC, action: Action) !void {
     switch (action) {
         .enter_command_mode => {
-            self.setMode(.command_insert);
-            const writer = self.commandWriter();
+            zc.setMode(.command_insert);
+            const writer = zc.commandWriter();
             try writer.writeByte(':');
         },
         .edit_cell => {
-            self.setMode(.command_insert);
-            const writer = self.commandWriter();
-            try writer.print("let {} = ", .{self.cursor});
-            try self.sheet.printCellExpression(self.cursor, writer);
+            zc.setMode(.command_insert);
+            const writer = zc.commandWriter();
+            try writer.print("let {} = ", .{zc.cursor});
+            try zc.currentSheet().printCellExpression(zc.cursor, writer);
         },
-        .fit_text => try self.expandWidthAtCursor(),
-        .enter_visual_mode => self.setMode(.visual),
+        .fit_text => try zc.expandWidthAtCursor(),
+        .enter_visual_mode => zc.setMode(.visual),
         .enter_normal_mode => {},
         .dismiss_count_or_status_message => {
-            if (self.count != 0) {
-                self.resetCount();
+            if (zc.count != 0) {
+                zc.resetCount();
             } else {
-                self.dismissStatusMessage();
+                zc.dismissStatusMessage();
             }
         },
 
-        .undo => try self.undo(),
-        .redo => try self.redo(),
+        .next_sheet => zc.nextSheet(),
+        .prev_sheet => zc.prevSheet(),
+        .close_sheet => try zc.closeSheet(zc.current_sheet),
+        .undo => try zc.undo(),
+        .redo => try zc.redo(),
         .yank_cell => {
-            self.yank = self.anyCursorRange();
+            zc.yank = zc.anyCursorRange();
         },
-        .put_cell => try self.put(self.cursor),
-        .cell_cursor_up => self.cursorUp(),
-        .cell_cursor_down => self.cursorDown(),
-        .cell_cursor_left => self.cursorLeft(),
-        .cell_cursor_right => self.cursorRight(),
-        .cell_cursor_row_first => try self.cursorToFirstCellInColumn(),
-        .cell_cursor_row_last => try self.cursorToLastCellInColumn(),
-        .cell_cursor_col_first => try self.cursorToFirstCellInRow(),
-        .cell_cursor_col_last => try self.cursorToLastCellInRow(),
-        .goto_col => self.cursorGotoCol(),
-        .goto_row => self.cursorGotoRow(),
+        .put_cell => try zc.put(zc.cursor),
+        .cell_cursor_up => zc.cursorUp(),
+        .cell_cursor_down => zc.cursorDown(),
+        .cell_cursor_left => zc.cursorLeft(),
+        .cell_cursor_right => zc.cursorRight(),
+        .cell_cursor_row_first => try zc.cursorToFirstCellInColumn(),
+        .cell_cursor_row_last => try zc.cursorToLastCellInColumn(),
+        .cell_cursor_col_first => try zc.cursorToFirstCellInRow(),
+        .cell_cursor_col_last => try zc.cursorToLastCellInRow(),
+        .goto_col => zc.cursorGotoCol(),
+        .goto_row => zc.cursorGotoRow(),
         .delete_column => {
-            try self.sheet.deleteColOrRowRange(self.cursor.x, self.cursor.x, .{}, .col);
-            self.sheet.endUndoGroup();
-            self.ui.update(&.{ .column_headings, .cells });
+            try zc.currentSheet().deleteColOrRowRange(zc.cursor.x, zc.cursor.x, .{}, .col);
+            zc.currentSheet().endUndoGroup();
+            zc.ui.update(&.{ .column_headings, .cells });
         },
         .delete_row => {
-            try self.sheet.deleteColOrRowRange(self.cursor.y, self.cursor.y, .{}, .row);
-            self.sheet.endUndoGroup();
-            self.ui.update(&.{ .column_headings, .cells });
+            try zc.currentSheet().deleteColOrRowRange(zc.cursor.y, zc.cursor.y, .{}, .row);
+            zc.currentSheet().endUndoGroup();
+            zc.ui.update(&.{ .column_headings, .cells });
         },
         .insert_column => {
-            self.sheet.insertColumns(self.cursor.x, self.getCount(), .{}) catch |err| switch (err) {
-                error.Overflow => self.setStatusMessage(.err, "Columns would overflow", .{}),
+            zc.currentSheet().insertColumns(zc.cursor.x, zc.getCount(), .{}) catch |err| switch (err) {
+                error.Overflow => zc.setStatusMessage(.err, "Columns would overflow", .{}),
                 else => |e| return e,
             };
-            self.sheet.endUndoGroup();
-            self.ui.update(&.{ .column_headings, .cells });
+            zc.currentSheet().endUndoGroup();
+            zc.ui.update(&.{ .column_headings, .cells });
         },
         .insert_row => {
-            self.sheet.insertRows(self.cursor.y, self.getCount(), .{}) catch |err| switch (err) {
-                error.Overflow => self.setStatusMessage(.err, "Rows would overflow", .{}),
+            zc.currentSheet().insertRows(zc.cursor.y, zc.getCount(), .{}) catch |err| switch (err) {
+                error.Overflow => zc.setStatusMessage(.err, "Rows would overflow", .{}),
                 else => |e| return e,
             };
-            self.sheet.endUndoGroup();
-            self.ui.update(&.{ .row_numbers, .cells });
+            zc.currentSheet().endUndoGroup();
+            zc.ui.update(&.{ .row_numbers, .cells });
         },
 
-        .delete_cell => self.deleteCell() catch |err| switch (err) {
-            error.OutOfMemory => self.setStatusMessage(.err, "Out of memory!", .{}),
+        .delete_cell => zc.deleteCell() catch |err| switch (err) {
+            error.OutOfMemory => zc.setStatusMessage(.err, "Out of memory!", .{}),
         },
-        .next_populated_cell => try self.cursorNextPopulatedCell(),
-        .prev_populated_cell => try self.cursorPrevPopulatedCell(),
-        .increase_precision => try self.cursorIncPrecision(),
-        .decrease_precision => try self.cursorDecPrecision(),
-        .increase_width => try self.cursorIncWidth(),
-        .decrease_width => try self.cursorDecWidth(),
+        .next_populated_cell => try zc.cursorNextPopulatedCell(),
+        .prev_populated_cell => try zc.cursorPrevPopulatedCell(),
+        .increase_precision => try zc.cursorIncPrecision(),
+        .decrease_precision => try zc.cursorDecPrecision(),
+        .increase_width => try zc.cursorIncWidth(),
+        .decrease_width => try zc.cursorDecWidth(),
         .assign_cell => {
-            self.setMode(.command_insert);
-            try self.commandWriter().print("let {} = ", .{self.cursor});
+            zc.setMode(.command_insert);
+            try zc.commandWriter().print("let {} = ", .{zc.cursor});
         },
 
         .zero => {
-            if (self.count == 0) {
-                try self.cursorToFirstCellInRow();
+            if (zc.count == 0) {
+                try zc.cursorToFirstCellInRow();
             } else {
-                self.setCount(0);
+                zc.setCount(0);
             }
         },
-        .count => |count| self.setCount(count),
+        .count => |count| zc.setCount(count),
 
-        .text_align_left => try self.setTextAlignment(self.anyCursorRange(), .left),
-        .text_align_right => try self.setTextAlignment(self.anyCursorRange(), .right),
-        .text_align_center => try self.setTextAlignment(self.anyCursorRange(), .center),
+        .text_align_left => try zc.setTextAlignment(zc.anyCursorRange(), .left),
+        .text_align_right => try zc.setTextAlignment(zc.anyCursorRange(), .right),
+        .text_align_center => try zc.setTextAlignment(zc.anyCursorRange(), .center),
         else => {},
     }
 }
 
-fn doVisualMode(self: *Self, action: Action) Allocator.Error!void {
-    assert(self.mode == .visual or self.mode == .select);
+fn doVisualMode(zc: *ZC, action: Action) Allocator.Error!void {
+    assert(zc.mode == .visual or zc.mode == .select);
     switch (action) {
-        .enter_normal_mode => self.setMode(.normal),
+        .enter_normal_mode => zc.setMode(.normal),
         .swap_anchor => {
-            const temp = self.anchor;
-            self.anchor = self.cursor;
-            self.setCursor(temp);
+            const temp = zc.anchor;
+            zc.anchor = zc.cursor;
+            zc.setCursor(temp);
         },
 
-        .select_cancel => self.setMode(.command_insert),
+        .select_cancel => zc.setMode(.command_insert),
         .select_submit => {
-            defer self.setMode(.command_insert);
-            const writer = self.commandWriter();
+            defer zc.setMode(.command_insert);
+            const writer = zc.commandWriter();
 
-            const tl = Position.topLeft(self.cursor, self.anchor);
-            const br = Position.bottomRight(self.cursor, self.anchor);
+            const tl = Position.topLeft(zc.cursor, zc.anchor);
+            const br = Position.bottomRight(zc.cursor, zc.anchor);
 
             try writer.print("{}:{}", .{ tl, br });
         },
 
         .yank_cell => {
-            self.yank = self.anyCursorRange();
-            self.setMode(.normal);
+            zc.yank = zc.anyCursorRange();
+            zc.setMode(.normal);
         },
 
-        .cell_cursor_up => self.cursorUp(),
-        .cell_cursor_down => self.cursorDown(),
-        .cell_cursor_left => self.cursorLeft(),
-        .cell_cursor_right => self.cursorRight(),
-        .cell_cursor_row_first => try self.cursorToFirstCellInColumn(),
-        .cell_cursor_row_last => try self.cursorToLastCellInColumn(),
-        .cell_cursor_col_first => try self.cursorToFirstCellInRow(),
-        .cell_cursor_col_last => try self.cursorToLastCellInRow(),
-        .next_populated_cell => try self.cursorNextPopulatedCell(),
-        .prev_populated_cell => try self.cursorPrevPopulatedCell(),
+        .cell_cursor_up => zc.cursorUp(),
+        .cell_cursor_down => zc.cursorDown(),
+        .cell_cursor_left => zc.cursorLeft(),
+        .cell_cursor_right => zc.cursorRight(),
+        .cell_cursor_row_first => try zc.cursorToFirstCellInColumn(),
+        .cell_cursor_row_last => try zc.cursorToLastCellInColumn(),
+        .cell_cursor_col_first => try zc.cursorToFirstCellInRow(),
+        .cell_cursor_col_last => try zc.cursorToLastCellInRow(),
+        .next_populated_cell => try zc.cursorNextPopulatedCell(),
+        .prev_populated_cell => try zc.cursorPrevPopulatedCell(),
 
-        .zero => self.setCount(0),
-        .count => |count| self.setCount(count),
+        .zero => zc.setCount(0),
+        .count => |count| zc.setCount(count),
 
-        .visual_move_up => self.selectionUp(),
-        .visual_move_down => self.selectionDown(),
-        .visual_move_left => self.selectionLeft(),
-        .visual_move_right => self.selectionRight(),
+        .visual_move_up => zc.selectionUp(),
+        .visual_move_down => zc.selectionDown(),
+        .visual_move_left => zc.selectionLeft(),
+        .visual_move_right => zc.selectionRight(),
 
-        .text_align_left => try self.setTextAlignment(self.anyCursorRange(), .left),
-        .text_align_right => try self.setTextAlignment(self.anyCursorRange(), .right),
-        .text_align_center => try self.setTextAlignment(self.anyCursorRange(), .center),
+        .text_align_left => try zc.setTextAlignment(zc.anyCursorRange(), .left),
+        .text_align_right => try zc.setTextAlignment(zc.anyCursorRange(), .right),
+        .text_align_center => try zc.setTextAlignment(zc.anyCursorRange(), .center),
 
         .delete_cell => {
-            defer self.setMode(.normal);
-            try self.deleteCellRange(self.visualRange());
+            defer zc.setMode(.normal);
+            try zc.deleteCellRange(zc.visualRange());
         },
         else => {},
     }
 }
 
-fn parseCommand(self: *Self, str: [:0]const u8) !void {
+fn parseCommand(zc: *ZC, str: [:0]const u8) !void {
     if (str.len == 0) return;
 
     // TODO: Unify command and assignment parsing and handling
@@ -965,7 +989,7 @@ fn parseCommand(self: *Self, str: [:0]const u8) !void {
     //       which is useless for anything other than assignments. I suppose we could append them
     //       no matter what and decrement ast_nodes.len if it's not an assignment?
     if (str[0] == ':')
-        return self.runCommand(str[1..]);
+        return zc.runCommand(str[1..]);
 
     for (str) |c| {
         if (!std.ascii.isWhitespace(c)) {
@@ -975,97 +999,97 @@ fn parseCommand(self: *Self, str: [:0]const u8) !void {
         }
     }
 
-    const expr_root = try ast.fromSource(&self.sheet, str);
+    const expr_root = try ast.fromSource(zc.currentSheet(), str);
 
-    const pos = self.sheet.ast_nodes.items(.data)[expr_root.n].assignment;
+    const pos = zc.currentSheet().ast_nodes.items(.data)[expr_root.n].assignment;
 
-    self.sheet.ast_nodes.len -= 1;
+    zc.currentSheet().ast_nodes.len -= 1;
     const spliced_root: ast.Index = .from(expr_root.n - 1);
 
-    try self.setCell(pos, str, spliced_root, .{});
-    self.sheet.endUndoGroup();
+    try zc.setCell(pos, str, spliced_root, .{});
+    zc.currentSheet().endUndoGroup();
 }
 
-fn interpretCommands(self: *Self, commands: []const u8) !void {
+fn interpretCommands(zc: *ZC, commands: []const u8) !void {
     var lines = std.mem.tokenizeScalar(u8, commands, '\n');
     while (lines.next()) |line| {
-        try self.parseCommand(line);
-        try self.updateCells();
+        try zc.parseCommand(line);
+        try zc.updateCells();
     }
 }
 
-pub fn isSelectedCell(self: *const Self, pos: Position) bool {
-    return switch (self.mode) {
-        .visual, .select => pos.intersects(self.anchor, self.cursor),
-        else => self.cursor.hash() == pos.hash(),
+pub fn isSelectedCell(zc: *const ZC, pos: Position) bool {
+    return switch (zc.mode) {
+        .visual, .select => pos.intersects(zc.anchor, zc.cursor),
+        else => zc.cursor.hash() == pos.hash(),
     };
 }
 
-pub fn isSelectedCol(self: *const Self, x: PosInt) bool {
-    return switch (self.mode) {
+pub fn isSelectedCol(zc: *const ZC, x: Position.Int) bool {
+    return switch (zc.mode) {
         .visual, .select => {
-            const min = @min(self.cursor.x, self.anchor.x);
-            const max = @max(self.cursor.x, self.anchor.x);
+            const min = @min(zc.cursor.x, zc.anchor.x);
+            const max = @max(zc.cursor.x, zc.anchor.x);
             return x >= min and x <= max;
         },
-        else => self.cursor.x == x,
+        else => zc.cursor.x == x,
     };
 }
 
-pub fn isSelectedRow(self: *const Self, y: PosInt) bool {
-    return switch (self.mode) {
+pub fn isSelectedRow(zc: *const ZC, y: Position.Int) bool {
+    return switch (zc.mode) {
         .visual, .select => {
-            const min = @min(self.cursor.y, self.anchor.y);
-            const max = @max(self.cursor.y, self.anchor.y);
+            const min = @min(zc.cursor.y, zc.anchor.y);
+            const max = @max(zc.cursor.y, zc.anchor.y);
             return y >= min and y <= max;
         },
-        else => self.cursor.y == y,
+        else => zc.cursor.y == y,
     };
 }
 
-pub fn nextPopulatedCell(self: *Self, start_pos: Position, count: u32) Allocator.Error!Position {
+pub fn nextPopulatedCell(zc: *ZC, start_pos: Position, count: u32) Allocator.Error!Position {
     var pos = start_pos;
     for (0..count) |_| {
-        pos = try self.sheet.nextPopulatedCell(pos) orelse return pos;
+        pos = try zc.currentSheet().nextPopulatedCell(pos) orelse return pos;
     }
     return pos;
 }
 
-pub fn prevPopulatedCell(self: *Self, start_pos: Position, count: u32) Allocator.Error!Position {
+pub fn prevPopulatedCell(zc: *ZC, start_pos: Position, count: u32) Allocator.Error!Position {
     var pos = start_pos;
     for (0..count) |_| {
-        pos = try self.sheet.prevPopulatedCell(pos) orelse return pos;
+        pos = try zc.currentSheet().prevPopulatedCell(pos) orelse return pos;
     }
     return pos;
 }
 
-pub fn cursorNextPopulatedCell(self: *Self) Allocator.Error!void {
-    const new_pos = try self.nextPopulatedCell(self.cursor, self.getCount());
-    self.setCursor(new_pos);
-    self.resetCount();
+pub fn cursorNextPopulatedCell(zc: *ZC) Allocator.Error!void {
+    const new_pos = try zc.nextPopulatedCell(zc.cursor, zc.getCount());
+    zc.setCursor(new_pos);
+    zc.resetCount();
 }
 
-pub fn cursorPrevPopulatedCell(self: *Self) Allocator.Error!void {
-    const new_pos = try self.prevPopulatedCell(self.cursor, self.getCount());
-    self.setCursor(new_pos);
-    self.resetCount();
+pub fn cursorPrevPopulatedCell(zc: *ZC) Allocator.Error!void {
+    const new_pos = try zc.prevPopulatedCell(zc.cursor, zc.getCount());
+    zc.setCursor(new_pos);
+    zc.resetCount();
 }
 
-pub fn setCount(self: *Self, count: u4) void {
+pub fn setCount(zc: *ZC, count: u4) void {
     assert(count <= 9);
-    self.count = self.count *| 10 +| count;
+    zc.count = zc.count *| 10 +| count;
 }
 
-pub fn getCount(self: *const Self) u32 {
-    return if (self.count == 0) 1 else self.count;
+pub fn getCount(zc: *const ZC) u32 {
+    return if (zc.count == 0) 1 else zc.count;
 }
 
-pub fn getCountPos(self: *const Self) PosInt {
-    return @intCast(@min(std.math.maxInt(PosInt), self.getCount()));
+pub fn getCountPos(zc: *const ZC) Position.Int {
+    return @intCast(@min(std.math.maxInt(Position.Int), zc.getCount()));
 }
 
-pub fn resetCount(self: *Self) void {
-    self.count = 0;
+pub fn resetCount(zc: *ZC) void {
+    zc.count = 0;
 }
 
 const Cmd = enum {
@@ -1092,20 +1116,20 @@ const Cmd = enum {
     unset,
     yank,
     put,
+    close_sheet,
+    close_sheet_force,
+    rename_sheet,
 };
 
 const cmds = std.StaticStringMap(Cmd).initComptime(.{
     .{ "w", .save },
-    .{ "w!", .save_force },
-    .{ "e", .load },
-    .{ "e!", .load_force },
+    .{ "e", .load_force },
     .{ "q", .quit },
     .{ "q!", .quit_force },
     .{ "fill", .fill },
     .{ "fill-expr", .fill_expr },
     .{ "bw", .binary_save },
-    .{ "be", .binary_load },
-    .{ "be!", .binary_load_force },
+    .{ "be", .binary_load_force },
     .{ "undo", .undo },
     .{ "redo", .redo },
     .{ "delete", .delete },
@@ -1118,6 +1142,11 @@ const cmds = std.StaticStringMap(Cmd).initComptime(.{
     .{ "unset", .unset },
     .{ "yank", .yank },
     .{ "put", .put },
+    .{ "sheet-close", .close_sheet },
+    .{ "sheet-close!", .close_sheet_force },
+    .{ "sc", .close_sheet },
+    .{ "sc!", .close_sheet_force },
+    .{ "sheet-rename", .rename_sheet },
 });
 
 const DebugCmd = enum {
@@ -1164,44 +1193,44 @@ fn parseRangeOrPoint(bytes: []const u8) !Rect {
     );
 }
 
-fn runDebugCommand(self: *Self, cmd_str: []const u8, iter: *utils.WordIterator) !void {
+fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !void {
     const cmd = debug_cmds.get(cmd_str) orelse return error.InvalidCommand;
     switch (cmd) {
         .expect_eql_number => {
             const arg1 = iter.next() orelse return error.InvalidSyntax;
             const arg2 = iter.next() orelse return error.InvalidSyntax;
             const n = try std.fmt.parseFloat(f64, arg2);
-            try self.sheet.expectCellEquals(arg1, n);
+            try zc.currentSheet().expectCellEquals(arg1, n);
         },
         .expect_eql_string => {
             const arg1 = iter.next() orelse return error.InvalidSyntax;
             const arg2 = iter.next() orelse return error.InvalidSyntax;
-            try self.sheet.expectCellEqualsString(arg1, arg2);
+            try zc.currentSheet().expectCellEqualsString(arg1, arg2);
         },
         .expect_non_extant => {
             const arg1 = iter.next() orelse return error.InvalidSyntax;
             if (std.mem.containsAtLeast(u8, arg1, 1, ":")) {
                 // Argument is a range
-                try self.sheet.expectRangeNonExtant(arg1);
+                try zc.currentSheet().expectRangeNonExtant(arg1);
             } else {
-                try self.sheet.expectCellNonExtant(arg1);
+                try zc.currentSheet().expectCellNonExtant(arg1);
             }
         },
         .expect_error => {
             const arg1 = iter.next() orelse return error.InvalidSyntax;
-            try self.sheet.expectCellError(arg1);
+            try zc.currentSheet().expectCellError(arg1);
         },
         .update_cell => {
-            const pos = self.cursor;
-            if (self.sheet.getCellHandleByPosOrNull(pos)) |handle| {
-                try self.sheet.enqueueUpdate(handle);
-                self.ui.update(&.{.cells});
+            const pos = zc.cursor;
+            if (zc.currentSheet().getCellHandleByPosOrNull(pos)) |handle| {
+                try zc.currentSheet().enqueueUpdate(handle);
+                zc.ui.update(&.{.cells});
             }
         },
     }
 }
 
-pub fn runCommand(self: *Self, str: [:0]const u8) !void {
+pub fn runCommand(zc: *ZC, str: [:0]const u8) !void {
     var iter = utils.wordIterator(str);
     const cmd_str = iter.next() orelse return error.InvalidCommand;
     assert(cmd_str.len > 0);
@@ -1209,82 +1238,121 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
     const cmd = cmds.get(cmd_str) orelse {
         if (@import("builtin").mode != .Debug) return error.InvalidCommand;
 
-        return self.runDebugCommand(cmd_str, &iter);
+        return zc.runDebugCommand(cmd_str, &iter);
     };
 
     // TODO: Implement a better system for displaying usage information for commands, which is
     //       invoked whenver a malformed command is encountered.
     switch (cmd) {
+        .close_sheet => {
+            if (zc.currentSheet().has_changes) {
+                zc.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
+            } else {
+                try zc.closeSheet(zc.current_sheet);
+            }
+        },
+        .close_sheet_force => try zc.closeSheet(zc.current_sheet),
+        .rename_sheet => {
+            const index, const new_name = blk: {
+                const arg1 = iter.next() orelse return error.InvalidSyntax;
+                const arg2 = iter.next() orelse break :blk .{ zc.current_sheet, arg1 };
+                const index = zc.sheets.getIndex(arg1) orelse {
+                    zc.setStatusMessage(.err, "Sheet '{s}' does not exist", .{arg1});
+                    return;
+                };
+                break :blk .{ index, arg2 };
+            };
+
+            const old_name = zc.sheets.keys()[index];
+            zc.setStatusMessage(.info, "Renamed '{s}' to '{s}'", .{ old_name, new_name });
+            zc.renameSheet(index, new_name) catch |err| switch (err) {
+                error.InvalidSheetName => {
+                    zc.setStatusMessage(
+                        .err,
+                        "Invalid sheet name. sheet name cannot be empty",
+                        .{},
+                    );
+                },
+                error.SheetAlreadyExists => {
+                    zc.setStatusMessage(
+                        .err,
+                        "Sheet '{s}' already exists",
+                        .{new_name},
+                    );
+                },
+                else => |e| return e,
+            };
+        },
         .yank => {
             const range = if (iter.next()) |arg|
                 try parseRangeOrPoint(arg)
             else
-                self.anyCursorRange();
+                zc.anyCursorRange();
 
-            self.yank = range;
+            zc.yank = range;
         },
         .put => {
             const pos = if (iter.next()) |arg|
                 try Position.fromAddress(arg)
             else
-                self.cursor;
-            try self.put(pos);
+                zc.cursor;
+            try zc.put(pos);
         },
         // Set a property back to its default value
         .unset => {
             const usage = "Usage: `:unset PROPERTY`";
             const arg1 = iter.next() orelse {
-                self.setStatusMessage(.err, "{s}", .{usage});
+                zc.setStatusMessage(.err, "{s}", .{usage});
                 return;
             };
 
             const property = std.meta.stringToEnum(SetProperty, arg1) orelse {
-                self.setStatusMessage(.err, "Invalid property '{s}'", .{arg1});
+                zc.setStatusMessage(.err, "Invalid property '{s}'", .{arg1});
                 return;
             };
 
             // TODO: Check if the property is actually set before unsetting it.
             switch (property) {
                 .theme => {
-                    self.setDefaultTheme() catch |err| switch (err) {
+                    zc.setDefaultTheme() catch |err| switch (err) {
                         error.Unsupported => {
-                            self.setStatusMessage(
+                            zc.setStatusMessage(
                                 .err,
                                 "User interface '{s}' does not support themes",
-                                .{self.ui_interface.getUiName()},
+                                .{zc.ui_interface.getUiName()},
                             );
                         },
                         error.Failed => {
-                            self.setStatusMessage(.err, "Could not restore default theme", .{});
+                            zc.setStatusMessage(.err, "Could not restore default theme", .{});
                         },
                     };
                 },
                 .truecolor => {
-                    self.ui.term.truecolor_enabled = false;
-                    self.ui.update_flags = .all;
+                    zc.ui.term.truecolor_enabled = false;
+                    zc.ui.update_flags = .all;
                 },
             }
         },
         .set => {
             const usage = "Usage: `:set PROPERTY VALUE`";
             const arg1 = iter.next() orelse {
-                self.setStatusMessage(.err, "{s}", .{usage});
+                zc.setStatusMessage(.err, "{s}", .{usage});
                 return;
             };
 
             const property = std.meta.stringToEnum(SetProperty, arg1) orelse {
-                self.setStatusMessage(.err, "Invalid property '{s}': " ++ usage, .{arg1});
+                zc.setStatusMessage(.err, "Invalid property '{s}': " ++ usage, .{arg1});
                 return;
             };
 
             const arg2 = iter.next() orelse {
                 switch (property) {
                     .truecolor => {
-                        self.ui.term.truecolor_enabled = true;
-                        self.ui.update_flags = .all;
+                        zc.ui.term.truecolor_enabled = true;
+                        zc.ui.update_flags = .all;
                     },
                     else => {
-                        self.setStatusMessage(.err, "{s}", .{usage});
+                        zc.setStatusMessage(.err, "{s}", .{usage});
                     },
                 }
                 return;
@@ -1292,70 +1360,84 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
 
             switch (property) {
                 .theme => {
-                    self.setTheme(arg2) catch {
-                        self.setStatusMessage(.err, "Couldn't set theme", .{});
+                    zc.setTheme(arg2) catch {
+                        zc.setStatusMessage(.err, "Couldn't set theme", .{});
                     };
                 },
                 .truecolor => {
                     if (std.ascii.eqlIgnoreCase(arg2, "true")) {
-                        self.ui.term.truecolor_enabled = true;
+                        zc.ui.term.truecolor_enabled = true;
                     } else if (std.ascii.eqlIgnoreCase(arg2, "false")) {
-                        self.ui.term.truecolor_enabled = false;
+                        zc.ui.term.truecolor_enabled = false;
                     } else return;
 
-                    self.ui.update_flags = .all;
+                    zc.ui.update_flags = .all;
                 },
             }
         },
         .quit => {
-            if (self.sheet.has_changes) {
-                self.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
+            if (zc.currentSheet().has_changes) {
+                zc.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
             } else {
-                self.running = false;
+                zc.running = false;
             }
         },
-        .quit_force => self.running = false,
+        .quit_force => zc.running = false,
         .save, .save_force => {
-            self.writeFile(iter.next()) catch |err| {
-                self.setStatusMessage(.warn, "Could not write file: {s}", .{@errorName(err)});
+            // TODO: Check if already exists
+            zc.writeFile(iter.next()) catch |err| {
+                zc.setStatusMessage(.warn, "Could not write file: {s}", .{@errorName(err)});
                 return;
             };
-            self.sheet.has_changes = false;
+            zc.currentSheet().has_changes = false;
+            zc.ui.update(&.{.sheet_list});
         },
         .binary_save => {
             const filepath = iter.next() orelse {
-                self.setStatusMessage(.err, "No filename provided", .{});
+                zc.setStatusMessage(.err, "No filename provided", .{});
                 return;
             };
 
             const file = std.fs.cwd().createFile(filepath, .{}) catch |err| {
-                self.setStatusMessage(.warn, "Could not write binary file: {s}", .{
+                zc.setStatusMessage(.warn, "Could not write binary file: {s}", .{
                     @errorName(err),
                 });
                 return;
             };
             defer file.close();
 
-            try self.sheet.serialize(file);
+            try zc.currentSheet().serialize(file);
         },
         .binary_load => {
-            if (self.sheet.has_changes) {
-                self.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
+            if (zc.currentSheet().has_changes) {
+                zc.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
             } else {
-                try self.loadCmdBinary(iter.next() orelse "");
+                try zc.loadCmdBinary(iter.next() orelse "");
             }
         },
         .binary_load_force => {
-            try self.loadCmdBinary(iter.next() orelse "");
+            try zc.loadCmdBinary(iter.next() orelse "");
         },
         .load => {
-            if (self.sheet.has_changes) {
-                self.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
+            if (zc.currentSheet().has_changes) {
+                zc.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
             } else {
-                try self.loadCmd(iter.next() orelse "");
+                if (iter.next()) |path| {
+                    try zc.loadCmd(path);
+                } else {
+                    const new_sheet = try zc.openSheet();
+                    zc.setCurrentSheet(new_sheet);
+                }
             }
         },
-        .load_force => try self.loadCmd(iter.next() orelse ""),
+        .load_force => {
+            if (iter.next()) |path| {
+                try zc.loadCmd(path);
+            } else {
+                const new_sheet = try zc.openSheet();
+                zc.setCurrentSheet(new_sheet);
+            }
+        },
         .fill => {
             const range = try parseRangeOrPoint(iter.next() orelse return error.InvalidSyntax);
             const arg1_start = iter.index;
@@ -1364,27 +1446,27 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
             const arg2 = iter.next() orelse {
                 // TODO: Clean this up on failure
                 // No increment was provided, so all cells can share the same expression
-                const expr = try ast.fromExpression(&self.sheet, str[arg1_start..]);
-                const node = self.sheet.ast_nodes.get(expr.n);
+                const expr = try ast.fromExpression(zc.currentSheet(), str[arg1_start..]);
+                const node = zc.currentSheet().ast_nodes.get(expr.n);
                 if (node.tag != .number) return error.InvalidSyntax;
 
                 const n = node.data.number;
-                try self.sheet.bulkSetCellExpr(range, arg1, expr, .{
+                try zc.currentSheet().bulkSetCellExpr(range, arg1, expr, .{
                     .value = .{ .number = n },
                     .tag = .number,
                 });
-                self.sheet.queued_cells.items.len = 0;
-                self.sheet.endUndoGroup();
-                self.ui.update(&.{.cells});
+                zc.currentSheet().queued_cells.items.len = 0;
+                zc.currentSheet().endUndoGroup();
+                zc.ui.update(&.{.cells});
                 return;
             };
 
             const value = std.fmt.parseFloat(f64, arg1) catch return error.InvalidSyntax;
             const increment = std.fmt.parseFloat(f64, arg2) catch return error.InvalidSyntax;
 
-            try self.sheet.insertIncrementingCellRange(range, value, increment, .{});
-            self.sheet.endUndoGroup();
-            self.ui.update(&.{.cells});
+            try zc.currentSheet().insertIncrementingCellRange(range, value, increment, .{});
+            zc.currentSheet().endUndoGroup();
+            zc.ui.update(&.{.cells});
         },
         .fill_expr => {
             const arg1 = iter.next() orelse return error.InvalidSyntax;
@@ -1392,10 +1474,10 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
 
             const range = try parseRangeOrPoint(arg1);
 
-            const expr = try ast.fromExpression(&self.sheet, expr_str);
-            try self.sheet.bulkSetCellExpr(range, expr_str, expr, .{});
-            self.sheet.endUndoGroup();
-            self.ui.update(&.{ .cursor, .cells });
+            const expr = try ast.fromExpression(zc.currentSheet(), expr_str);
+            try zc.currentSheet().bulkSetCellExpr(range, expr_str, expr, .{});
+            zc.currentSheet().endUndoGroup();
+            zc.ui.update(&.{ .cursor, .cells });
         },
         inline .undo, .redo => |tag| {
             const count = blk: {
@@ -1405,7 +1487,7 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
                         error.Overflow => "Must be between 1 and 4294967295",
                         error.InvalidCharacter => "Expected integer",
                     };
-                    self.setStatusMessage(.err, "Invalid argument '{s}'. {s}", .{
+                    zc.setStatusMessage(.err, "Invalid argument '{s}'. {s}", .{
                         arg_string,
                         err_msg,
                     });
@@ -1416,8 +1498,8 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
             };
 
             for (0..count) |_| switch (tag) {
-                .undo => try self.undo(),
-                .redo => try self.redo(),
+                .undo => try zc.undo(),
+                .redo => try zc.redo(),
                 else => comptime unreachable,
             };
         },
@@ -1425,14 +1507,14 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
             const range = if (iter.next()) |arg_string|
                 try parseRangeOrPoint(arg_string)
             else
-                self.anyCursorRange();
+                zc.anyCursorRange();
 
-            try self.deleteCellRange(range);
+            try zc.deleteCellRange(range);
         },
         .delete_columns => {
             const start, const end = blk: {
                 const arg = iter.next() orelse {
-                    const range = self.anyCursorRange();
+                    const range = zc.anyCursorRange();
                     break :blk .{ range.tl.x, range.br.x };
                 };
 
@@ -1450,14 +1532,14 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
                 break :blk .{ first_col, first_col };
             };
 
-            try self.sheet.deleteColOrRowRange(start, end, .{}, .col);
-            self.sheet.endUndoGroup();
-            self.ui.update(&.{ .cells, .column_headings, .cursor });
+            try zc.currentSheet().deleteColOrRowRange(start, end, .{}, .col);
+            zc.currentSheet().endUndoGroup();
+            zc.ui.update(&.{ .cells, .column_headings, .cursor });
         },
         .delete_rows => {
             const start, const end = blk: {
                 const arg = iter.next() orelse {
-                    const range = self.anyCursorRange();
+                    const range = zc.anyCursorRange();
                     break :blk .{ range.tl.x, range.br.x };
                 };
 
@@ -1475,19 +1557,19 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
                 break :blk .{ first_row, first_row };
             };
 
-            try self.sheet.deleteColOrRowRange(start, end, .{}, .row);
-            self.sheet.endUndoGroup();
-            self.ui.update(&.{ .cells, .row_numbers, .cursor });
+            try zc.currentSheet().deleteColOrRowRange(start, end, .{}, .row);
+            zc.currentSheet().endUndoGroup();
+            zc.ui.update(&.{ .cells, .row_numbers, .cursor });
         },
         .insert_columns => {
             const column, const count = blk: {
                 const arg1 = iter.next() orelse
-                    break :blk .{ self.cursor.x, 1 };
+                    break :blk .{ zc.cursor.x, 1 };
 
                 const arg2 = iter.next() orelse {
                     // Only provided one argument, which is the number of cols to delete
                     const count = try std.fmt.parseInt(u32, arg1, 0);
-                    break :blk .{ self.cursor.x, count };
+                    break :blk .{ zc.cursor.x, count };
                 };
 
                 const column = try Position.columnFromAddress(arg1);
@@ -1496,26 +1578,26 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
             };
 
             if (count > 0) {
-                self.sheet.insertColumns(column, count, .{}) catch |err| switch (err) {
+                zc.currentSheet().insertColumns(column, count, .{}) catch |err| switch (err) {
                     error.Overflow => {
-                        self.setStatusMessage(.err, "Columns would overflow", .{});
+                        zc.setStatusMessage(.err, "Columns would overflow", .{});
                         return;
                     },
                     else => |e| return e,
                 };
-                self.sheet.endUndoGroup();
-                self.ui.update(&.{ .cells, .column_headings, .cursor });
+                zc.currentSheet().endUndoGroup();
+                zc.ui.update(&.{ .cells, .column_headings, .cursor });
             }
         },
         .insert_rows => {
             const row, const count = blk: {
                 const arg1 = iter.next() orelse
-                    break :blk .{ self.cursor.y, 1 };
+                    break :blk .{ zc.cursor.y, 1 };
 
                 const arg2 = iter.next() orelse {
                     // Only provided one argument, which is the number of cols to delete
                     const count = try std.fmt.parseInt(u32, arg1, 0);
-                    break :blk .{ self.cursor.y, count };
+                    break :blk .{ zc.cursor.y, count };
                 };
 
                 const row = try std.fmt.parseInt(u32, arg1, 0);
@@ -1524,15 +1606,15 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
             };
 
             if (count > 0) {
-                self.sheet.insertRows(row, count, .{}) catch |err| switch (err) {
+                zc.currentSheet().insertRows(row, count, .{}) catch |err| switch (err) {
                     error.Overflow => {
-                        self.setStatusMessage(.err, "Rows would overflow", .{});
+                        zc.setStatusMessage(.err, "Rows would overflow", .{});
                         return;
                     },
                     else => |e| return e,
                 };
-                self.sheet.endUndoGroup();
-                self.ui.update(&.{ .cells, .row_numbers, .cursor });
+                zc.currentSheet().endUndoGroup();
+                zc.ui.update(&.{ .cells, .row_numbers, .cursor });
             }
         },
         .set_text_align => {
@@ -1544,7 +1626,7 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
             });
 
             const arg1 = iter.next() orelse {
-                self.setStatusMessage(.err, usage, .{});
+                zc.setStatusMessage(.err, usage, .{});
                 return;
             };
 
@@ -1552,83 +1634,166 @@ pub fn runCommand(self: *Self, str: [:0]const u8) !void {
                 if (iter.next()) |arg2|
                     .{ try parseRangeOrPoint(arg1), arg2 }
                 else
-                    .{ self.anyCursorRange(), arg1 };
+                    .{ zc.anyCursorRange(), arg1 };
 
             const new_alignment = map.get(value_str) orelse {
-                self.setStatusMessage(.err, usage, .{});
+                zc.setStatusMessage(.err, usage, .{});
                 return;
             };
-            try self.setTextAlignment(rect, new_alignment);
+            try zc.setTextAlignment(rect, new_alignment);
         },
     }
 }
 
-fn resetArena(self: *Self) void {
-    _ = self.arena.reset(.{
+fn resetArena(zc: *ZC) void {
+    _ = zc.arena.reset(.{
         .retain_with_limit = comptime std.math.pow(usize, 2, 20),
     });
 }
 
 // TODO: Integrate with undos and serialization
-fn setTextAlignment(self: *Self, r: Rect, alignment: Sheet.TextAttrs.Alignment) !void {
-    var cells: std.ArrayList(Sheet.Cell.Handle) = .init(self.arena.allocator());
-    defer self.resetArena();
+fn setTextAlignment(zc: *ZC, r: Rect, alignment: Sheet.TextAttrs.Alignment) !void {
+    var cells: std.ArrayList(Sheet.Cell.Handle) = .init(zc.arena.allocator());
+    defer zc.resetArena();
 
-    try self.sheet.cell_tree.queryWindow(&.{ r.tl.x, r.tl.y }, &.{ r.br.x, r.br.y }, &cells);
-    try self.sheet.text_attrs.ensureUnusedCapacity(self.sheet.allocator, cells.items.len);
+    try zc.currentSheet().cell_tree.queryWindow(&.{ r.tl.x, r.tl.y }, &.{ r.br.x, r.br.y }, &cells);
+    try zc.currentSheet().text_attrs.ensureUnusedCapacity(zc.currentSheet().allocator, cells.items.len);
 
     for (cells.items) |cell|
-        self.sheet.setTextAlignment(cell, alignment) catch unreachable;
+        zc.currentSheet().setTextAlignment(cell, alignment) catch unreachable;
 
-    self.ui.update(&.{.cells});
+    zc.ui.update(&.{.cells});
 }
 
-pub fn loadCmdBinary(self: *Self, filepath: []const u8) !void {
+pub fn loadCmdBinary(zc: *ZC, filepath: []const u8) !void {
+    assert(zc.sheets.entries.len > 0);
     if (filepath.len == 0) return error.EmptyFileName;
-
-    self.ui.update_flags.cells = true;
 
     const file = try std.fs.cwd().openFile(filepath, .{});
     defer file.close();
 
-    var old_sheet = self.sheet;
-    self.sheet = try .deserialize(self.allocator, file);
-    old_sheet.deinit();
+    const new_sheet = try zc.openSheet();
+    errdefer comptime unreachable;
+
+    const sheet = &zc.sheets.values()[new_sheet];
+    sheet.deserialize(sheet.allocator, file) catch |err| {
+        zc.setStatusMessage(.err, "Could not open file: {s}", .{@errorName(err)});
+        zc.closeSheet(new_sheet) catch unreachable;
+        return;
+    };
+
+    zc.setCurrentSheet(new_sheet);
 }
 
-pub fn loadCmd(zc: *Self, filepath: []const u8) !void {
+pub fn loadCmd(zc: *ZC, filepath: []const u8) !void {
+    assert(zc.sheets.entries.len > 0);
     if (filepath.len == 0) return error.EmptyFileName;
 
-    zc.sheet.clearRetainingCapacity();
-    zc.ui.update_flags.cells = true;
+    const new_sheet = try zc.openSheet();
+    errdefer comptime unreachable;
 
-    zc.loadFile(filepath) catch |err| {
+    zc.loadFile(zc.getSheet(new_sheet), filepath) catch |err| {
         zc.setStatusMessage(.err, "Could not open file: {s}", .{@errorName(err)});
+        zc.closeSheet(new_sheet) catch unreachable;
+        return;
     };
+
+    zc.setCurrentSheet(new_sheet);
 }
 
-fn writeFile(self: *Self, filepath: ?[]const u8) !void {
-    try self.sheet.writeFile(.{ .filepath = filepath });
-    self.emitEvent("UpdateFilePath", .{filepath});
+fn writeFile(zc: *ZC, filepath: ?[]const u8) !void {
+    try zc.currentSheet().writeFile(.{ .filepath = filepath });
+    zc.emitEvent("UpdateFilePath", .{filepath});
 }
 
-fn loadFile(self: *Self, filepath: []const u8) !void {
-    try self.sheet.loadFile(filepath);
-    self.sheet.endUndoGroup();
-    self.emitEvent("UpdateFilePath", .{filepath});
+fn loadFile(zc: *ZC, sheet: *Sheet, filepath: []const u8) !void {
+    try sheet.loadFile(filepath);
+    sheet.endUndoGroup();
+    zc.emitEvent("UpdateFilePath", .{filepath});
 }
 
-fn setDefaultTheme(self: *Self) !void {
-    try self.ui_interface.applyDefaultTheme();
+fn setCurrentSheet(zc: *ZC, index: usize) void {
+    zc.current_sheet = index;
+    zc.ui.update_flags = .all;
+}
+
+fn prevSheet(zc: *ZC) void {
+    const new_sheet = if (zc.current_sheet == 0)
+        zc.sheets.entries.len - 1
+    else
+        zc.current_sheet - 1;
+    zc.setCurrentSheet(new_sheet);
+}
+
+fn nextSheet(zc: *ZC) void {
+    const new_sheet = (zc.current_sheet + 1) % zc.sheets.entries.len;
+    zc.setCurrentSheet(new_sheet);
+}
+
+fn openSheet(zc: *ZC) !usize {
+    // TODO: Could we use an adapter for the default sheet names to avoid allocating memory?
+    try zc.sheets.ensureUnusedCapacity(zc.allocator, 1);
+    const new_sheet_name = try std.fmt.allocPrint(zc.allocator, "Sheet{d}", .{
+        zc.max_sheet_n,
+    });
+    errdefer zc.allocator.free(new_sheet_name);
+
+    const new_sheet: Sheet = try .init(zc.allocator);
+    errdefer comptime unreachable;
+
+    zc.max_sheet_n += 1;
+    zc.sheets.putAssumeCapacityNoClobber(new_sheet_name, new_sheet);
+    zc.ui.update(&.{.sheet_list});
+
+    return zc.sheets.entries.len - 1;
+}
+
+fn closeSheet(zc: *ZC, index: usize) !void {
+    var sheet = zc.sheets.values()[index];
+    const name = zc.sheets.keys()[index];
+    defer zc.allocator.free(name);
+    zc.sheets.orderedRemoveAt(index);
+    sheet.deinit();
+    if (zc.sheets.entries.len == 0) {
+        const new_sheet = try zc.openSheet();
+        zc.setCurrentSheet(new_sheet);
+    } else if (zc.current_sheet == index) {
+        zc.prevSheet();
+    }
+
+    zc.setStatusMessage(.info, "Closed '{s}'", .{name});
+}
+
+fn renameSheet(zc: *ZC, index: usize, new_name: []const u8) !void {
+    if (new_name.len == 0) return error.InvalidSheetName;
+    if (zc.sheets.get(new_name) != null) {
+        return error.SheetAlreadyExists;
+    }
+
+    const new_name_owned = try zc.allocator.dupe(u8, new_name);
+    const old_key = zc.sheets.keys()[index];
+
+    zc.sheets.setKey(zc.allocator, index, new_name_owned) catch |err| {
+        zc.allocator.free(new_name_owned);
+        zc.sheets.keys()[index] = old_key;
+        return err;
+    };
+
+    zc.allocator.free(old_key);
+    zc.ui.update_flags.sheet_list = true;
+}
+
+fn setDefaultTheme(zc: *ZC) !void {
+    try zc.ui_interface.applyDefaultTheme();
 }
 
 fn setTheme(
-    self: *Self,
+    zc: *ZC,
     /// Base name of the theme file to set.
     theme_name: []const u8,
 ) !void {
-    const ui_name = self.ui_interface.getUiName();
-    const extension = self.ui_interface.getThemeFileExtension();
+    const ui_name = zc.ui_interface.getUiName();
+    const extension = zc.ui_interface.getThemeFileExtension();
 
     var name_buf: std.BoundedArray(u8, std.fs.max_name_bytes) = .{};
     name_buf.writer().print("{s}{s}", .{ theme_name, extension }) catch
@@ -1645,168 +1810,163 @@ fn setTheme(
         file_name,
     }) catch return error.NameTooLong;
 
-    try self.ui_interface.applyTheme(path);
+    try zc.ui_interface.applyTheme(path);
 }
 
-fn put(self: *Self, dest: Position) !void {
-    if (self.yank) |yank| {
+fn put(zc: *ZC, dest: Position) !void {
+    if (zc.yank) |yank| {
         if (!yank.tl.eql(dest)) {
-            try self.sheet.copyRangeTo(yank, dest);
-            self.sheet.endUndoGroup();
-            self.ui.update(&.{.cells});
+            try zc.currentSheet().copyRangeTo(yank, dest);
+            zc.currentSheet().endUndoGroup();
+            zc.ui.update(&.{.cells});
         }
     }
 }
 
-fn undo(self: *Self) Allocator.Error!void {
-    defer self.resetCount();
-    self.ui.update(&.{ .cells, .column_headings, .row_numbers });
+fn undo(zc: *ZC) Allocator.Error!void {
+    defer zc.resetCount();
+    zc.ui.update(&.{ .cells, .column_headings, .row_numbers });
 
-    for (0..self.getCount()) |_| {
-        try self.sheet.undo();
+    for (0..zc.getCount()) |_| {
+        try zc.currentSheet().undo();
     }
 }
 
-fn redo(self: *Self) Allocator.Error!void {
-    defer self.resetCount();
-    self.ui.update(&.{ .cells, .column_headings, .row_numbers });
+fn redo(zc: *ZC) Allocator.Error!void {
+    defer zc.resetCount();
+    zc.ui.update(&.{ .cells, .column_headings, .row_numbers });
 
-    for (0..self.getCount()) |_| {
-        try self.sheet.redo();
+    for (0..zc.getCount()) |_| {
+        try zc.currentSheet().redo();
     }
 }
 
-fn anyCursorRange(self: *const Self) Rect {
-    if (self.mode == .visual or self.mode == .select)
-        return self.visualRange();
-    return .initSinglePos(self.cursor);
+fn anyCursorRange(zc: *const ZC) Rect {
+    if (zc.mode == .visual or zc.mode == .select)
+        return zc.visualRange();
+    return .initSinglePos(zc.cursor);
 }
 
-fn visualRange(self: *const Self) Rect {
-    assert(self.mode == .visual or self.mode == .select);
-    return Rect.initNormalizePos(self.cursor, self.anchor);
+fn visualRange(zc: *const ZC) Rect {
+    assert(zc.mode == .visual or zc.mode == .select);
+    return Rect.initNormalizePos(zc.cursor, zc.anchor);
 }
 
-pub fn deleteCell(self: *Self) Allocator.Error!void {
-    assert(self.mode != .visual);
-    try self.sheet.deleteCell(self.cursor, .{});
-    self.sheet.endUndoGroup();
+pub fn deleteCell(zc: *ZC) Allocator.Error!void {
+    assert(zc.mode != .visual);
+    try zc.currentSheet().deleteCell(zc.cursor, .{});
+    zc.currentSheet().endUndoGroup();
 
-    self.ui.update(&.{ .cells, .cursor });
+    zc.ui.update(&.{ .cells, .cursor });
 }
 
-pub fn deleteCellRange(self: *Self, rect: Rect) Allocator.Error!void {
-    try self.sheet.deleteCellRange(rect, .{});
-    self.sheet.endUndoGroup();
+pub fn deleteCellRange(zc: *ZC, rect: Rect) Allocator.Error!void {
+    try zc.currentSheet().deleteCellRange(rect, .{});
+    zc.currentSheet().endUndoGroup();
 
-    self.ui.update(&.{ .cells, .cursor });
+    zc.ui.update(&.{ .cells, .cursor });
 }
 
-pub fn setCursor(self: *Self, new_pos: Position) void {
-    self.prev_cursor = self.cursor;
-    self.cursor = new_pos;
-    self.clampScreenToCursor();
+pub fn setCursor(zc: *ZC, new_pos: Position) void {
+    zc.prev_cursor = zc.cursor;
+    zc.cursor = new_pos;
+    zc.clampScreenToCursor();
 
-    if (self.mode.isVisual()) self.ui.update(&.{ .column_headings, .row_numbers });
-    self.ui.update(&.{.cursor});
-
-    switch (self.mode) {
-        .visual, .select => self.ui.update(&.{.cells}),
-        else => {},
-    }
+    if (zc.mode.isVisual()) zc.ui.update(&.{ .cells, .column_headings, .row_numbers });
+    zc.ui.update(&.{.cursor});
 }
 
-pub fn cursorUp(self: *Self) void {
-    self.setCursor(.{ .y = self.cursor.y -| self.getCountPos(), .x = self.cursor.x });
-    self.resetCount();
+pub fn cursorUp(zc: *ZC) void {
+    zc.setCursor(.{ .y = zc.cursor.y -| zc.getCountPos(), .x = zc.cursor.x });
+    zc.resetCount();
 }
 
-pub fn cursorDown(self: *Self) void {
-    self.setCursor(.{ .y = self.cursor.y +| self.getCountPos(), .x = self.cursor.x });
-    self.resetCount();
+pub fn cursorDown(zc: *ZC) void {
+    zc.setCursor(.{ .y = zc.cursor.y +| zc.getCountPos(), .x = zc.cursor.x });
+    zc.resetCount();
 }
 
-pub fn cursorLeft(self: *Self) void {
-    self.setCursor(.{ .y = self.cursor.y, .x = self.cursor.x -| self.getCountPos() });
-    self.resetCount();
+pub fn cursorLeft(zc: *ZC) void {
+    zc.setCursor(.{ .y = zc.cursor.y, .x = zc.cursor.x -| zc.getCountPos() });
+    zc.resetCount();
 }
 
-pub fn cursorRight(self: *Self) void {
-    self.setCursor(.{ .y = self.cursor.y, .x = self.cursor.x +| self.getCountPos() });
-    self.resetCount();
+pub fn cursorRight(zc: *ZC) void {
+    zc.setCursor(.{ .y = zc.cursor.y, .x = zc.cursor.x +| zc.getCountPos() });
+    zc.resetCount();
 }
 
-pub fn selectionUp(self: *Self) void {
-    assert(self.mode == .visual or self.mode == .select);
-    const count = self.getCountPos();
-    if (self.anchor.y < self.cursor.y) {
-        const len = self.cursor.y - self.anchor.y;
-        self.setCursor(.{ .y = @max(self.cursor.y -| count, len), .x = self.cursor.x });
-        self.anchor.y -|= count;
+pub fn selectionUp(zc: *ZC) void {
+    assert(zc.mode == .visual or zc.mode == .select);
+    const count = zc.getCountPos();
+    if (zc.anchor.y < zc.cursor.y) {
+        const len = zc.cursor.y - zc.anchor.y;
+        zc.setCursor(.{ .y = @max(zc.cursor.y -| count, len), .x = zc.cursor.x });
+        zc.anchor.y -|= count;
     } else {
-        const len = self.anchor.y - self.cursor.y;
-        self.anchor.y = @max(self.anchor.y -| count, len);
-        self.setCursor(.{ .y = self.cursor.y -| count, .x = self.cursor.x });
+        const len = zc.anchor.y - zc.cursor.y;
+        zc.anchor.y = @max(zc.anchor.y -| count, len);
+        zc.setCursor(.{ .y = zc.cursor.y -| count, .x = zc.cursor.x });
     }
-    self.resetCount();
+    zc.resetCount();
 }
 
-pub fn selectionDown(self: *Self) void {
-    assert(self.mode == .visual or self.mode == .select);
-    const count = self.getCountPos();
+pub fn selectionDown(zc: *ZC) void {
+    assert(zc.mode == .visual or zc.mode == .select);
+    const count = zc.getCountPos();
 
-    if (self.anchor.y < self.cursor.y) {
-        const len = self.cursor.y - self.anchor.y;
-        self.setCursor(.{ .y = self.cursor.y +| count, .x = self.cursor.x });
-        self.anchor.y = @min(self.anchor.y +| count, std.math.maxInt(PosInt) - len);
+    if (zc.anchor.y < zc.cursor.y) {
+        const len = zc.cursor.y - zc.anchor.y;
+        zc.setCursor(.{ .y = zc.cursor.y +| count, .x = zc.cursor.x });
+        zc.anchor.y = @min(zc.anchor.y +| count, std.math.maxInt(Position.Int) - len);
     } else {
-        const len = self.anchor.y - self.cursor.y;
-        self.setCursor(.{
-            .y = @min(self.cursor.y +| count, std.math.maxInt(PosInt) - len),
-            .x = self.cursor.x,
+        const len = zc.anchor.y - zc.cursor.y;
+        zc.setCursor(.{
+            .y = @min(zc.cursor.y +| count, std.math.maxInt(Position.Int) - len),
+            .x = zc.cursor.x,
         });
-        self.anchor.y +|= count;
+        zc.anchor.y +|= count;
     }
-    self.resetCount();
+    zc.resetCount();
 }
 
-pub fn selectionLeft(self: *Self) void {
-    assert(self.mode == .visual or self.mode == .select);
-    const count = self.getCountPos();
-    if (self.anchor.x < self.cursor.x) {
-        const len = self.cursor.x - self.anchor.x;
-        self.setCursor(.{ .x = @max(self.cursor.x -| count, len), .y = self.cursor.y });
-        self.anchor.x -|= count;
+pub fn selectionLeft(zc: *ZC) void {
+    assert(zc.mode == .visual or zc.mode == .select);
+    const count = zc.getCountPos();
+    if (zc.anchor.x < zc.cursor.x) {
+        const len = zc.cursor.x - zc.anchor.x;
+        zc.setCursor(.{ .x = @max(zc.cursor.x -| count, len), .y = zc.cursor.y });
+        zc.anchor.x -|= count;
     } else {
-        const len = self.anchor.x - self.cursor.x;
-        self.anchor.x = @max(self.anchor.x -| count, len);
-        self.setCursor(.{ .x = self.cursor.x -| count, .y = self.cursor.y });
+        const len = zc.anchor.x - zc.cursor.x;
+        zc.anchor.x = @max(zc.anchor.x -| count, len);
+        zc.setCursor(.{ .x = zc.cursor.x -| count, .y = zc.cursor.y });
     }
-    self.resetCount();
+    zc.resetCount();
 }
 
-pub fn selectionRight(self: *Self) void {
-    assert(self.mode == .visual or self.mode == .select);
-    const count = self.getCountPos();
+pub fn selectionRight(zc: *ZC) void {
+    assert(zc.mode == .visual or zc.mode == .select);
+    const count = zc.getCountPos();
 
-    if (self.anchor.x < self.cursor.x) {
-        const len = self.cursor.x - self.anchor.x;
-        self.setCursor(.{ .x = self.cursor.x +| count, .y = self.cursor.y });
-        self.anchor.x = @min(self.anchor.x +| count, std.math.maxInt(PosInt) - len);
+    if (zc.anchor.x < zc.cursor.x) {
+        const len = zc.cursor.x - zc.anchor.x;
+        zc.setCursor(.{ .x = zc.cursor.x +| count, .y = zc.cursor.y });
+        zc.anchor.x = @min(zc.anchor.x +| count, std.math.maxInt(Position.Int) - len);
     } else {
-        const len = self.anchor.x - self.cursor.x;
-        self.setCursor(.{
-            .x = @min(self.cursor.x +| count, std.math.maxInt(PosInt) - len),
-            .y = self.cursor.y,
+        const len = zc.anchor.x - zc.cursor.x;
+        zc.setCursor(.{
+            .x = @min(zc.cursor.x +| count, std.math.maxInt(Position.Int) - len),
+            .y = zc.cursor.y,
         });
-        self.anchor.x +|= count;
+        zc.anchor.x +|= count;
     }
-    self.resetCount();
+    zc.resetCount();
 }
 
 // FIXME: The Y value is incorrect when clamping screen to cursor?
-pub fn leftReservedColumns(self: *const Self) u16 {
-    const y = self.screen_pos.y +| self.ui.contentHeight() -| 1;
+pub fn leftReservedColumns(zc: *const ZC) u16 {
+    const y = zc.screen_pos.y +| zc.ui.cellViewHeight() -| 1;
 
     if (y == 0)
         return 2;
@@ -1814,111 +1974,111 @@ pub fn leftReservedColumns(self: *const Self) u16 {
     return @intCast(std.math.log10(y) + 2);
 }
 
-pub fn clampScreenToCursor(self: *Self) void {
-    self.clampScreenToCursorY();
-    self.clampScreenToCursorX();
+pub fn clampScreenToCursor(zc: *ZC) void {
+    zc.clampScreenToCursorY();
+    zc.clampScreenToCursorX();
 }
 
-pub fn clampScreenToCursorY(self: *Self) void {
-    const height = self.ui.contentHeight();
+pub fn clampScreenToCursorY(zc: *ZC) void {
+    const height = zc.ui.cellViewHeight();
     if (height == 0) return;
 
-    if (self.cursor.y < self.screen_pos.y) {
-        self.screen_pos.y = self.cursor.y;
-    } else if (self.cursor.y - self.screen_pos.y >= height) {
-        self.screen_pos.y = self.cursor.y - (height - 1);
+    if (zc.cursor.y < zc.screen_pos.y) {
+        zc.screen_pos.y = zc.cursor.y;
+    } else if (zc.cursor.y - zc.screen_pos.y >= height) {
+        zc.screen_pos.y = zc.cursor.y - (height - 1);
     } else {
         return;
     }
-    self.ui.update(&.{ .column_headings, .row_numbers, .cells });
+    zc.ui.update(&.{ .column_headings, .row_numbers, .cells });
 }
 
-pub fn clampScreenToCursorX(self: *Self) void {
-    if (self.cursor.x < self.screen_pos.x) {
-        self.screen_pos.x = self.cursor.x;
-        self.ui.update(&.{ .column_headings, .cells });
+pub fn clampScreenToCursorX(zc: *ZC) void {
+    if (zc.cursor.x < zc.screen_pos.x) {
+        zc.screen_pos.x = zc.cursor.x;
+        zc.ui.update(&.{ .column_headings, .cells });
         return;
     }
 
-    var w = self.leftReservedColumns();
-    var x = self.cursor.x;
+    var w = zc.leftReservedColumns();
+    var x = zc.cursor.x;
 
-    const view_width = self.ui.term.width -| self.leftReservedColumns();
-    while (x >= self.screen_pos.x) : (x -= 1) {
-        const col: Sheet.Column = self.sheet.getColumn(x) orelse .{};
+    const view_width = zc.ui.term.width -| zc.leftReservedColumns();
+    while (x >= zc.screen_pos.x) : (x -= 1) {
+        const col: Sheet.Column = zc.currentSheet().getColumn(x) orelse .{};
         w += @min(view_width, col.width);
 
-        if (w > self.ui.term.width) {
-            if (x < self.cursor.x) {
-                self.screen_pos.x = x +| 1;
-                self.ui.update(&.{ .column_headings, .cells });
+        if (w > zc.ui.term.width) {
+            if (x < zc.cursor.x) {
+                zc.screen_pos.x = x +| 1;
+                zc.ui.update(&.{ .column_headings, .cells });
             }
             break;
         }
         if (x == 0) break;
     }
 }
-pub fn setPrecision(self: *Self, column: PosInt, new_precision: u8) Allocator.Error!void {
-    try self.sheet.setPrecision(column, new_precision, .{});
-    self.sheet.endUndoGroup();
-    self.ui.update_flags.cells = true;
+pub fn setPrecision(zc: *ZC, column: Position.Int, new_precision: u8) Allocator.Error!void {
+    try zc.currentSheet().setPrecision(column, new_precision, .{});
+    zc.currentSheet().endUndoGroup();
+    zc.ui.update_flags.cells = true;
 }
 
-pub fn incPrecision(self: *Self, column: PosInt, count: u8) Allocator.Error!void {
-    try self.sheet.incPrecision(column, count, .{});
-    self.sheet.endUndoGroup();
-    self.ui.update_flags.cells = true;
+pub fn incPrecision(zc: *ZC, column: Position.Int, count: u8) Allocator.Error!void {
+    try zc.currentSheet().incPrecision(column, count, .{});
+    zc.currentSheet().endUndoGroup();
+    zc.ui.update_flags.cells = true;
 }
 
-pub fn decPrecision(self: *Self, column: PosInt, count: u8) Allocator.Error!void {
-    try self.sheet.decPrecision(column, count, .{});
-    self.sheet.endUndoGroup();
-    self.ui.update_flags.cells = true;
+pub fn decPrecision(zc: *ZC, column: Position.Int, count: u8) Allocator.Error!void {
+    try zc.currentSheet().decPrecision(column, count, .{});
+    zc.currentSheet().endUndoGroup();
+    zc.ui.update_flags.cells = true;
 }
 
-pub inline fn cursorIncPrecision(self: *Self) Allocator.Error!void {
-    const count: u8 = @intCast(@min(std.math.maxInt(u8), self.getCount()));
-    try self.incPrecision(self.cursor.x, count);
-    self.resetCount();
+pub inline fn cursorIncPrecision(zc: *ZC) Allocator.Error!void {
+    const count: u8 = @intCast(@min(std.math.maxInt(u8), zc.getCount()));
+    try zc.incPrecision(zc.cursor.x, count);
+    zc.resetCount();
 }
 
-pub inline fn cursorDecPrecision(self: *Self) Allocator.Error!void {
-    const count: u8 = @intCast(@min(std.math.maxInt(u8), self.getCount()));
-    try self.decPrecision(self.cursor.x, count);
-    self.resetCount();
+pub inline fn cursorDecPrecision(zc: *ZC) Allocator.Error!void {
+    const count: u8 = @intCast(@min(std.math.maxInt(u8), zc.getCount()));
+    try zc.decPrecision(zc.cursor.x, count);
+    zc.resetCount();
 }
 
-pub fn incWidth(self: *Self, column: PosInt, n: u8) Allocator.Error!void {
-    try self.sheet.incWidth(column, n, .{});
-    self.sheet.endUndoGroup();
-    self.ui.update_flags.cells = true;
-    self.ui.update_flags.column_headings = true;
+pub fn incWidth(zc: *ZC, column: Position.Int, n: u8) Allocator.Error!void {
+    try zc.currentSheet().incWidth(column, n, .{});
+    zc.currentSheet().endUndoGroup();
+    zc.ui.update_flags.cells = true;
+    zc.ui.update_flags.column_headings = true;
 }
 
-pub fn decWidth(self: *Self, column: PosInt, n: u8) Allocator.Error!void {
-    try self.sheet.decWidth(column, n, .{});
-    self.sheet.endUndoGroup();
-    self.ui.update_flags.cells = true;
-    self.ui.update_flags.column_headings = true;
+pub fn decWidth(zc: *ZC, column: Position.Int, n: u8) Allocator.Error!void {
+    try zc.currentSheet().decWidth(column, n, .{});
+    zc.currentSheet().endUndoGroup();
+    zc.ui.update_flags.cells = true;
+    zc.ui.update_flags.column_headings = true;
 }
 
-pub inline fn cursorIncWidth(self: *Self) Allocator.Error!void {
-    const count: u8 = @intCast(@min(std.math.maxInt(u8), self.getCount()));
-    try self.incWidth(self.cursor.x, count);
-    self.resetCount();
-    self.clampScreenToCursorX();
+pub inline fn cursorIncWidth(zc: *ZC) Allocator.Error!void {
+    const count: u8 = @intCast(@min(std.math.maxInt(u8), zc.getCount()));
+    try zc.incWidth(zc.cursor.x, count);
+    zc.resetCount();
+    zc.clampScreenToCursorX();
 }
 
-pub inline fn cursorDecWidth(self: *Self) Allocator.Error!void {
-    const count: u8 = @intCast(@min(std.math.maxInt(u8), self.getCount()));
-    try self.decWidth(self.cursor.x, count);
-    self.resetCount();
+pub inline fn cursorDecWidth(zc: *ZC) Allocator.Error!void {
+    const count: u8 = @intCast(@min(std.math.maxInt(u8), zc.getCount()));
+    try zc.decWidth(zc.cursor.x, count);
+    zc.resetCount();
 }
 
 fn widthNeededForColumn(
-    self: *Self,
+    zc: *ZC,
     sheet: *Sheet,
-    column_index: PosInt,
+    column_index: Position.Int,
     precision: u8,
     max_width: u16,
 ) !u16 {
@@ -1937,7 +2097,7 @@ fn widthNeededForColumn(
     const writer = buf.writer();
     for (results.items) |handle| {
         const cell = sheet.getCellFromHandle(handle);
-        switch (cell.value_type) {
+        switch (cell.value_tag) {
             .err => {},
             .number => {
                 const n = cell.value.number;
@@ -1952,8 +2112,8 @@ fn widthNeededForColumn(
             },
             .string => {
                 const str = sheet.cellStringValue(cell);
-                const w: u16 = @intCast(self.ui_interface.stringWidth(str, .{
-                    .max_width = self.ui.term.width,
+                const w: u16 = @intCast(zc.ui_interface.stringWidth(str, .{
+                    .max_width = zc.ui.term.width,
                 }).width); // TODO: Make all widths u32
                 if (w > width) {
                     width = w;
@@ -1966,58 +2126,58 @@ fn widthNeededForColumn(
     return width;
 }
 
-pub fn expandWidthAtCursor(self: *Self) Allocator.Error!void {
-    const handle = self.sheet.getColumnHandle(self.cursor.x) orelse return;
-    const col = self.sheet.cols.getValue(handle);
+pub fn expandWidthAtCursor(zc: *ZC) Allocator.Error!void {
+    const handle = zc.currentSheet().getColumnHandle(zc.cursor.x) orelse return;
+    const col = zc.currentSheet().cols.getValue(handle);
 
-    const max_width = self.ui.term.width - self.leftReservedColumns();
-    const width_needed = try self.widthNeededForColumn(
-        &self.sheet,
-        self.cursor.x,
+    const max_width = zc.ui.term.width - zc.leftReservedColumns();
+    const width_needed = try zc.widthNeededForColumn(
+        zc.currentSheet(),
+        zc.cursor.x,
         col.precision,
         max_width,
     );
-    try self.sheet.setColWidth(handle, self.cursor.x, width_needed, .{});
-    self.sheet.endUndoGroup();
-    self.clampScreenToCursorX();
-    self.ui.update(&.{ .cells, .column_headings });
+    try zc.currentSheet().setColWidth(handle, zc.cursor.x, width_needed, .{});
+    zc.currentSheet().endUndoGroup();
+    zc.clampScreenToCursorX();
+    zc.ui.update(&.{ .cells, .column_headings });
 }
 
-pub fn cursorToFirstCellInRow(self: *Self) !void {
-    const pos = try self.sheet.firstCellInRow(self.cursor.y) orelse return;
-    self.setCursor(pos);
+pub fn cursorToFirstCellInRow(zc: *ZC) !void {
+    const pos = try zc.currentSheet().firstCellInRow(zc.cursor.y) orelse return;
+    zc.setCursor(pos);
 }
 
-pub fn cursorToLastCellInRow(self: *Self) !void {
-    const pos = try self.sheet.lastCellInRow(self.cursor.y) orelse return;
-    self.setCursor(pos);
+pub fn cursorToLastCellInRow(zc: *ZC) !void {
+    const pos = try zc.currentSheet().lastCellInRow(zc.cursor.y) orelse return;
+    zc.setCursor(pos);
 }
 
-pub fn cursorToFirstCellInColumn(self: *Self) !void {
-    const pos = try self.sheet.firstCellInColumn(self.cursor.x) orelse return;
-    self.setCursor(pos);
+pub fn cursorToFirstCellInColumn(zc: *ZC) !void {
+    const pos = try zc.currentSheet().firstCellInColumn(zc.cursor.x) orelse return;
+    zc.setCursor(pos);
 }
 
-pub fn cursorToLastCellInColumn(self: *Self) !void {
-    const pos = try self.sheet.lastCellInColumn(self.cursor.x) orelse return;
-    self.setCursor(pos);
+pub fn cursorToLastCellInColumn(zc: *ZC) !void {
+    const pos = try zc.currentSheet().lastCellInColumn(zc.cursor.x) orelse return;
+    zc.setCursor(pos);
 }
 
-pub fn cursorGotoRow(self: *Self) void {
-    const count: PosInt = @intCast(@min(std.math.maxInt(PosInt), self.count));
-    self.resetCount();
-    self.setCursor(.{ .x = self.cursor.x, .y = count });
+pub fn cursorGotoRow(zc: *ZC) void {
+    const count: Position.Int = @intCast(@min(std.math.maxInt(Position.Int), zc.count));
+    zc.resetCount();
+    zc.setCursor(.{ .x = zc.cursor.x, .y = count });
 }
 
-pub fn cursorGotoCol(self: *Self) void {
-    const count: PosInt = @intCast(@min(std.math.maxInt(PosInt), self.count));
-    self.resetCount();
-    self.setCursor(.{ .x = count, .y = self.cursor.y });
+pub fn cursorGotoCol(zc: *ZC) void {
+    const count: Position.Int = @intCast(@min(std.math.maxInt(Position.Int), zc.count));
+    zc.resetCount();
+    zc.setCursor(.{ .x = count, .y = zc.cursor.y });
 }
 
 test "Sheet mode counts" {
     const t = std.testing;
-    var zc: Self = undefined;
+    var zc: ZC = undefined;
     try zc.init(t.allocator, .{ .ui = false });
     defer zc.deinit();
 
@@ -2027,9 +2187,9 @@ test "Sheet mode counts" {
 
 test "Motions normal mode" {
     const t = std.testing;
-    const max = std.math.maxInt(PosInt);
+    const max = std.math.maxInt(Position.Int);
 
-    var zc: Self = undefined;
+    var zc: ZC = undefined;
     try zc.init(t.allocator, .{ .ui = false });
     defer zc.deinit();
 
@@ -2232,7 +2392,7 @@ test "Motions visual mode" {
     const t = std.testing;
     const max = std.math.maxInt(Position.Int);
 
-    var zc: Self = undefined;
+    var zc: ZC = undefined;
     try zc.init(t.allocator, .{ .ui = false });
     defer zc.deinit();
 
@@ -2604,7 +2764,7 @@ test "Motions visual mode" {
 
 // Test files at runtime so no recompilation is needed if the data changes
 fn testFile(gpa: std.mem.Allocator, path: []const u8) !void {
-    var zc: Self = undefined;
+    var zc: ZC = undefined;
     try zc.init(gpa, .{ .ui = false });
     defer zc.deinit();
 

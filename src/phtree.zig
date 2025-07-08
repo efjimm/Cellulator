@@ -493,7 +493,7 @@ pub fn PhTree(
             return ret;
         }
 
-        fn leafItem(
+        pub fn leafItem(
             tree: *const @This(),
             handle: Leaf.Handle,
             comptime tag: std.MultiArrayList(Leaf).Field,

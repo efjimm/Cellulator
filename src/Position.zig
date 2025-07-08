@@ -13,8 +13,10 @@ pub const Position = packed struct {
         std.math.maxInt(u32),
     )});
 
-    x: Int = 0,
-    y: Int = 0,
+    x: Int,
+    y: Int,
+
+    pub const origin: Position = .init(0, 0);
 
     pub fn init(x: Int, y: Int) Position {
         return .{ .x = x, .y = y };

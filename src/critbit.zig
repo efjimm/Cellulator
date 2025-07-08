@@ -79,9 +79,7 @@ pub fn CritBitMap(
         }
 
         pub fn initContext(context: Context) Self {
-            return .{
-                .context = context,
-            };
+            return .{ .context = context };
         }
 
         fn clear(allocator: Allocator, node: *ENode, tag: Tag) void {

@@ -95,6 +95,10 @@ pub const Action = union(enum) {
     yank_cell,
     put_cell,
 
+    next_sheet,
+    prev_sheet,
+    close_sheet,
+
     cell_cursor_up,
     cell_cursor_down,
     cell_cursor_left,
@@ -450,6 +454,9 @@ const sheet_keys = [_]KeyMaps{
             .{ "u", .undo },
             .{ "U", .redo },
             .{ "p", .put_cell },
+            .{ "gn", .next_sheet },
+            .{ "gp", .prev_sheet },
+            .{ "<C-w>q", .close_sheet },
         },
     },
     .{

@@ -33,6 +33,8 @@ strings_buf: std.ArrayListUnmanaged(u8),
 /// Used to query whether a cell belongs to a range and then update the cells
 /// that depend on that range.
 dependents: Dependents,
+
+// TODO: Make this not be linked list
 deps: std.ArrayListUnmanaged(Dep) = .empty,
 free_deps: DepIndex = .none,
 
@@ -47,8 +49,8 @@ string_values: FlatListPool(u8),
 // TODO: Only create columns for columns whose width/precision/whatever actually changes.
 cols: Columns,
 
-undos: UndoList,
-redos: UndoList,
+undos: std.MultiArrayList(Undo),
+redos: std.MultiArrayList(Undo),
 
 cell_buffer: std.ArrayListUnmanaged(Cell.Handle) = .empty,
 
@@ -60,6 +62,14 @@ filepath: std.BoundedArray(u8, std.fs.max_path_bytes),
 arena: std.heap.ArenaAllocator,
 
 text_attrs: PhTree(TextAttrs, 2, Cell.Handle.Int),
+
+lua_point_trees: std.StringHashMapUnmanaged(LuaDataPointTree) = .empty,
+
+// TODO: Expose 1 and 4 dimensional trees to Lua
+
+/// Maps 2D points to lua tables. Can be created by lua scripts to store arbitrary Lua data in
+/// PhTrees implemented in native code with high performance.
+const LuaDataPointTree = PhTree(i32, 2, u32);
 
 pub const TextAttrs = extern struct {
     alignment: Alignment,
@@ -77,21 +87,6 @@ pub const TextAttrs = extern struct {
     pub const Handle = @FieldType(Sheet, "text_attrs").Leaf.Handle;
 };
 
-pub fn setTextAlignment(
-    sheet: *Sheet,
-    cell: Cell.Handle,
-    new_alignment: TextAttrs.Alignment,
-) !void {
-    const res = try sheet.text_attrs.getOrPut(sheet.allocator, sheet.cell_tree.getPoint(cell));
-    if (!res.found_existing)
-        res.value_ptr.* = .default;
-    res.value_ptr.alignment = new_alignment;
-}
-
-pub fn clearTextAttrs(sheet: *Sheet, cell: Cell.Handle) void {
-    _ = sheet.text_attrs.remove(cell);
-}
-
 const arena_retain_size = std.math.pow(usize, 2, 20);
 
 pub const Dep = extern struct {
@@ -102,37 +97,6 @@ pub const Dep = extern struct {
 pub const Columns = PhTree(Column, 1, u32);
 pub const Dependents = PhTree(DepIndex, 4, usize);
 pub const CellTree = PhTree(Cell, 2, usize);
-
-fn createDep(sheet: *Sheet, dep: Dep) !DepIndex {
-    if (sheet.free_deps.isValid()) {
-        const ret = sheet.free_deps;
-        sheet.free_deps = sheet.deps.items[ret.n].next;
-        sheet.deps.items[ret.n] = dep;
-        return ret;
-    }
-
-    const ret: DepIndex = .from(@intCast(sheet.deps.items.len));
-    try sheet.deps.append(sheet.allocator, dep);
-    return ret;
-}
-
-fn createDepAssumeCapacity(sheet: *Sheet, dep: Dep) DepIndex {
-    if (sheet.free_deps.isValid()) {
-        const ret = sheet.free_deps;
-        sheet.free_deps = sheet.deps.items[ret.n].next;
-        sheet.deps.items[ret.n] = dep;
-        return ret;
-    }
-
-    const ret: DepIndex = .from(@intCast(sheet.deps.items.len));
-    sheet.deps.appendAssumeCapacity(dep);
-    return ret;
-}
-
-fn destroyDep(sheet: *Sheet, dep: DepIndex) void {
-    sheet.deps.items[dep.n].next = sheet.free_deps;
-    sheet.free_deps = dep;
-}
 
 pub const StringIndex = packed struct {
     n: u32,
@@ -164,89 +128,84 @@ pub const DepIndex = packed struct {
     pub const none: DepIndex = .{ .n = std.math.maxInt(u32) };
 };
 
-fn getStringSlice(sheet: *Sheet, index: StringIndex) [:0]const u8 {
-    if (!index.isValid()) return "";
-    const ptr: [*:0]const u8 = @ptrCast(sheet.strings_buf.items[index.n..].ptr);
-    return std.mem.span(ptr);
-}
-
-pub fn posFromCellHandle(sheet: *Sheet, handle: Cell.Handle) Position {
-    const point = sheet.cell_tree.getPoint(handle).*;
-    return .init(point[0], point[1]);
-}
-
-pub fn rectFromCellHandle(sheet: *Sheet, handle: Cell.Handle) Rect {
-    const point = sheet.cell_tree.getPoint(handle).*;
-    const pos: Position = .init(point[0], point[1]);
-    return .initSinglePos(pos);
-}
-
-pub fn init(allocator: Allocator) !Sheet {
-    var sheet: Sheet = .{
-        .allocator = allocator,
-        .has_changes = false,
-
-        .queued_cells = .empty,
-        .strings_buf = .empty,
-
-        .undos = .empty,
-        .redos = .empty,
-
-        .cell_tree = .empty,
-        .dependents = .empty,
-        .ast_nodes = .empty,
-        .string_values = .empty,
-
-        .cols = .empty,
-
-        .search_buffer = .empty,
-
-        .arena = .init(allocator),
-        .filepath = .{},
-
-        .text_attrs = .empty,
-    };
-
-    try sheet.undos.ensureTotalCapacity(allocator, 1);
-    errdefer sheet.undos.deinit(allocator);
-    try sheet.redos.ensureTotalCapacity(allocator, 1);
-
-    return sheet;
-}
-
-pub fn deinit(sheet: *Sheet) void {
-    sheet.strings_buf.deinit(sheet.allocator);
-    sheet.search_buffer.deinit(sheet.allocator);
-
-    sheet.clearUndos(.undo);
-    sheet.clearUndos(.redo);
-    sheet.dependents.deinit(sheet.allocator);
-    sheet.cell_tree.deinit(sheet.allocator);
-
-    sheet.queued_cells.deinit(sheet.allocator);
-    sheet.undos.deinit(sheet.allocator);
-    sheet.redos.deinit(sheet.allocator);
-
-    sheet.cols.deinit(sheet.allocator);
-    sheet.ast_nodes.deinit(sheet.allocator);
-    sheet.string_values.deinit(sheet.allocator);
-    sheet.deps.deinit(sheet.allocator);
-    sheet.cell_buffer.deinit(sheet.allocator);
-    sheet.text_attrs.deinit(sheet.allocator);
-    sheet.arena.deinit();
-}
-
-pub fn getCellFromHandle(sheet: *Sheet, handle: Cell.Handle) *Cell {
-    return sheet.cell_tree.getValue(handle);
-}
-
-const Marker = packed struct(u2) {
-    undo: bool = false,
-    redo: bool = false,
+pub const UndoOpts = struct {
+    undo_type: UndoType = .undo,
+    clear_redos: bool = true,
 };
 
-pub const UndoList = std.MultiArrayList(Undo);
-pub const UndoType = enum { undo, redo };
+pub const Cell = extern struct {
+    /// Cached value of the cell
+    value: Value = .{ .err = .fromError(error.NotEvaluable) },
+
+    /// Tag denoting the type of value. A tagged union would add extra unnecessary padding.
+    value_tag: Value.Tag = .err,
+
+    /// State used for evaluating cells.
+    state: enum(u8) {
+        up_to_date,
+        dirty,
+        enqueued,
+        computing,
+    } = .up_to_date,
+
+    /// Abstract syntax tree representing the expression in the cell.
+    expr_root: ast.Index = .invalid,
+
+    // TODO: We can encode this information in the string AST nodes themselves.
+    strings: StringIndex = .invalid,
+
+    pub const Handle = CellTree.Leaf.Handle;
+
+    // Non-extern unions get a hidden tag in safe builds which makes serialising them annoying.
+    // So we use an extern union here.
+    pub const Value = extern union {
+        number: f64,
+        string: FlatListPool(u8).List.Index,
+        err: Error,
+
+        pub const Tag = blk: {
+            var t = @typeInfo(std.meta.FieldEnum(Value));
+            t.@"enum".tag_type = u8;
+            break :blk @Type(t);
+        };
+    };
+
+    pub const Error = extern struct {
+        tag: Tag,
+
+        pub const Tag = blk: {
+            var t = @typeInfo(std.meta.FieldEnum(ast.EvalError));
+            t.@"enum".tag_type = u8;
+            break :blk @Type(t);
+        };
+
+        pub fn fromError(err: ast.EvalError) Error {
+            return switch (err) {
+                inline else => |e| .{ .tag = @field(Tag, @errorName(e)) },
+            };
+        }
+
+        pub fn getError(e: Error) ast.EvalError {
+            return switch (e.tag) {
+                inline else => |tag| @field(ast.EvalError, @tagName(tag)),
+            };
+        }
+    };
+
+    pub fn setValue(cell: *Cell, comptime tag: Value.Tag, value: @FieldType(Value, @tagName(tag))) void {
+        cell.value = @unionInit(Value, @tagName(tag), value);
+        cell.value_tag = tag;
+    }
+};
+
+pub const Column = extern struct {
+    pub const default_width = 10;
+
+    width: u16 = default_width,
+    precision: u8 = 2,
+
+    pub const Handle = Columns.Leaf.Handle;
+};
 
 /// This is an extern struct instead of a tagged union for serialization purposes.
 pub const Undo = extern struct {
@@ -325,6 +284,171 @@ pub const Undo = extern struct {
     };
 };
 
+pub const UndoType = enum { undo, redo };
+
+pub fn init(allocator: Allocator) !Sheet {
+    var sheet: Sheet = .{
+        .allocator = allocator,
+        .has_changes = false,
+
+        .queued_cells = .empty,
+        .strings_buf = .empty,
+
+        .undos = .empty,
+        .redos = .empty,
+
+        .cell_tree = .empty,
+        .dependents = .empty,
+        .ast_nodes = .empty,
+        .string_values = .empty,
+
+        .cols = .empty,
+
+        .search_buffer = .empty,
+
+        .arena = .init(allocator),
+        .filepath = .{},
+
+        .text_attrs = .empty,
+
+        .lua_point_trees = .empty,
+    };
+
+    try sheet.undos.ensureTotalCapacity(allocator, 1);
+    errdefer sheet.undos.deinit(allocator);
+    try sheet.redos.ensureTotalCapacity(allocator, 1);
+
+    return sheet;
+}
+
+pub fn deinit(sheet: *Sheet) void {
+    sheet.strings_buf.deinit(sheet.allocator);
+    sheet.search_buffer.deinit(sheet.allocator);
+    sheet.lua_point_trees.deinit(sheet.allocator);
+
+    sheet.clearUndos(.undo);
+    sheet.clearUndos(.redo);
+    sheet.dependents.deinit(sheet.allocator);
+    sheet.cell_tree.deinit(sheet.allocator);
+
+    sheet.queued_cells.deinit(sheet.allocator);
+    sheet.undos.deinit(sheet.allocator);
+    sheet.redos.deinit(sheet.allocator);
+
+    sheet.cols.deinit(sheet.allocator);
+    sheet.ast_nodes.deinit(sheet.allocator);
+    sheet.string_values.deinit(sheet.allocator);
+    sheet.deps.deinit(sheet.allocator);
+    sheet.cell_buffer.deinit(sheet.allocator);
+    sheet.text_attrs.deinit(sheet.allocator);
+    sheet.arena.deinit();
+}
+
+const Lua = @import("zlua").Lua;
+
+// /// Creates a new 2D point tree for use in Lua plugins. The tree stores indexes into a Lua table,
+// /// which allows storing arbitrary lua data in the tree. Due to Lua's limitations, the maximum
+// /// number of elements is 2^31 - 1. The table associated with the tree is stored at
+// /// `zc.current_sheet.plugindata.[name]``
+// pub fn createLuaTree(sheet: *Sheet, lua: *Lua, name: []const u8) !void {
+//     defer lua.setTop(0);
+
+//     const res = try sheet.lua_point_trees.getOrPut(sheet.allocator, name);
+//     if (res.found_existing) {
+//         return error.TreeAlreadyExists;
+//     }
+//     errdefer sheet.lua_point_trees.removeByPtr(res.key_ptr);
+
+//     res.value_ptr.* = .empty;
+
+//     var t = try lua.getGlobal("zc");
+//     if (t != .table) return error.LuaError;
+
+//     t = lua.getField(-1, "userdata");
+//     if (t != .table) return error.LuaError;
+
+//     lua.newTable();
+//     lua.setField(-2, name);
+// }
+
+// pub fn destroyLuaTree(sheet: *Sheet, name: []const u8) void {
+//     if (sheet.lua_point_trees.fetchRemove(name)) |kv| {
+//         var tree = kv.value;
+//         tree.deinit(sheet.allocator);
+//     }
+// }
+
+// pub fn luaTreeCreateValue(sheet: *Sheet, name: []const u8) !i32 {
+
+// }
+
+pub fn setTextAlignment(
+    sheet: *Sheet,
+    cell: Cell.Handle,
+    new_alignment: TextAttrs.Alignment,
+) !void {
+    const res = try sheet.text_attrs.getOrPut(sheet.allocator, sheet.cell_tree.getPoint(cell));
+    if (!res.found_existing)
+        res.value_ptr.* = .default;
+    res.value_ptr.alignment = new_alignment;
+}
+
+pub fn clearTextAttrs(sheet: *Sheet, cell: Cell.Handle) void {
+    _ = sheet.text_attrs.remove(cell);
+}
+
+fn createDep(sheet: *Sheet, dep: Dep) !DepIndex {
+    if (sheet.free_deps.isValid()) {
+        const ret = sheet.free_deps;
+        sheet.free_deps = sheet.deps.items[ret.n].next;
+        sheet.deps.items[ret.n] = dep;
+        return ret;
+    }
+
+    const ret: DepIndex = .from(@intCast(sheet.deps.items.len));
+    try sheet.deps.append(sheet.allocator, dep);
+    return ret;
+}
+
+fn createDepAssumeCapacity(sheet: *Sheet, dep: Dep) DepIndex {
+    if (sheet.free_deps.isValid()) {
+        const ret = sheet.free_deps;
+        sheet.free_deps = sheet.deps.items[ret.n].next;
+        sheet.deps.items[ret.n] = dep;
+        return ret;
+    }
+
+    const ret: DepIndex = .from(@intCast(sheet.deps.items.len));
+    sheet.deps.appendAssumeCapacity(dep);
+    return ret;
+}
+
+fn destroyDep(sheet: *Sheet, dep: DepIndex) void {
+    sheet.deps.items[dep.n].next = sheet.free_deps;
+    sheet.free_deps = dep;
+}
+
+fn getStringSlice(sheet: *Sheet, index: StringIndex) [:0]const u8 {
+    if (!index.isValid()) return "";
+    const ptr: [*:0]const u8 = @ptrCast(sheet.strings_buf.items[index.n..].ptr);
+    return std.mem.span(ptr);
+}
+
+pub fn posFromCellHandle(sheet: *Sheet, handle: Cell.Handle) Position {
+    const point = sheet.cell_tree.getPoint(handle).*;
+    return .init(point[0], point[1]);
+}
+
+pub fn rectFromCellHandle(sheet: *Sheet, handle: Cell.Handle) Rect {
+    const point = sheet.cell_tree.getPoint(handle).*;
+    const pos: Position = .init(point[0], point[1]);
+    return .initSinglePos(pos);
+}
+
+pub fn getCellFromHandle(sheet: *Sheet, handle: Cell.Handle) *Cell {
+    return sheet.cell_tree.getValue(handle);
+}
+
 const SerializeHeader = extern struct {
     /// Magic number identifying a binary file as a cellulator file.
     magic: u32 = magic_number,
@@ -393,14 +517,11 @@ pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
     try file.writevAll(&iovecs);
 }
 
-pub fn deserialize(allocator: Allocator, file: std.fs.File) !Sheet {
+pub fn deserialize(sheet: *Sheet, allocator: Allocator, file: std.fs.File) !void {
     const header = try file.reader().readStruct(SerializeHeader);
 
     if (header.magic != SerializeHeader.magic_number) return error.InvalidFile;
     if (header.version != SerializeHeader.binary_version) return error.InvalidVersion;
-
-    var sheet = try Sheet.init(allocator);
-    errdefer sheet.deinit();
 
     sheet.free_deps = header.deps_free;
 
@@ -417,8 +538,6 @@ pub fn deserialize(allocator: Allocator, file: std.fs.File) !Sheet {
         try utils.prepMultiArrayList(Undo, &sheet.redos, allocator, header.redos_len, header.redos_cap);
 
     _ = try file.readvAll(&iovecs);
-
-    return sheet;
 }
 
 pub fn clearRetainingCapacity(sheet: *Sheet) void {
@@ -971,27 +1090,31 @@ fn findExtantCol(sheet: *Sheet, r: Rect, comptime p: enum { first, last }) !?Pos
 }
 
 pub fn nextPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
-    const remaining_row: Rect = if (pos.x != std.math.maxInt(PosInt))
-        .{
-            .tl = .{ .x = pos.x + 1, .y = pos.y },
-            .br = .{ .x = std.math.maxInt(PosInt), .y = pos.y },
+    const remaining_row: Rect = blk: {
+        if (pos.x != std.math.maxInt(PosInt)) {
+            @branchHint(.likely);
+            break :blk .{
+                .tl = .{ .x = pos.x + 1, .y = pos.y },
+                .br = .{ .x = std.math.maxInt(PosInt), .y = pos.y },
+            };
         }
-    else if (pos.y != std.math.maxInt(PosInt))
-        .{
+        if (pos.y != std.math.maxInt(PosInt)) break :blk .{
             .tl = .{ .x = 0, .y = pos.y + 1 },
             .br = .{ .x = std.math.maxInt(PosInt), .y = pos.y + 1 },
+        } else {
+            @branchHint(.cold);
+            return null;
         }
-    else
-        return null;
+    };
 
     if (try sheet.findExtantCol(remaining_row, .first)) |col_index| {
-        return .{
-            .x = col_index,
-            .y = remaining_row.br.y,
-        };
+        return .{ .x = col_index, .y = remaining_row.br.y };
     }
 
-    if (pos.y == std.math.maxInt(PosInt)) return null;
+    if (pos.y == std.math.maxInt(PosInt)) {
+        @branchHint(.unlikely);
+        return null;
+    }
 
     const range: Rect = .{
         .tl = .{ .x = 0, .y = pos.y + 1 },
@@ -1002,30 +1125,24 @@ pub fn nextPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
             .tl = .{ .x = 0, .y = y },
             .br = .{ .x = std.math.maxInt(PosInt), .y = y },
         };
-        if (try sheet.findExtantCol(row, .first)) |x| {
-            return .{
-                .x = x,
-                .y = y,
-            };
-        }
+        if (try sheet.findExtantCol(row, .first)) |x|
+            return .init(x, y);
     }
 
     return null;
 }
 
 pub fn prevPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
-    const remaining_row: Rect = if (pos.x != 0)
-        .{
-            .tl = .{ .x = 0, .y = pos.y },
-            .br = .{ .x = pos.x - 1, .y = pos.y },
-        }
-    else if (pos.y != 0)
-        .{
-            .tl = .{ .x = 0, .y = pos.y - 1 },
-            .br = .{ .x = std.math.maxInt(PosInt), .y = pos.y - 1 },
-        }
-    else
+    const remaining_row: Rect = if (pos.x != 0) .{
+        .tl = .{ .x = 0, .y = pos.y },
+        .br = .{ .x = pos.x - 1, .y = pos.y },
+    } else if (pos.y != 0) .{
+        .tl = .{ .x = 0, .y = pos.y - 1 },
+        .br = .{ .x = std.math.maxInt(PosInt), .y = pos.y - 1 },
+    } else {
+        @branchHint(.unlikely);
         return null;
+    };
 
     if (try sheet.findExtantCol(remaining_row, .last)) |col_index| {
         return .{
@@ -1055,11 +1172,6 @@ pub fn prevPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
 
     return null;
 }
-
-pub const UndoOpts = struct {
-    undo_type: UndoType = .undo,
-    clear_redos: bool = true,
-};
 
 pub fn clearUndos(sheet: *Sheet, comptime kind: UndoType) void {
     const list = switch (kind) {
@@ -1673,8 +1785,8 @@ fn createColumnRangeAssumeCapacity(sheet: *Sheet, range: Rect) void {
 
     for (range.tl.x.., cols_start..sheet.cols.leaves.len) |x, i| {
         const handle: Column.Handle = .from(@intCast(i));
-
         const existing = sheet.cols.insertAssumeCapacity(&.{@intCast(x)}, handle);
+
         if (existing != .invalid) {
             sheet.cols.getValue(handle).* = sheet.cols.getValue(existing).*;
             sheet.cols.destroyValue(existing);
@@ -1761,7 +1873,7 @@ pub fn bulkSetCellExpr(
 
     const cell: Cell = .{
         .value = opts.value,
-        .value_type = opts.tag,
+        .value_tag = opts.tag,
         .state = if (need_cell_eval) .enqueued else .up_to_date,
         .expr_root = expr,
         .strings = strings,
@@ -2538,95 +2650,21 @@ pub fn setFilePath(sheet: *Sheet, filepath: []const u8) void {
 }
 
 pub fn cellStringValue(sheet: *Sheet, cell: *const Cell) []const u8 {
-    assert(cell.value_type == .string);
+    assert(cell.value_tag == .string);
     return sheet.string_values.items(cell.value.string);
 }
 
 pub fn freeCellString(sheet: *Sheet, cell: *Cell) void {
-    assert(cell.value_type == .string);
+    assert(cell.value_tag == .string);
     sheet.string_values.destroyList(cell.value.string);
 }
 
 pub fn setCellError(sheet: *Sheet, cell: *Cell) void {
-    if (cell.value_type == .string)
+    if (cell.value_tag == .string)
         sheet.string_values.destroyList(cell.value.string);
 
     cell.setValue(.err, .fromError(error.NotEvaluable));
 }
-
-// TODO: Theres' a bunch of wasted memory here
-pub const Cell = extern struct {
-    /// Cached value of the cell
-    value: Value = .{ .err = .fromError(error.NotEvaluable) },
-
-    /// Tag denoting the type of value. A tagged union would add extra unnecessary padding.
-    value_type: Value.Tag = .err,
-
-    /// State used for evaluating cells.
-    state: enum(u8) {
-        up_to_date,
-        dirty,
-        enqueued,
-        computing,
-    } = .up_to_date,
-
-    /// Abstract syntax tree representing the expression in the cell.
-    expr_root: ast.Index = .invalid,
-
-    // TODO: We can encode this information in the string AST nodes themselves.
-    strings: StringIndex = .invalid,
-
-    pub const Handle = CellTree.Leaf.Handle;
-
-    // Non-extern unions get a hidden tag in safe builds which makes serialising them annoying.
-    // So we use an extern union here.
-    pub const Value = extern union {
-        number: f64,
-        string: FlatListPool(u8).List.Index,
-        err: Error,
-
-        pub const Tag = blk: {
-            var t = @typeInfo(std.meta.FieldEnum(Value));
-            t.@"enum".tag_type = u8;
-            break :blk @Type(t);
-        };
-    };
-
-    pub const Error = extern struct {
-        tag: Tag,
-
-        pub const Tag = blk: {
-            var t = @typeInfo(std.meta.FieldEnum(ast.EvalError));
-            t.@"enum".tag_type = u8;
-            break :blk @Type(t);
-        };
-
-        pub fn fromError(err: ast.EvalError) Error {
-            return switch (err) {
-                inline else => |e| .{ .tag = @field(Tag, @errorName(e)) },
-            };
-        }
-
-        pub fn getError(e: Error) ast.EvalError {
-            return switch (e.tag) {
-                inline else => |tag| @field(ast.EvalError, @tagName(tag)),
-            };
-        }
-    };
-
-    pub fn fromExpression(sheet: *Sheet, expr: []const u8) !Cell {
-        return .{ .expr_root = try ast.fromExpression(&sheet, expr) };
-    }
-
-    pub fn isError(cell: Cell) bool {
-        return cell.value_type == .err;
-    }
-
-    pub fn setValue(cell: *Cell, comptime tag: Value.Tag, value: @FieldType(Value, @tagName(tag))) void {
-        cell.value = @unionInit(Value, @tagName(tag), value);
-        cell.value_type = tag;
-    }
-};
 
 /// Queues the dependents of `ref` for update.
 fn queueDependents(sheet: *Sheet, rect: Rect) Allocator.Error!void {
@@ -2682,7 +2720,7 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) ast.EvalError!ast.Ev
                 return err;
             };
 
-            if (cell.value_type == .string)
+            if (cell.value_tag == .string)
                 sheet.string_values.destroyList(cell.value.string);
 
             switch (res) {
@@ -2702,7 +2740,7 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) ast.EvalError!ast.Ev
         },
     }
 
-    return switch (cell.value_type) {
+    return switch (cell.value_tag) {
         .number => .{ .number = cell.value.number },
         .string => .{ .cell_string = .{
             .sheet = sheet,
@@ -2731,15 +2769,6 @@ pub fn printCellExpression(sheet: *Sheet, pos: Position, writer: anytype) !void 
         writer,
     );
 }
-
-pub const Column = extern struct {
-    pub const default_width = 10;
-
-    width: u16 = default_width,
-    precision: u8 = 2,
-
-    pub const Handle = Columns.Leaf.Handle;
-};
 
 fn setRowOrColumn(
     sheet: *Sheet,
@@ -3516,10 +3545,10 @@ pub fn expectRangeNonExtant(sheet: *Sheet, address: []const u8) !void {
 pub fn expectCellEquals(sheet: *Sheet, address: []const u8, expected_value: f64) !void {
     const pos: Position = try .fromAddress(address);
     const cell = sheet.getCellPtr(pos) orelse return error.CellNotFound;
-    if (cell.value_type != .number) {
+    if (cell.value_tag != .number) {
         std.debug.print(
             "Cell {} has value type {}, expected number\n",
-            .{ pos, cell.value_type },
+            .{ pos, cell.value_tag },
         );
         return error.TestExpectedCellsEql;
     }
@@ -3538,9 +3567,9 @@ pub fn expectCellEqualsString(sheet: *Sheet, address: []const u8, expected_value
         std.debug.print("Could not find cell '{s}'\n", .{address});
         return error.CellNotFound;
     };
-    if (cell.value_type != .string) {
+    if (cell.value_tag != .string) {
         std.debug.print("Cell {} has value type {}, expected string '{s}'\n", .{
-            pos, cell.value_type, expected_value,
+            pos, cell.value_tag, expected_value,
         });
         return error.TestExpectedCellsEqlStrings;
     }
@@ -3554,9 +3583,9 @@ pub fn expectCellEqualsString(sheet: *Sheet, address: []const u8, expected_value
 pub fn expectCellError(sheet: *Sheet, address: []const u8) !void {
     const pos: Position = try .fromAddress(address);
     const cell = sheet.getCellPtr(pos) orelse return error.CellNotFound;
-    if (!cell.isError()) {
+    if (cell.value_tag != .err) {
         std.debug.print("Expected cell {} to have error, but has value type {}\n", .{
-            pos, cell.value_type,
+            pos, cell.value_tag,
         });
         return error.UnexpectedValue;
     }

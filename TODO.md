@@ -16,6 +16,20 @@ might be an interesting read so I committed it. The stuff at the top is probably
   - Automatically check validity of entered commands against a declared structure
   - Allow registering new commands from lua
 
+- Command mode
+  - Undos and redos
+  - File completion
+
+- Make the "has changes" indicator reset when undo back to initial state
+
+- Handle sheet list overflowing screen
+- Add fzf-like popup for searching sheets
+- Copy sheets
+- Flush inactive sheets to disk as binary data
+  - Store a checksum of the data in-memory to ensure integrity
+- Read-only sheets
+- Actions across sheets
+
 - Update the damn readme
 
 - Allow associating Lua data with cells

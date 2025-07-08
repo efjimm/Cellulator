@@ -24,7 +24,7 @@ const utils = @import("utils.zig");
 pub const status_line = 0;
 pub const input_line = 1;
 pub const col_heading_line = 2;
-pub const content_line = 3;
+pub const cell_view_line = 3;
 
 term: Term,
 update_flags: UpdateFlags = .all,
@@ -66,6 +66,9 @@ pub const default_theme: Theme = .{
     .cell_error_selected = .init(.black, .red, .none),
     .cell_blank_unselected = .init(.none, .none, .none),
     .cell_blank_selected = .init(.none, .blue, .none),
+
+    .sheet_selected = .init(.black, .blue, .none),
+    .sheet_unselected = .init(.none, .bright_black, .none),
 };
 
 pub const UiElement = enum {
@@ -95,6 +98,9 @@ pub const UiElement = enum {
     cell_error_selected,
     cell_blank_unselected,
     cell_blank_selected,
+
+    sheet_selected,
+    sheet_unselected,
 };
 
 const UpdateFlags = packed struct {
@@ -103,6 +109,7 @@ const UpdateFlags = packed struct {
     row_numbers: bool,
     cells: bool,
     cursor: bool,
+    sheet_list: bool,
 
     pub const all: UpdateFlags = .{
         .command = true,
@@ -110,6 +117,7 @@ const UpdateFlags = packed struct {
         .row_numbers = true,
         .cells = true,
         .cursor = true,
+        .sheet_list = true,
     };
 
     pub const none: UpdateFlags = .{
@@ -118,6 +126,7 @@ const UpdateFlags = packed struct {
         .row_numbers = false,
         .cells = false,
         .cursor = false,
+        .sheet_list = false,
     };
 };
 
@@ -266,8 +275,8 @@ pub fn update(tui: *Tui, comptime fields: []const std.meta.FieldEnum(UpdateFlags
 }
 
 /// Returns the number of rows *fully* visible on the screen.
-pub fn contentHeight(tui: *const Tui) u16 {
-    return tui.term.height -| content_line;
+pub fn cellViewHeight(tui: *const Tui) u16 {
+    return tui.term.height -| (cell_view_line + 1);
 }
 
 pub fn render(tui: *Tui, zc: *ZC) !void {
@@ -314,6 +323,8 @@ pub fn render(tui: *Tui, zc: *ZC) !void {
         try tui.renderCursor();
     }
 
+    try tui.renderSheetList();
+
     if (tui.update_flags.command or zc.mode.isCommandMode())
         try tui.renderCommandLine();
 
@@ -330,6 +341,36 @@ fn setStyle(tui: *Tui, element: UiElement) !void {
     tui.current_style = element;
 }
 
+fn renderSheetList(tui: *Tui) RenderError!void {
+    const rc = tui.rc.?;
+    const zc = tui.zc.?;
+
+    try rc.moveCursorTo(tui.term.height - 1, 0);
+    var rpw = rc.cellWriter(tui.term.width);
+    const writer = rpw.writer();
+
+    try tui.setStyle(.sheet_unselected);
+
+    for (zc.sheets.values(), zc.sheets.keys(), 0..) |sheet, name, i| {
+        const style: UiElement =
+            if (i != zc.current_sheet)
+                .sheet_unselected
+            else
+                .sheet_selected;
+
+        try tui.setStyle(style);
+        try writer.print("{s} {s} ", .{
+            if (sheet.has_changes) "[+]" else "",
+            name,
+        });
+
+        try tui.setStyle(.sheet_unselected);
+    }
+
+    try rpw.finish();
+    try rc.clearToEol();
+}
+
 fn renderStatus(tui: *Tui) RenderError!void {
     const rc = tui.rc.?;
     const zc = tui.zc.?;
@@ -338,43 +379,40 @@ fn renderStatus(tui: *Tui) RenderError!void {
 
     const writer = rc.buffer.writer();
 
-    const filepath = zc.sheet.getFilePath();
-    if (filepath.len > 0) {
-        try tui.setStyle(.filepath);
-        try writer.writeAll(filepath);
-        try tui.setStyle(.status_line);
-    } else {
-        try tui.setStyle(.status_line);
-        writer.writeAll("<no file>") catch unreachable;
-    }
-
-    if (zc.sheet.has_changes) {
-        try writer.writeAll(" [+]");
-    }
-
+    try tui.setStyle(.status_line);
     try writer.print(" {} {}", .{ zc.cursor, zc.mode });
 
     if (zc.count != 0) {
         try tui.setStyle(.count);
         try writer.print(" {d}{s}", .{ zc.getCount(), zc.input_buf.items });
+        try tui.setStyle(.status_line);
     } else if (zc.input_buf.items.len > 0) {
         try tui.setStyle(.count);
         try writer.print(" {s}", .{zc.input_buf.items});
+        try tui.setStyle(.status_line);
     }
 
-    try tui.setStyle(.status_line);
     try writer.writeAll(" [");
-    if (zc.sheet.getCell(zc.cursor)) |cell| {
-        if (!cell.isError()) {
+    if (zc.currentSheet().getCell(zc.cursor)) |cell| {
+        if (cell.value_tag != .err) {
             try tui.setStyle(.expression);
         } else {
             try tui.setStyle(.expression_error);
         }
-        try zc.sheet.printCellExpression(zc.cursor, writer);
+        try zc.currentSheet().printCellExpression(zc.cursor, writer);
     }
 
     try tui.setStyle(.status_line);
     try writer.writeByte(']');
+
+    const path = zc.currentSheet().filepath.constSlice();
+    if (path.len > 0) {
+        try tui.setStyle(.filepath);
+        try writer.print(" {s}", .{path});
+    } else {
+        try writer.writeAll(" No file");
+    }
+
     try rc.clearToEol();
 }
 
@@ -461,7 +499,7 @@ fn renderColumnHeadings(tui: *Tui) RenderError!void {
 
     // TODO: Clean up these calls to getColumn
     while (w < tui.term.width) : (x += 1) {
-        const col: Column = zc.sheet.getColumn(x) orelse .{};
+        const col: Column = zc.currentSheet().getColumn(x) orelse .{};
         const width = @min(tui.term.width - reserved_cols, col.width);
 
         var buf: [Position.max_str_len]u8 = undefined;
@@ -492,7 +530,10 @@ fn renderRowNumbers(tui: *Tui) RenderError!void {
     try rc.moveCursorTo(col_heading_line, 0);
     try rc.buffer.writer().writeByteNTimes(' ', width);
 
-    for (content_line..tui.term.height, zc.screen_pos.y..) |screen_line, sheet_line| {
+    for (
+        cell_view_line..cell_view_line + tui.cellViewHeight(),
+        zc.screen_pos.y..,
+    ) |screen_line, sheet_line| {
         try rc.moveCursorTo(@intCast(screen_line), 0);
 
         var rpw = rc.cellWriter(width);
@@ -532,14 +573,14 @@ fn renderCursorAtPos(tui: *Tui, pos: Position) !void {
     const left = zc.leftReservedColumns();
     const writer = rc.buffer.writer();
 
-    const y: u16 = @intCast(pos.y - zc.screen_pos.y + content_line);
+    const y: u16 = @intCast(pos.y - zc.screen_pos.y + cell_view_line);
     const x = blk: {
         assert(zc.screen_pos.x <= pos.x);
 
         var x = left;
         var i = zc.screen_pos.x;
         while (i < pos.x) : (i += 1) {
-            const col: Column = zc.sheet.getColumn(i) orelse .{};
+            const col: Column = zc.currentSheet().getColumn(i) orelse .{};
             x += col.width;
         }
         break :blk x;
@@ -547,17 +588,17 @@ fn renderCursorAtPos(tui: *Tui, pos: Position) !void {
 
     // Render the cells and headings at the current cursor position with a specific colour.
     try rc.moveCursorTo(y, x);
-    const col_handle = zc.sheet.cols.findEntry(&.{pos.x});
-    const col = zc.sheet.getColumnByHandleOrDefault(col_handle);
+    const col_handle = zc.currentSheet().cols.findEntry(&.{pos.x});
+    const col = zc.currentSheet().getColumnByHandleOrDefault(col_handle);
 
-    const cell_handle = zc.sheet.getCellHandleByPos(pos);
-    const text_attrs_handle = zc.sheet.text_attrs.findEntry(&.{ pos.x, pos.y });
+    const cell_handle = zc.currentSheet().getCellHandleByPos(pos);
+    const text_attrs_handle = zc.currentSheet().text_attrs.findEntry(&.{ pos.x, pos.y });
     try tui.renderCell(
         pos,
         cell_handle,
         col.precision,
         col.width,
-        zc.sheet.getTextAttrs(text_attrs_handle),
+        zc.currentSheet().getTextAttrs(text_attrs_handle),
     );
 
     const width = @min(col.width, rc.term.width - left);
@@ -598,7 +639,7 @@ fn divCeil(n: anytype, d: @TypeOf(n)) @TypeOf(n) {
 }
 
 /// Returns the number of columns currently visible on screen.
-fn contentWidth(tui: *const Tui) u16 {
+fn visibleColumnCount(tui: *const Tui) u16 {
     const zc = tui.zc.?;
 
     var width: u16 = 0;
@@ -606,11 +647,11 @@ fn contentWidth(tui: *const Tui) u16 {
     var last = zc.screen_pos.x;
     const view_width = tui.term.width - zc.leftReservedColumns();
 
-    var cols_iter = zc.sheet.cols.iteratorAt(.{zc.screen_pos.x});
+    var cols_iter = zc.currentSheet().cols.iteratorAt(.{zc.screen_pos.x});
     while (cols_iter.next()) |handle| {
         assert(last >= zc.screen_pos.x);
 
-        const col = zc.sheet.cols.getPoint(handle)[0];
+        const col = zc.currentSheet().cols.getPoint(handle)[0];
         // TODO: This is a hack for a deficiency in `PhTree.iteratorAt`
         if (col < zc.screen_pos.x) {
             return @min(
@@ -621,7 +662,7 @@ fn contentWidth(tui: *const Tui) u16 {
 
         const diff: u16 = @intCast(@min(view_width, col - last));
         const diff_width = diff * Column.default_width;
-        const w = diff_width + zc.sheet.cols.getValue(handle).width;
+        const w = diff_width + zc.currentSheet().cols.getValue(handle).width;
 
         if (width + w >= view_width) {
             const remaining_width = view_width - width;
@@ -685,7 +726,7 @@ fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !struct {
     const TextAttrsContext = SheetTreeContext("text_attrs");
 
     const zc = tui.zc.?;
-    const sheet = &zc.sheet;
+    const sheet = zc.currentSheet();
     const arena = tui.arena.allocator();
 
     var cols: std.ArrayList(Column.Handle) = try .initCapacity(arena, col_count);
@@ -695,7 +736,7 @@ fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !struct {
     const tl: *const [2]u32 = &.{ zc.screen_pos.x, zc.screen_pos.y };
     const br: *const [2]u32 = &.{
         zc.screen_pos.x +| (col_count - 1),
-        zc.screen_pos.y +| (tui.term.height - content_line - 1),
+        zc.screen_pos.y +| (tui.cellViewHeight() - 1),
     };
 
     sheet.cols.queryWindow(&.{tl[0]}, &.{br[0]}, &cols) catch unreachable;
@@ -729,10 +770,10 @@ fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !struct {
 fn renderCells(tui: *Tui) !void {
     const rc = tui.rc.?;
     const zc = tui.zc.?;
-    const sheet = &zc.sheet;
+    const sheet = zc.currentSheet();
 
-    const col_count = tui.contentWidth();
-    const height = tui.contentHeight();
+    const col_count = tui.visibleColumnCount();
+    const height = tui.cellViewHeight();
     const cell_count = col_count * height;
 
     defer _ = tui.arena.reset(.{ .retain_with_limit = 1 << 20 });
@@ -742,7 +783,7 @@ fn renderCells(tui: *Tui) !void {
     const view_width = tui.term.width - screen_col_start;
     var y: Position.Int = 0; // Relative to the screen pos
     while (y < height) : (y += 1) {
-        const screen_line = content_line + y;
+        const screen_line = cell_view_line + y;
         try rc.moveCursorTo(@intCast(screen_line), screen_col_start);
 
         var w: u16 = 0;
@@ -777,7 +818,7 @@ fn renderCell(
 ) !void {
     const rc = tui.rc.?;
     const zc = tui.zc.?;
-    const sheet = &zc.sheet;
+    const sheet = zc.currentSheet();
     const selected = isSelected(zc, pos);
 
     var rpw = rc.cellWriter(width);
@@ -791,7 +832,7 @@ fn renderCell(
 
     const cell: *const Cell = sheet.getCellFromHandle(cell_handle);
 
-    switch (cell.value_type) {
+    switch (cell.value_tag) {
         .number => {
             try tui.setStyle(if (selected) .cell_number_selected else .cell_number_unselected);
             try writer.print("{d: >[1].[2]}", .{ cell.value.number, width, precision });
@@ -800,7 +841,7 @@ fn renderCell(
         .string => {
             try tui.setStyle(if (selected) .cell_text_selected else .cell_text_unselected);
 
-            const text = zc.sheet.cellStringValue(cell);
+            const text = zc.currentSheet().cellStringValue(cell);
             const alignment = utils.enumFromEnum(shovel.TextAlignment, text_attrs.alignment);
             try shovel.writeTruncating(text, width, alignment, rc.buffer.writer());
         },
@@ -816,8 +857,8 @@ fn isOnScreen(tui: *const Tui, zc: *ZC, pos: Position) bool {
     if (pos.x < zc.screen_pos.x or pos.y < zc.screen_pos.y)
         return false;
 
-    const col_count = tui.contentWidth();
-    const height = tui.term.height -| content_line;
+    const col_count = tui.visibleColumnCount();
+    const height = tui.cellViewHeight();
 
     return pos.x <= zc.screen_pos.x +| col_count and pos.y <= zc.screen_pos.y +| height;
 }

@@ -273,7 +273,7 @@ const metatables = .{
 
         pub fn end_undo_group(state: *Lua) callconv(.C) c_int {
             const zc = state.checkUserdata(*ZC, 1, "zc").*;
-            zc.sheet.endUndoGroup();
+            zc.currentSheet().endUndoGroup();
             return 0;
         }
 
