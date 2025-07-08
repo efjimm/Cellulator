@@ -557,52 +557,69 @@ fn renderCursor(tui: *Tui) RenderError!void {
     const zc = tui.zc.?;
 
     // Overwrite the old cursor if it's still on screen
-    if (tui.isOnScreen(zc, zc.prev_cursor))
-        try tui.renderCursorAtPos(zc.prev_cursor);
+    const old_col_handle = zc.currentSheet().cols.findEntry(&.{zc.prev_cursor.x});
+    const x_on_screen, const y_on_screen = tui.isOnScreen(zc, zc.prev_cursor);
+    if (x_on_screen or y_on_screen) {
+        const old_x = posXToScreenX(zc, zc.prev_cursor.x);
+        const old_y = posYToScreenY(zc, zc.prev_cursor.y);
+        try tui.renderCursorAtPos(zc.prev_cursor, old_col_handle, old_x, old_y);
+        if (x_on_screen and zc.cursor.x != zc.prev_cursor.x)
+            try tui.overwriteColumnHeading(zc.prev_cursor, old_col_handle, old_x);
+        if (y_on_screen and zc.cursor.y != zc.prev_cursor.y)
+            try tui.overwriteRowHeading(zc.prev_cursor);
+    }
 
     // Draw the new cursor
-    try tui.renderCursorAtPos(zc.cursor);
+    const new_col_handle = zc.currentSheet().cols.findEntry(&.{zc.cursor.x});
+    const new_x = posXToScreenX(zc, zc.cursor.x);
+    const new_y = posYToScreenY(zc, zc.cursor.y);
+    try tui.renderCursorAtPos(zc.cursor, new_col_handle, new_x, new_y);
+    if (zc.cursor.y != zc.prev_cursor.y)
+        try tui.overwriteRowHeading(zc.cursor);
+    if (zc.cursor.x != zc.prev_cursor.x)
+        try tui.overwriteColumnHeading(zc.cursor, new_col_handle, new_x);
 }
 
-fn renderCursorAtPos(tui: *Tui, pos: Position) !void {
-    const rc = tui.rc.?;
+fn overwriteRowHeading(tui: *Tui, pos: Position) !void {
     const zc = tui.zc.?;
-
-    if (zc.mode.isVisual()) return;
-
+    const rc = tui.rc.?;
     const left = zc.leftReservedColumns();
-    const writer = rc.buffer.writer();
 
-    const y: u16 = @intCast(pos.y - zc.screen_pos.y + cell_view_line);
-    const x = blk: {
-        assert(zc.screen_pos.x <= pos.x);
+    const y = posYToScreenY(zc, pos.y);
 
-        var x = left;
-        var i = zc.screen_pos.x;
-        while (i < pos.x) : (i += 1) {
-            const col: Column = zc.currentSheet().getColumn(i) orelse .{};
-            x += col.width;
-        }
-        break :blk x;
-    };
+    try rc.moveCursorTo(y, 0);
+    try tui.setStyle(
+        if (isSelected(zc, pos))
+            .row_heading_selected
+        else
+            .row_heading_unselected,
+    );
+    try rc.buffer.writer().print("{d: ^[1]}", .{ pos.y, left });
+}
 
-    // Render the cells and headings at the current cursor position with a specific colour.
-    try rc.moveCursorTo(y, x);
-    const col_handle = zc.currentSheet().cols.findEntry(&.{pos.x});
+fn posXToScreenX(zc: *ZC, px: Position.Int) u16 {
+    var x = zc.leftReservedColumns();
+    var i = zc.screen_pos.x;
+    while (i < px) : (i += 1) {
+        const c: Column = zc.currentSheet().getColumn(i) orelse .{};
+        x += c.width;
+    }
+    return x;
+}
+
+fn posYToScreenY(zc: *ZC, py: Position.Int) u16 {
+    return @intCast(py - zc.screen_pos.y + cell_view_line);
+}
+
+fn overwriteColumnHeading(tui: *Tui, pos: Position, col_handle: Column.Handle, screen_x: u16) !void {
+    const zc = tui.zc.?;
+    const rc = tui.rc.?;
+    const left = zc.leftReservedColumns();
+
     const col = zc.currentSheet().getColumnByHandleOrDefault(col_handle);
 
-    const cell_handle = zc.currentSheet().getCellHandleByPos(pos);
-    const text_attrs_handle = zc.currentSheet().text_attrs.findEntry(&.{ pos.x, pos.y });
-    try tui.renderCell(
-        pos,
-        cell_handle,
-        col.precision,
-        col.width,
-        zc.currentSheet().getTextAttrs(text_attrs_handle),
-    );
-
     const width = @min(col.width, rc.term.width - left);
-    try rc.moveCursorTo(col_heading_line, x);
+    try rc.moveCursorTo(col_heading_line, screen_x);
     try tui.setStyle(
         if (isSelected(zc, pos))
             .column_heading_selected
@@ -612,16 +629,27 @@ fn renderCursorAtPos(tui: *Tui, pos: Position) !void {
 
     var buf: [Position.max_str_len]u8 = undefined;
     const slice = Position.columnAddressBuf(pos.x, &buf);
-    try shovel.writeTruncating(slice, width, .center, writer);
+    try shovel.writeTruncating(slice, width, .center, rc.buffer.writer());
+}
 
-    try rc.moveCursorTo(y, 0);
-    try tui.setStyle(
-        if (isSelected(zc, pos))
-            .row_heading_selected
-        else
-            .row_heading_unselected,
+fn renderCursorAtPos(tui: *Tui, pos: Position, col_handle: Column.Handle, screen_x: u16, screen_y: u16) !void {
+    const rc = tui.rc.?;
+    const zc = tui.zc.?;
+
+    if (zc.mode.isVisual()) return;
+
+    // Render the cells and headings at the current cursor position with a specific colour.
+    const col = zc.currentSheet().getColumnByHandleOrDefault(col_handle);
+    const cell_handle = zc.currentSheet().getCellHandleByPos(pos);
+    const text_attrs_handle = zc.currentSheet().text_attrs.findEntry(&.{ pos.x, pos.y });
+    try rc.moveCursorTo(screen_y, screen_x);
+    try tui.renderCell(
+        pos,
+        cell_handle,
+        col.precision,
+        col.width,
+        zc.currentSheet().getTextAttrs(text_attrs_handle),
     );
-    try writer.print("{d: ^[1]}", .{ pos.y, left });
 }
 
 fn isSelected(zc: *const ZC, pos: Position) bool {
@@ -853,12 +881,20 @@ fn renderCell(
     }
 }
 
-fn isOnScreen(tui: *const Tui, zc: *ZC, pos: Position) bool {
-    if (pos.x < zc.screen_pos.x or pos.y < zc.screen_pos.y)
-        return false;
+const OnScreenResult = struct {
+    x: bool,
+    y: bool,
+};
+
+fn isOnScreen(tui: *const Tui, zc: *ZC, pos: Position) [2]bool {
+    if (pos.x < zc.screen_pos.x and pos.y < zc.screen_pos.y)
+        return .{ false, false };
 
     const col_count = tui.visibleColumnCount();
     const height = tui.cellViewHeight();
 
-    return pos.x <= zc.screen_pos.x +| col_count and pos.y <= zc.screen_pos.y +| height;
+    return .{
+        pos.x >= zc.screen_pos.x and pos.x <= zc.screen_pos.x +| col_count,
+        pos.y >= zc.screen_pos.y and pos.y <= zc.screen_pos.y +| height,
+    };
 }

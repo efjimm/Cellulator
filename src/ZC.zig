@@ -822,16 +822,16 @@ pub fn doCommandToMode(zc: *ZC, action: CommandAction) void {
         .enter_normal_mode => zc.setMode(.command_normal),
         .none => {
             const keys = zc.input_buf.items;
-            if (keys.len > 0) {
-                zc.setMode(zc.prev_mode);
-                switch (zc.prev_mode) {
-                    .command_to_forwards => zc.doCommandMotion(.{ .to_forwards_utf8 = keys }) catch unreachable,
-                    .command_to_backwards => zc.doCommandMotion(.{ .to_backwards_utf8 = keys }) catch unreachable,
-                    .command_until_forwards => zc.doCommandMotion(.{ .until_forwards_utf8 = keys }) catch unreachable,
-                    .command_until_backwards => zc.doCommandMotion(.{ .until_backwards_utf8 = keys }) catch unreachable,
-                    else => unreachable,
-                }
-            }
+            if (keys.len == 0) return;
+            zc.setMode(zc.prev_mode);
+            const motion: Motion = switch (zc.prev_mode) {
+                .command_to_forwards => .{ .to_forwards_utf8 = keys },
+                .command_to_backwards => .{ .to_backwards_utf8 = keys },
+                .command_until_forwards => .{ .until_forwards_utf8 = keys },
+                .command_until_backwards => .{ .until_backwards_utf8 = keys },
+                else => unreachable,
+            };
+            zc.doCommandMotion(motion) catch unreachable;
         },
         else => {},
     }

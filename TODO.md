@@ -16,8 +16,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
   - Automatically check validity of entered commands against a declared structure
   - Allow registering new commands from lua
 
-  Handle counts correctly for deleting/inserting rows and columns.
-
 - Command mode
   - Undos and redos
   - File completion
@@ -47,7 +45,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
   - Can be implemented via Lua with the three aformentioned features.
 
 - Features
-  - C-k bind in command line
   - Better error reporting when setting themes
   - Deduplicate repeated commands in command history
   - Expandable, scrollable status messages for more verbose error messages and documentation
