@@ -279,10 +279,7 @@ const metatables = .{
 
         pub fn set_cell(state: *Lua) callconv(.C) c_int {
             const zc = state.checkUserdata(*ZC, 1, "zc").*;
-            state.checkType(2, .table);
 
-            _ = state.getIndex(2, 1);
-            _ = state.getIndex(2, 2);
             const expr_str = state.checkString(-1);
             const pos = checkCellAddress(state, -2);
 
@@ -291,18 +288,6 @@ const metatables = .{
                 error.UnexpectedToken => state.argError(2, "Unexpected token"),
                 error.OutOfMemory => return 0, // TODO: Make sure this is handled properly
             };
-            return 0;
-        }
-
-        pub fn delete_cell(state: *Lua) callconv(.C) c_int {
-            const zc = state.checkUserdata(*ZC, 1, "zc").*;
-            state.checkType(2, .table);
-
-            _ = state.getIndex(2, 1);
-            const pos = checkCellAddress(state, -1);
-            zc.deleteCell2(pos, .{ .emit_event = false }) catch {};
-
-            state.setTop(0);
             return 0;
         }
 

@@ -255,7 +255,7 @@ pub fn init(zc: *ZC, allocator: Allocator, options: InitOptions) !void {
     zc.emitEvent("Init", .{});
 
     if (options.filepath) |filepath| {
-        try zc.loadFile(zc.currentSheet(), filepath);
+        try zc.loadFile(zc.current_sheet, filepath);
     }
 
     log.debug("Finished init", .{});
@@ -345,8 +345,17 @@ pub fn setCell(
     try zc.currentSheet().setCell(pos, source, expr_root, .{});
     zc.ui.update_flags.cursor = true;
     zc.ui.update_flags.cells = true;
-    if (opts.emit_event)
-        zc.emitEvent("SetCell", .{pos});
+    if (opts.emit_event) {
+        const expr_string =
+            for (source, 0..) |c, i| {
+                if (c == '=') break std.mem.trimLeft(
+                    u8,
+                    source[i + 1 ..],
+                    &std.ascii.whitespace,
+                );
+            } else unreachable;
+        zc.emitEvent("SetCell", .{ pos, expr_string });
+    }
 }
 
 pub fn getSheet(zc: *const ZC, index: usize) *Sheet {
@@ -355,6 +364,10 @@ pub fn getSheet(zc: *const ZC, index: usize) *Sheet {
 
 pub fn currentSheet(zc: *const ZC) *Sheet {
     return &zc.sheets.values()[zc.current_sheet];
+}
+
+pub fn getSheetName(zc: *const ZC, index: usize) []const u8 {
+    return zc.sheets.keys()[index];
 }
 
 /// Sets the cell at `pos` to the expression represented by `expr`.
@@ -868,16 +881,21 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
         .goto_col => zc.cursorGotoCol(),
         .goto_row => zc.cursorGotoRow(),
         .delete_column => {
-            try zc.currentSheet().deleteColOrRowRange(zc.cursor.x, zc.cursor.x, .{}, .col);
+            defer zc.resetCount();
+            const count = zc.getCount() - 1;
+            try zc.currentSheet().deleteColOrRowRange(zc.cursor.x, zc.cursor.x + count, .{}, .col);
             zc.currentSheet().endUndoGroup();
             zc.ui.update(&.{ .column_headings, .cells });
         },
         .delete_row => {
-            try zc.currentSheet().deleteColOrRowRange(zc.cursor.y, zc.cursor.y, .{}, .row);
+            defer zc.resetCount();
+            const count = zc.getCount() - 1;
+            try zc.currentSheet().deleteColOrRowRange(zc.cursor.y, zc.cursor.y + count, .{}, .row);
             zc.currentSheet().endUndoGroup();
-            zc.ui.update(&.{ .column_headings, .cells });
+            zc.ui.update(&.{ .row_numbers, .cells });
         },
         .insert_column => {
+            defer zc.resetCount();
             zc.currentSheet().insertColumns(zc.cursor.x, zc.getCount(), .{}) catch |err| switch (err) {
                 error.Overflow => zc.setStatusMessage(.err, "Columns would overflow", .{}),
                 else => |e| return e,
@@ -886,6 +904,7 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
             zc.ui.update(&.{ .column_headings, .cells });
         },
         .insert_row => {
+            defer zc.resetCount();
             zc.currentSheet().insertRows(zc.cursor.y, zc.getCount(), .{}) catch |err| switch (err) {
                 error.Overflow => zc.setStatusMessage(.err, "Rows would overflow", .{}),
                 else => |e| return e,
@@ -1376,8 +1395,11 @@ pub fn runCommand(zc: *ZC, str: [:0]const u8) !void {
             }
         },
         .quit => {
-            if (zc.currentSheet().has_changes) {
-                zc.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
+            for (zc.sheets.values()) |*sheet| {
+                if (sheet.has_changes) {
+                    zc.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
+                    break;
+                }
             } else {
                 zc.running = false;
             }
@@ -1394,7 +1416,7 @@ pub fn runCommand(zc: *ZC, str: [:0]const u8) !void {
         },
         .binary_save => {
             const filepath = iter.next() orelse {
-                zc.setStatusMessage(.err, "No filename provided", .{});
+                zc.setStatusMessage(.err, "Not enough arguments (expected a path)", .{});
                 return;
             };
 
@@ -1416,7 +1438,11 @@ pub fn runCommand(zc: *ZC, str: [:0]const u8) !void {
             }
         },
         .binary_load_force => {
-            try zc.loadCmdBinary(iter.next() orelse "");
+            const path = iter.next() orelse {
+                zc.setStatusMessage(.err, "Not enough arguments (expected a path)", .{});
+                return;
+            };
+            try zc.loadCmdBinary(path);
         },
         .load => {
             if (zc.currentSheet().has_changes) {
@@ -1469,12 +1495,20 @@ pub fn runCommand(zc: *ZC, str: [:0]const u8) !void {
             zc.ui.update(&.{.cells});
         },
         .fill_expr => {
-            const arg1 = iter.next() orelse return error.InvalidSyntax;
+            const arg1 = iter.next() orelse {
+                zc.setStatusMessage(.err, "Not enough arguments (expected a range or cell)", .{});
+                return;
+            };
             const expr_str = str[iter.index..];
-
             const range = try parseRangeOrPoint(arg1);
 
-            const expr = try ast.fromExpression(zc.currentSheet(), expr_str);
+            const expr = ast.fromExpression(zc.currentSheet(), expr_str) catch |err| switch (err) {
+                error.UnexpectedToken => {
+                    zc.setStatusMessage(.err, "Invalid expression (unexpected token)", .{});
+                    return;
+                },
+                else => |e| return e,
+            };
             try zc.currentSheet().bulkSetCellExpr(range, expr_str, expr, .{});
             zc.currentSheet().endUndoGroup();
             zc.ui.update(&.{ .cursor, .cells });
@@ -1692,7 +1726,7 @@ pub fn loadCmd(zc: *ZC, filepath: []const u8) !void {
     const new_sheet = try zc.openSheet();
     errdefer comptime unreachable;
 
-    zc.loadFile(zc.getSheet(new_sheet), filepath) catch |err| {
+    zc.loadFile(new_sheet, filepath) catch |err| {
         zc.setStatusMessage(.err, "Could not open file: {s}", .{@errorName(err)});
         zc.closeSheet(new_sheet) catch unreachable;
         return;
@@ -1703,13 +1737,16 @@ pub fn loadCmd(zc: *ZC, filepath: []const u8) !void {
 
 fn writeFile(zc: *ZC, filepath: ?[]const u8) !void {
     try zc.currentSheet().writeFile(.{ .filepath = filepath });
-    zc.emitEvent("UpdateFilePath", .{filepath});
 }
 
-fn loadFile(zc: *ZC, sheet: *Sheet, filepath: []const u8) !void {
+fn loadFile(zc: *ZC, sheet_index: usize, filepath: []const u8) !void {
+    const sheet = zc.getSheet(sheet_index);
     try sheet.loadFile(filepath);
     sheet.endUndoGroup();
-    zc.emitEvent("UpdateFilePath", .{filepath});
+    zc.emitEvent("UpdateFilePath", .{
+        zc.getSheetName(sheet_index),
+        filepath,
+    });
 }
 
 fn setCurrentSheet(zc: *ZC, index: usize) void {

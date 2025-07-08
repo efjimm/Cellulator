@@ -1,19 +1,9 @@
 # Cellulator
 
-Cellulator is a TUI spreadsheet calculator written in [Zig](https://ziglang.org).
+Cellulator is a terminal based, vim-like spreadsheet calculator.
 
-## Portability
-
-Cellulator works on Linux and MacOS. Zig's standard library is currently missing some constants and
-types for other POSIX compliant OS's that are required by Cellulator, and may or may not build for
-them.
-
-## Terminal Compatibility
-
-Cellulator should be compatible with most modern software terminals. Cellulator does not use
-curses, instead using a [fork](https://github.com/efjimm/zig-spoon) of
-[zig-spoon](https://git.sr.ht/~leon_plickat/zig-spoon). spoon uses vt-100 escape sequences to draw
-to the screen, which should be supported by any modern terminal.
+Cellulator primarily targets Linux. MacOS and FreeBSD 0.14 targets compile successfully but are
+otherwise untested.
 
 # Installation
 
@@ -24,18 +14,18 @@ Requirements:
 Clone the repo and run `zig build -Doptimize=ReleaseSafe` to build the project. The resulting
 binary will be in zig-out/bin by default.
 
-Run `zig build test -fsummary` to run the tests.
+Run `zig build --summary new test` to run the tests.
 
 # Usage
 
 Cellulator is currently in early development. Expect missing features. If you actually intend on
 using Cellulator, build it in ReleaseSafe mode to catch any latent bugs.
 
-The maximum sheet size is 4,294,967,296 rows by 4,294,967,296 columns.
+The maximum sheet size is $2^{32}$ rows by $2^{32}$ columns.
 
 ## Modes
 
-Cellulator used mode-based input, like in vim. There are multiple modes in Cellulator:
+Cellulator is a modal program like vim. There are several modes in Cellulator:
 
  - normal
  - visual
@@ -46,11 +36,11 @@ Cellulator used mode-based input, like in vim. There are multiple modes in Cellu
 
 Normal mode allows you to move around the sheet using vim-like motions and perform various
 operations. Visual mode is used for performing operations on a range of cells interactively.
-Command normal and command insert mode allow for editing the command buffer and submitting
-commands. Command operator pending modes perform a specific action on a range of text delimited by
-an inputted motion.
 
-## Statements / Commands
+Command modes are for editing the text in the command line. vim-style text editing is available for
+editing the command line buffer, hence the multiple command modes.
+
+## Statements and Commands
 
 Cellulator differentiates between **statements** and **commands**. They can both be entered via the
 command line. The main difference is that statements can be read from a file - this is how
@@ -58,26 +48,173 @@ Cellulator saves sheet state to disk.
 
 There is currently only one type of statement in cellulator:
 
-- `let {cell address} = {expression}`
-  - {cell address} is the text address of a cell, e.g. `A0`, `GL3600`
-  - {expression} is any [expression](#expressions)
+```
+let CELL = EXPR
+```
+
+CELL is the address of a cell, e.g. `A0`, `GL3600`
+EXPR is any [expression](#expressions)
 
 Commands can be entered via placing a colon character as the first character of a command.
 Pressing ':' in normal mode will do this automatically. What follows is a list of currently
 implemented commands. Values surrounded in {} are optional.
 
-- `w {filepath}` Save to the given filepath, or to the sheet's filepath if not specified.
-- `e{!} filepath` Try to load from the given file. Will not continue if there are unsaved changes.
-  This can be overridden by specifying a ! after 'e'.
-- `q{!}` Quit the program. Will not continue if there are unsaved changes, unless ! is specified.
-- `fill (range) (value) {increment}`
-  - Fills the given range with value, incrementing by increment each cell. Increment is applied
-    left to right, top to bottom. Example: ":fill b1:d12 30 0.2"
-- `bw {filepath}` Save to the given filepath in a binary format. This format is significantly
-   faster to save/load. Filepath must be specified.
-- `be {filepath}` Load from the given filepath in a binary format.
-- `text-align [cell address] left|right|center` Set the alignment of the text in the specified cell.
-   If the cell address is not given, the cell under the cursor is affected.
+```
+:w
+:w PATH
+```
+
+Save to the given filepath, or to the sheet's filepath if not specified.
+
+```
+:e
+:e PATH
+```
+
+Creates a new sheet with the given filepath. If the filepath exists it will load
+attempt to load the file into the new sheet.
+
+```
+:q{!}
+```
+
+Quit the program. Will not continue if there are unsaved changes, unless ! is specified.
+
+```
+:fill RANGE VALUE
+:fill RANGE VALUE INCREMENT
+```
+
+Fills the given range with value, incrementing by increment each cell. Increment is applied left to
+right, top to bottom. Example: `:fill b1:d12 30 0.2`
+
+```
+:fill-expr RANGE EXPR...
+```
+
+Fills the given range with an expression. Example: `:fill-expr a0:c3 1 / 2 + 3`
+
+```
+:bw PATH
+```
+
+Save to the given filepath in a binary format. This format is significantly faster to save/load.
+Filepath must be specified.
+
+```
+:be PATH
+```
+
+Load from the given filepath in a binary format. Significantly faster to load than a normal file.
+
+**Binary files are not validated beyond a simple magic number and version check. Binary files are
+loaded directly into the internal state of the program without modification. It is conceivable that
+a malicious file could contain an invalid state that causes undefined behaviour. Only open binary
+files you trust.**
+
+```
+:text-align left|right|center
+:text-align CELL left|right|center
+:text-align RANGE left|right|center
+```
+
+Set the alignment of the text in the specified cells or under the cursor if not specified. Only
+cells with a text value can have be aligned.
+
+
+```
+:undo
+:undo N
+```
+
+Undos N or 1 times.
+
+```
+:redo
+:redo N
+```
+
+Redos N or 1 times.
+
+```
+:delete
+:delete CELL
+:delete RANGE
+```
+
+Delete the given cell or all cells in the given range. If no arguments are supplied the cells
+underneath the cursor are deleted.
+
+```
+:delete-cols
+:delete-cols COLUMN_RANGE
+```
+
+Delete the given columns, or the columns under the cursor if no arguments are given. The column
+range is specified like a cell range but with the row numbers omitted, e.g. `:delete-cols C:AA`
+
+```
+:delete-rows
+:delete-rows ROW_RANGE
+```
+
+Delete the given rows, or the rows under the cursor if no arguments are given. The row range is
+specified like a cell range but with the column letters omitted, e.g. `:delete-rows 9:15`
+
+```
+:insert-cols
+:insert-cols N
+:insert-cols START N
+```
+
+Insert columns into the sheet. The two argument variant inserts N columns at column START. The one
+argument variant inserts N columns at the cursor, and the zero argument variant inserts 1 column at
+the cursor.
+
+```
+:yank
+:yank RANGE
+```
+
+Copies the given range or the cursor range to the yank buffer.
+
+```
+:put
+:put CELL
+```
+
+Pastes the current contents of the range held by the yank buffer at the given positionor at the
+cursor. Expressions are copied literally, with no modification.
+
+```
+:sheet-close
+:sheet-close!
+:sc
+:sc!
+```
+
+Closes the currently selected sheet. The ! version force closes the sheet even if it has unsaved
+changes.
+
+```
+:sheet-rename NEW_NAME
+:sheet-rename TARGET_SHEET NEW_NAME
+```
+
+Renames the given sheet or the current sheet.
+
+```
+:set PROPERTY
+:set PROPERTY VALUE
+```
+
+Sets a configuration property to a given value or to true if omitted. Currently supported properties are `theme` and `truecolor`.
+
+```
+:unset PROPERTY
+```
+
+Unsets a configuration property.
 
 ## Expressions
 
@@ -116,7 +253,7 @@ Examples:
 
 - `A0`
 - `GP359`
-- `crxp65535` (Last cell in a sheet)
+- `crxp65535`
 
 ### Cell Ranges
 
@@ -215,6 +352,15 @@ will repeat the following motion that many times. This does not currently work f
 - `<` Align text under cursor to the left
 - `>` Align text under cursor to the right
 - `|` Align text undor cursor to the center
+- `gn` Go to the next sheet
+- `gp` Go to the previous sheet
+- `C-wq` Close the current sheet
+- `yy` Yank selected cell
+- `p` Put yanked cells at cursor
+- `ic` Insert count columns at the cursor
+- `dc` Delete count columns at the cursor
+- `ir` Insert count rows at the cursor
+- `dr` Delete count rows at the cursor
 
 ### Visual Mode
 
@@ -226,6 +372,7 @@ will repeat the following motion that many times. This does not currently work f
 - `Alt-k` Move selection up count times
 - `Alt-h` Move selection left count times
 - `Alt-l` Move selection right count times
+- `yy` Yank selected cells and enter normal mode
 
 ### Visual Select Mode
 
@@ -245,7 +392,8 @@ will repeat the following motion that many times. This does not currently work f
 - `C-f`, `Right` Move cursor forward one character
 - `C-b`, `Left` Move cursor backward one character
 - `C-w` Delete the word before the cursor
-- `C-u` Delete all text in the command buffer
+- `C-u` Delete all text before the cursor
+- `C-k` Delete all text after the cursor
 - `C-v` Enter visual select mode
 - `C-p`, `<Up>` History prev
 - `C-n`, `<Down>` History next
@@ -306,3 +454,116 @@ Performs the given operation on the text delimited by the next motion
 - `a'` Around single quotes
 - `` i` `` Inside backticks
 - `` a` `` Around backticks
+
+## Lua Scripting
+
+Cellulator integrates Lua for scripting and configuration purposes. Currently the API is a very
+small proof of concept and not at all stable.
+
+At startup Cellulator runs the Lua file at `$XDG_CONFIG_HOME/cellulator/init.lua`. A global variable
+`zc` is exposed which provides functionality to interact with Cellulator.
+
+Here is an example `init.lua`:
+
+```lua
+zc.events:subscribe('Start', function()
+  -- Set theme on startup
+  zc:command('set theme mytheme')
+end)
+
+zc.events:subscribe('SetCell', function(pos)
+  -- Move the cursor down one
+  zc:set_cursor{ x = pos.x, y = pos.y + 1 }
+
+  -- Set the cell directly to the right to (expr) * 2
+  zc:set_cell({ x = pos.x + 1, y = pos.y }, '(' .. expr .. ') * 2')
+end)
+
+zc.events:subscribe('UpdateFilePath', function(sheet_name, new_path)
+  -- Display a status message when we open a new file
+  zc:status{'Opened file "' .. new_path  .. '" in ' .. sheet_name}
+end)
+```
+
+### Events
+
+Cellulator has a mechanism for emitting events, which Lua code can register handlers for. Lua code
+can also register and emit its own events.
+
+### Themes
+
+When a theme is set using the `:set THEME_NAME` command, the corresponding theme file at
+`${XDG_CONFIG_HOME}/cellulator/themes/terminal/THEME_NAME.lua` is loaded. For the terminal UI, theme
+files are lua files that when executed return a table containing the theme definition. The keys of
+the returned table correspond to a specific UI element to be styled. Omitted keys are left at their
+default value.
+
+Here is an (extremely ugly) example theme:
+
+```lua
+local bg = '#ff0000'
+local fg = '#c0c5ce'
+local high_bg = '#6984ae'
+local high_fg = '#292d36'
+local high = { fg = high_fg, bg = high_bg }
+local plain= { fg = fg, bg = bg }
+
+return {
+  filepath = { fg = fg, bg = bg, attrs = { 'bold', 'underline' } },
+  status_line = { fg = '#00ff00', bg = '#0000ff' },
+  command_line = { fg = '#00ff00', bg = '#0000ff' },
+  expression = { fg = '#00ff00', bg = bg },
+
+  column_heading_unselected = plain,
+  column_heading_selected   = high,
+  row_heading_unselected    = plain,
+  row_heading_selected      = high,
+
+  cell_blank_selected    = high,
+  cell_blank_unselected  = plain,
+  cell_number_selected   = high,
+  cell_number_unselected = plain,
+  cell_text_selected     = high,
+  cell_text_unselected   = plain,
+  cell_error_selected    = high,
+  cell_error_unselected  = plain,
+
+  selected_sheet = high,
+  unselected_sheet = plain,
+}
+```
+
+
+The currently available elements are:
+
+```
+status_line,
+status_info,
+status_warn,
+status_err,
+
+filepath,
+cursor_pos,
+mode_indicator,
+count,
+expression,
+expression_error,
+command_line,
+
+column_heading_unselected,
+column_heading_selected,
+row_heading_unselected,
+row_heading_selected,
+
+cell_number_unselected,
+cell_number_selected,
+cell_text_unselected,
+cell_text_selected,
+cell_error_unselected,
+cell_error_selected,
+cell_blank_unselected,
+cell_blank_selected,
+
+sheet_selected,
+sheet_unselected,
+```

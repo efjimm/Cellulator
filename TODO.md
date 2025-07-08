@@ -16,6 +16,8 @@ might be an interesting read so I committed it. The stuff at the top is probably
   - Automatically check validity of entered commands against a declared structure
   - Allow registering new commands from lua
 
+  Handle counts correctly for deleting/inserting rows and columns.
+
 - Command mode
   - Undos and redos
   - File completion

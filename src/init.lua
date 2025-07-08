@@ -38,11 +38,11 @@ zc.events = {
   end,
 }
 
+-- Emitted after startup but before the file specified on the command line is loaded.
 zc.events:register('Init')
+-- Emitted after startup and after the file specified on the command line is loaded.
 zc.events:register('Start')
+-- Emitted whenever the user manually sets a single cell value.
 zc.events:register('SetCell')
+-- Emitted whenever the file path of a sheet is updated.
 zc.events:register('UpdateFilePath')
-
-zc.events:subscribe('UpdateFilePath', function(new_path)
-  zc.sheet.path = new_path
-end)
