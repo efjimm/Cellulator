@@ -849,8 +849,10 @@ const ExprRangeIterator = struct {
             },
             .range => {
                 const r = data[it.start.n + iter.index].range;
-                const p1 = data[r.lhs.n].pos;
-                const p2 = data[r.rhs.n].pos;
+                const start: ast.Index = .from(@intCast(it.start.n + iter.index));
+                const lhs, const rhs = r.resolve(start);
+                const p1 = data[lhs.n].pos;
+                const p2 = data[rhs.n].pos;
                 _ = iter.next().?;
                 _ = iter.next().?;
                 return .{ .tl = p1, .br = p2 };
@@ -1414,9 +1416,9 @@ fn updateRange(sheet: *Sheet, index: ast.Index, new_range: Rect, _: UndoOpts) !v
     assert(tag == .range or tag == .invalidated_range);
     try sheet.ensureUnusedUndoCapacity(1);
 
-    const ptr = &sheet.ast_nodes.items(.data)[index.n].range;
-    const lhs = &sheet.ast_nodes.items(.data)[ptr.lhs.n].pos;
-    const rhs = &sheet.ast_nodes.items(.data)[ptr.rhs.n].pos;
+    const l, const r = sheet.ast_nodes.items(.data)[index.n].range.resolve(index);
+    const lhs = &sheet.ast_nodes.items(.data)[l.n].pos;
+    const rhs = &sheet.ast_nodes.items(.data)[r.n].pos;
 
     lhs.* = new_range.tl;
     rhs.* = new_range.br;
@@ -2109,9 +2111,9 @@ pub fn deleteColOrRowRange(
                     i -= 2;
                 },
                 .range => {
-                    const range = data[i].range;
-                    const tl: Position = data[range.lhs.n].pos;
-                    const br: Position = data[range.rhs.n].pos;
+                    const lhs, const rhs = data[i].range.resolve(.from(i));
+                    const tl: Position = data[lhs.n].pos;
+                    const br: Position = data[rhs.n].pos;
                     const tl_f = @field(tl, f);
                     const br_f = @field(br, f);
                     const needs_resize_or_delete = !(tl_f > end or (tl_f < start and br_f > end));
@@ -2275,9 +2277,9 @@ pub fn deleteColOrRowRange(
                 i -= 2;
             },
             .range => {
-                const range = data[i].range;
-                const tl: *Position = &data[range.lhs.n].pos;
-                const br: *Position = &data[range.rhs.n].pos;
+                const lhs, const rhs = data[i].range.resolve(.from(i));
+                const tl: *Position = &data[lhs.n].pos;
+                const br: *Position = &data[rhs.n].pos;
                 const u: Undo = .init(.update_range, .{
                     .ast_node = .from(i),
                     .range = .{
@@ -2376,9 +2378,9 @@ pub fn insertColsOrRows(
                 },
                 .invalidated_range => i -= 2,
                 .range => {
-                    const range = data[i].range;
-                    const tl: Position = data[range.lhs.n].pos;
-                    const br: Position = data[range.rhs.n].pos;
+                    const lhs, const rhs = data[i].range.resolve(.from(i));
+                    const tl: Position = data[lhs.n].pos;
+                    const br: Position = data[rhs.n].pos;
                     const tl_f = @field(tl, f);
                     const br_f = @field(br, f);
                     undo_count += @intFromBool(tl_f >= index or br_f >= index);
@@ -2487,9 +2489,9 @@ pub fn insertColsOrRows(
                 i -= 2;
             },
             .range => {
-                const range = data[i].range;
-                const tl = &data[range.lhs.n].pos;
-                const br = &data[range.rhs.n].pos;
+                const lhs, const rhs = data[i].range.resolve(.from(i));
+                const tl = &data[lhs.n].pos;
+                const br = &data[rhs.n].pos;
                 assert(tl.x <= br.x);
                 assert(tl.y <= br.y);
 

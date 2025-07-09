@@ -82,11 +82,23 @@ pub const Index = packed struct {
         return .{ .n = n };
     }
 
-    pub fn isValid(n: Index) bool {
-        return n == .invalid;
+    pub fn sub(index: Index, offset: NegativeOffset) Index {
+        return .from(index.n - offset.int());
     }
 
     pub const invalid: Index = .{ .n = std.math.maxInt(u32) };
+};
+
+pub const NegativeOffset = enum(u32) {
+    _,
+
+    pub fn from(n: u32) NegativeOffset {
+        return @enumFromInt(n);
+    }
+
+    pub fn int(o: NegativeOffset) u32 {
+        return @intFromEnum(o);
+    }
 };
 
 pub fn fromSource(sheet: *Sheet, source: [:0]const u8) ParseError!Index {
@@ -203,112 +215,112 @@ pub fn printFromNode(
             try writer.print("\"{s}\"", .{strings[str.start..str.end]});
         },
         .concat => |b| {
-            try printFromIndex(nodes, sheet, b.lhs, writer, strings);
+            try printFromIndex(nodes, sheet, index.sub(b.lhs), writer, strings);
             try writer.writeAll(" # ");
-            try printFromIndex(nodes, sheet, b.rhs, writer, strings);
+            try printFromIndex(nodes, sheet, index.sub(b.rhs), writer, strings);
         },
         .assignment => |pos| {
             try writer.print("let {} = ", .{pos});
             try printFromIndex(nodes, sheet, .from(index.n - 1), writer, strings);
         },
         .add => |b| {
-            try printFromIndex(nodes, sheet, b.lhs, writer, strings);
+            try printFromIndex(nodes, sheet, index.sub(b.lhs), writer, strings);
             try writer.writeAll(" + ");
-            const rhs = nodes.get(b.rhs.n);
+            const rhs = nodes.get(index.sub(b.rhs).n);
             switch (rhs.tag) {
                 .sub => {
                     try writer.writeByte('(');
-                    try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings);
+                    try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings);
                     try writer.writeByte(')');
                 },
                 else => {
-                    try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings);
+                    try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings);
                 },
             }
         },
         .sub => |b| {
-            try printFromIndex(nodes, sheet, b.lhs, writer, strings);
+            try printFromIndex(nodes, sheet, index.sub(b.lhs), writer, strings);
             try writer.writeAll(" - ");
 
-            const rhs = nodes.get(b.rhs.n);
+            const rhs = nodes.get(index.sub(b.rhs).n);
             switch (rhs.tag) {
                 .add, .sub => {
                     try writer.writeByte('(');
-                    try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings);
+                    try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings);
                     try writer.writeByte(')');
                 },
                 else => {
-                    try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings);
+                    try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings);
                 },
             }
         },
         .mul => |b| {
-            const lhs = nodes.get(b.lhs.n);
+            const lhs = nodes.get(index.sub(b.lhs).n);
             switch (lhs.tag) {
                 .add, .sub => {
                     try writer.writeByte('(');
-                    try printFromNode(nodes, sheet, b.lhs, lhs, writer, strings);
+                    try printFromNode(nodes, sheet, index.sub(b.lhs), lhs, writer, strings);
                     try writer.writeByte(')');
                 },
-                else => try printFromNode(nodes, sheet, b.lhs, lhs, writer, strings),
+                else => try printFromNode(nodes, sheet, index.sub(b.lhs), lhs, writer, strings),
             }
             try writer.writeAll(" * ");
-            const rhs = nodes.get(b.rhs.n);
+            const rhs = nodes.get(index.sub(b.rhs).n);
             switch (rhs.tag) {
                 .add, .sub, .div, .mod => {
                     try writer.writeByte('(');
-                    try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings);
+                    try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings);
                     try writer.writeByte(')');
                 },
-                else => try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings),
+                else => try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings),
             }
         },
         .div => |b| {
-            const lhs = nodes.get(b.lhs.n);
+            const lhs = nodes.get(index.sub(b.lhs).n);
             switch (lhs.tag) {
                 .add, .sub => {
                     try writer.writeByte('(');
-                    try printFromNode(nodes, sheet, b.lhs, lhs, writer, strings);
+                    try printFromNode(nodes, sheet, index.sub(b.lhs), lhs, writer, strings);
                     try writer.writeByte(')');
                 },
-                else => try printFromNode(nodes, sheet, b.lhs, lhs, writer, strings),
+                else => try printFromNode(nodes, sheet, index.sub(b.lhs), lhs, writer, strings),
             }
             try writer.writeAll(" / ");
-            const rhs = nodes.get(b.rhs.n);
+            const rhs = nodes.get(index.sub(b.rhs).n);
             switch (rhs.tag) {
                 .add, .sub, .mul, .div, .mod => {
                     try writer.writeByte('(');
-                    try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings);
+                    try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings);
                     try writer.writeByte(')');
                 },
-                else => try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings),
+                else => try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings),
             }
         },
         .mod => |b| {
-            const lhs = nodes.get(b.lhs.n);
+            const lhs = nodes.get(index.sub(b.lhs).n);
             switch (lhs.tag) {
                 .add, .sub => {
                     try writer.writeByte('(');
-                    try printFromNode(nodes, sheet, b.lhs, lhs, writer, strings);
+                    try printFromNode(nodes, sheet, index.sub(b.lhs), lhs, writer, strings);
                     try writer.writeByte(')');
                 },
-                else => try printFromNode(nodes, sheet, b.lhs, lhs, writer, strings),
+                else => try printFromNode(nodes, sheet, index.sub(b.lhs), lhs, writer, strings),
             }
             try writer.writeAll(" % ");
-            const rhs = nodes.get(b.rhs.n);
+            const rhs = nodes.get(index.sub(b.rhs).n);
             switch (rhs.tag) {
                 .add, .sub, .mul, .div, .mod => {
                     try writer.writeByte('(');
-                    try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings);
+                    try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings);
                     try writer.writeByte(')');
                 },
-                else => try printFromNode(nodes, sheet, b.rhs, rhs, writer, strings),
+                else => try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings),
             }
         },
         .range, .invalidated_range => |b| {
-            try printFromIndex(nodes, sheet, b.lhs, writer, strings);
+            try printFromIndex(nodes, sheet, index.sub(b.lhs), writer, strings);
             try writer.writeByte(':');
-            try printFromIndex(nodes, sheet, b.rhs, writer, strings);
+            try printFromIndex(nodes, sheet, index.sub(b.rhs), writer, strings);
         },
 
         .builtin => |b| {
@@ -427,7 +439,7 @@ pub fn leftMostChild(
         .mod,
         .range,
         .invalidated_range,
-        => |b| leftMostChild(nodes, b.lhs),
+        => |b| leftMostChild(nodes, index.sub(b.lhs)),
         .builtin => |b| leftMostChild(nodes, b.first_arg),
     };
 }
@@ -556,25 +568,25 @@ pub fn EvalContext(comptime Context: type) type {
                     return self.context.evalCellByPos(pos);
                 },
                 .add => |op| {
-                    const lhs = try self.eval(op.lhs);
-                    const rhs = try self.eval(op.rhs);
+                    const lhs = try self.eval(index.sub(op.lhs));
+                    const rhs = try self.eval(index.sub(op.rhs));
 
                     return .{ .number = try lhs.toNumber(0) + try rhs.toNumber(0) };
                 },
                 .sub => |op| {
-                    const rhs = try self.eval(op.rhs);
-                    const lhs = try self.eval(op.lhs);
+                    const rhs = try self.eval(index.sub(op.rhs));
+                    const lhs = try self.eval(index.sub(op.lhs));
 
                     return .{ .number = try lhs.toNumber(0) - try rhs.toNumber(0) };
                 },
                 .mul => |op| {
-                    const rhs = try self.eval(op.lhs);
-                    const lhs = try self.eval(op.rhs);
+                    const rhs = try self.eval(index.sub(op.lhs));
+                    const lhs = try self.eval(index.sub(op.rhs));
                     return .{ .number = try lhs.toNumber(0) * try rhs.toNumber(0) };
                 },
                 .div => |op| {
-                    const lhs = try self.eval(op.lhs);
-                    const rhs = try self.eval(op.rhs);
+                    const lhs = try self.eval(index.sub(op.lhs));
+                    const rhs = try self.eval(index.sub(op.rhs));
 
                     const rhs_number = try rhs.toNumberOrNull() orelse return error.DivideByZero;
                     if (rhs_number == 0) return error.DivideByZero;
@@ -582,8 +594,8 @@ pub fn EvalContext(comptime Context: type) type {
                     return .{ .number = try lhs.toNumber(0) / rhs_number };
                 },
                 .mod => |op| {
-                    const lhs = try self.eval(op.lhs);
-                    const rhs = try self.eval(op.rhs);
+                    const lhs = try self.eval(index.sub(op.lhs));
+                    const rhs = try self.eval(index.sub(op.rhs));
 
                     return .{ .number = @rem(try lhs.toNumber(0), try rhs.toNumber(0)) };
                 },
@@ -599,8 +611,8 @@ pub fn EvalContext(comptime Context: type) type {
                 },
 
                 .concat => |op| {
-                    const lhs = try self.eval(op.lhs);
-                    const rhs = try self.eval(op.rhs);
+                    const lhs = try self.eval(index.sub(op.lhs));
+                    const rhs = try self.eval(index.sub(op.rhs));
 
                     const len = lhs.lengthAsString() + rhs.lengthAsString();
                     const buf = try self.allocator.alloc(u8, len);
@@ -641,7 +653,10 @@ pub fn EvalContext(comptime Context: type) type {
             var total: f64 = 0;
 
             while (iter.next()) |i| switch (tags[i.n]) {
-                .range => total += try self.sumRange(data[i.n].range),
+                .range => {
+                    const lhs, const rhs = data[i.n].range.resolve(i);
+                    total += try self.sumRange(lhs, rhs);
+                },
                 .invalidated_range => return error.NotEvaluable,
                 else => {
                     const res = try self.eval(i);
@@ -653,26 +668,23 @@ pub fn EvalContext(comptime Context: type) type {
         }
 
         /// Converts an ast range to a position range.
-        fn toPosRange(self: @This(), r: BinaryOperator) Position.Rect {
+        fn toPosRange(self: @This(), lhs: Index, rhs: Index) Position.Rect {
             const data = self.nodes.items(.data);
 
-            if (self.nodes.items(.tag)[r.lhs.n] != .pos) {
-                std.debug.print("{}\n", .{self.nodes.items(.tag)[r.lhs.n]});
+            if (self.nodes.items(.tag)[lhs.n] != .pos) {
+                std.debug.print("{}\n", .{self.nodes.items(.tag)[lhs.n]});
                 unreachable;
             }
-            if (self.nodes.items(.tag)[r.rhs.n] != .pos) {
-                std.debug.print("{}\n", .{self.nodes.items(.tag)[r.rhs.n]});
+            if (self.nodes.items(.tag)[rhs.n] != .pos) {
+                std.debug.print("{}\n", .{self.nodes.items(.tag)[rhs.n]});
                 unreachable;
             }
 
-            return .initPos(
-                data[r.lhs.n].pos,
-                data[r.rhs.n].pos,
-            );
+            return .initPos(data[lhs.n].pos, data[rhs.n].pos);
         }
 
-        fn sumRange(self: @This(), r: BinaryOperator) !f64 {
-            const range = self.toPosRange(r);
+        fn sumRange(self: @This(), lhs: Index, rhs: Index) !f64 {
+            const range = self.toPosRange(lhs, rhs);
 
             var total: f64 = 0;
             var results: std.ArrayList(Sheet.Cell.Handle) = .init(self.allocator);
@@ -698,7 +710,10 @@ pub fn EvalContext(comptime Context: type) type {
             var total: f64 = 1;
 
             while (iter.next()) |i| switch (tags[i.n]) {
-                .range => total *= try self.prodRange(data[i.n].range),
+                .range => {
+                    const r = data[i.n].range;
+                    total *= try self.prodRange(i.sub(r.lhs), i.sub(r.rhs));
+                },
                 .invalidated_range => return error.NotEvaluable,
                 else => {
                     const res = try self.eval(i);
@@ -709,8 +724,8 @@ pub fn EvalContext(comptime Context: type) type {
             return total;
         }
 
-        fn prodRange(self: @This(), r: BinaryOperator) !f64 {
-            const range = self.toPosRange(r);
+        fn prodRange(self: @This(), lhs: Index, rhs: Index) !f64 {
+            const range = self.toPosRange(lhs, rhs);
 
             var total: f64 = 1;
             var results: std.ArrayList(Sheet.Cell.Handle) = .init(self.allocator);
@@ -741,11 +756,13 @@ pub fn EvalContext(comptime Context: type) type {
             while (iter.next()) |i| switch (tags[i.n]) {
                 .range => {
                     const r = data[i.n].range;
-                    total += try self.sumRange(r);
+                    const lhs = i.sub(r.lhs);
+                    const rhs = i.sub(r.rhs);
+                    total += try self.sumRange(lhs, rhs);
 
                     const rect: Rect = .initPos(
-                        data[r.lhs.n].pos,
-                        data[r.rhs.n].pos,
+                        data[lhs.n].pos,
+                        data[rhs.n].pos,
                     );
 
                     total_items += rect.area();
@@ -770,7 +787,10 @@ pub fn EvalContext(comptime Context: type) type {
 
             while (iter.next()) |i| {
                 const m = switch (tags[i.n]) {
-                    .range => try self.maxRange(data[i.n].range),
+                    .range => blk: {
+                        const lhs, const rhs = data[i.n].range.resolve(i);
+                        break :blk try self.maxRange(lhs, rhs);
+                    },
                     .invalidated_range => return error.NotEvaluable,
                     else => blk: {
                         const res = try self.eval(i);
@@ -784,8 +804,8 @@ pub fn EvalContext(comptime Context: type) type {
             return max orelse 0;
         }
 
-        fn maxRange(self: @This(), r: BinaryOperator) !?f64 {
-            const range = self.toPosRange(r);
+        fn maxRange(self: @This(), lhs: Index, rhs: Index) !?f64 {
+            const range = self.toPosRange(lhs, rhs);
 
             var max: ?f64 = null;
             var results: std.ArrayList(Sheet.Cell.Handle) = .init(self.allocator);
@@ -813,7 +833,10 @@ pub fn EvalContext(comptime Context: type) type {
 
             while (iter.next()) |i| {
                 const m = switch (tags[i.n]) {
-                    .range => try self.minRange(data[i.n].range),
+                    .range => blk: {
+                        const lhs, const rhs = data[i.n].range.resolve(i);
+                        break :blk try self.minRange(lhs, rhs);
+                    },
                     .invalidated_range => return error.NotEvaluable,
                     else => blk: {
                         const res = try self.eval(i);
@@ -827,8 +850,8 @@ pub fn EvalContext(comptime Context: type) type {
             return min orelse 0;
         }
 
-        fn minRange(self: @This(), r: BinaryOperator) !?f64 {
-            const range = self.toPosRange(r);
+        fn minRange(self: @This(), lhs: Index, rhs: Index) !?f64 {
+            const range = self.toPosRange(lhs, rhs);
 
             var min: ?f64 = null;
             var results: std.ArrayList(Sheet.Cell.Handle) = .init(self.allocator);
