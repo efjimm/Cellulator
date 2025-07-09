@@ -530,6 +530,7 @@ pub fn PhTree(
 
             // The points are the same
             if (root_conflicting_bit == 0) {
+                tree.leafItem(kv, .parent).* = .invalid;
                 tree.root = .init(kv);
                 return root;
             }
