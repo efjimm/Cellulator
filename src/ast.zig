@@ -327,7 +327,7 @@ pub fn printFromNode(
             switch (b.tag) {
                 inline else => |tag| try writer.print("@{s}(", .{@tagName(tag)}),
             }
-            var iter = argIteratorForwards(nodes, b.first_arg, index);
+            var iter = argIteratorForwards(nodes, index.sub(b.first_arg), index);
             if (iter.next()) |arg_index| {
                 try printFromIndex(nodes, sheet, arg_index, writer, strings);
             }
@@ -440,7 +440,7 @@ pub fn leftMostChild(
         .range,
         .invalidated_range,
         => |b| leftMostChild(nodes, index.sub(b.lhs)),
-        .builtin => |b| leftMostChild(nodes, b.first_arg),
+        .builtin => |b| leftMostChild(nodes, index.sub(b.first_arg)),
     };
 }
 
@@ -601,13 +601,13 @@ pub fn EvalContext(comptime Context: type) type {
                 },
 
                 .builtin => |b| switch (b.tag) {
-                    .sum => .{ .number = try self.evalSum(b.first_arg, index) },
-                    .prod => .{ .number = try self.evalProd(b.first_arg, index) },
-                    .avg => .{ .number = try self.evalAvg(b.first_arg, index) },
-                    .max => .{ .number = try self.evalMax(b.first_arg, index) },
-                    .min => .{ .number = try self.evalMin(b.first_arg, index) },
-                    .upper => .{ .string = try self.evalUpper(b.first_arg) },
-                    .lower => .{ .string = try self.evalLower(b.first_arg) },
+                    .sum => .{ .number = try self.evalSum(index.sub(b.first_arg), index) },
+                    .prod => .{ .number = try self.evalProd(index.sub(b.first_arg), index) },
+                    .avg => .{ .number = try self.evalAvg(index.sub(b.first_arg), index) },
+                    .max => .{ .number = try self.evalMax(index.sub(b.first_arg), index) },
+                    .min => .{ .number = try self.evalMin(index.sub(b.first_arg), index) },
+                    .upper => .{ .string = try self.evalUpper(index.sub(b.first_arg)) },
+                    .lower => .{ .string = try self.evalLower(index.sub(b.first_arg)) },
                 },
 
                 .concat => |op| {

@@ -37,7 +37,7 @@ pub const BinaryOperator = extern struct {
 
 pub const Builtin = extern struct {
     tag: Tag,
-    first_arg: Index,
+    first_arg: NegativeOffset,
 
     const Tag = enum(u8) {
         sum,
@@ -257,9 +257,10 @@ fn parseFunction(parser: *Parser) !Index {
     };
     try parser.expectToken(.rparen);
 
+    const len: u32 = @intCast(parser.nodes.len);
     return parser.addNode(.init(.builtin, .{
         .tag = builtin,
-        .first_arg = args_start,
+        .first_arg = @enumFromInt(len - args_start.n),
     }));
 }
 
