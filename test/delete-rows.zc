@@ -1,4 +1,4 @@
-# Test 1: Delete a single row and verify shifting and reference invalidation with undo/redo.
+-- Test 1: Delete a single row and verify shifting and reference invalidation with undo/redo.
 let A0 = 10
 let A1 = 20
 let A2 = 30
@@ -17,7 +17,7 @@ let B0 = A1 + 5
 :expect-eql-number A1 30
 :expect-error B0
 
-# Test 2: Delete a range of rows affecting a range reference formula.
+-- Test 2: Delete a range of rows affecting a range reference formula.
 let A3 = 5
 let A4 = 10
 let A5 = 15
@@ -38,7 +38,7 @@ let C3 = @sum(A3:A6)
 :expect-eql-number A4 20
 :expect-eql-number C3 25
 
-# Test 3: Delete a row that is referenced in a formula with a single cell reference.
+-- Test 3: Delete a row that is referenced in a formula with a single cell reference.
 let A7 = 100
 let A8 = 200
 let B8 = A7 + A8
@@ -54,7 +54,7 @@ let B8 = A7 + A8
 :expect-error B7
 :expect-non-extant B8
 
-# Test 4: Delete a range of rows from a filled grid with undo/redo.
+-- Test 4: Delete a range of rows from a filled grid with undo/redo.
 :fill A10:E12 1 1
 :delete-rows 11:12
 :expect-eql-number A10 1
@@ -83,7 +83,7 @@ let B8 = A7 + A8
 :expect-eql-number A10 1
 :expect-non-extant A11:E12
 
-# Test 5: Delete rows that completely cover a range referenced by a formula, causing the formula to error.
+-- Test 5: Delete rows that completely cover a range referenced by a formula, causing the formula to error.
 let A20 = 50
 let A21 = 60
 let A22 = 70
@@ -98,7 +98,7 @@ let B19 = @sum(A20:A22)
 :redo 1
 :expect-error B19
 
-# Test 6: Multiple deletion with undo/redo interleaved with other operations.
+-- Test 6: Multiple deletion with undo/redo interleaved with other operations.
 let A30 = 5
 let A31 = 10
 let A32 = 15

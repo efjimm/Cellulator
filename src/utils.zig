@@ -197,6 +197,7 @@ pub const WordIterator = struct {
 
         var quote_state: QuoteState = .none;
         var quote_index: usize = 0;
+        var possible_comment_start = false;
 
         const end_index = for (str, 0..) |c, i| {
             if (std.ascii.isWhitespace(c)) {
@@ -204,6 +205,13 @@ pub const WordIterator = struct {
                     break i;
 
                 quote_index = i;
+            }
+
+            if (c == '-') {
+                if (possible_comment_start) break i - 1;
+                possible_comment_start = true;
+            } else {
+                possible_comment_start = false;
             }
 
             const new_quote_state = QuoteState.fromChar(c);

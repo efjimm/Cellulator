@@ -1,11 +1,11 @@
-# Basic adjustment
+-- Basic adjustment
 let A0 = 10
 let B0 = A0 + 5
 :yank B0
 
-# C0 becomes B0 + 5
+-- C0 becomes B0 + 5
 :pa C0
-# E0 becomes D0 + 5. D0 is empty so it is interpreted as 0.
+-- E0 becomes D0 + 5. D0 is empty so it is interpreted as 0.
 :pa E0
 
 :expect-eql-number A0 10
@@ -13,29 +13,29 @@ let B0 = A0 + 5
 :expect-eql-number C0 20
 :expect-eql-number E0 5
 
-# Basic ranges
+-- Basic ranges
 
 :fill A1:E1 1 1
 
-# A1 B1 C1 D1 E1
-#  1  2  3  4  5
+-- A1 B1 C1 D1 E1
+--  1  2  3  4  5
 
 let F1 = @sum(B1:D1)
 
-# Should be 2 + 3 + 4
+-- Should be 2 + 3 + 4
 :expect-eql-number F1 9
 
 :yank F1
 :pa G1
 
-# F1 was `@sum(B1:D1)`. Because the new destination is 1 column to the right of the original, all
-# the cell references in the expression will be incremented by 1 column. So the expression pasted at
-# G1 should be `@sum(C1:E1)`.
+-- F1 was `@sum(B1:D1)`. Because the new destination is 1 column to the right of the original, all
+-- the cell references in the expression will be incremented by 1 column. So the expression pasted at
+-- G1 should be `@sum(C1:E1)`.
 
-# 3 + 4 + 5
+-- 3 + 4 + 5
 :expect-eql-number G1 12
 
-# Basic adjustment - multiple cell references
+-- Basic adjustment - multiple cell references
 let A2 = 1
 let B2 = 2
 let C2 = A2 + B2
@@ -45,8 +45,8 @@ let C2 = A2 + B2
 :expect-eql-number A2 1
 :expect-eql-number B2 2
 :expect-eql-number C2 3
-# D2 should be B2 + C2 (relative adjustment)
-# Value should be 2 + 3 = 5
+-- D2 should be B2 + C2 (relative adjustment)
+-- Value should be 2 + 3 = 5
 :expect-eql-number D2 5
 
 let A2 = 10
@@ -54,11 +54,11 @@ let B2 = 20
 :expect-eql-number A2 10
 :expect-eql-number B2 20
 :expect-eql-number C2 30
-# D2 should still track B2 + C2
-# Value should be 20 + 30 = 50
+-- D2 should still track B2 + C2
+-- Value should be 20 + 30 = 50
 :expect-eql-number D2 50
 
-# Range references adjustment in Builtin Functions
+-- Range references adjustment in Builtin Functions
 let A3 = 1
 let B3 = 2
 let C3 = 3
@@ -72,17 +72,17 @@ let E3 = @sum(A3:D3)
 :expect-eql-number C3 3
 :expect-eql-number D3 4
 :expect-eql-number E3 10
-# F3 should be @sum(B3:E3) (range adjusted by 1 column)
-# F3's value should be B3 (2) + C3 (3) + D3 (4) + E3 (10) = 19
+-- F3 should be @sum(B3:E3) (range adjusted by 1 column)
+-- F3's value should be B3 (2) + C3 (3) + D3 (4) + E3 (10) = 19
 :expect-eql-number F3 19
 
 let A3 = 10
-# E3's value changes: 10+2+3+4 = 19
+-- E3's value changes: 10+2+3+4 = 19
 :expect-eql-number E3 19
-# F3's value changes: B3 (2) + C3 (3) + D3 (4) + E3 (19) = 28
+-- F3's value changes: B3 (2) + C3 (3) + D3 (4) + E3 (19) = 28
 :expect-eql-number F3 28
 
-# String concatenation (#) with cell references
+-- String concatenation (#) with cell references
 let A4 = 'World'
 let B4 = 'Hello ' # A4
 :yank B4
@@ -90,18 +90,18 @@ let B4 = 'Hello ' # A4
 
 :expect-eql-string A4 'World'
 :expect-eql-string B4 'Hello World'
-# C4 should be 'Hello ' # B4
-# Value should be 'Hello ' + 'Hello World' = 'Hello Hello World'
+-- C4 should be 'Hello ' # B4
+-- Value should be 'Hello ' + 'Hello World' = 'Hello Hello World'
 :expect-eql-string C4 'Hello Hello World'
 
 let A4 = 'Cellulator'
 :expect-eql-string A4 'Cellulator'
 :expect-eql-string B4 'Hello Cellulator'
-# C4 should track B4
-# Value should be 'Hello ' + 'Hello Cellulator' = 'Hello Hello Cellulator'
+-- C4 should track B4
+-- Value should be 'Hello ' + 'Hello Cellulator' = 'Hello Hello Cellulator'
 :expect-eql-string C4 'Hello Hello Cellulator'
 
-# Builtin functions with single cell argument (@upper, @lower)
+-- Builtin functions with single cell argument (@upper, @lower)
 let A5 = 'Test String'
 let B5 = @upper(A5)
 :yank B5
@@ -109,35 +109,35 @@ let B5 = @upper(A5)
 
 :expect-eql-string A5 'Test String'
 :expect-eql-string B5 'TEST STRING'
-# C5 should be @upper(B5)
+-- C5 should be @upper(B5)
 :expect-eql-string C5 'TEST STRING'
 
 let A5 = 'another test'
 :expect-eql-string A5 'another test'
 :expect-eql-string B5 'ANOTHER TEST'
-# C5 should track B5
+-- C5 should track B5
 :expect-eql-string C5 'ANOTHER TEST'
 
-# Pasting a range of expressions with inter-dependencies
+-- Pasting a range of expressions with inter-dependencies
 let A6 = 10
 let B6 = A6 * 2
 let A7 = B6 + 5
 let B7 = A7 / 2
 :yank A6:B7
-# Paste to C8 (2 columns right, 2 rows down from A6)
+-- Paste to C8 (2 columns right, 2 rows down from A6)
 :pa C8
 
-# Original values
+-- Original values
 :expect-eql-number A6 10
 :expect-eql-number B6 20
 :expect-eql-number A7 25
 :expect-eql-number B7 12.5
 
-# Expected adjusted expressions in the pasted range:
-# C8 (from A6) should be 10 (value, as A6 was a value)
-# D8 (from B6) should be C8 * 2
-# C9 (from A7) should be D8 + 5
-# D9 (from B7) should be C9 / 2
+-- Expected adjusted expressions in the pasted range:
+-- C8 (from A6) should be 10 (value, as A6 was a value)
+-- D8 (from B6) should be C8 * 2
+-- C9 (from A7) should be D8 + 5
+-- D9 (from B7) should be C9 / 2
 
 :expect-eql-number C8 10
 :expect-eql-number D8 20
@@ -150,18 +150,18 @@ let A6 = 1
 :expect-eql-number A7 7
 :expect-eql-number B7 3.5
 
-# After A6 changes, the original cells A6, B6, A7, B7 update.
-# The pasted cells C8, D8, C9, D9 are independent.
-# C8 was a literal copy of A6's value at the time of yank (10), so it does not change.
+-- After A6 changes, the original cells A6, B6, A7, B7 update.
+-- The pasted cells C8, D8, C9, D9 are independent.
+-- C8 was a literal copy of A6's value at the time of yank (10), so it does not change.
 :expect-eql-number C8 10
-# D8's expression was adjusted to C8 * 2. Since C8 is still 10, D8 remains 20.
+-- D8's expression was adjusted to C8 * 2. Since C8 is still 10, D8 remains 20.
 :expect-eql-number D8 20
-# C9's expression was adjusted to D8 + 5. Since D8 is still 20, C9 remains 25.
+-- C9's expression was adjusted to D8 + 5. Since D8 is still 20, C9 remains 25.
 :expect-eql-number C9 25
-# D9's expression was adjusted to C9 / 2. Since C9 is still 25, D9 remains 12.5.
+-- D9's expression was adjusted to C9 / 2. Since C9 is still 25, D9 remains 12.5.
 :expect-eql-number D9 12.5
 
-# Undo/Redo - with adjusted expressions
+-- Undo/Redo - with adjusted expressions
 let A10 = 10
 let B10 = A10 + 1
 :yank B10
@@ -169,29 +169,29 @@ let B10 = A10 + 1
 
 :expect-eql-number A10 10
 :expect-eql-number B10 11
-# C10 is B10 + 1
-# Value should be 11 + 1 = 12
+-- C10 is B10 + 1
+-- Value should be 11 + 1 = 12
 :expect-eql-number C10 12
 
-# Undo pa C10
+-- Undo pa C10
 :undo
 :expect-eql-number A10 10
 :expect-eql-number B10 11
 :expect-non-extant C10
 
-# Undo let B10
+-- Undo let B10
 :undo
 :expect-eql-number A10 10
 :expect-non-extant B10
 :expect-non-extant C10
 
-# Redo let B10
+-- Redo let B10
 :redo
 :expect-eql-number A10 10
 :expect-eql-number B10 11
 :expect-non-extant C10
 
-# Redo pa C10
+-- Redo pa C10
 :redo
 :expect-eql-number A10 10
 :expect-eql-number B10 11
@@ -200,16 +200,16 @@ let B10 = A10 + 1
 let A10 = 5
 :expect-eql-number A10 5
 :expect-eql-number B10 6
-# C10 (B10 + 1) should be 6 + 1 = 7
+-- C10 (B10 + 1) should be 6 + 1 = 7
 :expect-eql-number C10 7
 
-# Undo let A10 = 5
+-- Undo let A10 = 5
 :undo
 :expect-eql-number A10 10
 :expect-eql-number B10 11
 :expect-eql-number C10 12
 
-# Overwrite existing cell with adjusted expression
+-- Overwrite existing cell with adjusted expression
 let A11 = 10
 let B11 = A11 * 2
 let C11 = 50
@@ -218,38 +218,38 @@ let C11 = 50
 :expect-eql-number C11 50
 
 :yank B11
-# Overwrite C11 with adjusted expression
+-- Overwrite C11 with adjusted expression
 :pa C11
 
 :expect-eql-number A11 10
 :expect-eql-number B11 20
-# C11 should now be B11 * 2
-# Value should be 20 * 2 = 40
+-- C11 should now be B11 * 2
+-- Value should be 20 * 2 = 40
 :expect-eql-number C11 40
 
 let A11 = 5
 :expect-eql-number A11 5
 :expect-eql-number B11 10
-# C11 (B11 * 2) should be 10 * 2 = 20
+-- C11 (B11 * 2) should be 10 * 2 = 20
 :expect-eql-number C11 20
 
-# Yank cell with an error and paste (adjusted)
-# Circular reference, causes error
+-- Yank cell with an error and paste (adjusted)
+-- Circular reference, causes error
 let A12 = A12
 :yank A12
 :pa B12
 
 :expect-error A12
-# B12 should also be an error (circular reference to B12, as A12 was A12, shifted to B12 becomes B12)
+-- B12 should also be an error (circular reference to B12, as A12 was A12, shifted to B12 becomes B12)
 :expect-error B12
 
-# Fix A12
+-- Fix A12
 let A12 = 10
 :expect-eql-number A12 10
-# B12's expression is still B12, so it should remain an error
+-- B12's expression is still B12, so it should remain an error
 :expect-error B12
 
-# Pasting a string literal (no adjustment needed)
+-- Pasting a string literal (no adjustment needed)
 let A13 = 'Hello World'
 :yank A13
 :pa B13
@@ -259,10 +259,10 @@ let A13 = 'Hello World'
 
 let A13 = 'Goodbye'
 :expect-eql-string A13 'Goodbye'
-# String paste copies the value, not an expression
+-- String paste copies the value, not an expression
 :expect-eql-string B13 'Hello World'
 
-# Pasting a number literal (no adjustment needed)
+-- Pasting a number literal (no adjustment needed)
 let A14 = 123
 :yank A14
 :pa B14
@@ -272,5 +272,5 @@ let A14 = 123
 
 let A14 = 456
 :expect-eql-number A14 456
-# Number paste copies the value, not an expression
+-- Number paste copies the value, not an expression
 :expect-eql-number B14 123

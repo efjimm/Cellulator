@@ -1011,15 +1011,8 @@ fn parseCommand(zc: *ZC, str: [:0]const u8) !void {
     if (str[0] == ':')
         return zc.runCommand(str[1..]);
 
-    for (str) |c| {
-        if (!std.ascii.isWhitespace(c)) {
-            // If the first non-whitespace character is a # then this line is a comment
-            if (c == '#') return;
-            break;
-        }
-    }
-
     const expr_root = try ast.fromSource(zc.currentSheet(), str);
+    if (!expr_root.isValid()) return;
 
     const pos = zc.currentSheet().ast_nodes.items(.data)[expr_root.n].assignment;
 

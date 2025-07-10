@@ -86,6 +86,10 @@ pub const Index = packed struct {
         return .from(index.n - offset.int());
     }
 
+    pub fn isValid(i: Index) bool {
+        return i != invalid;
+    }
+
     pub const invalid: Index = .{ .n = std.math.maxInt(u32) };
 };
 
@@ -105,6 +109,10 @@ pub const NegativeOffset = enum(u32) {
 pub fn fromSource(sheet: *Sheet, source: [:0]const u8) ParseError!Index {
     var tokens = try Tokenizer.collectTokens(sheet.allocator, source, @intCast(source.len / 2));
     defer tokens.deinit(sheet.allocator);
+
+    if (tokens.items(.tag)[0] == .eof) {
+        return .invalid;
+    }
 
     var parser: Parser = .init(
         sheet.allocator,

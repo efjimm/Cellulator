@@ -20,6 +20,7 @@ const State = enum {
     cell_address,
     single_string_literal,
     double_string_literal,
+    comment,
 };
 
 pub fn collectTokens(
@@ -142,8 +143,12 @@ pub fn next(tokenizer: *Tokenizer) Token {
                 tokenizer.pos += 1;
             },
             '-' => {
-                tag = .minus;
                 tokenizer.pos += 1;
+                switch (tokenizer.bytes[tokenizer.pos]) {
+                    '-' => continue :state .comment,
+                    else => {},
+                }
+                tag = .minus;
             },
             '*' => {
                 tag = .asterisk;
@@ -190,6 +195,17 @@ pub fn next(tokenizer: *Tokenizer) Token {
                     .start = start,
                 };
             },
+        },
+        .comment => {
+            tokenizer.pos += 1;
+            switch (tokenizer.bytes[tokenizer.pos]) {
+                '\n' => {
+                    start = tokenizer.pos;
+                    continue :state .start;
+                },
+                0 => return eof,
+                else => continue :state .comment,
+            }
         },
         .integer_number => {
             tokenizer.pos += 1;
