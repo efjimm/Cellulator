@@ -1857,7 +1857,7 @@ pub fn bulkSetCellExpr(
         sheet.deps.items.len += area;
         const new_deps = sheet.deps.items[start..];
         // TODO: Make this suck less
-        for (new_deps, 1.., handles_start..) |*dep, i, handle_index| {
+        for (new_deps, start + 1.., handles_start..) |*dep, i, handle_index| {
             dep.* = .{
                 .handle = .from(@intCast(handle_index)),
                 .next = .from(@intCast(i)),
@@ -1883,6 +1883,7 @@ pub fn bulkSetCellExpr(
     sheet.cell_tree.leaves.len += area;
     // All created cells share the same cell value
     @memset(sheet.cell_tree.leaves.items(.value)[handles_start..], cell);
+    @memset(sheet.cell_tree.leaves.items(.parent)[handles_start..], .invalid);
 
     // TODO: These inserts get slow when we start inserting millions of cells at once.
     //       Each insert does a separate lookup. We should find some way to exploit the internal

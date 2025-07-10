@@ -1,0 +1,172 @@
+-- Basic fill-expr - simple expression
+:fill-expr A0:B1 10 + 5
+
+:expect-eql-number A0 15
+:expect-eql-number B0 15
+:expect-eql-number A1 15
+:expect-eql-number B1 15
+
+-- Basic fill-expr - expression with cell references (literal copy, no adjustment)
+let C0 = 100
+let D0 = 5
+:fill-expr E0:F1 C0 + D0
+
+-- E0 should be C0 + D0 (100 + 5 = 105)
+:expect-eql-number E0 105
+-- F0 should be C0 + D0 (100 + 5 = 105)
+:expect-eql-number F0 105
+-- E1 should be C0 + D0 (100 + 5 = 105)
+:expect-eql-number E1 105
+-- F1 should be C0 + D0 (100 + 5 = 105)
+:expect-eql-number F1 105
+
+-- Change referenced cells, verify fill-expr cells update
+let C0 = 10
+let D0 = 2
+:expect-eql-number E0 12
+:expect-eql-number F0 12
+:expect-eql-number E1 12
+:expect-eql-number F1 12
+
+-- Fill-expr with string concatenation
+let G0 = 'World'
+:fill-expr H0:I0 'Hello ' # G0
+
+:expect-eql-string H0 'Hello World'
+:expect-eql-string I0 'Hello World'
+
+let G0 = 'Cellulator'
+:expect-eql-string H0 'Hello Cellulator'
+:expect-eql-string I0 'Hello Cellulator'
+
+
+-- Fill-expr with a builtin function and cell references
+let J0 = 10
+let J1 = 20
+let J2 = 30
+:fill-expr K0:L1 @sum(J0, J1, J2)
+
+:expect-eql-number K0 60
+:expect-eql-number L0 60
+:expect-eql-number K1 60
+:expect-eql-number L1 60
+
+let J0 = 1
+let J1 = 2
+let J2 = 3
+:expect-eql-number K0 6
+:expect-eql-number L0 6
+:expect-eql-number K1 6
+:expect-eql-number L1 6
+
+
+-- Fill-expr with a range in a builtin function
+let M0 = 1
+let M1 = 2
+let M2 = 3
+let M3 = 4
+:fill-expr N0:O0 @sum(M0:M3)
+
+:expect-eql-number N0 10 -- 1+2+3+4
+:expect-eql-number O0 10 -- 1+2+3+4
+
+let M0 = 10
+:expect-eql-number N0 19 -- 10+2+3+4
+:expect-eql-number O0 19 -- 10+2+3+4
+
+
+-- Undo/Redo for fill-expr
+let P0 = 1
+let P1 = 2
+:fill-expr Q0:R0 P0 + P1
+
+:expect-eql-number Q0 3
+:expect-eql-number R0 3
+
+-- Undo fill-expr
+:undo
+:expect-non-extant Q0
+:expect-non-extant R0
+
+-- Redo fill-expr
+:redo
+:expect-eql-number Q0 3
+:expect-eql-number R0 3
+
+let P0 = 10
+:expect-eql-number Q0 12
+:expect-eql-number R0 12
+
+-- Undo change to P0
+:undo
+:expect-eql-number Q0 3
+:expect-eql-number R0 3
+
+
+-- Interaction with cell deletion (referenced cell becomes 0)
+let S0 = 50
+:fill-expr T0:T1 S0 + 10
+
+:expect-eql-number T0 60
+:expect-eql-number T1 60
+
+:delete S0
+:expect-non-extant S0
+-- T0 and T1 should now evaluate S0 as 0
+:expect-eql-number T0 10 -- 0 + 10
+:expect-eql-number T1 10 -- 0 + 10
+
+-- Undo deletion
+:undo
+:expect-eql-number S0 50
+:expect-eql-number T0 60
+:expect-eql-number T1 60
+
+-- Redo deletion
+:redo
+:expect-non-extant S0
+:expect-eql-number T0 10
+:expect-eql-number T1 10
+
+
+-- Interaction with row deletion (direct reference becomes error, ranges adjust)
+let U0 = 1
+let U1 = 2
+let U2 = 3
+let U3 = @sum(U0:U2) -- 1+2+3 = 6
+:fill-expr V0:W1 U0 + U1
+
+:expect-eql-number U0 1
+:expect-eql-number U1 2
+:expect-eql-number U2 3
+:expect-eql-number U3 6
+:expect-eql-number V0 3 -- U0 + U1
+:expect-eql-number W0 3
+:expect-eql-number V1 3
+:expect-eql-number W1 3
+
+-- Delete row 0 (containing U0, U1, U2, U3)
+:delete-rows 0:0
+-- All cells in row 0 are gone.
+-- V0:W1 expressions now reference cells that were deleted.
+-- Direct references to deleted cells become errors.
+:expect-error V0
+:expect-error W0
+:expect-eql-number U2 5
+
+-- Undo row deletion
+:undo
+:expect-eql-number U0 1
+:expect-eql-number U1 2
+:expect-eql-number U2 3
+:expect-eql-number U3 6
+:expect-eql-number V0 3
+:expect-eql-number W0 3
+:expect-eql-number V1 3
+:expect-eql-number W1 3
+
+-- Redo row deletion
+:redo
+:expect-error V0
+:expect-error W0
+:expect-eql-number U2 5

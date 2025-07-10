@@ -129,6 +129,7 @@ fn configureTests(
         "test/undo-redo.zc",
         "test/string.zc",
         "test/fill.zc",
+        "test/fill-expr.zc",
         "test/binary-serialize.zc",
         "test/save-load.zc",
         "test/delete-cols.zc",
