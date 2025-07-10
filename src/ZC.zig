@@ -875,10 +875,10 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
         .cell_cursor_down => zc.cursorDown(),
         .cell_cursor_left => zc.cursorLeft(),
         .cell_cursor_right => zc.cursorRight(),
-        .cell_cursor_row_first => try zc.cursorToFirstCellInColumn(),
-        .cell_cursor_row_last => try zc.cursorToLastCellInColumn(),
-        .cell_cursor_col_first => try zc.cursorToFirstCellInRow(),
-        .cell_cursor_col_last => try zc.cursorToLastCellInRow(),
+        .cell_cursor_row_first => zc.cursorToFirstCellInColumn(),
+        .cell_cursor_row_last => zc.cursorToLastCellInColumn(),
+        .cell_cursor_col_first => zc.cursorToFirstCellInRow(),
+        .cell_cursor_col_last => zc.cursorToLastCellInRow(),
         .goto_col => zc.cursorGotoCol(),
         .goto_row => zc.cursorGotoRow(),
         .delete_column => {
@@ -917,8 +917,8 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
         .delete_cell => zc.deleteCell() catch |err| switch (err) {
             error.OutOfMemory => zc.setStatusMessage(.err, "Out of memory!", .{}),
         },
-        .next_populated_cell => try zc.cursorNextPopulatedCell(),
-        .prev_populated_cell => try zc.cursorPrevPopulatedCell(),
+        .next_populated_cell => zc.cursorNextPopulatedCell(),
+        .prev_populated_cell => zc.cursorPrevPopulatedCell(),
         .increase_precision => try zc.cursorIncPrecision(),
         .decrease_precision => try zc.cursorDecPrecision(),
         .increase_width => try zc.cursorIncWidth(),
@@ -930,7 +930,7 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
 
         .zero => {
             if (zc.count == 0) {
-                try zc.cursorToFirstCellInRow();
+                zc.cursorToFirstCellInRow();
             } else {
                 zc.setCount(0);
             }
@@ -982,12 +982,12 @@ fn doVisualMode(zc: *ZC, action: Action) Allocator.Error!void {
         .cell_cursor_down => zc.cursorDown(),
         .cell_cursor_left => zc.cursorLeft(),
         .cell_cursor_right => zc.cursorRight(),
-        .cell_cursor_row_first => try zc.cursorToFirstCellInColumn(),
-        .cell_cursor_row_last => try zc.cursorToLastCellInColumn(),
-        .cell_cursor_col_first => try zc.cursorToFirstCellInRow(),
-        .cell_cursor_col_last => try zc.cursorToLastCellInRow(),
-        .next_populated_cell => try zc.cursorNextPopulatedCell(),
-        .prev_populated_cell => try zc.cursorPrevPopulatedCell(),
+        .cell_cursor_row_first => zc.cursorToFirstCellInColumn(),
+        .cell_cursor_row_last => zc.cursorToLastCellInColumn(),
+        .cell_cursor_col_first => zc.cursorToFirstCellInRow(),
+        .cell_cursor_col_last => zc.cursorToLastCellInRow(),
+        .next_populated_cell => zc.cursorNextPopulatedCell(),
+        .prev_populated_cell => zc.cursorPrevPopulatedCell(),
 
         .zero => zc.setCount(0),
         .count => |count| zc.setCount(count),
@@ -1068,30 +1068,30 @@ pub fn isSelectedRow(zc: *const ZC, y: Position.Int) bool {
     };
 }
 
-pub fn nextPopulatedCell(zc: *ZC, start_pos: Position, count: u32) Allocator.Error!Position {
+pub fn nextPopulatedCell(zc: *ZC, start_pos: Position, count: u32) Position {
     var pos = start_pos;
     for (0..count) |_| {
-        pos = try zc.currentSheet().nextPopulatedCell(pos) orelse return pos;
+        pos = zc.currentSheet().nextPopulatedCell(pos) orelse return pos;
     }
     return pos;
 }
 
-pub fn prevPopulatedCell(zc: *ZC, start_pos: Position, count: u32) Allocator.Error!Position {
+pub fn prevPopulatedCell(zc: *ZC, start_pos: Position, count: u32) Position {
     var pos = start_pos;
     for (0..count) |_| {
-        pos = try zc.currentSheet().prevPopulatedCell(pos) orelse return pos;
+        pos = zc.currentSheet().prevPopulatedCell(pos) orelse return pos;
     }
     return pos;
 }
 
-pub fn cursorNextPopulatedCell(zc: *ZC) Allocator.Error!void {
-    const new_pos = try zc.nextPopulatedCell(zc.cursor, zc.getCount());
+pub fn cursorNextPopulatedCell(zc: *ZC) void {
+    const new_pos = zc.nextPopulatedCell(zc.cursor, zc.getCount());
     zc.setCursor(new_pos);
     zc.resetCount();
 }
 
-pub fn cursorPrevPopulatedCell(zc: *ZC) Allocator.Error!void {
-    const new_pos = try zc.prevPopulatedCell(zc.cursor, zc.getCount());
+pub fn cursorPrevPopulatedCell(zc: *ZC) void {
+    const new_pos = zc.prevPopulatedCell(zc.cursor, zc.getCount());
     zc.setCursor(new_pos);
     zc.resetCount();
 }
@@ -2212,23 +2212,23 @@ pub fn expandWidthAtCursor(zc: *ZC) Allocator.Error!void {
     zc.ui.update(&.{ .cells, .column_headings });
 }
 
-pub fn cursorToFirstCellInRow(zc: *ZC) !void {
-    const pos = try zc.currentSheet().firstCellInRow(zc.cursor.y) orelse return;
+pub fn cursorToFirstCellInRow(zc: *ZC) void {
+    const pos = zc.currentSheet().firstCellInRow(zc.cursor.y) orelse return;
     zc.setCursor(pos);
 }
 
-pub fn cursorToLastCellInRow(zc: *ZC) !void {
-    const pos = try zc.currentSheet().lastCellInRow(zc.cursor.y) orelse return;
+pub fn cursorToLastCellInRow(zc: *ZC) void {
+    const pos = zc.currentSheet().lastCellInRow(zc.cursor.y) orelse return;
     zc.setCursor(pos);
 }
 
-pub fn cursorToFirstCellInColumn(zc: *ZC) !void {
-    const pos = try zc.currentSheet().firstCellInColumn(zc.cursor.x) orelse return;
+pub fn cursorToFirstCellInColumn(zc: *ZC) void {
+    const pos = zc.currentSheet().firstCellInColumn(zc.cursor.x) orelse return;
     zc.setCursor(pos);
 }
 
-pub fn cursorToLastCellInColumn(zc: *ZC) !void {
-    const pos = try zc.currentSheet().lastCellInColumn(zc.cursor.x) orelse return;
+pub fn cursorToLastCellInColumn(zc: *ZC) void {
+    const pos = zc.currentSheet().lastCellInColumn(zc.cursor.x) orelse return;
     zc.setCursor(pos);
 }
 

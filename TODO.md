@@ -30,8 +30,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
 - Read-only sheets
 - Actions across sheets
 
-- Update the damn readme
-
 - Allow associating Lua data with cells
 
 - Allow providing a custom format function for displaying cells
@@ -96,8 +94,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
 - Undo/redo for command mode
 - Detailed error reporting in parser
 
-- Multiple sheets
-- Document code
 - Rebinding keys
 
 - File formats
@@ -107,7 +103,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
 - Store string dependencies in a single buffer in Sheet
   - Undos and redos are sequential in time, so when we nuke redos we can just chop off the end
     portion of the buffer.
-- Goto command
 - Consider changing functionality of `w` motion and adding `e` motion
   - Currently `w` just goes to the next populated cell. It may be better to have it function
     similar to vim's `w`, where it goes to the first cell in the next set of column-continuous cells.
@@ -119,7 +114,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 - Limits documentation
 - Multi-threaded evaluation of cells
-- Flush 'cold' cells to disk when there are many
 - Per-cell colors
 - GNUPlot integration
 

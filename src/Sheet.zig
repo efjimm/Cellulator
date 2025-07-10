@@ -434,7 +434,7 @@ fn getStringSlice(sheet: *Sheet, index: StringIndex) [:0]const u8 {
     return std.mem.span(ptr);
 }
 
-pub fn posFromCellHandle(sheet: *Sheet, handle: Cell.Handle) Position {
+pub fn posFromCellHandle(sheet: *const Sheet, handle: Cell.Handle) Position {
     const point = sheet.cell_tree.getPoint(handle).*;
     return .init(point[0], point[1]);
 }
@@ -975,123 +975,100 @@ fn removeCellAsDependentOfExpr(
     }
 }
 
-pub fn firstCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
-    var results: std.ArrayList(Cell.Handle) = .init(sheet.allocator);
-    defer results.deinit();
-
-    try sheet.cell_tree.queryWindow(&.{ 0, row }, &.{ std.math.maxInt(u32), row }, &results);
-
-    var min: ?PosInt = null;
-    for (results.items) |handle| {
-        const x = sheet.cell_tree.getPoint(handle).*[0];
-        if (min == null or x < min.?) min = x;
-    }
-
-    return if (min) |x| .{ .x = x, .y = row } else null;
+pub fn firstCellInRow(sheet: *Sheet, row: Position.Int) ?Position {
+    const x = sheet.findExtantCol(.init(0, row, std.math.maxInt(u32), row), .first) orelse return null;
+    return .init(x, row);
 }
 
-pub fn lastCellInRow(sheet: *Sheet, row: Position.Int) !?Position {
-    var results: std.ArrayList(Cell.Handle) = .init(sheet.allocator);
-    defer results.deinit();
-
-    try sheet.cell_tree.queryWindow(&.{ 0, row }, &.{ std.math.maxInt(u32), row }, &results);
-
-    var max: ?PosInt = null;
-    for (results.items) |handle| {
-        const x = sheet.cell_tree.getPoint(handle).*[0];
-        if (max == null or x > max.?) max = x;
-    }
-
-    return if (max) |x| .{ .x = x, .y = row } else null;
+pub fn lastCellInRow(sheet: *Sheet, row: Position.Int) ?Position {
+    const x = sheet.findExtantCol(.init(0, row, std.math.maxInt(u32), row), .last) orelse return null;
+    return .init(x, row);
 }
 
-// TODO: Optimize these
-
-pub fn firstCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
-    var results: std.ArrayList(Cell.Handle) = .init(sheet.allocator);
-    defer results.deinit();
-
-    try sheet.cell_tree.queryWindow(&.{ col, 0 }, &.{ col, std.math.maxInt(u32) }, &results);
-
-    var min: ?PosInt = null;
-    for (results.items) |handle| {
-        const y = sheet.cell_tree.getPoint(handle).*[1];
-        if (min == null or y < min.?) min = y;
-    }
-
-    return if (min) |y| .{ .x = col, .y = y } else null;
+pub fn firstCellInColumn(sheet: *Sheet, col: Position.Int) ?Position {
+    const y = sheet.findExtantRow(
+        .init(col, 0, col, std.math.maxInt(u32)),
+        .first,
+    ) orelse return null;
+    return .init(col, y);
 }
 
-pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) !?Position {
-    var results: std.ArrayList(Cell.Handle) = .init(sheet.allocator);
-    defer results.deinit();
-
-    try sheet.cell_tree.queryWindow(&.{ col, 0 }, &.{ col, std.math.maxInt(u32) }, &results);
-
-    var max: ?PosInt = null;
-    for (results.items) |handle| {
-        const y = sheet.cell_tree.getPoint(handle).*[1];
-        if (max == null or y > max.?) max = y;
-    }
-
-    return if (max) |y| .{ .x = col, .y = y } else null;
+pub fn lastCellInColumn(sheet: *Sheet, col: Position.Int) ?Position {
+    const y = sheet.findExtantRow(
+        .init(col, 0, col, std.math.maxInt(u32)),
+        .last,
+    ) orelse return null;
+    return .init(col, y);
 }
 
+// TODO: Optimize these functions by using a binary search on increasingly larger ranges.
 /// Given a range, find the first or last row that contains a cell
-fn findExtantRow(sheet: *Sheet, r: Rect, comptime p: enum { first, last }) !?PosInt {
-    var sfa = std.heap.stackFallback(1024, sheet.allocator);
-    const allocator = sfa.get();
+fn findExtantRow(sheet: *Sheet, r: Rect, comptime p: enum { first, last }) ?PosInt {
+    const Context = struct {
+        min: ?PosInt = null,
+        max: ?PosInt = null,
+        sheet: *const Sheet,
 
-    var results: std.ArrayList(Cell.Handle) = .init(allocator);
-    defer results.deinit();
-
-    try sheet.cell_tree.queryWindow(&.{ r.tl.x, r.tl.y }, &.{ r.br.x, r.br.y }, &results);
-
-    if (results.items.len == 0) return null; // Range does not contain any cells
-
-    var result_y: u32 = sheet.cell_tree.getPoint(results.items[0]).*[1];
-    for (results.items[1..]) |handle| {
-        const y = sheet.cell_tree.getPoint(handle).*[1];
-        switch (p) {
-            .first => if (y < result_y) {
-                result_y = y;
-            },
-            .last => if (y > result_y) {
-                result_y = y;
-            },
+        pub fn func(ctx: *@This(), handle: Cell.Handle) !void {
+            const pos = ctx.sheet.posFromCellHandle(handle);
+            switch (p) {
+                .first => if (ctx.min == null or pos.y < ctx.min.?) {
+                    ctx.min = pos.y;
+                },
+                .last => if (ctx.max == null or pos.y > ctx.max.?) {
+                    ctx.max = pos.y;
+                },
+            }
         }
-    }
-    return result_y;
+    };
+
+    var ctx: Context = .{ .sheet = sheet };
+    sheet.cell_tree.traverse(
+        &.{ r.tl.x, r.tl.y },
+        &.{ r.br.x, r.br.y },
+        &ctx,
+    ) catch unreachable;
+
+    return switch (p) {
+        .first => ctx.min,
+        .last => ctx.max,
+    };
 }
 
 /// Given a range, find the first or last column that contains a cell
-fn findExtantCol(sheet: *Sheet, r: Rect, comptime p: enum { first, last }) !?PosInt {
-    var sfa = std.heap.stackFallback(1024, sheet.allocator);
-    const allocator = sfa.get();
+fn findExtantCol(sheet: *Sheet, r: Rect, comptime p: enum { first, last }) ?PosInt {
+    const Context = struct {
+        min: ?PosInt = null,
+        max: ?PosInt = null,
+        sheet: *const Sheet,
 
-    var results: std.ArrayList(Cell.Handle) = .init(allocator);
-    defer results.deinit();
-
-    try sheet.cell_tree.queryWindow(&.{ r.tl.x, r.tl.y }, &.{ r.br.x, r.br.y }, &results);
-
-    if (results.items.len == 0) return null; // Range does not contain any cells
-
-    var result_x: u32 = sheet.cell_tree.getPoint(results.items[0]).*[0];
-    for (results.items[1..]) |handle| {
-        const x = sheet.cell_tree.getPoint(handle).*[0];
-        switch (p) {
-            .first => if (x < result_x) {
-                result_x = x;
-            },
-            .last => if (x > result_x) {
-                result_x = x;
-            },
+        pub fn func(ctx: *@This(), handle: Cell.Handle) !void {
+            const pos = ctx.sheet.posFromCellHandle(handle);
+            switch (p) {
+                .first => if (ctx.min == null or pos.x < ctx.min.?) {
+                    ctx.min = pos.x;
+                },
+                .last => if (ctx.max == null or pos.x > ctx.max.?) {
+                    ctx.max = pos.x;
+                },
+            }
         }
-    }
-    return result_x;
+    };
+
+    var ctx: Context = .{ .sheet = sheet };
+    sheet.cell_tree.traverse(
+        &.{ r.tl.x, r.tl.y },
+        &.{ r.br.x, r.br.y },
+        &ctx,
+    ) catch unreachable;
+
+    return switch (p) {
+        .first => ctx.min,
+        .last => ctx.max,
+    };
 }
 
-pub fn nextPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
+pub fn nextPopulatedCell(sheet: *Sheet, pos: Position) ?Position {
     const remaining_row: Rect = blk: {
         if (pos.x != std.math.maxInt(PosInt)) {
             @branchHint(.likely);
@@ -1109,7 +1086,7 @@ pub fn nextPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
         }
     };
 
-    if (try sheet.findExtantCol(remaining_row, .first)) |col_index| {
+    if (sheet.findExtantCol(remaining_row, .first)) |col_index| {
         return .{ .x = col_index, .y = remaining_row.br.y };
     }
 
@@ -1122,19 +1099,19 @@ pub fn nextPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
         .tl = .{ .x = 0, .y = pos.y + 1 },
         .br = .{ .x = std.math.maxInt(PosInt), .y = std.math.maxInt(PosInt) },
     };
-    if (try sheet.findExtantRow(range, .first)) |y| {
+    if (sheet.findExtantRow(range, .first)) |y| {
         const row: Rect = .{
             .tl = .{ .x = 0, .y = y },
             .br = .{ .x = std.math.maxInt(PosInt), .y = y },
         };
-        if (try sheet.findExtantCol(row, .first)) |x|
+        if (sheet.findExtantCol(row, .first)) |x|
             return .init(x, y);
     }
 
     return null;
 }
 
-pub fn prevPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
+pub fn prevPopulatedCell(sheet: *Sheet, pos: Position) ?Position {
     const remaining_row: Rect = if (pos.x != 0) .{
         .tl = .{ .x = 0, .y = pos.y },
         .br = .{ .x = pos.x - 1, .y = pos.y },
@@ -1146,7 +1123,7 @@ pub fn prevPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
         return null;
     };
 
-    if (try sheet.findExtantCol(remaining_row, .last)) |col_index| {
+    if (sheet.findExtantCol(remaining_row, .last)) |col_index| {
         return .{
             .x = col_index,
             .y = remaining_row.br.y,
@@ -1159,12 +1136,12 @@ pub fn prevPopulatedCell(sheet: *Sheet, pos: Position) !?Position {
         .tl = .{ .x = 0, .y = 0 },
         .br = .{ .x = std.math.maxInt(PosInt), .y = pos.y - 1 },
     };
-    if (try sheet.findExtantRow(range, .last)) |y| {
+    if (sheet.findExtantRow(range, .last)) |y| {
         const row: Rect = .{
             .tl = .{ .x = 0, .y = y },
             .br = .{ .x = std.math.maxInt(PosInt), .y = y },
         };
-        if (try sheet.findExtantCol(row, .last)) |x| {
+        if (sheet.findExtantCol(row, .last)) |x| {
             return .{
                 .x = x,
                 .y = y,

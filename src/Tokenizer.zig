@@ -20,6 +20,8 @@ const State = enum {
     cell_address,
     single_string_literal,
     double_string_literal,
+    single_string_literal_start,
+    double_string_literal_start,
     comment,
 };
 
@@ -180,12 +182,12 @@ pub fn next(tokenizer: *Tokenizer) Token {
             },
             '\'' => {
                 tag = .single_string_literal_start;
-                tokenizer.state = .single_string_literal;
+                tokenizer.state = .single_string_literal_start;
                 tokenizer.pos += 1;
             },
             '"' => {
                 tag = .double_string_literal_start;
-                tokenizer.state = .double_string_literal;
+                tokenizer.state = .double_string_literal_start;
                 tokenizer.pos += 1;
             },
             else => {
@@ -250,8 +252,7 @@ pub fn next(tokenizer: *Tokenizer) Token {
                 else => {},
             }
         },
-        .single_string_literal => {
-            tokenizer.pos += 1;
+        .single_string_literal_start => {
             switch (tokenizer.bytes[tokenizer.pos]) {
                 '\'' => {
                     tag = .single_string_literal_end;
@@ -263,8 +264,15 @@ pub fn next(tokenizer: *Tokenizer) Token {
                 else => continue :state .single_string_literal,
             }
         },
+        .single_string_literal => {
+            tokenizer.pos += 1;
+            continue :state .single_string_literal_start;
+        },
         .double_string_literal => {
             tokenizer.pos += 1;
+            continue :state .double_string_literal_start;
+        },
+        .double_string_literal_start => {
             switch (tokenizer.bytes[tokenizer.pos]) {
                 '"' => {
                     tag = .double_string_literal_end;

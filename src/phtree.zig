@@ -862,6 +862,25 @@ pub fn PhTree(
             return handle;
         }
 
+        pub fn traverse(
+            tree: *@This(),
+            min: *const Point,
+            max: *const Point,
+            ctx: anytype,
+        ) !void {
+            switch (tree.root) {
+                .invalid => {},
+                .leaf => |root| {
+                    const p = tree.leafItem(root, .point);
+                    if (entryInWindow(p, min, max))
+                        try ctx.func(root);
+                },
+                .branch => |root| {
+                    try tree.traverseNodeWindow(root, min, max, ctx);
+                },
+            }
+        }
+
         /// Appends all key/value pairs whose key falls between `min` and `max`.
         pub fn queryWindow(
             tree: *@This(),
@@ -869,17 +888,15 @@ pub fn PhTree(
             max: *const Point,
             results: *std.ArrayList(Leaf.Handle),
         ) Allocator.Error!void {
-            switch (tree.root) {
-                .invalid => {},
-                .leaf => |root| {
-                    const p = tree.leafItem(root, .point);
-                    if (entryInWindow(p, min, max))
-                        try results.append(root);
-                },
-                .branch => |root| {
-                    try tree.queryNodeWindow(root, min, max, results);
-                },
-            }
+            const Context = struct {
+                results: *std.ArrayList(Leaf.Handle),
+
+                pub fn func(ctx: @This(), h: Leaf.Handle) !void {
+                    try ctx.results.append(h);
+                }
+            };
+
+            try tree.traverse(min, max, Context{ .results = results });
         }
 
         /// Appends all key/value pairs whose key intersects the rectangle of `min` and `max`.
@@ -1033,14 +1050,13 @@ pub fn PhTree(
             return pointGreaterOrEqual(p, min) and pointLessOrEqual(p, max);
         }
 
-        // TODO: Adapt this function to a range iterator
-        fn queryNodeWindow(
+        fn traverseNodeWindow(
             tree: *@This(),
             handle: Branch.Handle,
             min: *const Point,
             max: *const Point,
-            results: *std.ArrayList(Leaf.Handle),
-        ) Allocator.Error!void {
+            ctx: anytype,
+        ) !void {
             assert(handle != .invalid);
             const p = tree.branchItem(handle, .point);
             if (!nodeInWindow(p, tree.branchItem(handle, .postfix_length).*, min, max))
@@ -1056,7 +1072,7 @@ pub fn PhTree(
             }
 
             for (tree.branchItem(handle, .children), 0..) |child_handle, i| {
-                if (((i | mask_lower) & mask_upper) != i)
+                if ((i | mask_lower) & mask_upper != i)
                     continue;
 
                 switch (tree.getChild(handle, @intCast(i))) {
@@ -1064,11 +1080,12 @@ pub fn PhTree(
                     .leaf => |leaf| {
                         const child_point = tree.leafItem(leaf, .point);
                         if (entryInWindow(child_point, min, max)) {
-                            try results.append(.from(child_handle.int()));
+                            const h: Leaf.Handle = .from(child_handle.int());
+                            try ctx.func(h);
                         }
                     },
                     .branch => |branch| {
-                        try tree.queryNodeWindow(branch, min, max, results);
+                        try tree.traverseNodeWindow(branch, min, max, ctx);
                     },
                 }
             }
