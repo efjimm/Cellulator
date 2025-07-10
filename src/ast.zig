@@ -9,8 +9,8 @@ const Rect = Position.Rect;
 
 const Tokenizer = @import("Tokenizer.zig");
 const Parser = @import("Parser.zig");
-const BinaryOperator = Parser.BinaryOperator;
-const Builtin = Parser.Builtin;
+pub const BinaryOperator = Parser.BinaryOperator;
+pub const Builtin = Parser.Builtin;
 
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -93,6 +93,7 @@ pub const NegativeOffset = enum(u32) {
     _,
 
     pub fn from(n: u32) NegativeOffset {
+        assert(n != 0);
         return @enumFromInt(n);
     }
 

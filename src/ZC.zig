@@ -869,7 +869,8 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
         .yank_cell => {
             zc.yank = zc.anyCursorRange();
         },
-        .put_cell => try zc.put(zc.cursor),
+        .put_cell => try zc.put(zc.cursor, .no_adjust),
+        .put_cell_adjust => try zc.put(zc.cursor, .adjust),
         .cell_cursor_up => zc.cursorUp(),
         .cell_cursor_down => zc.cursorDown(),
         .cell_cursor_left => zc.cursorLeft(),
@@ -1135,6 +1136,7 @@ const Cmd = enum {
     unset,
     yank,
     put,
+    put_adjust,
     close_sheet,
     close_sheet_force,
     rename_sheet,
@@ -1161,6 +1163,9 @@ const cmds = std.StaticStringMap(Cmd).initComptime(.{
     .{ "unset", .unset },
     .{ "yank", .yank },
     .{ "put", .put },
+    .{ "p", .put },
+    .{ "put-adjust", .put_adjust },
+    .{ "pa", .put_adjust },
     .{ "sheet-close", .close_sheet },
     .{ "sheet-close!", .close_sheet_force },
     .{ "sc", .close_sheet },
@@ -1315,7 +1320,14 @@ pub fn runCommand(zc: *ZC, str: [:0]const u8) !void {
                 try Position.fromAddress(arg)
             else
                 zc.cursor;
-            try zc.put(pos);
+            try zc.put(pos, .no_adjust);
+        },
+        .put_adjust => {
+            const pos = if (iter.next()) |arg|
+                try Position.fromAddress(arg)
+            else
+                zc.cursor;
+            try zc.put(pos, .adjust);
         },
         // Set a property back to its default value
         .unset => {
@@ -1850,10 +1862,10 @@ fn setTheme(
     try zc.ui_interface.applyTheme(path);
 }
 
-fn put(zc: *ZC, dest: Position) !void {
+fn put(zc: *ZC, dest: Position, comptime adjust: Sheet.Adjust) !void {
     if (zc.yank) |yank| {
         if (!yank.tl.eql(dest)) {
-            try zc.currentSheet().copyRangeTo(yank, dest);
+            try zc.currentSheet().copyRangeTo(yank, dest, adjust);
             zc.currentSheet().endUndoGroup();
             zc.ui.update(&.{.cells});
         }

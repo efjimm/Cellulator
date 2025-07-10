@@ -181,10 +181,22 @@ Copies the given range or the cursor range to the yank buffer.
 ```
 :put
 :put CELL
+:p
+:p CELL
 ```
 
-Pastes the current contents of the range held by the yank buffer at the given positionor at the
+Pastes the current contents of the range held by the yank buffer at the given position or at the
 cursor. Expressions are copied literally, with no modification.
+
+```
+:put-adjust
+:put-adjust CELL
+:pa
+:pa CELL
+```
+
+Pastes the current contents of the range held by the yank buffer at the given position or at the
+cursor. Cell references contained in the expression are adjusted based on the new position.
 
 ```
 :sheet-close
@@ -356,7 +368,8 @@ will repeat the following motion that many times. This does not currently work f
 - `gp` Go to the previous sheet
 - `C-wq` Close the current sheet
 - `yy` Yank selected cell
-- `p` Put yanked cells at cursor
+- `p` Put yanked cells at cursor, copying expression exactly
+- `P` Put yanked cells at cursor, adjusting cell references in the expressions
 - `ic` Insert count columns at the cursor
 - `dc` Delete count columns at the cursor
 - `ir` Insert count rows at the cursor

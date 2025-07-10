@@ -62,6 +62,8 @@ might be an interesting read so I committed it. The stuff at the top is probably
   - Random numbers
   - Insert cells feature from libreoffice
   - Highlight cells in expression of hovered cell
+  - Go to definition for cell references
+  - Show the expression and cached value for hovered over cells in command mode
 
 - Implement constant folding
   - Full expressions still need to exist in the Ast for printing purposes

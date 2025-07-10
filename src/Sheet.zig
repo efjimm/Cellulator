@@ -478,7 +478,7 @@ const SerializeHeader = extern struct {
     redos_cap: u32,
 
     const magic_number: u32 = @bitCast([4]u8{ 'Z', 'C', 'Z', 'C' });
-    const binary_version = 8;
+    const binary_version = 9;
 };
 
 pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
@@ -869,10 +869,10 @@ fn addCellAsDependentOfRange(
     dependent: Cell.Handle,
     range: Rect,
 ) void {
-    // log.debug("Adding {} as a dependent of {}", .{
-    //     sheet.rectFromCellHandle(dependent).tl,
-    //     range,
-    // });
+    log.debug("Adding {} as a dependent of {}", .{
+        sheet.rectFromCellHandle(dependent).tl,
+        range,
+    });
 
     const p: Dependents.Point = .{
         range.tl.x, range.tl.y,
@@ -2772,6 +2772,24 @@ pub fn printCellExpression(sheet: *Sheet, pos: Position, writer: anytype) !void 
     );
 }
 
+const FmtData = struct {
+    sheet: *Sheet,
+    pos: Position,
+};
+
+pub fn formatCellExpression(
+    d: FmtData,
+    comptime _: []const u8,
+    _: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    try d.sheet.printCellExpression(d.pos, writer);
+}
+
+pub fn fmtCellExpr(f: FmtData) std.fmt.Formatter(formatCellExpression) {
+    return .{ .data = f };
+}
+
 fn setRowOrColumn(
     sheet: *Sheet,
     comptime T: type,
@@ -2828,7 +2846,8 @@ pub fn getColumnHandle(sheet: *Sheet, index: PosInt) ?Column.Handle {
     return null;
 }
 
-pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Position) !void {
+// TODO: Make `dest` a range and have it tile the copied cells
+pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Position, comptime adjust: Adjust) !void {
     assert(!Position.eql(src.tl, dest));
     defer sheet.resetArena();
     const arena = sheet.arena.allocator();
@@ -2845,10 +2864,12 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Position) !void {
     try sheet.ensureUnusedUndoCapacity(2);
     try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, cells.items.len + 1);
 
+    var total_asts_len: usize = 0;
     var total_deps: u32 = 0;
     for (cells.items) |cell| { // TODO: This kinda sucks
         const ast_root = sheet.getCellFromHandle(cell).expr_root;
         var iter: ExprRangeIterator = .init(sheet, ast_root);
+        total_asts_len += iter.i.n - iter.start.n;
         while (iter.next()) |_| total_deps += 1;
     }
 
@@ -2856,9 +2877,13 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Position) !void {
     try sheet.ensureUnusedCellQueueCapacity(cells.items.len);
     try sheet.deps.ensureUnusedCapacity(sheet.allocator, total_deps);
     try sheet.ensureUnusedCellQueueCapacity(cells.items.len);
+    if (adjust == .adjust) {
+        try sheet.dependents.ensureUnusedCapacity(sheet.allocator, cells.items.len);
+        try sheet.ensureUnusedAstNodeCapacity(@intCast(total_asts_len));
+    }
     errdefer comptime unreachable;
 
-    const new_cells = sheet.createShallowCellCopiesContiguous(cells.items, src.tl, dest);
+    const new_cells = sheet.createCellCopiesContiguous(cells.items, src.tl, dest, adjust);
 
     const dest_range: Rect = .initPos(dest, .add(dest, .sub(src.br, src.tl)));
     _ = sheet.deleteCellRangeAssumeCapacity(dest_range, .{});
@@ -2872,17 +2897,20 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Position) !void {
     }), .{}) catch unreachable;
 }
 
-/// Copies all the cells in `cell_handles`, returning the first cell handle created. The expression
-/// and strings are shared between the original and copied cells. The created cells are appended at
-/// the end of the cell tree's leaves array and as such have continuous handles. The cells are not
-/// inserted into the tree.
+pub const Adjust = enum { adjust, no_adjust };
+
+/// Copies all the cells in `cell_handles`, returning the first cell handle created. The  strings
+/// are shared between the original and copied cells. The created cells are appended at the end of
+/// the cell tree's leaves array and as such have continuous handles. The cells are not inserted
+/// into the tree.
 ///
 /// The point of each cell is set to src + (dest - origin).
-pub fn createShallowCellCopiesContiguous(
+pub fn createCellCopiesContiguous(
     sheet: *Sheet,
     cell_handles: []const Cell.Handle,
     origin: Position,
     dest: Position,
+    comptime adjust: Adjust,
 ) Cell.Handle {
     const start: Cell.Handle = .from(@intCast(sheet.cell_tree.leaves.len));
     sheet.cell_tree.leaves.len += cell_handles.len;
@@ -2892,17 +2920,54 @@ pub fn createShallowCellCopiesContiguous(
     for (cell_handles, start.int()..) |src_handle, dest_handle_int| {
         const src_point = sheet.cell_tree.getPoint(src_handle);
         const src_cell = sheet.getCellFromHandle(src_handle).*;
-        const src_pos: Position = .init(src_point[0], src_point[1]);
 
+        if (adjust == .adjust) {
+            const left = ast.leftMostChild(sheet.ast_nodes, src_cell.expr_root);
+            const len = src_cell.expr_root.n - left.n + 1;
+            const asts_start = sheet.ast_nodes.len;
+            sheet.ast_nodes.len += len;
+            assert(sheet.ast_nodes.len <= sheet.ast_nodes.capacity);
+
+            const tags = sheet.ast_nodes.items(.tag);
+            const data = sheet.ast_nodes.items(.data);
+
+            for (
+                tags[left.n..][0..len],
+                data[left.n..][0..len],
+                tags[asts_start..],
+                data[asts_start..],
+            ) |src_tag, src_data, *dest_tag, *dest_data| {
+                dest_tag.* = src_tag;
+                dest_data.* = src_data;
+                switch (src_tag) {
+                    inline else => |t| {
+                        switch (@FieldType(ast.Node.Payload, @tagName(t))) {
+                            Position => {
+                                dest_data.pos.x = @intCast(@as(i33, dest_data.pos.x) + x_diff);
+                                dest_data.pos.y = @intCast(@as(i33, dest_data.pos.y) + y_diff);
+                            },
+                            else => {},
+                        }
+                    },
+                }
+            }
+        }
+
+        const src_pos: Position = .init(src_point[0], src_point[1]);
         const new_x: u32 = @intCast(@as(i33, src_pos.x) + x_diff);
         const new_y: u32 = @intCast(@as(i33, src_pos.y) + y_diff);
+
+        const expr_root: ast.Index = switch (adjust) {
+            .adjust => .from(@intCast(sheet.ast_nodes.len - 1)),
+            .no_adjust => src_cell.expr_root,
+        };
 
         sheet.cell_tree.leaves.set(dest_handle_int, .{
             .point = .{ new_x, new_y },
             .parent = .invalid,
             .value = .{
                 .state = .enqueued,
-                .expr_root = src_cell.expr_root,
+                .expr_root = expr_root,
                 .strings = src_cell.strings,
             },
         });
@@ -3556,8 +3621,13 @@ pub fn expectCellEquals(sheet: *Sheet, address: []const u8, expected_value: f64)
     }
     if (!std.math.approxEqRel(f64, expected_value, cell.value.number, 0.001)) {
         std.debug.print(
-            "Cell {} with value {d} not within tolerance of expected value {d}\n",
-            .{ pos, cell.value.number, expected_value },
+            "Cell {} ({}) with value {d} not within tolerance of expected value {d}\n",
+            .{
+                pos,
+                fmtCellExpr(.{ .sheet = sheet, .pos = pos }),
+                cell.value.number,
+                expected_value,
+            },
         );
         return error.TestExpectedCellsEql;
     }

@@ -455,7 +455,6 @@ test "parser" {
 }
 
 test "Node contents" {
-    if (true) return error.SkipZigTest;
     const t = std.testing;
     const testNodes = struct {
         fn func(bytes: [:0]const u8, nodes: []const Node) !void {
@@ -497,11 +496,11 @@ test "Node contents" {
             .init(.number, 3.0),
             .init(.number, 2.0),
             .init(.sub, .{ .lhs = .from(2), .rhs = .from(1) }),
-            .init(.mul, .{ .lhs = .from(0), .rhs = .from(3) }),
+            .init(.mul, .{ .lhs = .from(4), .rhs = .from(1) }),
             .init(.number, 2.0),
             .init(.number, 1.0),
-            .init(.add, .{ .lhs = .from(5), .rhs = .from(6) }),
-            .init(.div, .{ .lhs = .from(4), .rhs = .from(7) }),
+            .init(.add, .{ .lhs = .from(2), .rhs = .from(1) }),
+            .init(.div, .{ .lhs = .from(4), .rhs = .from(1) }),
             .init(.assignment, .fromValidAddress("b30")),
         },
     );
@@ -516,7 +515,7 @@ test "Node contents" {
                 .start = "let crxp65535 = 'this is epic' # '".len,
                 .end = "let crxp65535 = 'this is epic' # 'nice".len,
             }),
-            .init(.concat, .{ .lhs = .from(0), .rhs = .from(1) }),
+            .init(.concat, .{ .lhs = .from(2), .rhs = .from(1) }),
             .init(.assignment, .fromValidAddress("crxp65535")),
         },
     );
