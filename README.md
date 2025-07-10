@@ -137,6 +137,14 @@ Undos N or 1 times.
 Redos N or 1 times.
 
 ```
+:go CELL
+:go RANGE
+```
+
+Moves the cursor to the given cell or range. If a range is given the mode changes to visual and the
+range is selected.
+
+```
 :delete
 :delete CELL
 :delete RANGE

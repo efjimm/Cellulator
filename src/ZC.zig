@@ -605,7 +605,7 @@ const CommandWriter = std.io.Writer(*ZC, Allocator.Error, commandWrite);
 pub fn submitCommand(zc: *ZC) !void {
     assert(zc.mode.isCommandMode());
     zc.dismissStatusMessage();
-    defer zc.setMode(.normal);
+    defer if (zc.mode.isCommandMode()) zc.setMode(.normal);
 
     const slice = try zc.command.submit(zc.allocator);
     defer zc.commandHistoryNext();
@@ -1141,6 +1141,7 @@ const Cmd = enum {
     close_sheet,
     close_sheet_force,
     rename_sheet,
+    goto,
 };
 
 const cmds = std.StaticStringMap(Cmd).initComptime(.{
@@ -1172,6 +1173,7 @@ const cmds = std.StaticStringMap(Cmd).initComptime(.{
     .{ "sc", .close_sheet },
     .{ "sc!", .close_sheet_force },
     .{ "sheet-rename", .rename_sheet },
+    .{ "go", .goto },
 });
 
 const DebugCmd = enum {
@@ -1269,6 +1271,23 @@ pub fn runCommand(zc: *ZC, str: [:0]const u8) !void {
     // TODO: Implement a better system for displaying usage information for commands, which is
     //       invoked whenver a malformed command is encountered.
     switch (cmd) {
+        .goto => {
+            const arg1 = iter.next() orelse {
+                std.log.err("Not enough arguments (expected a cell or range)", .{});
+                return;
+            };
+            const r = parseRangeOrPoint(arg1) catch {
+                std.log.err("Invalid cell or range", .{});
+                return;
+            };
+            if (r.area() == 1) {
+                zc.setCursor(r.tl);
+            } else {
+                zc.setMode(.visual);
+                zc.anchor = r.tl;
+                zc.setCursor(r.br);
+            }
+        },
         .close_sheet => {
             if (zc.currentSheet().has_changes) {
                 zc.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
