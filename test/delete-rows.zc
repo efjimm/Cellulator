@@ -118,3 +118,7 @@ let B30 = A30 + A32
 :expect-eql-number A30 5
 :expect-eql-number A31 15
 :expect-non-extant A32
+
+:undo 200
+:redo 200
+:undo 200

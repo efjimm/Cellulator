@@ -1312,6 +1312,7 @@ pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
             const index = u.payload.bulk_cell_insert;
             const handles = sheet.getUndoCellsSlice(index);
 
+            try sheet.ensureUnusedCellQueueCapacity(handles.len);
             sheet.bulkInsertCellHandles(handles);
 
             try sheet.pushUndo(.init(.bulk_cell_delete, index), opts);
@@ -2847,11 +2848,25 @@ pub fn getColumnHandle(sheet: *Sheet, index: PosInt) ?Column.Handle {
     return null;
 }
 
+fn roundUp(a: anytype, multiple: anytype) @TypeOf(a) {
+    return ((a + multiple - 1) / multiple) * multiple;
+}
+
 // TODO: Make `dest` a range and have it tile the copied cells
-pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Position, comptime adjust: Adjust) !void {
-    assert(!Position.eql(src.tl, dest));
+pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Rect, comptime adjust: Adjust) !void {
+    assert(!Rect.eql(src, dest));
     defer sheet.resetArena();
     const arena = sheet.arena.allocator();
+
+    const real_dest: Rect = .init(
+        dest.tl.x,
+        dest.tl.y,
+        dest.tl.x + roundUp(dest.width(), src.width()) - 1,
+        dest.tl.y + roundUp(dest.height(), src.height()) - 1,
+    );
+    const tile_count = @divExact(real_dest.area(), src.area());
+    const tile_x = @divExact(real_dest.width(), src.width());
+    const tile_y = @divExact(real_dest.height(), src.height());
 
     var cells: std.ArrayList(Cell.Handle) = try .initCapacity(arena, 128);
     try sheet.cell_tree.queryWindow(
@@ -2863,7 +2878,7 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Position, comptime adjust: Ad
     if (cells.items.len == 0) return;
 
     try sheet.ensureUnusedUndoCapacity(2);
-    try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, cells.items.len + 1);
+    try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, (cells.items.len * tile_count) + 1);
 
     var total_asts_len: usize = 0;
     var total_deps: u32 = 0;
@@ -2871,30 +2886,28 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Position, comptime adjust: Ad
         const ast_root = sheet.getCellFromHandle(cell).expr_root;
         var iter: ExprRangeIterator = .init(sheet, ast_root);
         total_asts_len += iter.i.n - iter.start.n;
-        while (iter.next()) |_| total_deps += 1;
+        while (iter.next()) |_| total_deps += @intCast(tile_count);
     }
 
-    try sheet.ensureUnusedCellCapacity(cells.items.len);
-    try sheet.ensureUnusedCellQueueCapacity(cells.items.len);
+    try sheet.ensureUnusedCellCapacity(cells.items.len * tile_count);
     try sheet.deps.ensureUnusedCapacity(sheet.allocator, total_deps);
-    try sheet.ensureUnusedCellQueueCapacity(cells.items.len);
+    try sheet.ensureUnusedCellQueueCapacity(cells.items.len * tile_count);
     if (adjust == .adjust) {
-        try sheet.dependents.ensureUnusedCapacity(sheet.allocator, cells.items.len);
-        try sheet.ensureUnusedAstNodeCapacity(@intCast(total_asts_len));
+        try sheet.dependents.ensureUnusedCapacity(sheet.allocator, cells.items.len * tile_count);
+        try sheet.ensureUnusedAstNodeCapacity(@intCast(total_asts_len * tile_count));
     }
     errdefer comptime unreachable;
 
-    const new_cells = sheet.createCellCopiesContiguous(cells.items, src.tl, dest, adjust);
+    const new_cells = sheet.createCellCopiesContiguous(cells.items, src, dest.tl, tile_x, tile_y, adjust);
 
-    const dest_range: Rect = .initPos(dest, .add(dest, .sub(src.br, src.tl)));
-    _ = sheet.deleteCellRangeAssumeCapacity(dest_range, .{});
+    _ = sheet.deleteCellRangeAssumeCapacity(real_dest, .{});
     sheet.bulkInsertCellHandlesContiguous(
         new_cells.int(),
-        new_cells.int() + cells.items.len,
+        new_cells.int() + cells.items.len * tile_count,
     );
     sheet.pushUndo(.init(.bulk_cell_delete_contiguous, .{
         .start = new_cells.int(),
-        .end = new_cells.int() + cells.items.len,
+        .end = new_cells.int() + cells.items.len * tile_count,
     }), .{}) catch unreachable;
 }
 
@@ -2909,69 +2922,85 @@ pub const Adjust = enum { adjust, no_adjust };
 pub fn createCellCopiesContiguous(
     sheet: *Sheet,
     cell_handles: []const Cell.Handle,
-    origin: Position,
+    origin: Rect,
     dest: Position,
+    tile_x: u32,
+    tile_y: u32,
     comptime adjust: Adjust,
 ) Cell.Handle {
     const start: Cell.Handle = .from(@intCast(sheet.cell_tree.leaves.len));
-    sheet.cell_tree.leaves.len += cell_handles.len;
+    sheet.cell_tree.leaves.len += cell_handles.len * tile_x * tile_y;
 
-    const x_diff, const y_diff = dest.diff(origin);
+    const x_diff, const y_diff = dest.diff(origin.tl);
+    const height = origin.height();
+    const width = origin.width();
 
-    for (cell_handles, start.int()..) |src_handle, dest_handle_int| {
+    var dest_handle_int = start.int();
+    for (cell_handles) |src_handle| {
         const src_point = sheet.cell_tree.getPoint(src_handle);
         const src_cell = sheet.getCellFromHandle(src_handle).*;
 
-        if (adjust == .adjust) {
-            const left = ast.leftMostChild(sheet.ast_nodes, src_cell.expr_root);
-            const len = src_cell.expr_root.n - left.n + 1;
-            const asts_start = sheet.ast_nodes.len;
-            sheet.ast_nodes.len += len;
-            assert(sheet.ast_nodes.len <= sheet.ast_nodes.capacity);
-
-            const tags = sheet.ast_nodes.items(.tag);
-            const data = sheet.ast_nodes.items(.data);
-
-            for (
-                tags[left.n..][0..len],
-                data[left.n..][0..len],
-                tags[asts_start..],
-                data[asts_start..],
-            ) |src_tag, src_data, *dest_tag, *dest_data| {
-                dest_tag.* = src_tag;
-                dest_data.* = src_data;
-                switch (src_tag) {
-                    inline else => |t| {
-                        switch (@FieldType(ast.Node.Payload, @tagName(t))) {
-                            Position => {
-                                dest_data.pos.x = @intCast(@as(i33, dest_data.pos.x) + x_diff);
-                                dest_data.pos.y = @intCast(@as(i33, dest_data.pos.y) + y_diff);
-                            },
-                            else => {},
-                        }
-                    },
-                }
-            }
-        }
-
+        const left = ast.leftMostChild(sheet.ast_nodes, src_cell.expr_root);
+        const len = src_cell.expr_root.n - left.n + 1;
         const src_pos: Position = .init(src_point[0], src_point[1]);
+
         const new_x: u32 = @intCast(@as(i33, src_pos.x) + x_diff);
         const new_y: u32 = @intCast(@as(i33, src_pos.y) + y_diff);
 
-        const expr_root: ast.Index = switch (adjust) {
-            .adjust => .from(@intCast(sheet.ast_nodes.len - 1)),
-            .no_adjust => src_cell.expr_root,
-        };
+        var y: u32 = 0;
+        while (y < tile_y) : (y += 1) {
+            var x: u32 = 0;
+            while (x < tile_x) : ({
+                x += 1;
+                dest_handle_int += 1;
+            }) {
+                if (adjust == .adjust) {
+                    const asts_start = sheet.ast_nodes.len;
+                    sheet.ast_nodes.len += len;
+                    assert(sheet.ast_nodes.len <= sheet.ast_nodes.capacity);
 
-        sheet.cell_tree.leaves.set(dest_handle_int, .{
-            .point = .{ new_x, new_y },
-            .parent = .invalid,
-            .value = .{
-                .state = .enqueued,
-                .expr_root = expr_root,
-                .strings = src_cell.strings,
-            },
-        });
+                    const tags = sheet.ast_nodes.items(.tag);
+                    const data = sheet.ast_nodes.items(.data);
+
+                    for (
+                        tags[left.n..][0..len],
+                        data[left.n..][0..len],
+                        tags[asts_start..],
+                        data[asts_start..],
+                    ) |src_tag, src_data, *dest_tag, *dest_data| {
+                        dest_tag.* = src_tag;
+                        dest_data.* = src_data;
+                        switch (src_tag) {
+                            .pos => {
+                                dest_data.pos.x = @intCast(@as(i33, dest_data.pos.x) + x_diff);
+                                dest_data.pos.y = @intCast(@as(i33, dest_data.pos.y) + y_diff);
+                                dest_data.pos.x += width * x;
+                                dest_data.pos.y += height * y;
+                            },
+                            else => {},
+                        }
+                    }
+                }
+
+                const tiled_x = new_x + x * width;
+                const tiled_y = new_y + y * height;
+
+                const expr_root: ast.Index = switch (adjust) {
+                    .adjust => .from(@intCast(sheet.ast_nodes.len - 1)),
+                    .no_adjust => src_cell.expr_root,
+                };
+
+                sheet.cell_tree.leaves.set(dest_handle_int, .{
+                    .point = .{ tiled_x, tiled_y },
+                    .parent = .invalid,
+                    .value = .{
+                        .state = .enqueued,
+                        .expr_root = expr_root,
+                        .strings = src_cell.strings,
+                    },
+                });
+            }
+        }
     }
 
     return start;

@@ -1,0 +1,191 @@
+-- Test :put with tiling behavior (source smaller than destination)
+let A0 = 1
+let A1 = 2
+let B0 = 3
+let B1 = 4
+:yank A0:B1
+:put C0:F3
+:expect-eql-number C0 1
+:expect-eql-number D0 3
+:expect-eql-number E0 1
+:expect-eql-number F0 3
+:expect-eql-number C1 2
+:expect-eql-number D1 4
+:expect-eql-number E1 2
+:expect-eql-number F1 4
+:expect-eql-number C2 1
+:expect-eql-number D2 3
+:expect-eql-number E2 1
+:expect-eql-number C2 1
+:expect-eql-number F2 3
+:expect-eql-number C3 2
+:expect-eql-number D3 4
+:expect-eql-number E3 2
+:expect-eql-number F3 4
+
+-- Test :put with tiling behavior (source larger than destination - source fully pasted)
+let G0 = "X"
+let G1 = "Y"
+let H0 = "Z"
+let H1 = "W"
+:yank G0:H1
+:put I0:I0
+:expect-eql-string I0 "X"
+:expect-eql-string J0 "Z"
+:expect-eql-string I1 "Y"
+:expect-eql-string J1 "W"
+
+-- Test :put-adjust with tiling behavior (source smaller than destination)
+-- We need to pre-populate the cells that the *adjusted* formulas will reference.
+-- Source: A0:B1, Destination: C0:F3
+-- Relative move from A0 to C0 is +2 columns, 0 rows.
+-- Relative move from B0 to D0 is +2 columns, 0 rows.
+-- Relative move from A0 to E0 (tiled) is +4 columns, 0 rows.
+-- Relative move from B0 to F0 (tiled) is +4 columns, 0 rows.
+-- Similarly for rows: A0 to C2 is +2 columns, +2 rows.
+
+-- Pre-populate cells that will be referenced by the adjusted formulas
+let Z0 = 100
+let Z1 = 101
+let AA0 = 102
+let AA1 = 103
+
+-- Cells referenced by formulas after adjustment (for C0, D0, E0, F0, C1, D1, E1, F1)
+let AB0 = 200
+let AB1 = 201
+let AC0 = 202
+let AC1 = 203
+let AD0 = 300
+let AD1 = 301
+let AE0 = 302
+let AE1 = 303
+
+-- Cells referenced by formulas after adjustment (for C2, D2, E2, F2, C3, D3, E3, F3 due to tiling)
+let AB2 = 200 -- Z0 + 2 cols, 2 rows
+let AB3 = 201 -- Z1 + 2 cols, 2 rows
+let AC2 = 202 -- AA0 + 2 cols, 2 rows
+let AC3 = 203 -- AA1 + 2 cols, 2 rows
+let AD2 = 300 -- Z0 + 4 cols, 2 rows
+let AD3 = 301 -- Z1 + 4 cols, 2 rows
+let AE2 = 302 -- AA0 + 4 cols, 2 rows
+let AE3 = 303 -- AA1 + 4 cols, 2 rows
+
+
+-- Define source cells with formulas
+let A0 = Z0+1
+let A1 = Z1+1
+let B0 = AA0+1
+let B1 = AA1+1
+
+:yank A0:B1
+:put-adjust C0:F3
+
+-- Verify values after put-adjust and tiling (Row 0)
+:expect-eql-number C0 201 -- from A0, references AB0
+:expect-eql-number D0 203 -- from B0, references AC0
+:expect-eql-number E0 301 -- from A0 tiled, references AD0
+:expect-eql-number F0 303 -- from B0 tiled, references AE0
+
+-- Verify values after put-adjust and tiling (Row 1)
+:expect-eql-number C1 202 -- from A1, references AB1
+:expect-eql-number D1 204 -- from B1, references AC1
+:expect-eql-number E1 302 -- from A1 tiled, references AD1
+:expect-eql-number F1 304 -- from B1 tiled, references AE1
+
+-- Verify values after put-adjust and tiling (Row 2 - tiled from Row 0 of source)
+:expect-eql-number C2 201 -- from A0 tiled, references AB2
+:expect-eql-number D2 203 -- from B0 tiled, references AC2
+:expect-eql-number E2 301 -- from A0 tiled, references AD2
+:expect-eql-number F2 303 -- from B0 tiled, references AE2
+
+-- Verify values after put-adjust and tiling (Row 3 - tiled from Row 1 of source)
+:expect-eql-number C3 202 -- from A1 tiled, references AB3
+:expect-eql-number D3 204 -- from B1 tiled, references AC3
+:expect-eql-number E3 302 -- from A1 tiled, references AD3
+:expect-eql-number F3 304 -- from B1 tiled, references AE3
+
+-- Test :put-adjust with tiling behavior (source larger than destination - source fully pasted)
+-- Source: O0:P1 (2x2), Destination: R0:R0 (1x1)
+-- Pre-populate cells that will be referenced by the adjusted formulas.
+-- O0 = P0*2 (P0 is 1 col right)
+-- P0 = Q0*3 (Q0 is 1 col right)
+-- When O0 is pasted to R0:
+--   O0 -> R0. P0 -> S0. Q0 -> T0.
+-- So R0 will become S0*2 and S0 will become T0*3.
+let Q0 = 5
+let Q1 = 6
+let T0 = 7 -- Will be referenced by S0 after adjustment
+let T1 = 8
+
+let O0 = P0*2
+let O1 = P1*2
+let P0 = Q0*3
+let P1 = Q1*3
+:yank O0:P1
+:put-adjust R0:R0
+
+-- Verify values after put-adjust and tiling
+-- R0 (from O0) should reference S0. S0 (from P0) should reference T0.
+-- Value: (T0 * 3) * 2 = (7 * 3) * 2 = 42
+:expect-eql-number R0 42
+-- S0 (from P0) should reference T0.
+-- Value: T0 * 3 = 7 * 3 = 21
+:expect-eql-number S0 21
+-- R1 (from O1) should reference S1. S1 (from P1) should reference T1.
+-- Value: (T1 * 3) * 2 = (8 * 3) * 2 = 48
+:expect-eql-number R1 48
+-- S1 (from P1) should reference T1.
+-- Value: T1 * 3 = 8 * 3 = 24
+:expect-eql-number S1 24
+
+-- Test :put with different data types and tiling (literal copy)
+let A2 = 10
+let B2 = "Hello"
+let C2 = A2+B2 -- This will likely evaluate to an error
+:yank A2:C2
+:put D2:G3
+:expect-eql-number D2 10
+:expect-eql-string E2 "Hello"
+:expect-error F2 -- Expecting an error due to invalid coercion
+:expect-eql-number G2 10
+:expect-eql-number D3 10
+:expect-eql-string E3 "Hello"
+:expect-error F3 -- Expecting an error due to invalid coercion
+:expect-eql-number G3 10
+
+-- Test :put-adjust with mixed data types and tiling
+-- Pre-populate cells that will be referenced by the adjusted formulas.
+let M2 = "World" -- Will be referenced by L2 after adjustment
+let M3 = "World" -- Will be referenced by L3 after adjustment
+
+let I2 = "World" -- This is the cell referenced by H2
+let H2 = I2*2 -- H2 refers to I2, will likely evaluate to an error
+:yank H2:I2
+:put-adjust J2:M3
+
+-- Verify values after put-adjust and tiling
+-- J2 (from H2) should reference K2 (1 column right of I2).
+-- K2 (from I2) is "World". So J2 will try to evaluate K2*2
+:expect-error J2 -- Expecting an error due to invalid operation
+:expect-eql-string K2 "World"
+-- L2 (from H2, tiled) should reference M2 (1 column right of I2, tiled).
+-- M2 (from I2, tiled) is "World". So L2 will try to evaluate M2*2
+:expect-error L2 -- Expecting an error due to invalid operation
+:expect-eql-string M2 "World"
+
+-- J3 (from H2, tiled) should reference K3.
+-- K3 (from I2, tiled) is "World". So J3 will try to evaluate K3*2
+:expect-error J3 -- Expecting an error due to invalid operation
+:expect-eql-string K3 "World"
+-- L3 (from H2, tiled) should reference M3 (1 column right of I2, tiled).
+-- M3 (from I2, tiled) is "World". So L3 will try to evaluate M3*2
+:expect-error L3 -- Expecting an error due to invalid operation
+:expect-eql-string M3 "World"
+
+:undo 53
+:expect-non-extant A0
+:expect-non-extant G0
+:expect-non-extant Z0
+:expect-non-extant Q0
+:expect-non-extant A2
+:expect-non-extant I2

@@ -63,3 +63,5 @@ let S0 = @upper(R0)
 let T0 = @lower(R0)
 :expect-eql-string S0 "123ABCDEF"
 :expect-eql-string T0 "123abcdef"
+
+:undo 200

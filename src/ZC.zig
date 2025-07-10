@@ -869,8 +869,8 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
         .yank_cell => {
             zc.yank = zc.anyCursorRange();
         },
-        .put_cell => try zc.put(zc.cursor, .no_adjust),
-        .put_cell_adjust => try zc.put(zc.cursor, .adjust),
+        .put_cell => try zc.put(zc.anyCursorRange(), .no_adjust),
+        .put_cell_adjust => try zc.put(zc.anyCursorRange(), .adjust),
         .cell_cursor_up => zc.cursorUp(),
         .cell_cursor_down => zc.cursorDown(),
         .cell_cursor_left => zc.cursorLeft(),
@@ -967,6 +967,14 @@ fn doVisualMode(zc: *ZC, action: Action) Allocator.Error!void {
 
         .yank_cell => {
             zc.yank = zc.anyCursorRange();
+            zc.setMode(.normal);
+        },
+        .put_cell => {
+            try zc.put(zc.anyCursorRange(), .no_adjust);
+            zc.setMode(.normal);
+        },
+        .put_cell_adjust => {
+            try zc.put(zc.anyCursorRange(), .adjust);
             zc.setMode(.normal);
         },
 
@@ -1309,18 +1317,18 @@ pub fn runCommand(zc: *ZC, str: [:0]const u8) !void {
             zc.yank = range;
         },
         .put => {
-            const pos = if (iter.next()) |arg|
-                try Position.fromAddress(arg)
+            const range = if (iter.next()) |arg|
+                try parseRangeOrPoint(arg)
             else
-                zc.cursor;
-            try zc.put(pos, .no_adjust);
+                zc.anyCursorRange();
+            try zc.put(range, .no_adjust);
         },
         .put_adjust => {
-            const pos = if (iter.next()) |arg|
-                try Position.fromAddress(arg)
+            const range = if (iter.next()) |arg|
+                try parseRangeOrPoint(arg)
             else
-                zc.cursor;
-            try zc.put(pos, .adjust);
+                zc.anyCursorRange();
+            try zc.put(range, .adjust);
         },
         // Set a property back to its default value
         .unset => {
@@ -1855,9 +1863,9 @@ fn setTheme(
     try zc.ui_interface.applyTheme(path);
 }
 
-fn put(zc: *ZC, dest: Position, comptime adjust: Sheet.Adjust) !void {
+fn put(zc: *ZC, dest: Rect, comptime adjust: Sheet.Adjust) !void {
     if (zc.yank) |yank| {
-        if (!yank.tl.eql(dest)) {
+        if (!yank.eql(dest)) {
             try zc.currentSheet().copyRangeTo(yank, dest, adjust);
             zc.currentSheet().endUndoGroup();
             zc.ui.update(&.{.cells});
@@ -2823,19 +2831,21 @@ fn testFile(gpa: std.mem.Allocator, path: []const u8) !void {
         if (c.* == '\n') c.* = 0;
     }
 
+    var has_errors = false;
     var lines = std.mem.tokenizeScalar(u8, content, 0);
     while (lines.next()) |line| {
-        errdefer |err| {
+        const null_terminated_line = line.ptr[0..line.len :0];
+        zc.parseCommand(null_terminated_line) catch |err| {
             var line_number: usize = 1;
             for (content[0..lines.index]) |c| {
                 if (c == 0) line_number += 1;
             }
             std.debug.print("Error {} at {s}:{d}\n", .{ err, path, line_number });
-        }
-        const null_terminated_line = line.ptr[0..line.len :0];
-        try zc.parseCommand(null_terminated_line);
+            has_errors = true;
+        };
         try zc.updateCells();
     }
+    if (has_errors) return error.Failed;
 }
 
 test "Sheet operations" {

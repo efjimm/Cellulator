@@ -274,3 +274,5 @@ let A14 = 456
 -- Number paste copies the literal value, not an expression that tracks A14
 :expect-eql-number B14 123
 
+
+:undo 200

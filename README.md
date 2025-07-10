@@ -180,23 +180,24 @@ Copies the given range or the cursor range to the yank buffer.
 
 ```
 :put
-:put CELL
+:put RANGE_OR_CELL
 :p
-:p CELL
+:p RANGE_OR_CELL
 ```
 
 Pastes the current contents of the range held by the yank buffer at the given position or at the
-cursor. Expressions are copied literally, with no modification.
+cursor. Expressions are copied literally, with no modification. If the range to copy to is larger
+than the source range, then the source range is tiled over the destination range. The full source
+range is always pasted, regardless of whether it overflows the destination range or not.
 
 ```
 :put-adjust
-:put-adjust CELL
+:put-adjust RANGE_OR_CELL
 :pa
-:pa CELL
+:pa RANGE_OR_CELL
 ```
 
-Pastes the current contents of the range held by the yank buffer at the given position or at the
-cursor. Cell references contained in the expression are adjusted based on the new position.
+Same as `:put`, but automatically adjusts cell references based on the new position.
 
 ```
 :sheet-close

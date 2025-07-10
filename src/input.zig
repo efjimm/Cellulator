@@ -392,6 +392,8 @@ const sheet_keys = [_]KeyMaps{
             .{ ">", .text_align_right },
             .{ "|", .text_align_center },
             .{ "yy", .yank_cell },
+            .{ "p", .put_cell },
+            .{ "P", .put_cell_adjust },
         },
     },
     .{
@@ -454,8 +456,6 @@ const sheet_keys = [_]KeyMaps{
             .{ "ir", .insert_row },
             .{ "u", .undo },
             .{ "U", .redo },
-            .{ "p", .put_cell },
-            .{ "P", .put_cell_adjust },
             .{ "gn", .next_sheet },
             .{ "gp", .prev_sheet },
             .{ "<C-w>q", .close_sheet },

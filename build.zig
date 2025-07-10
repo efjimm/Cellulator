@@ -136,6 +136,7 @@ fn configureTests(
         "test/delete-rows.zc",
         "test/yank-put.zc",
         "test/yank-put-adjust.zc",
+        "test/paste.zc",
     });
     opts.addOption(bool, "fast_tests", fast_tests);
 

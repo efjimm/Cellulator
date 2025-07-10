@@ -199,3 +199,7 @@ let AAB5 = 777
 :expect-eql-number AAA5 777
 :expect-non-extant AAB5
 
+
+:undo 200
+:redo 200
+:undo 200
