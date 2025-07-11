@@ -559,15 +559,19 @@ fn renderCursor(tui: *Tui) RenderError!void {
     // Overwrite the old cursor if it's still on screen
     const old_col_handle = zc.currentSheet().cols.findEntry(&.{zc.prev_cursor.x});
     const x_on_screen, const y_on_screen = tui.isOnScreen(zc, zc.prev_cursor);
-    if (x_on_screen or y_on_screen) {
+
+    if (x_on_screen and y_on_screen) {
         const old_x = posXToScreenX(zc, zc.prev_cursor.x);
         const old_y = posYToScreenY(zc, zc.prev_cursor.y);
         try tui.renderCursorAtPos(zc.prev_cursor, old_col_handle, old_x, old_y);
-        if (x_on_screen and zc.cursor.x != zc.prev_cursor.x)
-            try tui.overwriteColumnHeading(zc.prev_cursor, old_col_handle, old_x);
-        if (y_on_screen and zc.cursor.y != zc.prev_cursor.y)
-            try tui.overwriteRowHeading(zc.prev_cursor);
     }
+
+    if (x_on_screen and zc.cursor.x != zc.prev_cursor.x) {
+        const old_x = posXToScreenX(zc, zc.prev_cursor.x);
+        try tui.overwriteColumnHeading(zc.prev_cursor, old_col_handle, old_x);
+    }
+    if (y_on_screen and zc.cursor.y != zc.prev_cursor.y)
+        try tui.overwriteRowHeading(zc.prev_cursor);
 
     // Draw the new cursor
     const new_col_handle = zc.currentSheet().cols.findEntry(&.{zc.cursor.x});
