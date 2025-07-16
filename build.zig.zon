@@ -17,8 +17,8 @@
             .hash = "shovel-0.1.0-WAlYzK8ZBgBqytTlaSyDTLI7tgYjRI1vxnx7gpFtnMRt",
         },
         .zg = .{
-            .url = "git+https://github.com/efjimm/zg?ref=master#05edd068d71f645d703d62d4bcb00543af5d0c93",
-            .hash = "zg-0.14.0-oGqU3HClsgK6t2cRTkWPzhDe2dxFD7UzmyUtQsM8yr-L",
+            .url = "git+https://github.com/efjimm/zg?ref=master#d39310bcd7dd0f3d0d902f1347faa427368ff587",
+            .hash = "zg-0.14.0-oGqU3IOlsgIIxQU_WQ73eIWS_gkgvaPAHAYO3kp0eIey",
         },
     },
 }

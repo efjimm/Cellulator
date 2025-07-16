@@ -173,7 +173,7 @@ pub const Position = packed struct {
         const letters_end = for (address, 0..) |c, i| {
             if (!std.ascii.isAlphabetic(c))
                 break i;
-        } else unreachable;
+        } else return error.InvalidCellAddress;
 
         if (letters_end == 0) return error.InvalidCellAddress;
 
@@ -283,12 +283,30 @@ pub const Position = packed struct {
             };
         }
 
+        // TODO: These functions overflow for ranges that cover the entire width or height of
+        //       a sheet.
         pub fn height(r: Rect) Int {
             return r.br.y - r.tl.y + 1;
         }
 
         pub fn width(r: Rect) Int {
             return r.br.x - r.tl.x + 1;
+        }
+
+        pub fn height2(r: Rect) u33 {
+            return @as(u33, r.br.y - r.tl.y) + 1;
+        }
+
+        pub fn width2(r: Rect) u33 {
+            return @as(u33, r.br.x - r.tl.x) + 1;
+        }
+
+        pub fn zeroWidth(r: Rect) Int {
+            return r.br.x - r.tl.x;
+        }
+
+        pub fn zeroHeight(r: Rect) Int {
+            return r.br.y - r.tl.y;
         }
 
         pub fn area(r: Rect) HashInt {

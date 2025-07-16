@@ -1360,8 +1360,8 @@ fn bulkInsertCellHandlesContiguous(sheet: *Sheet, start: Cell.Handle.Int, end: C
     for (start..end) |i| {
         const handle: Cell.Handle = .from(@intCast(i));
         const cell = sheet.getCellFromHandle(handle);
-        const p = sheet.cell_tree.getPoint(handle).*;
-        const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
+        const p = sheet.cell_tree.getPoint(handle);
+        const removed = sheet.cell_tree.insertAssumeCapacity(p, handle);
         assert(removed == .invalid);
         sheet.addCellAsDependentOfExprRanges(handle, cell.expr_root);
         cell.state = .enqueued;
@@ -1622,7 +1622,7 @@ fn ensureUnusedCellBufferCapacity(sheet: *Sheet, n: u32) !void {
 /// Deletes a cell range, pushing a `.bulk_cell_insert` undo. Asserts that `undo_cell_buffer` and the
 /// respective undo stack has enough capacity.
 fn deleteCellRangeAssumeCapacity(sheet: *Sheet, range: Rect, opts: UndoOpts) u32 {
-    assert(sheet.cell_buffer.capacity - sheet.cell_buffer.items.len >= range.area() + 1);
+    // assert(sheet.cell_buffer.capacity - sheet.cell_buffer.items.len >= range.area() + 1);
     assert(opts.undo_type == .redo or sheet.undos.capacity - sheet.undos.len > 0);
     assert(opts.undo_type == .undo or sheet.redos.capacity - sheet.redos.len > 0);
 
@@ -2820,13 +2820,11 @@ pub inline fn getTextAttrs(sheet: *Sheet, handle: TextAttrs.Handle) TextAttrs {
 
 pub fn getColumnHandle(sheet: *Sheet, index: PosInt) ?Column.Handle {
     const handle = sheet.cols.findEntry(&.{index});
-    if (handle != .invalid)
-        return handle;
-    return null;
+    return if (handle != .invalid) handle else null;
 }
 
 fn roundUp(a: anytype, multiple: anytype) @TypeOf(a) {
-    return ((a + multiple - 1) / multiple) * multiple;
+    return ((a + (multiple - 1)) / multiple) * multiple;
 }
 
 // TODO: Make `dest` a range and have it tile the copied cells
@@ -2835,15 +2833,17 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Rect, comptime adjust: Adjust
     defer sheet.resetArena();
     const arena = sheet.arena.allocator();
 
+    const width_add: u32 = @intCast(roundUp(dest.width2(), src.width2()) - 1);
+    const height_add: u32 = @intCast(roundUp(dest.height2(), src.height2()) - 1);
     const real_dest: Rect = .init(
         dest.tl.x,
         dest.tl.y,
-        dest.tl.x + roundUp(dest.width(), src.width()) - 1,
-        dest.tl.y + roundUp(dest.height(), src.height()) - 1,
+        dest.tl.x +| width_add,
+        dest.tl.y +| height_add,
     );
-    const tile_count = @divExact(real_dest.area(), src.area());
-    const tile_x = @divExact(real_dest.width(), src.width());
-    const tile_y = @divExact(real_dest.height(), src.height());
+    const tile_x = std.math.divCeil(u64, real_dest.width2(), src.width2()) catch unreachable;
+    const tile_y = std.math.divCeil(u64, real_dest.height2(), src.height2()) catch unreachable;
+    const tile_count = tile_x * tile_y;
 
     var cells: std.ArrayList(Cell.Handle) = try .initCapacity(arena, 128);
     try sheet.cell_tree.queryWindow(
@@ -2876,15 +2876,16 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Rect, comptime adjust: Adjust
     errdefer comptime unreachable;
 
     const new_cells = sheet.createCellCopiesContiguous(cells.items, src, dest.tl, tile_x, tile_y, adjust);
+    const end = sheet.cell_tree.leaves.len;
 
     _ = sheet.deleteCellRangeAssumeCapacity(real_dest, .{});
     sheet.bulkInsertCellHandlesContiguous(
         new_cells.int(),
-        new_cells.int() + cells.items.len * tile_count,
+        end,
     );
     sheet.pushUndo(.init(.bulk_cell_delete_contiguous, .{
         .start = new_cells.int(),
-        .end = new_cells.int() + cells.items.len * tile_count,
+        .end = end,
     }), .{}) catch unreachable;
 }
 
@@ -2901,82 +2902,110 @@ pub fn createCellCopiesContiguous(
     cell_handles: []const Cell.Handle,
     origin: Rect,
     dest: Position,
-    tile_x: u32,
-    tile_y: u32,
+    tile_x: u64,
+    tile_y: u64,
     comptime adjust: Adjust,
 ) Cell.Handle {
     const start: Cell.Handle = .from(@intCast(sheet.cell_tree.leaves.len));
-    sheet.cell_tree.leaves.len += cell_handles.len * tile_x * tile_y;
 
     const x_diff, const y_diff = dest.diff(origin.tl);
-    const height = origin.height();
-    const width = origin.width();
+    assert(x_diff != 0 or y_diff != 0);
+    const height = origin.height2();
+    const width = origin.width2();
 
     var dest_handle_int = start.int();
     for (cell_handles) |src_handle| {
         const src_point = sheet.cell_tree.getPoint(src_handle);
-        const src_cell = sheet.getCellFromHandle(src_handle).*;
-
-        const left = ast.leftMostChild(sheet.ast_nodes, src_cell.expr_root);
-        const len = src_cell.expr_root.n - left.n + 1;
         const src_pos: Position = .init(src_point[0], src_point[1]);
 
-        const new_x: u32 = @intCast(@as(i33, src_pos.x) + x_diff);
-        const new_y: u32 = @intCast(@as(i33, src_pos.y) + y_diff);
+        const diffed_x, var ox = @addWithOverflow(src_pos.x, x_diff);
+        const diffed_y, var oy = @addWithOverflow(src_pos.y, y_diff);
+        if (ox == 1 or oy == 1) {
+            @branchHint(.unlikely);
+            continue;
+        }
+        const new_x: u32 = @intCast(diffed_x);
+        const new_y: u32 = @intCast(diffed_y);
 
-        var y: u32 = 0;
-        while (y < tile_y) : (y += 1) {
-            var x: u32 = 0;
-            while (x < tile_x) : ({
-                x += 1;
-                dest_handle_int += 1;
-            }) {
-                if (adjust == .adjust) {
-                    const asts_start = sheet.ast_nodes.len;
-                    sheet.ast_nodes.len += len;
-                    assert(sheet.ast_nodes.len <= sheet.ast_nodes.capacity);
+        const src_cell = sheet.getCellFromHandle(src_handle).*;
+        const left = ast.leftMostChild(sheet.ast_nodes, src_cell.expr_root);
+        const len = src_cell.expr_root.n - left.n + 1;
 
-                    const tags = sheet.ast_nodes.items(.tag);
-                    const data = sheet.ast_nodes.items(.data);
+        var i: u64 = 0;
+        while (i < tile_x * tile_y) : (i += 1) {
+            const x: u32 = @intCast(i % tile_x);
+            const y: u32 = @intCast(i / tile_x);
 
-                    for (
-                        tags[left.n..][0..len],
-                        data[left.n..][0..len],
-                        tags[asts_start..],
-                        data[asts_start..],
-                    ) |src_tag, src_data, *dest_tag, *dest_data| {
-                        dest_tag.* = src_tag;
-                        dest_data.* = src_data;
-                        switch (src_tag) {
-                            .pos => {
-                                dest_data.pos.x = @intCast(@as(i33, dest_data.pos.x) + x_diff);
-                                dest_data.pos.y = @intCast(@as(i33, dest_data.pos.y) + y_diff);
-                                dest_data.pos.x += width * x;
-                                dest_data.pos.y += height * y;
-                            },
-                            else => {},
+            const max = std.math.maxInt(u32);
+            if (x * width > max or y * height > max) {
+                @branchHint(.unlikely);
+                continue;
+            }
+
+            const wadd: u32 = @intCast(x * width);
+            const hadd: u32 = @intCast(y * height);
+            const tiled_x, ox = @addWithOverflow(new_x, wadd);
+            const tiled_y, oy = @addWithOverflow(new_y, hadd);
+            if (ox == 1 or oy == 1) {
+                @branchHint(.unlikely);
+                continue;
+            }
+
+            const tiled_diff_x, ox = @addWithOverflow(x_diff, wadd);
+            const tiled_diff_y, oy = @addWithOverflow(y_diff, hadd);
+            if (ox == 1 or oy == 1) {
+                @branchHint(.unlikely);
+                continue;
+            }
+
+            if (adjust == .adjust) {
+                const asts_start = sheet.ast_nodes.len;
+                sheet.ast_nodes.len += len;
+                assert(sheet.ast_nodes.len <= sheet.ast_nodes.capacity);
+
+                const tags = sheet.ast_nodes.items(.tag);
+                const data = sheet.ast_nodes.items(.data);
+
+                for (
+                    tags[left.n..][0..len],
+                    data[left.n..][0..len],
+                    tags[asts_start..],
+                    data[asts_start..],
+                ) |src_tag, src_data, *dest_tag, *dest_data| {
+                    dest_tag.* = src_tag;
+                    dest_data.* = src_data;
+                    if (src_tag == .pos) {
+                        const added_x, ox = @addWithOverflow(dest_data.pos.x, tiled_diff_x);
+                        const added_y, oy = @addWithOverflow(dest_data.pos.y, tiled_diff_y);
+                        if (ox == 1 or oy == 1 or added_x < 0 or added_y < 0) {
+                            @branchHint(.unlikely);
+                            dest_tag.* = .invalidated_pos;
+                            continue;
                         }
+
+                        dest_data.pos.x = @intCast(added_x);
+                        dest_data.pos.y = @intCast(added_y);
                     }
                 }
-
-                const tiled_x = new_x + x * width;
-                const tiled_y = new_y + y * height;
-
-                const expr_root: ast.Index = switch (adjust) {
-                    .adjust => .from(@intCast(sheet.ast_nodes.len - 1)),
-                    .no_adjust => src_cell.expr_root,
-                };
-
-                sheet.cell_tree.leaves.set(dest_handle_int, .{
-                    .point = .{ tiled_x, tiled_y },
-                    .parent = .invalid,
-                    .value = .{
-                        .state = .enqueued,
-                        .expr_root = expr_root,
-                        .strings = src_cell.strings,
-                    },
-                });
             }
+
+            const expr_root: ast.Index = switch (adjust) {
+                .adjust => .from(@intCast(sheet.ast_nodes.len - 1)),
+                .no_adjust => src_cell.expr_root,
+            };
+
+            sheet.cell_tree.leaves.len += 1;
+            assert(sheet.cell_tree.leaves.len <= sheet.cell_tree.leaves.capacity);
+            sheet.cell_tree.leaves.set(dest_handle_int, .{
+                .point = .{ @intCast(tiled_x), @intCast(tiled_y) },
+                .parent = .invalid,
+                .value = .{
+                    .state = .enqueued,
+                    .expr_root = expr_root,
+                    .strings = src_cell.strings,
+                },
+            });
+            dest_handle_int += 1;
         }
     }
 

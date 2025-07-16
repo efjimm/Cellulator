@@ -276,3 +276,16 @@ let A14 = 456
 
 
 :undo 200
+
+let A1 = 0
+
+:yank A1:MWLQKWV1
+:put A2:MWLQKWV2
+
+:fill a1:c3 1 1
+
+:yank a1:c3
+:put MLQKWV0
+:put MLQKWV10
+:put MLQKWV4294967295
+:put MLQKWV4294967291:MLQKWV4294967295
