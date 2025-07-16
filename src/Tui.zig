@@ -28,7 +28,7 @@ pub const cell_view_line = 3;
 
 term: Term,
 update_flags: UpdateFlags = .all,
-rc: ?*Term.RenderContext(1 << 14) = null,
+rc: ?Term.RenderContext = null,
 zc: ?*ZC = null,
 styles: Styles,
 current_style: ?UiElement = null,
@@ -134,7 +134,7 @@ const Tui = @This();
 
 var needs_resize: std.atomic.Value(bool) = .init(true);
 
-fn resizeHandler(_: c_int) callconv(.C) void {
+fn resizeHandler(_: c_int) callconv(.c) void {
     needs_resize.store(true, .monotonic);
 }
 
@@ -280,6 +280,7 @@ pub fn cellViewHeight(tui: *const Tui) u16 {
 }
 
 pub fn render(tui: *Tui, zc: *ZC) !void {
+    std.log.debug("Rendering", .{});
     assert(tui.rc == null);
 
     if (needs_resize.load(.monotonic)) {
@@ -289,7 +290,8 @@ pub fn render(tui: *Tui, zc: *ZC) !void {
         needs_resize.store(false, .monotonic);
     }
 
-    var rc = try tui.term.getRenderContext(1 << 14);
+    var buf: [1 << 14]u8 = undefined;
+    var rc = try tui.term.getRenderContext(&buf);
     rc.hideCursor() catch unreachable;
 
     if (tui.term.width < 15 or tui.term.height < 5) {
@@ -301,11 +303,12 @@ pub fn render(tui: *Tui, zc: *ZC) !void {
     }
 
     tui.zc = zc;
-    tui.rc = &rc;
+    tui.rc = rc;
     defer {
         tui.zc = null;
         tui.rc = null;
     }
+    errdefer unreachable;
 
     // TODO: Don't update this every frame
     try tui.renderStatus();
@@ -326,9 +329,9 @@ pub fn render(tui: *Tui, zc: *ZC) !void {
     try tui.renderSheetList();
 
     if (tui.update_flags.command or zc.mode.isCommandMode())
-        try tui.renderCommandLine();
+        tui.renderCommandLine() catch return tui.rc.?.writer.err.?;
 
-    try rc.done();
+    try tui.rc.?.done();
 
     tui.update_flags = .none;
 }
@@ -341,13 +344,13 @@ fn setStyle(tui: *Tui, element: UiElement) !void {
     tui.current_style = element;
 }
 
-fn renderSheetList(tui: *Tui) RenderError!void {
-    const rc = tui.rc.?;
+fn renderSheetList(tui: *Tui) !void {
+    const rc = &tui.rc.?;
     const zc = tui.zc.?;
 
     try rc.moveCursorTo(tui.term.height - 1, 0);
     var rpw = rc.cellWriter(tui.term.width);
-    const writer = rpw.writer();
+    const writer = &rpw.interface;
 
     try tui.setStyle(.sheet_unselected);
 
@@ -371,16 +374,16 @@ fn renderSheetList(tui: *Tui) RenderError!void {
     try rc.clearToEol();
 }
 
-fn renderStatus(tui: *Tui) RenderError!void {
-    const rc = tui.rc.?;
+fn renderStatus(tui: *Tui) !void {
+    const rc = &tui.rc.?;
     const zc = tui.zc.?;
     try rc.moveCursorTo(status_line, 0);
     try rc.hideCursor();
 
-    const writer = rc.buffer.writer();
+    const writer = &rc.writer.interface;
 
     try tui.setStyle(.status_line);
-    try writer.print(" {} {}", .{ zc.cursor, zc.mode });
+    try writer.print(" {f} {f}", .{ zc.cursor, zc.mode });
 
     if (zc.count != 0) {
         try tui.setStyle(.count);
@@ -416,13 +419,13 @@ fn renderStatus(tui: *Tui) RenderError!void {
     try rc.clearToEol();
 }
 
-fn renderCommandLine(tui: *Tui) RenderError!void {
-    const rc = tui.rc.?;
+fn renderCommandLine(tui: *Tui) !void {
+    const rc = &tui.rc.?;
     const zc = tui.zc.?;
     try rc.moveCursorTo(input_line, 0);
     try tui.setStyle(.command_line);
     try rc.clearToEol();
-    const writer = rc.buffer.writer();
+    const writer = &rc.writer.interface;
 
     if (zc.mode.isCommandMode()) {
         const left = zc.command.left();
@@ -483,10 +486,9 @@ fn renderCommandLine(tui: *Tui) RenderError!void {
     }
 }
 
-fn renderColumnHeadings(tui: *Tui) RenderError!void {
-    const rc = tui.rc.?;
+fn renderColumnHeadings(tui: *Tui) !void {
+    const rc = &tui.rc.?;
     const zc = tui.zc.?;
-    const writer = rc.buffer.writer();
 
     const reserved_cols = zc.leftReservedColumns();
     try rc.moveCursorTo(col_heading_line, reserved_cols);
@@ -507,10 +509,10 @@ fn renderColumnHeadings(tui: *Tui) RenderError!void {
 
         if (zc.isSelectedCol(x)) {
             try tui.setStyle(.column_heading_selected);
-            try shovel.writeTruncating(name, width, .center, writer);
+            try shovel.writeTruncating(name, width, .center, &rc.writer.interface);
             try tui.setStyle(.column_heading_unselected);
         } else {
-            try shovel.writeTruncating(name, width, .center, writer);
+            try shovel.writeTruncating(name, width, .center, &rc.writer.interface);
         }
 
         if (x == std.math.maxInt(Position.Int)) {
@@ -521,14 +523,14 @@ fn renderColumnHeadings(tui: *Tui) RenderError!void {
     }
 }
 
-fn renderRowNumbers(tui: *Tui) RenderError!void {
-    const rc = tui.rc.?;
+fn renderRowNumbers(tui: *Tui) !void {
+    const rc = &tui.rc.?;
     const zc = tui.zc.?;
     const width = zc.leftReservedColumns();
     try tui.setStyle(.row_heading_unselected);
 
     try rc.moveCursorTo(col_heading_line, 0);
-    try rc.buffer.writer().writeByteNTimes(' ', width);
+    try rc.writer.interface.splatByteAll(' ', width);
 
     for (
         cell_view_line..cell_view_line + tui.cellViewHeight(),
@@ -537,23 +539,22 @@ fn renderRowNumbers(tui: *Tui) RenderError!void {
         try rc.moveCursorTo(@intCast(screen_line), 0);
 
         var rpw = rc.cellWriter(width);
-        const writer = rpw.writer();
 
         if (zc.isSelectedRow(@intCast(sheet_line))) {
             try tui.setStyle(.row_heading_selected);
 
-            try writer.print("{d: ^[1]}", .{ sheet_line, width });
+            try rpw.interface.print("{d: ^[1]}", .{ sheet_line, width });
             try rpw.pad();
 
             try tui.setStyle(.row_heading_unselected);
         } else {
-            try writer.print("{d: ^[1]}", .{ sheet_line, width });
+            try rpw.interface.print("{d: ^[1]}", .{ sheet_line, width });
             try rpw.pad();
         }
     }
 }
 
-fn renderCursor(tui: *Tui) RenderError!void {
+fn renderCursor(tui: *Tui) !void {
     const zc = tui.zc.?;
 
     // Overwrite the old cursor if it's still on screen
@@ -586,7 +587,7 @@ fn renderCursor(tui: *Tui) RenderError!void {
 
 fn overwriteRowHeading(tui: *Tui, pos: Position) !void {
     const zc = tui.zc.?;
-    const rc = tui.rc.?;
+    const rc = &tui.rc.?;
     const left = zc.leftReservedColumns();
 
     const y = posYToScreenY(zc, pos.y);
@@ -598,7 +599,7 @@ fn overwriteRowHeading(tui: *Tui, pos: Position) !void {
         else
             .row_heading_unselected,
     );
-    try rc.buffer.writer().print("{d: ^[1]}", .{ pos.y, left });
+    try rc.writer.interface.print("{d: ^[1]}", .{ pos.y, left });
 }
 
 fn posXToScreenX(zc: *ZC, px: Position.Int) u16 {
@@ -617,7 +618,7 @@ fn posYToScreenY(zc: *ZC, py: Position.Int) u16 {
 
 fn overwriteColumnHeading(tui: *Tui, pos: Position, col_handle: Column.Handle, screen_x: u16) !void {
     const zc = tui.zc.?;
-    const rc = tui.rc.?;
+    const rc = &tui.rc.?;
     const left = zc.leftReservedColumns();
 
     const col = zc.currentSheet().getColumnByHandleOrDefault(col_handle);
@@ -633,11 +634,11 @@ fn overwriteColumnHeading(tui: *Tui, pos: Position, col_handle: Column.Handle, s
 
     var buf: [Position.max_str_len]u8 = undefined;
     const slice = Position.columnAddressBuf(pos.x, &buf);
-    try shovel.writeTruncating(slice, width, .center, rc.buffer.writer());
+    try shovel.writeTruncating(slice, width, .center, &rc.writer.interface);
 }
 
 fn renderCursorAtPos(tui: *Tui, pos: Position, col_handle: Column.Handle, screen_x: u16, screen_y: u16) !void {
-    const rc = tui.rc.?;
+    const rc = &tui.rc.?;
     const zc = tui.zc.?;
 
     if (zc.mode.isVisual()) return;
@@ -800,7 +801,7 @@ fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !struct {
 }
 
 fn renderCells(tui: *Tui) !void {
-    const rc = tui.rc.?;
+    const rc = &tui.rc.?;
     const zc = tui.zc.?;
     const sheet = zc.currentSheet();
 
@@ -848,13 +849,12 @@ fn renderCell(
     width: @FieldType(Column, "width"),
     text_attrs: Sheet.TextAttrs,
 ) !void {
-    const rc = tui.rc.?;
+    const rc = &tui.rc.?;
     const zc = tui.zc.?;
     const sheet = zc.currentSheet();
     const selected = isSelected(zc, pos);
 
     var rpw = rc.cellWriter(width);
-    const writer = rpw.writer();
 
     if (cell_handle == .invalid) {
         try tui.setStyle(if (selected) .cell_blank_selected else .cell_blank_unselected);
@@ -867,7 +867,7 @@ fn renderCell(
     switch (cell.value_tag) {
         .number => {
             try tui.setStyle(if (selected) .cell_number_selected else .cell_number_unselected);
-            try writer.print("{d: >[1].[2]}", .{ cell.value.number, width, precision });
+            try rpw.interface.print("{d: >[1].[2]}", .{ cell.value.number, width, precision });
             try rpw.pad();
         },
         .string => {
@@ -875,11 +875,11 @@ fn renderCell(
 
             const text = zc.currentSheet().cellStringValue(cell);
             const alignment = utils.enumFromEnum(shovel.TextAlignment, text_attrs.alignment);
-            try shovel.writeTruncating(text, width, alignment, rc.buffer.writer());
+            try shovel.writeTruncating(text, width, alignment, &rc.writer.interface);
         },
         .err => {
             try tui.setStyle(if (selected) .cell_error_selected else .cell_error_unselected);
-            try writer.print("{s: >[1]}", .{ "ERROR", width });
+            try rpw.interface.print("{s: >[1]}", .{ "ERROR", width });
             try rpw.pad();
         },
     }

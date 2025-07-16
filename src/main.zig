@@ -93,10 +93,10 @@ pub fn log(
         .shovel_perf => return,
         else => {},
     }
-    const writer = logfile.writer();
-    writer.print("[{s}] {s}: ", .{ @tagName(scope), @tagName(level) }) catch {};
-    writer.print(format, args) catch {};
-    writer.writeByte('\n') catch {};
+    const writer = logfile.writer(&.{});
+    writer.interface.print("[{s}] {s}: ", .{ @tagName(scope), @tagName(level) }) catch {};
+    writer.interface.print(format, args) catch {};
+    writer.interface.writeByte('\n') catch {};
 }
 
 // Reference all tests in other modules

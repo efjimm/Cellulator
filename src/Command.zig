@@ -131,7 +131,7 @@ pub fn writer(self: *Self, allocator: Allocator) Writer {
     } };
 }
 
-pub const Writer = std.io.Writer(WriterContext, Allocator.Error, WriterContext.ctxWrite);
+pub const Writer = std.io.GenericWriter(WriterContext, Allocator.Error, WriterContext.ctxWrite);
 
 pub const WriterContext = struct {
     data: *Self,

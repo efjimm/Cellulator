@@ -14,9 +14,13 @@ pub fn build(b: *std.Build) void {
 
     const main_mod = configureMainModule(b, target, optimize);
 
-    configureExe(b, main_mod, use_llvm);
-    configureTests(b, main_mod, opts);
+    const exe = configureExe(b, main_mod, use_llvm);
+    const tests = configureTests(b, main_mod, opts);
     configureBenchmarks(b, main_mod);
+
+    const check_step = b.step("check", "");
+    check_step.dependOn(&exe.step);
+    check_step.dependOn(&tests.step);
 
     main_mod.addOptions("build", opts);
 
@@ -90,15 +94,12 @@ fn configureExe(
     b: *std.Build,
     main_mod: *std.Build.Module,
     use_llvm: ?bool,
-) void {
+) *std.Build.Step.Compile {
     const exe = b.addExecutable(.{
         .name = "cellulator",
         .root_module = main_mod,
         .use_llvm = use_llvm,
     });
-
-    const check_step = b.step("check", "");
-    check_step.dependOn(&exe.step);
 
     b.installArtifact(exe);
     const run_cmd = b.addRunArtifact(exe);
@@ -108,20 +109,21 @@ fn configureExe(
 
     const run_step = b.step("run", "Run the program");
     run_step.dependOn(&run_cmd.step);
+    return exe;
 }
 
 fn configureTests(
     b: *std.Build,
     main_mod: *std.Build.Module,
     opts: *std.Build.Step.Options,
-) void {
+) *std.Build.Step.Compile {
     const fast_tests = b.option(bool, "fast-tests", "Skip slow tests") orelse false;
     const test_filter = b.option([]const u8, "test-filter", "Skip tests that do not match filter");
     const use_kcov = b.option(bool, "coverage", "Generate code coverage reports with kcov") orelse false;
 
     const tests = b.addTest(.{
         .root_module = main_mod,
-        .filter = test_filter,
+        .filters = &.{test_filter orelse ""},
     });
 
     opts.addOption([]const []const u8, "test_files", &.{
@@ -181,6 +183,8 @@ fn configureTests(
         const run_tests = b.addRunArtifact(tests);
         cleanup.step.dependOn(&run_tests.step);
     }
+
+    return tests;
 }
 
 fn configureBenchmarks(
@@ -188,10 +192,12 @@ fn configureBenchmarks(
     zc_mod: *std.Build.Module,
 ) void {
     const fill_exe = b.addExecutable(.{
-        .root_source_file = b.path("bench/bench-fill.zig"),
         .name = "fill",
-        .target = zc_mod.resolved_target,
-        .optimize = zc_mod.optimize.?,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/bench-fill.zig"),
+            .target = zc_mod.resolved_target,
+            .optimize = zc_mod.optimize.?,
+        }),
     });
 
     fill_exe.root_module.addImport("zc", zc_mod);

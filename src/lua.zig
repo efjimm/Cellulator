@@ -236,11 +236,11 @@ fn checkCellAddress(state: *Lua, raw_index: i32) Position {
 
 const metatables = .{
     .zc = struct {
-        pub fn __newindex(state: *Lua) callconv(.C) c_int {
+        pub fn __newindex(state: *Lua) callconv(.c) c_int {
             return newIndexCommon(state);
         }
 
-        pub fn __index(state: *Lua) callconv(.C) c_int {
+        pub fn __index(state: *Lua) callconv(.c) c_int {
             if (!state.isString(2)) return indexCommon(state);
 
             // const key = state.toString(2) catch unreachable;
@@ -248,7 +248,7 @@ const metatables = .{
             return indexCommon(state);
         }
 
-        pub fn status(state: *Lua) callconv(.C) c_int {
+        pub fn status(state: *Lua) callconv(.c) c_int {
             const zc = state.checkUserdata(*ZC, 1, "zc").*;
             state.checkType(2, .table);
             _ = state.getIndex(2, 1);
@@ -271,13 +271,13 @@ const metatables = .{
             return 0;
         }
 
-        pub fn end_undo_group(state: *Lua) callconv(.C) c_int {
+        pub fn end_undo_group(state: *Lua) callconv(.c) c_int {
             const zc = state.checkUserdata(*ZC, 1, "zc").*;
             zc.currentSheet().endUndoGroup();
             return 0;
         }
 
-        pub fn set_cell(state: *Lua) callconv(.C) c_int {
+        pub fn set_cell(state: *Lua) callconv(.c) c_int {
             const zc = state.checkUserdata(*ZC, 1, "zc").*;
 
             const expr_str = state.checkString(-1);
@@ -291,7 +291,7 @@ const metatables = .{
             return 0;
         }
 
-        pub fn set_cursor(state: *Lua) callconv(.C) c_int {
+        pub fn set_cursor(state: *Lua) callconv(.c) c_int {
             const zc: *ZC = state.checkUserdata(*ZC, 1, "zc").*;
             const pos = checkCellAddress(state, 2);
 
@@ -301,7 +301,7 @@ const metatables = .{
             return 0;
         }
 
-        pub fn command(state: *Lua) callconv(.C) c_int {
+        pub fn command(state: *Lua) callconv(.c) c_int {
             const zc = state.checkUserdata(*ZC, 1, "zc").*;
             const cmd_str = state.checkString(2);
             zc.runCommand(cmd_str) catch {};
@@ -309,7 +309,7 @@ const metatables = .{
             return 0;
         }
 
-        // pub fn get_cell_number(c_state: ?*lua.LuaState) callconv(.C) c_int {
+        // pub fn get_cell_number(c_state: ?*lua.LuaState) callconv(.c) c_int {
         //     var state = getState(c_state);
 
         //     const zc: *ZC = state.checkUserdata(*ZC, 1, "zc").*;
@@ -323,7 +323,7 @@ const metatables = .{
         // }
 
         // // TODO: Allow selecting sheet
-        // pub fn get_cell_text(c_state: ?*lua.LuaState) callconv(.C) c_int {
+        // pub fn get_cell_text(c_state: ?*lua.LuaState) callconv(.c) c_int {
         //     var state = getState(c_state);
 
         //     const zc: *ZC = state.checkUserdata(*ZC, 1, "zc").*;
@@ -339,29 +339,29 @@ const metatables = .{
         // }
 
         // TODO
-        // pub fn get_cell_expr_number(c_state: ?*lua.LuaState) callconv(.C) c_int {
+        // pub fn get_cell_expr_number(c_state: ?*lua.LuaState) callconv(.c) c_int {
         //     _ = c_state;
         //     return 1;
         // }
 
-        // pub fn get_cell_expr_text(c_state: ?*lua.LuaState) callconv(.C) c_int {
+        // pub fn get_cell_expr_text(c_state: ?*lua.LuaState) callconv(.c) c_int {
         //     _ = c_state;
         //     return 1;
         // }
 
-        // pub fn bind(c_state: ?*lua.LuaState) callconv(.C) c_int {
+        // pub fn bind(c_state: ?*lua.LuaState) callconv(.c) c_int {
         //     _ = c_state;
         //     return 0;
         // }
 
-        // pub fn unbind(c_state: ?*lua.LuaState) callconv(.C) c_int {
+        // pub fn unbind(c_state: ?*lua.LuaState) callconv(.c) c_int {
         //     _ = c_state;
         //     return 0;
         // }
     },
 
     .position = struct {
-        pub fn __tostring(state: *Lua) callconv(.C) c_int {
+        pub fn __tostring(state: *Lua) callconv(.c) c_int {
             const pos = checkCellAddress(state, 1);
             var buf = std.BoundedArray(u8, 64){};
             buf.writer().print("{f}", .{pos}) catch unreachable;
@@ -371,7 +371,7 @@ const metatables = .{
             return 1;
         }
 
-        pub fn __concat(state: *Lua) callconv(.C) c_int {
+        pub fn __concat(state: *Lua) callconv(.c) c_int {
             _ = state.toStringEx(1);
             _ = state.toStringEx(2);
             state.concat(2);
@@ -380,7 +380,7 @@ const metatables = .{
     },
 
     .tui = struct {
-        pub fn __index(state: *Lua) callconv(.C) c_int {
+        pub fn __index(state: *Lua) callconv(.c) c_int {
             return indexCommon(state);
         }
     },

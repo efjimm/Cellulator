@@ -193,7 +193,7 @@ pub inline fn printFromIndex(
     index: Index,
     writer: anytype,
     strings: []const u8,
-) @TypeOf(writer).Error!void {
+) std.io.Writer.Error!void {
     const node = nodes.get(index.n);
     return printFromNode(nodes, sheet, index, node, writer, strings);
 }
@@ -205,7 +205,7 @@ pub fn printFromNode(
     node: Node,
     writer: anytype,
     strings: []const u8,
-) @TypeOf(writer).Error!void {
+) std.io.Writer.Error!void {
     // On the left-hand side, expressions involving operators with lower precedence need
     // parentheses.
 
@@ -213,7 +213,7 @@ pub fn printFromNode(
     // non-commutative operators with the same precedence need to be surrounded by parentheses.
     switch (node.get()) {
         .number => |n| try writer.print("{d}", .{n}),
-        .column => |col| try writer.print("{}", .{Position.fmtColumnAddress(col)}),
+        .column => |col| try writer.print("{f}", .{Position.fmtColumnAddress(col)}),
         .pos => |pos| try writer.print("{f}", .{pos}),
         .invalidated_pos => |pos| {
             // TODO: Print these differently
@@ -229,7 +229,7 @@ pub fn printFromNode(
             try printFromIndex(nodes, sheet, index.sub(b.rhs), writer, strings);
         },
         .assignment => |pos| {
-            try writer.print("let {} = ", .{pos});
+            try writer.print("let {f} = ", .{pos});
             try printFromIndex(nodes, sheet, .from(index.n - 1), writer, strings);
         },
         .add => |b| {
@@ -417,8 +417,8 @@ pub fn print(
     root: Index,
     sheet: *Sheet,
     strings: []const u8,
-    writer: anytype,
-) @TypeOf(writer).Error!void {
+    writer: *std.io.Writer,
+) std.io.Writer.Error!void {
     return printFromIndex(nodes, sheet, root, writer, strings);
 }
 
@@ -1231,8 +1231,9 @@ test "Print" {
         const expr, const expected = d;
         const expr_root = try fromExpression(&sheet, expr);
 
-        var buf = std.BoundedArray(u8, 4096){};
-        try print(sheet.ast_nodes, expr_root, &sheet, expr, buf.writer());
-        try t.expectEqualStrings(expected, buf.constSlice());
+        var buf: [4096]u8 = undefined;
+        var fixed: std.io.Writer = .fixed(&buf);
+        try print(sheet.ast_nodes, expr_root, &sheet, expr, &fixed);
+        try t.expectEqualStrings(expected, fixed.buffered());
     }
 }

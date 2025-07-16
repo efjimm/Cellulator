@@ -518,7 +518,9 @@ pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
 }
 
 pub fn deserialize(sheet: *Sheet, allocator: Allocator, file: std.fs.File) !void {
-    const header = try file.reader().readStruct(SerializeHeader);
+    var buf: [@sizeOf(SerializeHeader)]u8 = undefined;
+    var reader = file.reader(&buf);
+    const header = try reader.interface.takeStruct(SerializeHeader);
 
     if (header.magic != SerializeHeader.magic_number) return error.InvalidFile;
     if (header.version != SerializeHeader.binary_version) return error.InvalidVersion;
@@ -537,6 +539,7 @@ pub fn deserialize(sheet: *Sheet, allocator: Allocator, file: std.fs.File) !void
         try utils.prepMultiArrayList(Undo, &sheet.undos, allocator, header.undos_len, header.undos_cap) ++
         try utils.prepMultiArrayList(Undo, &sheet.redos, allocator, header.redos_len, header.redos_cap);
 
+    try file.seekTo(@sizeOf(SerializeHeader));
     _ = try file.readvAll(&iovecs);
 }
 
@@ -568,7 +571,7 @@ const Assignment = struct {
 
 /// Parses many cell assignments in bulk, appending their AST nodes to `Sheet.ast_nodes`.
 /// Returns the total byte length of all parsed string literals
-pub fn bulkParse(
+fn bulkParse(
     sheet: *Sheet,
     src: [:0]const u8,
     tokens_allocator: std.mem.Allocator,
@@ -621,7 +624,7 @@ pub fn bulkParse(
             token_starts[token_index..],
         ) catch |err| switch (err) {
             error.UnexpectedToken, error.InvalidCellAddress => continue,
-            else => |e| return e,
+            error.OutOfMemory => return error.OutOfMemory,
         };
         token_index += token_sub_index;
         const expr_root: ast.Index = .from(@intCast(sheet.ast_nodes.len - 1));
@@ -648,7 +651,7 @@ fn resetArena(sheet: *Sheet) void {
 }
 
 // Optimized for bulk loading
-pub fn interpretSource(sheet: *Sheet, reader: anytype) !void {
+pub fn interpretSource(sheet: *Sheet, reader: *std.io.Reader) !void {
     errdefer sheet.clearRetainingCapacity();
 
     const arena = sheet.arena.allocator();
@@ -659,25 +662,28 @@ pub fn interpretSource(sheet: *Sheet, reader: anytype) !void {
 
     const buf_size = comptime std.math.pow(usize, 2, 22);
     var buf = try arena.alloc(u8, buf_size);
-    buf[buf_size - 1] = 0;
     buf.len = 0;
 
     while (true) {
-        buf.len += try reader.readAll(buf.ptr[buf.len .. buf_size - 1]);
+        buf.len += try reader.readSliceShort(buf.ptr[buf.len .. buf_size - 1]);
         if (buf.len == 0) break;
 
         const end = std.mem.lastIndexOfScalar(u8, buf, '\n') orelse buf.len;
         buf.ptr[end] = 0;
         const src = buf.ptr[0..end :0];
 
+        defer if (end + 1 < buf.len) {
+            std.mem.copyForwards(u8, buf, buf[end + 1 ..]);
+            buf.len -= end + 1;
+        } else {
+            buf.len = 0;
+        };
+
         cells.clearRetainingCapacity();
         tokens.clearRetainingCapacity();
         const ast_nodes_start: u32 = @intCast(sheet.ast_nodes.len);
         const total_strings_len = try sheet.bulkParse(src, arena, &tokens, arena, &cells);
-        if (cells.len == 0) {
-            buf.len = 0;
-            continue;
-        }
+        if (cells.len == 0) continue;
 
         const dependent_count = blk: {
             var dependent_count: Cell.Handle.Int = 0;
@@ -750,13 +756,6 @@ pub fn interpretSource(sheet: *Sheet, reader: anytype) !void {
 
             sheet.addCellAsDependentOfExprRanges(handle, root);
         }
-
-        if (end + 1 < buf.len) {
-            std.mem.copyForwards(u8, buf, buf[end + 1 ..]);
-            buf.len -= end + 1;
-        } else {
-            buf.len = 0;
-        }
     }
 }
 
@@ -777,7 +776,9 @@ pub fn loadFile(sheet: *Sheet, filepath: []const u8) !void {
     log.debug("Loading file {s}", .{filepath});
 
     sheet.clearRetainingCapacity();
-    try sheet.interpretSource(file.reader());
+    var buf: [8192]u8 = undefined;
+    var reader = file.reader(&buf);
+    try sheet.interpretSource(&reader.interface);
 }
 
 pub fn writeFile(
@@ -793,27 +794,26 @@ pub fn writeFile(
     var atomic_file = try std.fs.cwd().atomicFile(filepath, .{});
     defer atomic_file.deinit();
 
-    try sheet.writeContents(atomic_file.file.writer());
+    var buf: [8192]u8 = undefined;
+    var writer = atomic_file.file.writer(&buf);
+    try sheet.writeContents(&writer.interface);
     try atomic_file.finish();
 
     if (opts.filepath) |path|
         sheet.setFilePath(path);
 }
 
-pub fn writeContents(sheet: *Sheet, writer: anytype) !void {
-    var buf = std.io.bufferedWriter(writer);
-    const buf_writer = buf.writer();
-
+pub fn writeContents(sheet: *Sheet, writer: *std.io.Writer) !void {
     var iter = sheet.cell_tree.iterator();
     while (iter.next()) |handle| {
         const p = sheet.cell_tree.getPoint(handle).*;
         const pos: Position = .init(p[0], p[1]);
-        try buf_writer.print("let {}=", .{pos});
-        try sheet.printCellExpression(pos, buf_writer);
-        try buf_writer.writeByte('\n');
+        try writer.print("let {f}=", .{pos});
+        try sheet.printCellExpression(pos, writer);
+        try writer.writeByte('\n');
     }
 
-    try buf.flush();
+    try writer.flush();
 }
 
 /// Iterator over the cells referenced by an expression, as ranges.
@@ -869,7 +869,7 @@ fn addCellAsDependentOfRange(
     dependent: Cell.Handle,
     range: Rect,
 ) void {
-    log.debug("Adding {} as a dependent of {}", .{
+    log.debug("Adding {f} as a dependent of {f}", .{
         sheet.rectFromCellHandle(dependent).tl,
         range,
     });
@@ -2682,7 +2682,7 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) ast.EvalError!ast.Ev
             cell.state = .computing;
 
             const pos = sheet.posFromCellHandle(handle);
-            log.debug("eval {}", .{pos});
+            log.debug("eval {f}", .{pos});
             // Queue dependents before evaluating to ensure that errors are propagated to
             // dependents.
             try sheet.queueDependents(sheet.rectFromCellHandle(handle));
@@ -2740,7 +2740,7 @@ pub fn evalCellByPos(sheet: *Sheet, pos: Position) ast.EvalError!ast.EvalResult 
     return .none;
 }
 
-pub fn printCellExpression(sheet: *Sheet, pos: Position, writer: anytype) !void {
+pub fn printCellExpression(sheet: *Sheet, pos: Position, writer: *std.io.Writer) !void {
     const cell = sheet.getCellPtr(pos) orelse return;
     try ast.print(
         sheet.ast_nodes,
@@ -2756,16 +2756,11 @@ const FmtData = struct {
     pos: Position,
 };
 
-pub fn formatCellExpression(
-    d: FmtData,
-    comptime _: []const u8,
-    _: std.fmt.FormatOptions,
-    writer: anytype,
-) !void {
+pub fn formatCellExpression(d: FmtData, writer: *std.io.Writer) !void {
     try d.sheet.printCellExpression(d.pos, writer);
 }
 
-pub fn fmtCellExpr(f: FmtData) std.fmt.Formatter(formatCellExpression) {
+pub fn fmtCellExpr(f: FmtData) std.fmt.Alt(FmtData, formatCellExpression) {
     return .{ .data = f };
 }
 
@@ -3609,7 +3604,7 @@ test "Cell assignment, updating, evaluation" {
 pub fn expectCellNonExtant(sheet: *Sheet, address: []const u8) !void {
     const pos: Position = try .fromAddress(address);
     if (sheet.getCellPtr(pos) != null) {
-        std.debug.print("Expected cell {} to not exist\n", .{pos});
+        std.debug.print("Expected cell {f} to not exist\n", .{pos});
         return error.CellExists;
     }
 }
@@ -3631,16 +3626,16 @@ pub fn expectRangeNonExtant(sheet: *Sheet, address: []const u8) !void {
     defer results.deinit();
 
     if (results.items.len != 0) {
-        var bw = std.io.bufferedWriter(std.io.getStdErr().writer());
-        const w = bw.writer();
-        try w.print("Expected cells {} to not exist, found", .{r});
+        var buf: [4096]u8 = undefined;
+        var bw = std.fs.File.stderr().writer(&buf);
+        try bw.interface.print("Expected cells {f} to not exist, found", .{r});
         for (results.items) |handle| {
             const p = sheet.cell_tree.getPoint(handle).*;
             const pos: Position = .init(p[0], p[1]);
-            try w.print(" {}", .{pos});
+            try bw.interface.print(" {f}", .{pos});
         }
-        try w.writeByte('\n');
-        try bw.flush();
+        try bw.interface.writeByte('\n');
+        try bw.interface.flush();
         return error.CellExists;
     }
 }
@@ -3650,14 +3645,14 @@ pub fn expectCellEquals(sheet: *Sheet, address: []const u8, expected_value: f64)
     const cell = sheet.getCellPtr(pos) orelse return error.CellNotFound;
     if (cell.value_tag != .number) {
         std.debug.print(
-            "Cell {} has value type {}, expected number\n",
+            "Cell {f} has value type {}, expected number\n",
             .{ pos, cell.value_tag },
         );
         return error.TestExpectedCellsEql;
     }
     if (!std.math.approxEqRel(f64, expected_value, cell.value.number, 0.001)) {
         std.debug.print(
-            "Cell {} ({}) with value {d} not within tolerance of expected value {d}\n",
+            "Cell {f} ({f}) with value {d} not within tolerance of expected value {d}\n",
             .{
                 pos,
                 fmtCellExpr(.{ .sheet = sheet, .pos = pos }),
@@ -3676,14 +3671,14 @@ pub fn expectCellEqualsString(sheet: *Sheet, address: []const u8, expected_value
         return error.CellNotFound;
     };
     if (cell.value_tag != .string) {
-        std.debug.print("Cell {} has value type {}, expected string '{s}'\n", .{
+        std.debug.print("Cell {f} has value type {}, expected string '{s}'\n", .{
             pos, cell.value_tag, expected_value,
         });
         return error.TestExpectedCellsEqlStrings;
     }
     const str = sheet.string_values.items(cell.value.string);
     if (!std.mem.eql(u8, expected_value, str)) {
-        std.debug.print("Cell {} does not have expected string value\n", .{pos});
+        std.debug.print("Cell {f} does not have expected string value\n", .{pos});
         return std.testing.expectEqualStrings(expected_value, str);
     }
 }
@@ -3692,7 +3687,7 @@ pub fn expectCellError(sheet: *Sheet, address: []const u8) !void {
     const pos: Position = try .fromAddress(address);
     const cell = sheet.getCellPtr(pos) orelse return error.CellNotFound;
     if (cell.value_tag != .err) {
-        std.debug.print("Expected cell {} to have error, but has value type {}\n", .{
+        std.debug.print("Expected cell {f} to have error, but has value type {}\n", .{
             pos, cell.value_tag,
         });
         return error.UnexpectedValue;
@@ -3834,12 +3829,12 @@ test "Dependencies" {
         \\
     ;
 
-    var fbs = std.io.fixedBufferStream(bytes);
+    var reader: std.io.Reader = .fixed(bytes);
 
     var sheet = try init(std.testing.allocator);
     defer sheet.deinit();
 
-    try sheet.interpretSource(fbs.reader().any());
+    try sheet.interpretSource(&reader);
     try sheet.update();
 
     try testSetCell(&sheet, "A2", "A0 * 3");

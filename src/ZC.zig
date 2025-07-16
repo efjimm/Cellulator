@@ -195,12 +195,7 @@ pub const Mode = enum {
         };
     }
 
-    pub fn format(
-        mode: Mode,
-        comptime _: []const u8,
-        _: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
+    pub fn format(mode: Mode, writer: *std.io.Writer) !void {
         try writer.writeAll(@tagName(mode));
     }
 };
@@ -595,12 +590,10 @@ pub fn commandWrite(zc: *ZC, bytes: []const u8) Allocator.Error!usize {
 }
 
 pub fn commandWriter(zc: *ZC) CommandWriter {
-    return .{
-        .context = zc,
-    };
+    return .{ .context = zc };
 }
 
-const CommandWriter = std.io.Writer(*ZC, Allocator.Error, commandWrite);
+const CommandWriter = std.io.GenericWriter(*ZC, Allocator.Error, commandWrite);
 
 pub fn submitCommand(zc: *ZC) !void {
     assert(zc.mode.isCommandMode());
@@ -846,9 +839,9 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
         },
         .edit_cell => {
             zc.setMode(.command_insert);
-            const writer = zc.commandWriter();
-            try writer.print("let {} = ", .{zc.cursor});
-            try zc.currentSheet().printCellExpression(zc.cursor, writer);
+            var wr = zc.commandWriter().adaptToNewApi();
+            try wr.new_interface.print("let {f} = ", .{zc.cursor});
+            try zc.currentSheet().printCellExpression(zc.cursor, &wr.new_interface);
         },
         .fit_text => try zc.expandWidthAtCursor(),
         .enter_visual_mode => zc.setMode(.visual),
@@ -925,7 +918,7 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
         .decrease_width => try zc.cursorDecWidth(),
         .assign_cell => {
             zc.setMode(.command_insert);
-            try zc.commandWriter().print("let {} = ", .{zc.cursor});
+            try zc.commandWriter().print("let {f} = ", .{zc.cursor});
         },
 
         .zero => {
@@ -962,7 +955,7 @@ fn doVisualMode(zc: *ZC, action: Action) Allocator.Error!void {
             const tl = Position.topLeft(zc.cursor, zc.anchor);
             const br = Position.bottomRight(zc.cursor, zc.anchor);
 
-            try writer.print("{}:{}", .{ tl, br });
+            try writer.print("{f}:{f}", .{ tl, br });
         },
 
         .yank_cell => {

@@ -8,7 +8,7 @@ pub const Position = packed struct {
 
     const max = std.math.maxInt(Int);
 
-    pub const max_str_len = std.fmt.count("{}", .{Position.init(
+    pub const max_str_len = std.fmt.count("{f}", .{Position.init(
         std.math.maxInt(u32),
         std.math.maxInt(u32),
     )});
@@ -96,55 +96,44 @@ pub const Position = packed struct {
         return .{ .data = pos };
     }
 
-    pub fn formatCellAddress(
-        pos: Position,
-        comptime _: []const u8,
-        _: std.fmt.FormatOptions,
-        writer: anytype,
-    ) @TypeOf(writer).Error!void {
-        try writer.print("{}{d}", .{
+    pub fn formatCellAddress(pos: Position, writer: *std.io.Writer) !void {
+        try writer.print("{f}{d}", .{
             fmtColumnAddress(pos.x),
             pos.y,
         });
     }
 
-    pub fn fmtColumnAddress(index: u32) std.fmt.Formatter(formatColumnAddress) {
+    pub fn fmtColumnAddress(index: u32) std.fmt.Formatter(u32, formatColumnAddress) {
         return .{ .data = index };
     }
 
     /// Writes the alphabetic bijective base-26 representation of the given number to the passed
     /// writer.
-    pub fn formatColumnAddress(
-        index: Int,
-        comptime _: []const u8,
-        _: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
+    pub fn formatColumnAddress(index: Int, writer: *std.io.Writer) !void {
         if (index < 26) {
             try writer.writeByte('A' + @as(u8, @intCast(index)));
             return;
         }
 
         var buf: [64]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&buf);
-        const bufwriter = stream.writer();
+        var fixed: std.io.Writer = .fixed(&buf);
 
         var i = @as(HashInt, index) + 1;
         while (i > 0) : (i /= 26) {
             i -= 1;
             const r: u8 = @intCast(i % 26);
-            bufwriter.writeByte('A' + r) catch unreachable;
+            fixed.writeByte('A' + r) catch unreachable;
         }
 
-        const slice = stream.getWritten();
+        const slice = fixed.buffered();
         std.mem.reverse(u8, slice);
         _ = try writer.writeAll(slice);
     }
 
     pub fn columnAddressBuf(index: Int, buf: []u8) []u8 {
-        var fbs = std.io.fixedBufferStream(buf);
-        formatColumnAddress(index, "", .{}, fbs.writer()) catch unreachable;
-        return fbs.getWritten();
+        var fixed: std.io.Writer = .fixed(buf);
+        formatColumnAddress(index, &fixed) catch unreachable;
+        return fixed.buffered();
     }
 
     pub const FromAddressError = error{
@@ -250,13 +239,8 @@ pub const Position = packed struct {
             return dx * dy;
         }
 
-        pub fn format(
-            range: Rect,
-            comptime _: []const u8,
-            _: std.fmt.FormatOptions,
-            writer: anytype,
-        ) !void {
-            try writer.print("[{} -> {}]", .{ range.tl, range.br });
+        pub fn format(range: Rect, writer: *std.io.Writer) !void {
+            try writer.print("[{f} -> {f}]", .{ range.tl, range.br });
         }
 
         pub fn eql(r1: Rect, r2: Rect) bool {
@@ -384,12 +368,12 @@ pub const Position = packed struct {
         inline for (cases) |data| {
             const string, const pos = data;
             try std.testing.expectEqual(pos, try Position.fromAddress(string));
-            try std.testing.expectFmt(string, "{}", .{pos});
+            try std.testing.expectFmt(string, "{f}", .{pos});
 
             const len = for (string, 0..) |c, i| {
                 if (c >= '0' and c <= '9') break i;
             } else unreachable;
-            try std.testing.expectFmt(string[0..len], "{}", .{fmtColumnAddress(pos.x)});
+            try std.testing.expectFmt(string[0..len], "{f}", .{fmtColumnAddress(pos.x)});
         }
     }
 };
