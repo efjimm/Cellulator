@@ -197,18 +197,16 @@ pub fn FlatListPool(comptime T: type) type {
             };
         }
 
-        pub fn iovecs(pool: *Pool) [2]std.posix.iovec_const {
-            return .{
-                utils.arrayListIoVec(&pool.buf),
-                utils.arrayListIoVec(&pool.entries),
-            };
+        pub fn iovecs(pool: *Pool) [2][]u8 {
+            return utils.ptrToIoVec(pool.buf.items) ++
+                utils.ptrToIoVec(pool.entries.items);
         }
 
-        pub fn fromHeader(
+        pub fn initFromHeader(
             pool: *Pool,
             allocator: Allocator,
             header: Header,
-        ) Allocator.Error![2]std.posix.iovec {
+        ) Allocator.Error!void {
             pool.* = .{
                 .buf = .empty,
                 .entries = .empty,
@@ -220,8 +218,6 @@ pub fn FlatListPool(comptime T: type) type {
             try pool.entries.ensureTotalCapacityPrecise(allocator, header.entries_len);
             pool.buf.expandToCapacity();
             pool.entries.expandToCapacity();
-
-            return @bitCast(pool.iovecs());
         }
     };
 }

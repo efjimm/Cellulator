@@ -478,7 +478,7 @@ const SerializeHeader = extern struct {
     redos_cap: u32,
 
     const magic_number: u32 = @bitCast([4]u8{ 'Z', 'C', 'Z', 'C' });
-    const binary_version = 9;
+    const binary_version = 10;
 };
 
 pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
@@ -501,23 +501,24 @@ pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
         .redos_cap = @intCast(sheet.redos.capacity),
     };
 
-    var iovecs = .{
-        utils.ptrToIoVec(&header),
-        utils.arrayListIoVec(&sheet.strings_buf),
-    } ++ sheet.dependents.iovecs() ++ .{
-        utils.arrayListIoVec(&sheet.deps),
-    } ++ sheet.cell_tree.iovecs() ++
-        utils.multiArrayListSliceIoVec(ast.Node, &sheet.ast_nodes) ++
+    var iovecs: [36][]const u8 =
+        utils.ptrToIoVec(&header) ++
+        utils.ptrToIoVec(sheet.strings_buf.items) ++
+        sheet.dependents.iovecs() ++
+        utils.ptrToIoVec(sheet.deps.items) ++
+        sheet.cell_tree.iovecs() ++
+        utils.multiArrayListSliceIoVec(&sheet.ast_nodes) ++
         sheet.string_values.iovecs() ++
         sheet.cols.iovecs() ++
-        .{utils.arrayListIoVec(&sheet.cell_buffer)} ++
-        utils.multiArrayListIoVec(Undo, &sheet.undos) ++
-        utils.multiArrayListIoVec(Undo, &sheet.redos);
+        utils.ptrToIoVec(sheet.cell_buffer.items) ++
+        utils.multiArrayListIoVec(&sheet.undos) ++
+        utils.multiArrayListIoVec(&sheet.redos);
 
-    try file.writevAll(&iovecs);
+    var writer = file.writer(&.{});
+    try writer.interface.writeVecAll(&iovecs);
 }
 
-pub fn deserialize(sheet: *Sheet, allocator: Allocator, file: std.fs.File) !void {
+pub fn deserialize(sheet: *Sheet, gpa: Allocator, file: std.fs.File) !void {
     var buf: [@sizeOf(SerializeHeader)]u8 = undefined;
     var reader = file.reader(&buf);
     const header = try reader.interface.takeStruct(SerializeHeader);
@@ -527,20 +528,41 @@ pub fn deserialize(sheet: *Sheet, allocator: Allocator, file: std.fs.File) !void
 
     sheet.free_deps = header.deps_free;
 
-    var iovecs = [_]std.posix.iovec{
-        try utils.prepArrayList(&sheet.strings_buf, allocator, header.strings_buf_len),
-    } ++ try sheet.dependents.fromHeader(allocator, header.dependents) ++ .{
-        try utils.prepArrayList(&sheet.deps, sheet.allocator, header.deps_len),
-    } ++ try sheet.cell_tree.fromHeader(allocator, header.cell_tree) ++
-        try utils.prepMultiArrayListSlice(ast.Node, &sheet.ast_nodes, allocator, header.ast_nodes_len, header.ast_nodes_cap) ++
-        try sheet.string_values.fromHeader(sheet.allocator, header.string_values) ++
-        try sheet.cols.fromHeader(allocator, header.cols) ++
-        .{try utils.prepArrayList(&sheet.cell_buffer, sheet.allocator, header.cells_buffer_len)} ++
-        try utils.prepMultiArrayList(Undo, &sheet.undos, allocator, header.undos_len, header.undos_cap) ++
-        try utils.prepMultiArrayList(Undo, &sheet.redos, allocator, header.redos_len, header.redos_cap);
+    try sheet.strings_buf.ensureTotalCapacityPrecise(gpa, header.strings_buf_len);
+    sheet.strings_buf.expandToCapacity();
 
-    try file.seekTo(@sizeOf(SerializeHeader));
-    _ = try file.readvAll(&iovecs);
+    try sheet.deps.ensureTotalCapacityPrecise(gpa, header.deps_len);
+    sheet.deps.expandToCapacity();
+
+    try sheet.cell_buffer.ensureTotalCapacityPrecise(gpa, header.cells_buffer_len);
+    sheet.cell_buffer.expandToCapacity();
+
+    try sheet.dependents.initFromHeader(gpa, header.dependents);
+    try sheet.cell_tree.initFromHeader(gpa, header.cell_tree);
+    try utils.setAndExpandCapacitySlice(
+        &sheet.ast_nodes,
+        gpa,
+        header.ast_nodes_len,
+        header.ast_nodes_cap,
+    );
+    try sheet.string_values.initFromHeader(gpa, header.string_values);
+    try sheet.cols.initFromHeader(gpa, header.cols);
+    try utils.setAndExpandCapacity(&sheet.undos, gpa, header.undos_len, header.undos_cap);
+    try utils.setAndExpandCapacity(&sheet.redos, gpa, header.redos_len, header.redos_cap);
+
+    var iovecs =
+        utils.ptrToIoVec(sheet.strings_buf.items) ++
+        sheet.dependents.iovecs() ++
+        utils.ptrToIoVec(sheet.deps.items) ++
+        sheet.cell_tree.iovecs() ++
+        utils.multiArrayListSliceIoVec(&sheet.ast_nodes) ++
+        sheet.string_values.iovecs() ++
+        sheet.cols.iovecs() ++
+        utils.ptrToIoVec(sheet.cell_buffer.items) ++
+        utils.multiArrayListIoVec(&sheet.undos) ++
+        utils.multiArrayListIoVec(&sheet.redos);
+
+    try reader.interface.readVecAll(&iovecs);
 }
 
 pub fn clearRetainingCapacity(sheet: *Sheet) void {
@@ -660,7 +682,7 @@ pub fn interpretSource(sheet: *Sheet, reader: *std.io.Reader) !void {
     var cells: std.MultiArrayList(Assignment) = .empty;
     var tokens: std.MultiArrayList(Tokenizer.Token) = .empty;
 
-    const buf_size = comptime std.math.pow(usize, 2, 22);
+    const buf_size = comptime std.math.pow(usize, 2, 18);
     var buf = try arena.alloc(u8, buf_size);
     buf.len = 0;
 
@@ -3241,8 +3263,8 @@ fn testCellEvaluation(a: Allocator) !void {
         \\let F15 = F14+E15
         \\let C13 = C12+B13
     ;
-    var fbs = std.io.fixedBufferStream(set_cells);
-    try sheet.interpretSource(fbs.reader().any());
+    var reader: std.io.Reader = .fixed(set_cells);
+    try sheet.interpretSource(&reader);
     try sheet.update();
 
     // Test that updating this takes less than 100 ms
@@ -3563,9 +3585,9 @@ fn testCellEvaluation(a: Allocator) !void {
         \\let G20 = F20 # G19
     ;
 
-    fbs = std.io.fixedBufferStream(commands);
+    reader = .fixed(commands);
     sheet.clearRetainingCapacity();
-    try sheet.interpretSource(fbs.reader().any());
+    try sheet.interpretSource(&reader);
     try sheet.update();
 
     // Only checks the eval results of some of the cells, checking all is kinda slow

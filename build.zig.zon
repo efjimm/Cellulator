@@ -12,14 +12,13 @@
             .url = "git+https://github.com/natecraddock/ziglua?ref=main#a653a022cd609c74e934aeb54bf5beddd551df66",
             .hash = "zlua-0.1.0-hGRpC9ssBQBIej-WCkH8q-YamkRq7duEm_EiUu6YEtCQ",
         },
-        .shovel = .{
-            .path = "../shovel",
-            // .url = "git+https://github.com/efjimm/shovel?ref=master#1dcf60f816ac971078d6350e02de824b3e2eb508",
-            // .hash = "shovel-0.1.0-WAlYzK8ZBgBqytTlaSyDTLI7tgYjRI1vxnx7gpFtnMRt",
-        },
         .zg = .{
             .url = "git+https://github.com/efjimm/zg?ref=master#16355ce3da13f24d13200f834fab50c12b7e61ee",
             .hash = "zg-0.14.0-oGqU3PmnsgLOl4mt6T8xa6SeOYOYkSfvm13csnZTLonP",
+        },
+        .shovel = .{
+            .url = "git+https://github.com/efjimm/shovel?ref=master#6b5ec8b38edf4f5f1321fbddfde19e62716ed82a",
+            .hash = "shovel-0.1.0-WAlYzEYPBgCfSnO4sbv6dsWjurOp0_XZVG-rvAK9jEUu",
         },
     },
 }

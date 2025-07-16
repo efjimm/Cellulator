@@ -942,21 +942,9 @@ pub fn PhTree(
             free_count: Branch.Handle.Int,
         };
 
-        pub const IoVecs = blk: {
-            const nodes = @typeInfo(Branch).@"struct".fields.len;
-            const values = @typeInfo(Leaf).@"struct".fields.len;
-            break :blk [nodes + values]std.posix.iovec_const;
-        };
-
-        pub const IoVecsMut = blk: {
-            const nodes = @typeInfo(Branch).@"struct".fields.len;
-            const values = @typeInfo(Leaf).@"struct".fields.len;
-            break :blk [nodes + values]std.posix.iovec;
-        };
-
-        pub fn iovecs(tree: *@This()) IoVecs {
-            return utils.multiArrayListSliceIoVec(Branch, &tree.branches) ++
-                utils.multiArrayListSliceIoVec(Leaf, &tree.leaves);
+        pub fn iovecs(tree: *@This()) [8][]u8 {
+            return utils.multiArrayListSliceIoVec(&tree.branches) ++
+                utils.multiArrayListSliceIoVec(&tree.leaves);
         }
 
         pub fn getHeader(tree: *@This()) Header {
@@ -976,7 +964,7 @@ pub fn PhTree(
             };
         }
 
-        pub fn fromHeader(tree: *@This(), allocator: Allocator, header: Header) !IoVecsMut {
+        pub fn initFromHeader(tree: *@This(), allocator: Allocator, header: Header) !void {
             var nodes = tree.branches.toMultiArrayList();
             try nodes.setCapacity(allocator, header.nodes_cap);
             errdefer nodes.deinit(allocator);
@@ -1002,8 +990,6 @@ pub fn PhTree(
                 tree.requested_values_alloc = tree.leaves.capacity;
                 tree.requested_nodes_alloc = tree.branches.capacity;
             }
-
-            return @bitCast(tree.iovecs());
         }
 
         fn pointGreaterOrEqual(a: *const Point, b: *const Point) bool {
