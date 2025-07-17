@@ -368,7 +368,7 @@ pub fn getSheetName(zc: *const ZC, index: usize) []const u8 {
 /// Sets the cell at `pos` to the expression represented by `expr`.
 pub fn setCellString(zc: *ZC, pos: Position, expr: [:0]const u8, opts: ChangeCellOpts) !void {
     // TODO: This leaks memory if `setCell` fails, which can only happen on OOM.
-    const expr_root = try ast.fromExpression(zc.currentSheet(), expr);
+    const expr_root = try ast.parseFromExpression(zc.currentSheet(), expr);
 
     try zc.setCell(pos, expr, expr_root, opts);
 }
@@ -502,7 +502,6 @@ fn handleInput(zc: *ZC) !void {
             error.InvalidCellAddress => zc.setStatusMessage(.err, "Invalid cell address", .{}),
             error.InvalidCommand => zc.setStatusMessage(.err, "Invalid command", .{}),
             error.OutOfMemory => zc.setStatusMessage(.err, "Out of memory!", .{}),
-            error.UnexpectedToken => zc.setStatusMessage(.err, "Unexpected token", .{}),
             error.InvalidSyntax => zc.setStatusMessage(.err, "Invalid syntax", .{}),
             else => zc.setStatusMessage(.err, "Unhandled error {}", .{err}),
         },
@@ -1012,7 +1011,43 @@ fn parseCommand(zc: *ZC, str: [:0]const u8) !void {
     if (str[0] == ':')
         return zc.runCommand(str[1..]);
 
-    const expr_root = try ast.fromSource(zc.currentSheet(), str);
+    const Tokenizer = @import("Tokenizer.zig");
+    const Parser = @import("Parser.zig");
+    var tokens = try Tokenizer.collectTokens(zc.allocator, str, @intCast(str.len / 2));
+    defer tokens.deinit(zc.allocator);
+
+    if (tokens.items(.tag)[0] == .eof)
+        return;
+
+    const nodes = &zc.currentSheet().ast_nodes;
+    var parser: Parser = .init(
+        zc.allocator,
+        str,
+        tokens.items(.tag),
+        tokens.items(.start),
+        .{ .nodes = nodes.toMultiArrayList() },
+    );
+
+    {
+        const old_len = nodes.len;
+
+        // The parser could re-allocate the underlying nodes
+        defer nodes.* = parser.nodes.slice();
+        errdefer nodes.len = old_len;
+
+        parser.parse() catch |err| switch (err) {
+            error.UnexpectedToken,
+            error.InvalidCellAddress,
+            error.InvalidBuiltin,
+            => {
+                zc.setStatusMessage(.err, "{f}", .{parser.fmtError()});
+                return;
+            },
+            else => |e| return e,
+        };
+    }
+
+    const expr_root: ast.Index = .from(@intCast(nodes.len - 1));
     if (!expr_root.isValid()) return;
 
     const pos = zc.currentSheet().ast_nodes.items(.data)[expr_root.n].assignment;
@@ -1497,7 +1532,7 @@ pub fn runCommand(zc: *ZC, str: [:0]const u8) !void {
             const arg2 = iter.next() orelse {
                 // TODO: Clean this up on failure
                 // No increment was provided, so all cells can share the same expression
-                const expr = try ast.fromExpression(zc.currentSheet(), str[arg1_start..]);
+                const expr = try ast.parseFromExpression(zc.currentSheet(), str[arg1_start..]);
                 const node = zc.currentSheet().ast_nodes.get(expr.n);
                 if (node.tag != .number) return error.InvalidSyntax;
 
@@ -1527,7 +1562,7 @@ pub fn runCommand(zc: *ZC, str: [:0]const u8) !void {
             const expr_str = str[iter.index..];
             const range = try parseRangeOrPoint(arg1);
 
-            const expr = ast.fromExpression(zc.currentSheet(), expr_str) catch |err| switch (err) {
+            const expr = ast.parseFromExpression(zc.currentSheet(), expr_str) catch |err| switch (err) {
                 error.UnexpectedToken => {
                     zc.setStatusMessage(.err, "Invalid expression (unexpected token)", .{});
                     return;

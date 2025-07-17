@@ -69,13 +69,14 @@ pub fn main() !void {
     try zc.run();
 }
 
-fn panic(msg: []const u8, ret_addr: ?usize) noreturn {
+fn panicFn(msg: []const u8, ret_addr: ?usize) noreturn {
     @branchHint(.cold);
+    _ = std.fs.cwd().createFile("GUHBUH", .{}) catch {};
     zc.ui.term.cook() catch {};
     std.debug.defaultPanic(msg, ret_addr);
 }
 
-pub const Panic = std.debug.FullPanic(panic);
+pub const panic = std.debug.FullPanic(panicFn);
 
 pub const std_options: std.Options = .{
     .log_level = @field(std.log.Level, @tagName(log_level)),

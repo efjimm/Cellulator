@@ -22,6 +22,16 @@ nodes: NodeList,
 
 allocator: Allocator,
 
+err_info: ErrorInfo = .none,
+
+pub const ErrorInfo = union(enum) {
+    none,
+    expected_token: Token.Tag,
+    expected_string: []const u8,
+    invalid_builtin: []const u8,
+    invalid_cell_address: []const u8,
+};
+
 const Node = @import("ast.zig").Node;
 const Index = @import("ast.zig").Index;
 const NegativeOffset = @import("ast.zig").NegativeOffset;
@@ -67,6 +77,7 @@ const builtins = std.StaticStringMap(Builtin.Tag).initComptime(.{
 pub const ParseError = error{
     UnexpectedToken,
     InvalidCellAddress,
+    InvalidBuiltin,
 } || Allocator.Error;
 
 const InitOptions = struct {
@@ -129,7 +140,10 @@ pub fn parseAssignment(parser: *Parser) ParseError!Index {
     const raw = parser.src[start..parser.token_starts[parser.tok_i]];
     const text = std.mem.trimRight(u8, raw, " \t\r\n");
 
-    const pos = Position.fromAddress(text) catch return error.InvalidCellAddress;
+    const pos = Position.fromAddress(text) catch return parser.setError(
+        error.InvalidCellAddress,
+        .{ .invalid_cell_address = text },
+    );
 
     try parser.expectToken(.equals_sign);
     _ = try parser.parseExpression();
@@ -215,7 +229,7 @@ fn parsePrimaryExpr(parser: *Parser) !Index {
         inline .single_string_literal_start,
         .double_string_literal_start,
         => |tag| parser.parseStringLiteral(tag),
-        else => error.UnexpectedToken,
+        else => parser.setError(error.UnexpectedToken, .{ .expected_string = "expression" }),
     };
 }
 
@@ -240,7 +254,10 @@ fn parseFunction(parser: *Parser) !Index {
     const end = try parser.expectTokenGet(.lparen);
 
     const identifier = parser.src[start + 1 .. end];
-    const builtin = builtins.get(identifier) orelse return error.UnexpectedToken;
+    const builtin = builtins.get(identifier) orelse return parser.setError(
+        error.InvalidBuiltin,
+        .{ .invalid_builtin = identifier },
+    );
 
     const args_start = switch (builtin) {
         // These builtins take only one argument
@@ -288,7 +305,7 @@ fn parseNumber(parser: *Parser) !Index {
     // number token on invalid format.
     const num = std.fmt.parseFloat(f64, text) catch {
         std.debug.print("'{s}' ({x})\n", .{ text, text });
-        std.debug.print("Next token: {}\n", .{parser.token_tags[parser.tok_i]});
+        std.debug.print("Next token: {any}\n", .{parser.token_tags[parser.tok_i]});
         unreachable;
     };
 
@@ -301,7 +318,10 @@ fn parseCellName(parser: *Parser) !Index {
     const raw = parser.src[start..parser.token_starts[parser.tok_i]];
     const text = std.mem.trimRight(u8, raw, " \t\r\n");
 
-    const pos = Position.fromAddress(text) catch return error.InvalidCellAddress;
+    const pos = Position.fromAddress(text) catch return parser.setError(
+        error.InvalidCellAddress,
+        .{ .invalid_cell_address = text },
+    );
 
     return parser.addNode(.init(.pos, pos));
 }
@@ -315,7 +335,9 @@ fn addNode(noalias parser: *Parser, node: Node) Allocator.Error!Index {
 pub fn expectTokenGet(parser: *Parser, expected_tag: Token.Tag) !u32 {
     if (parser.token_tags[parser.tok_i] != expected_tag) {
         @branchHint(.unlikely);
-        return error.UnexpectedToken;
+        return parser.setError(error.UnexpectedToken, .{
+            .expected_token = expected_tag,
+        });
     }
     const ret = parser.token_starts[parser.tok_i];
     parser.tok_i += 1;
@@ -325,9 +347,71 @@ pub fn expectTokenGet(parser: *Parser, expected_tag: Token.Tag) !u32 {
 pub fn expectToken(parser: *Parser, expected_tag: Token.Tag) !void {
     if (parser.token_tags[parser.tok_i] != expected_tag) {
         @branchHint(.unlikely);
-        return error.UnexpectedToken;
+        return parser.setError(error.UnexpectedToken, .{
+            .expected_token = expected_tag,
+        });
     }
     parser.tok_i += 1;
+}
+
+fn setError(parser: *Parser, err: ParseError, info: ErrorInfo) ParseError {
+    parser.err_info = info;
+    return err;
+}
+
+pub fn fmtError(parser: *const Parser) std.fmt.Formatter(*const Parser, formatError) {
+    return .{ .data = parser };
+}
+
+pub fn formatError(parser: *const Parser, writer: *std.io.Writer) !void {
+    const actual = parser.token_tags[parser.tok_i];
+
+    switch (parser.err_info) {
+        .none => {},
+        .expected_token => |token| {
+            if (parser.tok_i > 0) {
+                const prev = parser.token_tags[parser.tok_i - 1];
+                try writer.print("expected {f} after {f}, found {f}", .{
+                    token, prev, actual,
+                });
+            } else {
+                try writer.print("expected {f}, found {f}", .{ token, actual });
+            }
+        },
+        .expected_string => |str| {
+            if (parser.tok_i > 0) {
+                const prev = parser.token_tags[parser.tok_i - 1];
+                try writer.print("expected {s} after {f}, found {f}", .{
+                    str, prev, actual,
+                });
+            } else {
+                try writer.print("expected {s}, found {f}", .{ str, actual });
+            }
+        },
+        .invalid_builtin => |str| {
+            try writer.print("invalid builtin function '{s}'", .{str});
+        },
+        .invalid_cell_address => |str| {
+            try writer.print("invalid cell address '{s}'", .{str});
+        },
+    }
+}
+
+fn fmtTags(tags: []const Token.Tag) std.fmt.Formatter([]const Token.Tag, formatTags) {
+    return .{ .data = tags };
+}
+
+fn formatTags(tags: []const Token.Tag, writer: *std.io.Writer) !void {
+    if (tags.len == 1) {
+        try writer.print("{f}", .{tags[0]});
+        return;
+    }
+
+    // try writer.writeByte('[');
+    for (tags[0 .. tags.len - 1]) |tag| {
+        try writer.print("{f}, ", .{tag});
+    }
+    try writer.print("or {f}", .{tags[tags.len - 1]});
 }
 
 fn eatToken(parser: *Parser, expected_tag: Token.Tag) ?Token {

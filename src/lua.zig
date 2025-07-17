@@ -286,6 +286,7 @@ const metatables = .{
             zc.setCellString(pos, expr_str, .{ .emit_event = false }) catch |err| switch (err) {
                 error.InvalidCellAddress => unreachable,
                 error.UnexpectedToken => state.argError(2, "Unexpected token"),
+                error.InvalidBuiltin => state.argError(2, "Invalid builtin"),
                 error.OutOfMemory => return 0, // TODO: Make sure this is handled properly
             };
             return 0;

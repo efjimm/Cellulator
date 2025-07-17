@@ -639,19 +639,22 @@ fn bulkParse(
 
     var token_index: u32 = 0;
     while (lines.next()) |_| {
-        const strings_len, const token_sub_index = ast.fromSource2(
+        const parser = ast.initTokens(
             sheet,
             src,
             token_tags[token_index..],
             token_starts[token_index..],
         ) catch |err| switch (err) {
-            error.UnexpectedToken, error.InvalidCellAddress => continue,
+            error.UnexpectedToken,
+            error.InvalidCellAddress,
+            error.InvalidBuiltin,
+            => continue,
             error.OutOfMemory => return error.OutOfMemory,
         };
-        token_index += token_sub_index;
+        token_index += parser.tok_i;
         const expr_root: ast.Index = .from(@intCast(sheet.ast_nodes.len - 1));
 
-        total_strings_len += strings_len + 1;
+        total_strings_len += parser.strings_len + 1;
 
         const data = sheet.ast_nodes.items(.data);
         assert(sheet.ast_nodes.items(.tag)[expr_root.n] == .assignment);
@@ -3038,7 +3041,7 @@ test "Sheet basics" {
     const exprs: []const [:0]const u8 = &.{ "50 + 5", "500 * 2 / 34 + 1", "a0", "a2 * a1" };
 
     for (exprs, 0..) |expr, i| {
-        const root = try ast.fromExpression(&sheet, expr);
+        const root = try ast.parseFromExpression(&sheet, expr);
         try sheet.setCell(.{ .x = 0, .y = @intCast(i) }, expr, root, .{});
     }
 
@@ -3054,13 +3057,13 @@ test "setCell allocations" {
 
             {
                 const expr = "a4 * a1 * a3";
-                const expr_root = try ast.fromExpression(&sheet, expr);
+                const expr_root = try ast.parseFromExpression(&sheet, expr);
                 try sheet.setCell(.{ .x = 0, .y = 0 }, expr, expr_root, .{});
             }
 
             {
                 const expr = "a2 * a1 * a3";
-                const expr_root = try ast.fromExpression(&sheet, expr);
+                const expr_root = try ast.parseFromExpression(&sheet, expr);
                 try sheet.setCell(.{ .x = 1, .y = 0 }, expr, expr_root, .{});
             }
 
@@ -3081,7 +3084,7 @@ test "Update values" {
     try sheet.setCell(
         try Position.fromAddress("C0"),
         "@sum(A0:B0)",
-        try ast.fromExpression(&sheet, "@sum(A0:B0)"),
+        try ast.parseFromExpression(&sheet, "@sum(A0:B0)"),
         .{},
     );
 
@@ -3090,13 +3093,13 @@ test "Update values" {
         try sheet.setCell(
             try Position.fromAddress("A0"),
             str,
-            try ast.fromExpression(&sheet, str),
+            try ast.parseFromExpression(&sheet, str),
             .{},
         );
         try sheet.setCell(
             try Position.fromAddress("B0"),
             "A0",
-            try ast.fromExpression(&sheet, "A0"),
+            try ast.parseFromExpression(&sheet, "A0"),
             .{},
         );
         try sheet.update();
@@ -3723,7 +3726,7 @@ test "Cell error propagation" {
     try sheet.setCell(
         .fromValidAddress("A0"),
         "10",
-        try ast.fromExpression(&sheet, "10"),
+        try ast.parseFromExpression(&sheet, "10"),
         .{},
     );
 
@@ -3733,7 +3736,7 @@ test "Cell error propagation" {
     try sheet.setCell(
         .fromValidAddress("B0"),
         "A0",
-        try ast.fromExpression(&sheet, "A0"),
+        try ast.parseFromExpression(&sheet, "A0"),
         .{},
     );
 
@@ -3743,7 +3746,7 @@ test "Cell error propagation" {
     try sheet.setCell(
         .fromValidAddress("A0"),
         "A0",
-        try ast.fromExpression(&sheet, "A0"),
+        try ast.parseFromExpression(&sheet, "A0"),
         .{},
     );
 
@@ -3759,7 +3762,7 @@ test "DupeStrings" {
 
     {
         const source = "let a0 = 'this is epic' # 'nice' # 'string!'";
-        const expr_root = try ast.fromSource(&sheet, source);
+        const expr_root = try ast.parseFromSource(sheet.allocator, &sheet.ast_nodes, source);
 
         try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, source.len);
         const strings = sheet.dupeAstStrings(
@@ -3773,7 +3776,7 @@ test "DupeStrings" {
 
     {
         const source = "let a0 = b0";
-        const expr_root = try ast.fromSource(&sheet, source);
+        const expr_root = try ast.parseFromSource(sheet.allocator, &sheet.ast_nodes, source);
 
         try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, source.len);
         const strings = sheet.dupeAstStrings(
@@ -3798,7 +3801,7 @@ test "Overwrite with string" {
         try sheet.setCell(
             .fromValidAddress(address),
             source,
-            try ast.fromExpression(&sheet, source),
+            try ast.parseFromExpression(&sheet, source),
             .{},
         );
 
@@ -3826,7 +3829,7 @@ test "Overwrite with reference" {
         try sheet.setCell(
             .fromValidAddress(address),
             source,
-            try ast.fromExpression(&sheet, source),
+            try ast.parseFromExpression(&sheet, source),
             .{},
         );
 
@@ -3835,11 +3838,11 @@ test "Overwrite with reference" {
 }
 
 fn testSetCell(sheet: *Sheet, address: []const u8, expr: [:0]const u8) !void {
-    try sheet.setCell(.fromValidAddress(address), expr, try ast.fromExpression(sheet, expr), .{});
+    try sheet.setCell(.fromValidAddress(address), expr, try ast.parseFromExpression(sheet, expr), .{});
 }
 
 fn testSetCellPos(sheet: *Sheet, pos: Position, expr: []const u8) !void {
-    try sheet.setCell(pos, expr, try ast.fromExpression(sheet, expr), .{});
+    try sheet.setCell(pos, expr, try ast.parseFromExpression(sheet, expr), .{});
 }
 
 test "Dependencies" {
@@ -3876,7 +3879,7 @@ test "insert column overflow" {
     var sheet = try init(std.testing.allocator);
     defer sheet.deinit();
 
-    try sheet.setCell(.init(std.math.maxInt(u32) - 1, 0), "5", try ast.fromExpression(&sheet, "5"), .{});
+    try sheet.setCell(.init(std.math.maxInt(u32) - 1, 0), "5", try ast.parseFromExpression(&sheet, "5"), .{});
     const res = sheet.insertColumns(0, 2, .{});
     try std.testing.expectError(error.Overflow, res);
 }
@@ -3885,7 +3888,7 @@ test "insert row overflow" {
     var sheet = try init(std.testing.allocator);
     defer sheet.deinit();
 
-    try sheet.setCell(.init(0, std.math.maxInt(u32) - 1), "5", try ast.fromExpression(&sheet, "5"), .{});
+    try sheet.setCell(.init(0, std.math.maxInt(u32) - 1), "5", try ast.parseFromExpression(&sheet, "5"), .{});
     try sheet.insertRows(0, 1, .{});
     try std.testing.expectError(error.Overflow, sheet.insertRows(0, 1, .{}));
 }

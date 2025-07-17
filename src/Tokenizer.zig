@@ -78,6 +78,36 @@ pub const Token = struct {
 
         eof,
         unknown,
+
+        pub fn format(tag: Tag, writer: *std.io.Writer) !void {
+            const strings = comptime std.EnumArray(Tag, []const u8).init(.{
+                .number = "number",
+                .equals_sign = "'='",
+                .plus = "'+'",
+                .minus = "'-'",
+                .asterisk = "'*'",
+                .forward_slash = "'/'",
+                .percent = "'%'",
+                .comma = "','",
+                .colon = "':'",
+                .hash = "'#'",
+                .lparen = "'('",
+                .rparen = "')'",
+                .column_name = "column name",
+                .cell_name = "cell address",
+                .builtin = "builtin",
+                .single_string_literal_start = "\"'\"",
+                .single_string_literal_end = "\"'\"",
+                .double_string_literal_start = "'\"'",
+                .double_string_literal_end = "'\"'",
+                .keyword_let = "'let'",
+                .eof = "eof",
+                .unknown = "",
+            });
+
+            const str = strings.get(tag);
+            try writer.writeAll(str);
+        }
     };
 };
 
@@ -86,9 +116,7 @@ const keywords = std.StaticStringMap(Token.Tag).initComptime(.{
 });
 
 pub fn init(bytes: [:0]const u8) Tokenizer {
-    return .{
-        .bytes = bytes,
-    };
+    return .{ .bytes = bytes };
 }
 
 pub fn next(tokenizer: *Tokenizer) Token {

@@ -106,27 +106,30 @@ pub const NegativeOffset = enum(u32) {
     }
 };
 
-pub fn fromSource(sheet: *Sheet, source: [:0]const u8) ParseError!Index {
-    var tokens = try Tokenizer.collectTokens(sheet.allocator, source, @intCast(source.len / 2));
-    defer tokens.deinit(sheet.allocator);
+pub fn parseFromSource(
+    gpa: std.mem.Allocator,
+    nodes: *NodeSlice,
+    source: [:0]const u8,
+) ParseError!Index {
+    var tokens = try Tokenizer.collectTokens(gpa, source, @intCast(source.len / 2));
+    defer tokens.deinit(gpa);
 
-    if (tokens.items(.tag)[0] == .eof) {
+    if (tokens.items(.tag)[0] == .eof)
         return .invalid;
-    }
 
     var parser: Parser = .init(
-        sheet.allocator,
+        gpa,
         source,
         tokens.items(.tag),
         tokens.items(.start),
-        .{ .nodes = sheet.ast_nodes.toMultiArrayList() },
+        .{ .nodes = nodes.toMultiArrayList() },
     );
 
-    const old_len = sheet.ast_nodes.len;
+    const old_len = nodes.len;
 
     // The parser could re-allocate the underlying nodes
-    defer sheet.ast_nodes = parser.nodes.slice();
-    errdefer sheet.ast_nodes.len = old_len;
+    defer nodes.* = parser.nodes.slice();
+    errdefer nodes.len = old_len;
 
     try parser.parse();
 
@@ -134,16 +137,12 @@ pub fn fromSource(sheet: *Sheet, source: [:0]const u8) ParseError!Index {
 }
 
 const Token = Tokenizer.Token;
-pub fn fromSource2(
+pub fn initTokens(
     sheet: *Sheet,
     source: [:0]const u8,
     token_tags: []const Token.Tag,
     token_starts: []const u32,
-) ParseError!struct { // TODO: Make this a normal struct instead of a tuple
-    /// Total byte length of all parsed string literals
-    u32,
-    u32,
-} {
+) ParseError!Parser {
     var parser: Parser = .init(
         sheet.allocator,
         source,
@@ -160,10 +159,10 @@ pub fn fromSource2(
 
     _ = try parser.parseStatement();
 
-    return .{ parser.strings_len, parser.tok_i };
+    return parser;
 }
 
-pub fn fromExpression(sheet: *Sheet, source: [:0]const u8) ParseError!Index {
+pub fn parseFromExpression(sheet: *Sheet, source: [:0]const u8) ParseError!Index {
     var tokens = try Tokenizer.collectTokens(sheet.allocator, source, @intCast(source.len / 2));
     defer tokens.deinit(sheet.allocator);
 
@@ -191,7 +190,7 @@ pub inline fn printFromIndex(
     nodes: NodeSlice,
     sheet: *Sheet,
     index: Index,
-    writer: anytype,
+    writer: *std.io.Writer,
     strings: []const u8,
 ) std.io.Writer.Error!void {
     const node = nodes.get(index.n);
@@ -203,7 +202,7 @@ pub fn printFromNode(
     sheet: *Sheet,
     index: Index,
     node: Node,
-    writer: anytype,
+    writer: *std.io.Writer,
     strings: []const u8,
 ) std.io.Writer.Error!void {
     // On the left-hand side, expressions involving operators with lower precedence need
@@ -215,10 +214,7 @@ pub fn printFromNode(
         .number => |n| try writer.print("{d}", .{n}),
         .column => |col| try writer.print("{f}", .{Position.fmtColumnAddress(col)}),
         .pos => |pos| try writer.print("{f}", .{pos}),
-        .invalidated_pos => |pos| {
-            // TODO: Print these differently
-            try writer.print("{f}", .{pos});
-        },
+        .invalidated_pos => |pos| try writer.print("{f}", .{pos}),
 
         .string_literal => |str| {
             try writer.print("\"{s}\"", .{strings[str.start..str.end]});
@@ -944,7 +940,7 @@ test "Parse and Eval Expression" {
             var sheet = try Sheet.init(t.allocator);
             defer sheet.deinit();
 
-            const expr_root = fromExpression(&sheet, expr) catch |err| {
+            const expr_root = parseFromExpression(&sheet, expr) catch |err| {
                 return if (err != expected) err else {};
             };
 
@@ -998,12 +994,12 @@ test "Functions on Ranges" {
             var sheet = try Sheet.init(t.allocator);
             defer sheet.deinit();
 
-            try sheet.setCell(try Position.fromAddress("A0"), "0", try fromExpression(&sheet, "0"), .{});
-            try sheet.setCell(try Position.fromAddress("B0"), "100", try fromExpression(&sheet, "100"), .{});
-            try sheet.setCell(try Position.fromAddress("A1"), "500", try fromExpression(&sheet, "500"), .{});
-            try sheet.setCell(try Position.fromAddress("B1"), "333.33", try fromExpression(&sheet, "333.33"), .{});
+            try sheet.setCell(try Position.fromAddress("A0"), "0", try parseFromExpression(&sheet, "0"), .{});
+            try sheet.setCell(try Position.fromAddress("B0"), "100", try parseFromExpression(&sheet, "100"), .{});
+            try sheet.setCell(try Position.fromAddress("A1"), "500", try parseFromExpression(&sheet, "500"), .{});
+            try sheet.setCell(try Position.fromAddress("B1"), "333.33", try parseFromExpression(&sheet, "333.33"), .{});
 
-            const expr_root = try fromExpression(&sheet, expr);
+            const expr_root = try parseFromExpression(&sheet, expr);
 
             try sheet.update();
             const res = try eval(
@@ -1229,7 +1225,7 @@ test "Print" {
 
     inline for (data) |d| {
         const expr, const expected = d;
-        const expr_root = try fromExpression(&sheet, expr);
+        const expr_root = try parseFromExpression(&sheet, expr);
 
         var buf: [4096]u8 = undefined;
         var fixed: std.io.Writer = .fixed(&buf);
