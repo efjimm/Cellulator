@@ -94,10 +94,12 @@ pub fn log(
         .shovel_perf => return,
         else => {},
     }
-    const writer = logfile.writer(&.{});
+    var buf: [1024]u8 = undefined;
+    var writer = logfile.writerStreaming(&buf);
     writer.interface.print("[{s}] {s}: ", .{ @tagName(scope), @tagName(level) }) catch {};
     writer.interface.print(format, args) catch {};
     writer.interface.writeByte('\n') catch {};
+    writer.interface.flush() catch {};
 }
 
 // Reference all tests in other modules

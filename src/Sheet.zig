@@ -521,7 +521,8 @@ pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
 pub fn deserialize(sheet: *Sheet, gpa: Allocator, file: std.fs.File) !void {
     var buf: [@sizeOf(SerializeHeader)]u8 = undefined;
     var reader = file.reader(&buf);
-    const header = try reader.interface.takeStruct(SerializeHeader);
+    const native_endian = builtin.target.cpu.arch.endian();
+    const header = try reader.interface.takeStruct(SerializeHeader, native_endian);
 
     if (header.magic != SerializeHeader.magic_number) return error.InvalidFile;
     if (header.version != SerializeHeader.binary_version) return error.InvalidVersion;
@@ -624,9 +625,10 @@ fn bulkParse(
     var lines = std.mem.tokenizeScalar(u8, src, '\n');
 
     tokens.clearRetainingCapacity();
-    var t: Tokenizer = .init(src);
+    var reader: std.io.Reader = .fixed(src);
+    var t: Tokenizer = .init(&reader);
     while (true) {
-        const token = t.next();
+        const token = t.next() catch unreachable;
         try tokens.append(tokens_allocator, token);
         if (token.tag == .eof) break;
     }
@@ -2770,7 +2772,6 @@ pub fn printCellExpression(sheet: *Sheet, pos: Position, writer: *std.io.Writer)
     try ast.print(
         sheet.ast_nodes,
         cell.expr_root,
-        sheet,
         sheet.strings_buf.items,
         writer,
     );

@@ -309,7 +309,7 @@ pub fn resetInputBuf(zc: *ZC) void {
     zc.input_buf_sfa.fixed_buffer_allocator.reset();
 }
 
-pub fn inputBufSlice(zc: *ZC) Allocator.Error![:0]const u8 {
+pub fn inputBufSlice(zc: *ZC) Allocator.Error![:0]u8 {
     const len = zc.input_buf.items.len;
     try zc.input_buf.append(zc.allocator, 0);
     zc.input_buf.items.len = len;
@@ -508,7 +508,8 @@ fn handleInput(zc: *ZC) !void {
         .prefix => return,
         .not_found => {
             if (zc.mode.isCommandMode()) {
-                try zc.doCommandMode(.none, bytes);
+                const n = std.mem.replace(u8, bytes, "<<", "<", bytes);
+                try zc.doCommandMode(.none, bytes[0 .. bytes.len - n]);
             }
         },
     }
@@ -1013,7 +1014,8 @@ fn parseCommand(zc: *ZC, str: [:0]const u8) !void {
 
     const Tokenizer = @import("Tokenizer.zig");
     const Parser = @import("Parser.zig");
-    var tokens = try Tokenizer.collectTokens(zc.allocator, str, @intCast(str.len / 2));
+    var reader: std.io.Reader = .fixed(str);
+    var tokens = try Tokenizer.collectTokens(zc.allocator, &reader, @intCast(str.len / 2));
     defer tokens.deinit(zc.allocator);
 
     if (tokens.items(.tag)[0] == .eof)
@@ -1048,8 +1050,6 @@ fn parseCommand(zc: *ZC, str: [:0]const u8) !void {
     }
 
     const expr_root: ast.Index = .from(@intCast(nodes.len - 1));
-    if (!expr_root.isValid()) return;
-
     const pos = zc.currentSheet().ast_nodes.items(.data)[expr_root.n].assignment;
 
     zc.currentSheet().ast_nodes.len -= 1;

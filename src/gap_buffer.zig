@@ -21,6 +21,41 @@ pub fn GapBuffer(comptime T: type) type {
 
         pub const ChildType = T;
 
+        pub const Reader = struct {
+            interface: std.io.Reader,
+            buffer: *const Self,
+            i: u32,
+
+            pub fn stream(io_reader: *std.io.Reader, w: *std.io.Writer, limit: std.io.Limit) !usize {
+                const r: *Reader = @fieldParentPtr("interface", io_reader);
+                if (r.i >= r.buffer.len) return error.EndOfStream;
+                const slice = if (r.i < r.buffer.gap_start)
+                    r.buffer.left()[r.i..]
+                else
+                    r.buffer.right()[r.i - r.buffer.gap_start ..];
+
+                const limited = limit.sliceConst(slice);
+                const n = try w.write(limited);
+                r.i += @intCast(n);
+                return n;
+            }
+        };
+
+        pub fn reader(self: *Self, buffer: []u8) Reader {
+            return .{
+                .interface = .{
+                    .vtable = &.{
+                        .stream = Reader.stream,
+                    },
+                    .buffer = buffer,
+                    .seek = 0,
+                    .end = 0,
+                },
+                .buffer = self,
+                .i = 0,
+            };
+        }
+
         /// Sets the gap to the end of the buffer. iovecs are invalidated by any operation that
         /// modifies the buffer or the gap.
         pub fn iovecs(self: *Self) std.posix.iovec_const {
@@ -58,11 +93,11 @@ pub fn GapBuffer(comptime T: type) type {
             self.gap_start = new_pos;
         }
 
-        pub fn allocatedSlice(self: Self) []T {
+        pub fn allocatedSlice(self: *const Self) []T {
             return self.ptr[0 .. self.len + self.gap_len];
         }
 
-        pub fn capacity(self: Self) u32 {
+        pub fn capacity(self: *const Self) u32 {
             return self.len + self.gap_len;
         }
 
@@ -178,25 +213,25 @@ pub fn GapBuffer(comptime T: type) type {
             }
         }
 
-        pub inline fn left(self: Self) []T {
+        pub inline fn left(self: *const Self) []T {
             return self.ptr[0..self.gap_start];
         }
 
-        pub inline fn right(self: Self) []T {
+        pub inline fn right(self: *const Self) []T {
             return self.ptr[self.gap_start + self.gap_len .. self.capacity()];
         }
 
-        pub inline fn get(self: Self, index: u32) T {
+        pub inline fn get(self: *const Self, index: u32) T {
             assert(index < self.len);
             return if (index < self.gap_start) self.ptr[index] else self.ptr[index + self.gap_len];
         }
 
-        pub inline fn getPtr(self: Self, index: u32) T {
+        pub inline fn getPtr(self: *const Self, index: u32) T {
             assert(index < self.len);
             return if (index < self.gap_start) &self.ptr[index] else &self.ptr[index + self.gap_len];
         }
 
-        pub inline fn length(self: Self) u32 {
+        pub inline fn length(self: *const Self) u32 {
             return self.len;
         }
 
@@ -357,4 +392,18 @@ test "u32" {
     buf.setGap(2);
     try t.expectEqualSlices(u32, &.{ 1, 2 }, buf.left());
     try t.expectEqualSlices(u32, &.{ 3, 4, 5 }, buf.right());
+}
+
+test "reader" {
+    var buf: GapBuffer(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try buf.appendSlice(std.testing.allocator, "This is a string");
+
+    var b: [128]u8 = undefined;
+    var reader = buf.reader(&b);
+    const first = try reader.interface.takeByte();
+    try std.testing.expectEqual(first, 'T');
+    const slice = try reader.interface.take("his is a string".len);
+    try std.testing.expectEqualStrings("his is a string", slice);
 }

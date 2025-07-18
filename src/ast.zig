@@ -111,7 +111,15 @@ pub fn parseFromSource(
     nodes: *NodeSlice,
     source: [:0]const u8,
 ) ParseError!Index {
-    var tokens = try Tokenizer.collectTokens(gpa, source, @intCast(source.len / 2));
+    var reader: std.io.Reader = .fixed(source);
+    var tokens = Tokenizer.collectTokens(
+        gpa,
+        &reader,
+        @intCast(source.len / 2),
+    ) catch |err| switch (err) {
+        error.ReadFailed => unreachable,
+        else => |e| return e,
+    };
     defer tokens.deinit(gpa);
 
     if (tokens.items(.tag)[0] == .eof)
@@ -163,7 +171,16 @@ pub fn initTokens(
 }
 
 pub fn parseFromExpression(sheet: *Sheet, source: [:0]const u8) ParseError!Index {
-    var tokens = try Tokenizer.collectTokens(sheet.allocator, source, @intCast(source.len / 2));
+    var reader: std.io.Reader = .fixed(source);
+    var tokens = Tokenizer.collectTokens(
+        sheet.allocator,
+        &reader,
+        @intCast(source.len / 2),
+    ) catch |err| switch (err) {
+        error.ReadFailed => unreachable,
+        else => |e| return e,
+    };
+
     defer tokens.deinit(sheet.allocator);
 
     var parser: Parser = .init(
@@ -188,18 +205,16 @@ pub fn parseFromExpression(sheet: *Sheet, source: [:0]const u8) ParseError!Index
 
 pub inline fn printFromIndex(
     nodes: NodeSlice,
-    sheet: *Sheet,
     index: Index,
     writer: *std.io.Writer,
     strings: []const u8,
 ) std.io.Writer.Error!void {
     const node = nodes.get(index.n);
-    return printFromNode(nodes, sheet, index, node, writer, strings);
+    return printFromNode(nodes, index, node, writer, strings);
 }
 
 pub fn printFromNode(
     nodes: NodeSlice,
-    sheet: *Sheet,
     index: Index,
     node: Node,
     writer: *std.io.Writer,
@@ -220,42 +235,42 @@ pub fn printFromNode(
             try writer.print("\"{s}\"", .{strings[str.start..str.end]});
         },
         .concat => |b| {
-            try printFromIndex(nodes, sheet, index.sub(b.lhs), writer, strings);
+            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
             try writer.writeAll(" # ");
-            try printFromIndex(nodes, sheet, index.sub(b.rhs), writer, strings);
+            try printFromIndex(nodes, index.sub(b.rhs), writer, strings);
         },
         .assignment => |pos| {
             try writer.print("let {f} = ", .{pos});
-            try printFromIndex(nodes, sheet, .from(index.n - 1), writer, strings);
+            try printFromIndex(nodes, .from(index.n - 1), writer, strings);
         },
         .add => |b| {
-            try printFromIndex(nodes, sheet, index.sub(b.lhs), writer, strings);
+            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
             try writer.writeAll(" + ");
             const rhs = nodes.get(index.sub(b.rhs).n);
             switch (rhs.tag) {
                 .sub => {
                     try writer.writeByte('(');
-                    try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings);
+                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
                     try writer.writeByte(')');
                 },
                 else => {
-                    try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings);
+                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
                 },
             }
         },
         .sub => |b| {
-            try printFromIndex(nodes, sheet, index.sub(b.lhs), writer, strings);
+            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
             try writer.writeAll(" - ");
 
             const rhs = nodes.get(index.sub(b.rhs).n);
             switch (rhs.tag) {
                 .add, .sub => {
                     try writer.writeByte('(');
-                    try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings);
+                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
                     try writer.writeByte(')');
                 },
                 else => {
-                    try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings);
+                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
                 },
             }
         },
@@ -264,20 +279,20 @@ pub fn printFromNode(
             switch (lhs.tag) {
                 .add, .sub => {
                     try writer.writeByte('(');
-                    try printFromNode(nodes, sheet, index.sub(b.lhs), lhs, writer, strings);
+                    try printFromNode(nodes, index.sub(b.lhs), lhs, writer, strings);
                     try writer.writeByte(')');
                 },
-                else => try printFromNode(nodes, sheet, index.sub(b.lhs), lhs, writer, strings),
+                else => try printFromNode(nodes, index.sub(b.lhs), lhs, writer, strings),
             }
             try writer.writeAll(" * ");
             const rhs = nodes.get(index.sub(b.rhs).n);
             switch (rhs.tag) {
                 .add, .sub, .div, .mod => {
                     try writer.writeByte('(');
-                    try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings);
+                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
                     try writer.writeByte(')');
                 },
-                else => try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings),
+                else => try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings),
             }
         },
         .div => |b| {
@@ -285,20 +300,20 @@ pub fn printFromNode(
             switch (lhs.tag) {
                 .add, .sub => {
                     try writer.writeByte('(');
-                    try printFromNode(nodes, sheet, index.sub(b.lhs), lhs, writer, strings);
+                    try printFromNode(nodes, index.sub(b.lhs), lhs, writer, strings);
                     try writer.writeByte(')');
                 },
-                else => try printFromNode(nodes, sheet, index.sub(b.lhs), lhs, writer, strings),
+                else => try printFromNode(nodes, index.sub(b.lhs), lhs, writer, strings),
             }
             try writer.writeAll(" / ");
             const rhs = nodes.get(index.sub(b.rhs).n);
             switch (rhs.tag) {
                 .add, .sub, .mul, .div, .mod => {
                     try writer.writeByte('(');
-                    try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings);
+                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
                     try writer.writeByte(')');
                 },
-                else => try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings),
+                else => try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings),
             }
         },
         .mod => |b| {
@@ -306,26 +321,26 @@ pub fn printFromNode(
             switch (lhs.tag) {
                 .add, .sub => {
                     try writer.writeByte('(');
-                    try printFromNode(nodes, sheet, index.sub(b.lhs), lhs, writer, strings);
+                    try printFromNode(nodes, index.sub(b.lhs), lhs, writer, strings);
                     try writer.writeByte(')');
                 },
-                else => try printFromNode(nodes, sheet, index.sub(b.lhs), lhs, writer, strings),
+                else => try printFromNode(nodes, index.sub(b.lhs), lhs, writer, strings),
             }
             try writer.writeAll(" % ");
             const rhs = nodes.get(index.sub(b.rhs).n);
             switch (rhs.tag) {
                 .add, .sub, .mul, .div, .mod => {
                     try writer.writeByte('(');
-                    try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings);
+                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
                     try writer.writeByte(')');
                 },
-                else => try printFromNode(nodes, sheet, index.sub(b.rhs), rhs, writer, strings),
+                else => try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings),
             }
         },
         .range, .invalidated_range => |b| {
-            try printFromIndex(nodes, sheet, index.sub(b.lhs), writer, strings);
+            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
             try writer.writeByte(':');
-            try printFromIndex(nodes, sheet, index.sub(b.rhs), writer, strings);
+            try printFromIndex(nodes, index.sub(b.rhs), writer, strings);
         },
 
         .builtin => |b| {
@@ -334,11 +349,11 @@ pub fn printFromNode(
             }
             var iter = argIteratorForwards(nodes, index.sub(b.first_arg), index);
             if (iter.next()) |arg_index| {
-                try printFromIndex(nodes, sheet, arg_index, writer, strings);
+                try printFromIndex(nodes, arg_index, writer, strings);
             }
             while (iter.next()) |arg_index| {
                 try writer.writeAll(", ");
-                try printFromIndex(nodes, sheet, arg_index, writer, strings);
+                try printFromIndex(nodes, arg_index, writer, strings);
             }
             try writer.writeByte(')');
         },
@@ -411,11 +426,10 @@ pub fn argIteratorForwards(nodes: NodeSlice, start: Index, end: Index) ArgIterat
 pub fn print(
     nodes: NodeSlice,
     root: Index,
-    sheet: *Sheet,
     strings: []const u8,
     writer: *std.io.Writer,
 ) std.io.Writer.Error!void {
-    return printFromIndex(nodes, sheet, root, writer, strings);
+    return printFromIndex(nodes, root, writer, strings);
 }
 
 pub fn leftMostChild(
@@ -1229,7 +1243,7 @@ test "Print" {
 
         var buf: [4096]u8 = undefined;
         var fixed: std.io.Writer = .fixed(&buf);
-        try print(sheet.ast_nodes, expr_root, &sheet, expr, &fixed);
+        try print(sheet.ast_nodes, expr_root, expr, &fixed);
         try t.expectEqualStrings(expected, fixed.buffered());
     }
 }

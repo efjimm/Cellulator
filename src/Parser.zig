@@ -431,7 +431,8 @@ test "parser" {
     const t = std.testing;
     const testParser = struct {
         fn func(bytes: [:0]const u8, node_tags: []const Node.Tag) !void {
-            var tokens = try Tokenizer.collectTokens(t.allocator, bytes, 0);
+            var reader: std.io.Reader = .fixed(bytes);
+            var tokens = try Tokenizer.collectTokens(t.allocator, &reader, 0);
             defer tokens.deinit(t.allocator);
 
             var parser = Parser.init(
@@ -450,7 +451,12 @@ test "parser" {
     }.func;
     const testParseError = struct {
         fn func(bytes: [:0]const u8, err: ?anyerror) !void {
-            var tokens = try Tokenizer.collectTokens(t.allocator, bytes, @intCast(bytes.len / 2));
+            var reader: std.io.Reader = .fixed(bytes);
+            var tokens = try Tokenizer.collectTokens(
+                t.allocator,
+                &reader,
+                @intCast(bytes.len / 2),
+            );
             defer tokens.deinit(t.allocator);
 
             var parser = Parser.init(
@@ -542,7 +548,12 @@ test "Node contents" {
     const t = std.testing;
     const testNodes = struct {
         fn func(bytes: [:0]const u8, nodes: []const Node) !void {
-            var tokens = try Tokenizer.collectTokens(t.allocator, bytes, @intCast(bytes.len / 2));
+            var reader: std.io.Reader = .fixed(bytes);
+            var tokens = try Tokenizer.collectTokens(
+                t.allocator,
+                &reader,
+                @intCast(bytes.len / 2),
+            );
             defer tokens.deinit(t.allocator);
 
             var parser: Parser = .init(

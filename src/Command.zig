@@ -227,6 +227,43 @@ pub fn right(self: *const Self) []const u8 {
         self.buffer.right();
 }
 
+pub fn reader(self: *Self, buffer: []u8) Reader {
+    return .{
+        .cmd = self,
+        .gap_reader = self.buffer.reader(&.{}),
+        .interface = .{
+            .vtable = &.{
+                .stream = Reader.stream,
+            },
+            .buffer = buffer,
+            .seek = 0,
+            .end = 0,
+        },
+        .i = 0,
+    };
+}
+
+pub const Reader = struct {
+    cmd: *const Self,
+    gap_reader: GapBuffer(u8).Reader,
+    i: u32,
+    interface: std.io.Reader,
+
+    pub fn stream(io_reader: *std.io.Reader, w: *std.io.Writer, limit: std.io.Limit) !usize {
+        const r: *Reader = @fieldParentPtr("interface", io_reader);
+        if (r.cmd.cow) {
+            const bytes = r.cmd.getHistoryItem(r.cmd.index);
+            if (r.i >= bytes.len) return error.EndOfStream;
+            const limited = limit.sliceConst(bytes);
+            const n = try w.write(limited);
+            r.i += @intCast(n);
+            return n;
+        }
+
+        return r.gap_reader.interface.stream(w, limit);
+    }
+};
+
 const zg = @import("zg");
 
 pub fn nextCharacter(self: *const Self, index: u32, count: u32) u32 {

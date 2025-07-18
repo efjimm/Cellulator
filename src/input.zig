@@ -27,7 +27,11 @@ pub fn createKeymaps(allocator: Allocator) !struct {
 
 /// Parses the raw terminal input in `bytes` into a readable format for keybindings, outputting
 /// the results to the given writer.
-pub fn parse(term: *Term, bytes: []const u8, writer: anytype) @TypeOf(writer).Error!void {
+pub fn parse(
+    term: *Term,
+    bytes: []const u8,
+    writer: anytype,
+) @TypeOf(writer).Error!void {
     var iter = inputParser(bytes, term);
 
     while (iter.next()) |in| {
@@ -68,6 +72,10 @@ pub fn parse(term: *Term, bytes: []const u8, writer: anytype) @TypeOf(writer).Er
                 '<' => try writer.writeAll("<<"),
                 127 => try writer.writeAll("<Delete>"),
                 0...'\n' - 1, '\n' + 1...'\r' - 1, '\r' + 1...31 => {},
+                '\n', '\r', 32...'<' - 1, '<' + 1...126 => {
+                    @branchHint(.likely);
+                    try writer.writeByte(@intCast(cp));
+                },
                 else => {
                     var buf: [4]u8 = undefined;
                     const len = std.unicode.utf8Encode(cp, &buf) catch continue;

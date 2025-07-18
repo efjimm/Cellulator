@@ -7,6 +7,8 @@
 //! for all input and drawing at once. Modern terminal emulators have a `sync` feature that allows
 //! them to avoid flickering in these cases, but this isn't supported on older terminal emulators
 //! including xterm and the Linux tty.
+//
+// TODO: Make TUI rendering resistant to OOM
 const std = @import("std");
 const assert = std.debug.assert;
 
@@ -49,8 +51,6 @@ pub const default_theme: Theme = .{
     .cursor_pos = .init(.none, .none, .none),
     .mode_indicator = .init(.none, .none, .none),
     .count = .init(.green, .none, .{ .bold = true }),
-    .expression = .init(.cyan, .none, .none),
-    .expression_error = .init(.red, .none, .none),
     .command_line = .init(.none, .none, .none),
 
     .column_heading_unselected = .init(.blue, .none, .none),
@@ -69,6 +69,16 @@ pub const default_theme: Theme = .{
 
     .sheet_selected = .init(.black, .blue, .none),
     .sheet_unselected = .init(.none, .bright_black, .none),
+
+    .token_number = .init(.green, .none, .none),
+    .token_builtin = .init(.red, .none, .none),
+    .token_let = .init(.yellow, .none, .none),
+    .token_whitespace = .init(.{ .rgb = .{ 0x65, 0x73, 0x7e } }, .none, .none),
+    .token_operator = .init(.magenta, .none, .none),
+    .token_cell_address = .init(.cyan, .none, .{ .bold = true }),
+    .token_parentheses = .init(.{ .rgb = .{ 0x65, 0x73, 0x7e } }, .none, .none),
+    .token_single_quoted_string = .init(.green, .none, .none),
+    .token_double_quoted_string = .init(.green, .none, .none),
 };
 
 pub const UiElement = enum {
@@ -81,8 +91,6 @@ pub const UiElement = enum {
     cursor_pos,
     mode_indicator,
     count,
-    expression,
-    expression_error,
     command_line,
 
     column_heading_unselected,
@@ -101,6 +109,16 @@ pub const UiElement = enum {
 
     sheet_selected,
     sheet_unselected,
+
+    token_number,
+    token_let,
+    token_builtin,
+    token_whitespace,
+    token_operator,
+    token_cell_address,
+    token_parentheses,
+    token_single_quoted_string,
+    token_double_quoted_string,
 };
 
 const UpdateFlags = packed struct {
@@ -280,7 +298,7 @@ pub fn cellViewHeight(tui: *const Tui) u16 {
 }
 
 pub fn render(tui: *Tui, zc: *ZC) !void {
-    std.log.debug("Rendering", .{});
+    defer _ = tui.arena.reset(.{ .retain_with_limit = 1 << 20 });
     assert(tui.rc == null);
 
     if (needs_resize.load(.monotonic)) {
@@ -377,13 +395,16 @@ fn renderSheetList(tui: *Tui) !void {
 fn renderStatus(tui: *Tui) !void {
     const rc = &tui.rc.?;
     const zc = tui.zc.?;
+    const arena = tui.arena.allocator();
     try rc.moveCursorTo(status_line, 0);
     try rc.hideCursor();
 
     const writer = &rc.writer.interface;
 
+    try tui.setStyle(.token_cell_address);
+    try writer.print(" {f}", .{zc.cursor});
     try tui.setStyle(.status_line);
-    try writer.print(" {f} {f}", .{ zc.cursor, zc.mode });
+    try writer.print(" {f}", .{zc.mode});
 
     if (zc.count != 0) {
         try tui.setStyle(.count);
@@ -396,19 +417,28 @@ fn renderStatus(tui: *Tui) !void {
     }
 
     try writer.writeAll(" [");
-    if (zc.currentSheet().getCell(zc.cursor)) |cell| {
-        if (cell.value_tag != .err) {
-            try tui.setStyle(.expression);
-        } else {
-            try tui.setStyle(.expression_error);
+    const sheet = zc.currentSheet();
+    if (sheet.getCell(zc.cursor)) |cell| {
+        const ast = @import("ast.zig");
+
+        const buf = try arena.alloc(u8, 4096);
+        var wr: std.io.Writer = .fixed(buf);
+        ast.print(sheet.ast_nodes, cell.expr_root, sheet.strings_buf.items, &wr) catch {};
+
+        var reader: std.io.Reader = .fixed(wr.buffer);
+        const tokens = try Tokenizer.collectTokens(arena, &reader, 128);
+        const tags = tokens.items(.tag);
+        const starts = tokens.items(.start);
+        for (tags[0 .. tags.len - 1], starts[0 .. starts.len - 1], starts[1..]) |tag, start, end| {
+            try tui.writeToken(tag, buf[start..end]);
         }
-        try zc.currentSheet().printCellExpression(zc.cursor, writer);
+        try tui.writeToken(.eof, buf[starts[starts.len - 1]..]);
     }
 
     try tui.setStyle(.status_line);
     try writer.writeByte(']');
 
-    const path = zc.currentSheet().filepath.constSlice();
+    const path = sheet.filepath.constSlice();
     if (path.len > 0) {
         try tui.setStyle(.filepath);
         try writer.print(" {s}", .{path});
@@ -419,6 +449,51 @@ fn renderStatus(tui: *Tui) !void {
     try rc.clearToEol();
 }
 
+const Tokenizer = @import("Tokenizer.zig");
+const Token = Tokenizer.Token;
+
+fn tokenStyle(tag: Token.Tag) UiElement {
+    return switch (tag) {
+        .builtin => .token_builtin,
+        .number => .token_number,
+        .keyword_let => .token_let,
+        .eof => .token_builtin,
+        .plus,
+        .minus,
+        .forward_slash,
+        .hash,
+        .asterisk,
+        .percent,
+        => .token_operator,
+        .cell_name => .token_cell_address,
+        .lparen, .rparen => .token_parentheses,
+        .single_string_literal_start, .single_string_literal_end => .token_single_quoted_string,
+        .double_string_literal_start, .double_string_literal_end => .token_double_quoted_string,
+        else => .command_line,
+    };
+}
+
+fn writeToken(tui: *Tui, tag: Token.Tag, slice: []const u8) !void {
+    const rc = &tui.rc.?;
+    const writer = &rc.writer.interface;
+    try tui.setStyle(tokenStyle(tag));
+    switch (tag) {
+        // These tags allow trailing whitespace as part of their contents
+        .single_string_literal_start, .double_string_literal_start => {
+            try writer.writeAll(slice);
+        },
+        else => {
+            const trimmed = std.mem.trimRight(u8, slice, &std.ascii.whitespace);
+            try writer.writeAll(trimmed);
+            const whitespace = slice[trimmed.len..];
+            if (whitespace.len > 0) {
+                try tui.setStyle(.token_whitespace);
+                try writer.writeAll(whitespace);
+            }
+        },
+    }
+}
+
 fn renderCommandLine(tui: *Tui) !void {
     const rc = &tui.rc.?;
     const zc = tui.zc.?;
@@ -427,29 +502,76 @@ fn renderCommandLine(tui: *Tui) !void {
     try rc.clearToEol();
     const writer = &rc.writer.interface;
 
+    const arena = tui.arena.allocator();
+
     if (zc.mode.isCommandMode()) {
+        var buf: [128]u8 = undefined;
+        var reader = zc.command.reader(&buf);
+
         const left = zc.command.left();
         const right = zc.command.right();
 
         const i = zc.command_screen_pos;
         const c = zc.command.cursor;
         assert(c >= i);
+
         if (i < left.len) {
             if (c > left.len) {
                 try writer.writeAll(left[i..]);
                 try writer.writeAll(right[0 .. c - left.len]);
                 try rc.saveCursor();
-                try writer.writeAll(right[c - left.len ..]);
             } else {
                 try writer.writeAll(left[i..c]);
                 try rc.saveCursor();
-                try writer.writeAll(left[c..]);
-                try writer.writeAll(right);
             }
         } else {
             try writer.writeAll(right[i - left.len .. c - left.len]);
             try rc.saveCursor();
-            try writer.writeAll(right[c - left.len ..]);
+        }
+
+        const tokens = try Tokenizer.collectTokens(
+            arena,
+            &reader.interface,
+            zc.command.length() / 2,
+        );
+
+        try rc.moveCursorTo(input_line, 0);
+
+        const tags = tokens.items(.tag);
+        const starts = tokens.items(.start);
+
+        const index, const cutoff =
+            for (starts, 0..) |start, j| {
+                if (start >= left.len) break .{ j, start - left.len };
+            } else .{ tokens.len - 1, 0 };
+
+        for (
+            tags[0..index],
+            starts[0..index],
+            starts[1 .. index + 1],
+        ) |tag, start, end| {
+            try tui.writeToken(tag, left[start..@min(left.len, end)]);
+        }
+
+        try writer.writeAll(right[0..cutoff]);
+
+        for (
+            tags[index .. tags.len - 1],
+            starts[index .. starts.len - 1],
+            starts[index + 1 ..],
+        ) |tag, start, end| {
+            const adjusted_start = start - left.len;
+            const adjusted_end = end - left.len;
+
+            try tui.writeToken(tag, right[adjusted_start..adjusted_end]);
+        }
+
+        const last_start = starts[starts.len - 1];
+        if (last_start < left.len) {
+            try tui.writeToken(.eof, left[last_start..]);
+            try writer.writeAll(right);
+        } else {
+            try tui.writeToken(.eof, right[last_start - left.len ..]);
         }
 
         switch (zc.mode) {
@@ -809,7 +931,6 @@ fn renderCells(tui: *Tui) !void {
     const height = tui.cellViewHeight();
     const cell_count = col_count * height;
 
-    defer _ = tui.arena.reset(.{ .retain_with_limit = 1 << 20 });
     const cols, const cells, const text_attrs = try tui.screenData(col_count, cell_count);
 
     const screen_col_start = zc.leftReservedColumns();
