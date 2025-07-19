@@ -880,8 +880,8 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
             }
         },
 
-        .next_sheet => zc.nextSheet(),
-        .prev_sheet => zc.prevSheet(),
+        .goto_next_sheet => zc.nextSheet(),
+        .goto_prev_sheet => zc.prevSheet(),
         .close_sheet => try zc.closeSheet(zc.current_sheet),
         .undo => try zc.undo(),
         .redo => try zc.redo(),

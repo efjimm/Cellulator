@@ -409,6 +409,9 @@ fn renderSheetList(tui: *Tui) !void {
 
 fn renderInputHints(tui: *Tui) !void {
     const Key = struct {
+        // Integer value of the action enum. This is used to sort the entries based on the order in
+        // the source code.
+        integer_value: u8,
         key: []const u8,
         description: []const u8,
         key_width: u16,
@@ -425,9 +428,10 @@ fn renderInputHints(tui: *Tui) !void {
             if (!std.mem.startsWith(u8, full_slice, ctx.input)) return;
 
             const slice = full_slice[ctx.input.len..];
-            const desc = @tagName(kv.value);
+            const desc = kv.value.description();
 
             try ctx.matches.append(ctx.allocator, .{
+                .integer_value = @intFromEnum(kv.value),
                 .key = slice,
                 .description = desc,
                 .key_width = 0,
@@ -442,8 +446,6 @@ fn renderInputHints(tui: *Tui) !void {
     const arena = tui.arena.allocator();
     const input = zc.inputSlice();
 
-    var matches: std.ArrayListUnmanaged(Key) = .empty;
-
     const max_width = tui.term.width -| 4;
 
     if (max_width == 0) {
@@ -451,6 +453,7 @@ fn renderInputHints(tui: *Tui) !void {
         return;
     }
 
+    var matches: std.ArrayListUnmanaged(Key) = .empty;
     var ctx: Context = .{
         .matches = &matches,
         .allocator = arena,
@@ -465,6 +468,14 @@ fn renderInputHints(tui: *Tui) !void {
     }
 
     if (matches.items.len == 0) return;
+
+    const SortContext = struct {
+        pub fn lessThan(_: @This(), a: Key, b: Key) bool {
+            return a.integer_value < b.integer_value;
+        }
+    };
+
+    std.mem.sort(Key, matches.items, SortContext{}, SortContext.lessThan);
 
     var max_keys_width: u16 = 0;
     for (matches.items) |*match| {

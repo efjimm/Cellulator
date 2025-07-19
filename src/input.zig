@@ -137,10 +137,6 @@ pub const Action = union(enum) {
     put_cell,
     put_cell_adjust,
 
-    next_sheet,
-    prev_sheet,
-    close_sheet,
-
     cell_cursor_up,
     cell_cursor_down,
     cell_cursor_left,
@@ -178,11 +174,77 @@ pub const Action = union(enum) {
     select_submit,
     select_cancel,
 
+    goto_next_sheet,
+    goto_prev_sheet,
+    close_sheet,
+
     zero,
     count: u4,
 
     // Visual mode only
     swap_anchor,
+
+    pub fn description(action: Action) []const u8 {
+        return switch (action) {
+            .enter_normal_mode => "Enter normal mode",
+            .enter_visual_mode => "Enter visual mode",
+            .enter_command_mode => "Enter command mode",
+            .edit_cell => "Edit cell expression",
+            .dismiss_count_or_status_message => "Set count to 0 / Dismiss status message",
+
+            .undo => "Undo",
+            .redo => "Redo",
+            .yank_cell => "Yank selected cells",
+            .put_cell => "Put yanked cells",
+            .put_cell_adjust => "Put yanked cells, adjusting expressions",
+
+            .goto_next_sheet => "Goto next sheet",
+            .goto_prev_sheet => "Goto previous sheet",
+            .close_sheet => "Close the current sheet",
+
+            .cell_cursor_up => "Move cursor up",
+            .cell_cursor_down => "Move cursor down",
+            .cell_cursor_left => "Move cursor left",
+            .cell_cursor_right => "Move cursor right",
+            .cell_cursor_row_first => "Goto first populated cell in column",
+            .cell_cursor_row_last => "Goto last populated cell in column",
+            .cell_cursor_col_first => "Goto first populated cell in row",
+            .cell_cursor_col_last => "Goto last populated cell in row",
+            .goto_row => "Goto row <n>",
+            .goto_col => "Goto column <n>",
+
+            .delete_cell => "Delete selected cells",
+            .next_populated_cell => "Goto the next populated cell",
+            .prev_populated_cell => "Goto the previous populated cell",
+            .increase_precision => "Increase precision of selected columns",
+            .decrease_precision => "Decrease precision of selected columns",
+            .increase_width => "Increase width of selected columns",
+            .decrease_width => "Decrease width of selected columns",
+            .assign_cell => "Assign expression",
+            .assign_label => "",
+            .fit_text => "Fit column to contents",
+            .delete_column => "Delete columns",
+            .delete_row => "Delete rows",
+            .insert_column => "Insert <n> columns",
+            .insert_row => "Insert <n> rows",
+
+            .text_align_left => "Align text left",
+            .text_align_right => "Align text right",
+            .text_align_center => "Align text center",
+
+            .visual_move_left => "Move selection left",
+            .visual_move_right => "Move selection right",
+            .visual_move_up => "Move selection up",
+            .visual_move_down => "Move selection down",
+            .select_submit => "Submit selection",
+            .select_cancel => "Cancel selection",
+
+            .zero => "",
+            .count => "",
+
+            .swap_anchor => "Swap anchor",
+        };
+    }
 };
 
 comptime {
@@ -268,6 +330,79 @@ pub const CommandAction = union(enum(u6)) {
     /// example, in insert mode the inputted text is passed along with this action if it does
     /// not correspond to another action.
     none,
+
+    pub fn description(action: CommandAction) []const u8 {
+        return switch (action) {
+            .motion_normal_word_inside => "Inside word",
+            .motion_long_word_inside => "Inside WORD",
+            .motion_normal_word_around => "Around word",
+            .motion_long_word_around => "Around WORD",
+
+            .motion_inside_delimiters => "Inside delimiters",
+            .motion_around_delimiters => "Around delimiters",
+
+            .motion_inside_delimiters_scalar => "Inside delimiters",
+            .motion_around_delimiters_scalar => "Around delimiters",
+            .motion_inside_single_delimiter_scalar => "Inside delimiters",
+            .motion_around_single_delimiter_scalar => "Around delimiters",
+
+            .motion_inside_single_delimiter => "Inside delimiters",
+            .motion_around_single_delimiter => "Around delimiters",
+            .motion_to_forwards => "To forwards",
+            .motion_to_backwards => "To backwards",
+            .motion_until_forwards => "Until forwards",
+            .motion_until_backwards => "Until backwards",
+
+            .motion_normal_word_start_next => "Next word start",
+            .motion_normal_word_start_prev => "Previous word start",
+            .motion_normal_word_end_next => "Next word end",
+            .motion_normal_word_end_prev => "Previous word end",
+            .motion_long_word_start_next => "Next WORD start",
+            .motion_long_word_start_prev => "Previous WORD start",
+            .motion_long_word_end_next => "Next WORD end",
+            .motion_long_word_end_prev => "Previous WORD end",
+            .motion_char_next => "Next character",
+            .motion_char_prev => "Previous character",
+            .motion_line => "Line",
+            .motion_eol => "To end of line",
+            .motion_bol => "To beginning of line",
+
+            .submit_command => "Submit command",
+            .enter_normal_mode => "Enter normal mode",
+
+            .enter_select_mode => "Enter select mode",
+
+            .enter_insert_mode => "Insert at cursor",
+            .enter_insert_mode_after => "Insert after cursor",
+            .enter_insert_mode_at_eol => "Insert at end of line",
+            .enter_insert_mode_at_bol => "Insert at beginning of line",
+
+            .history_next => "History next",
+            .history_prev => "History prev",
+
+            .backspace => "Backspace",
+            .delete_char => "Delete character",
+            .change_to_eol => "Change to end of line",
+            .delete_to_eol => "Delete to end of line",
+            .delete_to_bol => "Delete to beginning of line",
+            .change_char => "Change character",
+            .change_line => "Change line",
+            .backwards_delete_word => "Delete word backwards",
+
+            .operator_delete => "Delete mode",
+            .operator_change => "Change mode",
+
+            .operator_to_forwards => "To forwards",
+            .operator_until_forwards => "Until forwards",
+            .operator_to_backwards => "To backwards",
+            .operator_until_backwards => "Until backwards",
+
+            .zero => "Zero",
+            .count => "Count",
+
+            .none => "",
+        };
+    }
 
     pub fn isMotion(action: CommandAction) bool {
         return @intFromEnum(action) <= @intFromEnum(CommandAction.motion_bol);
@@ -374,6 +509,7 @@ const sheet_motions: []const SheetKey = &.{
     .{ "gr", .goto_row },
     .{ "gg", .cell_cursor_row_first },
     .{ "G", .cell_cursor_row_last },
+    .{ "ge", .cell_cursor_row_last },
     .{ "$", .cell_cursor_col_last },
     .{ "0", .zero }, // Could be motion or count
     .{ "1", .{ .count = 1 } },
@@ -416,8 +552,8 @@ const sheet_normal: SheetKeyMapData = .{
         .{ "ir", .insert_row },
         .{ "u", .undo },
         .{ "U", .redo },
-        .{ "gn", .next_sheet },
-        .{ "gp", .prev_sheet },
+        .{ "gn", .goto_next_sheet },
+        .{ "gp", .goto_prev_sheet },
         .{ "<C-w>q", .close_sheet },
     },
 };
