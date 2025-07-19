@@ -596,7 +596,7 @@ const Assignment = struct {
 /// Returns the total byte length of all parsed string literals
 fn bulkParse(
     sheet: *Sheet,
-    src: [:0]const u8,
+    src: []const u8,
     tokens_allocator: std.mem.Allocator,
     tokens: *std.MultiArrayList(Tokenizer.Token),
     cells_allocator: std.mem.Allocator,
@@ -679,6 +679,7 @@ fn resetArena(sheet: *Sheet) void {
 
 // Optimized for bulk loading
 pub fn interpretSource(sheet: *Sheet, reader: *std.io.Reader) !void {
+    assert(reader.buffer.len > 0);
     errdefer sheet.clearRetainingCapacity();
 
     const arena = sheet.arena.allocator();
@@ -687,24 +688,15 @@ pub fn interpretSource(sheet: *Sheet, reader: *std.io.Reader) !void {
     var cells: std.MultiArrayList(Assignment) = .empty;
     var tokens: std.MultiArrayList(Tokenizer.Token) = .empty;
 
-    const buf_size = comptime std.math.pow(usize, 2, 18);
-    var buf = try arena.alloc(u8, buf_size);
-    buf.len = 0;
-
     while (true) {
-        buf.len += try reader.readSliceShort(buf.ptr[buf.len .. buf_size - 1]);
-        if (buf.len == 0) break;
-
-        const end = std.mem.lastIndexOfScalar(u8, buf, '\n') orelse buf.len;
-        buf.ptr[end] = 0;
-        const src = buf.ptr[0..end :0];
-
-        defer if (end + 1 < buf.len) {
-            std.mem.copyForwards(u8, buf, buf[end + 1 ..]);
-            buf.len -= end + 1;
-        } else {
-            buf.len = 0;
+        reader.fill(reader.buffer.len) catch |err| switch (err) {
+            error.EndOfStream => if (reader.bufferedLen() == 0) break,
+            else => |e| return e,
         };
+        const bytes = reader.buffered();
+        const end = std.mem.lastIndexOfScalar(u8, bytes, '\n') orelse bytes.len;
+        const src = bytes[0..end];
+        reader.toss(@min(end + 1, bytes.len));
 
         cells.clearRetainingCapacity();
         tokens.clearRetainingCapacity();
@@ -803,8 +795,11 @@ pub fn loadFile(sheet: *Sheet, filepath: []const u8) !void {
     log.debug("Loading file {s}", .{filepath});
 
     sheet.clearRetainingCapacity();
-    var buf: [8192]u8 = undefined;
-    var reader = file.reader(&buf);
+
+    const arena = sheet.arena.allocator();
+    const buf = try arena.alloc(u8, 1 << 18);
+
+    var reader = file.reader(buf);
     try sheet.interpretSource(&reader.interface);
 }
 
@@ -3039,7 +3034,7 @@ test "Sheet basics" {
     var sheet = try Sheet.init(t.allocator);
     defer sheet.deinit();
 
-    const exprs: []const [:0]const u8 = &.{ "50 + 5", "500 * 2 / 34 + 1", "a0", "a2 * a1" };
+    const exprs: []const []const u8 = &.{ "50 + 5", "500 * 2 / 34 + 1", "a0", "a2 * a1" };
 
     for (exprs, 0..) |expr, i| {
         const root = try ast.parseFromExpression(&sheet, expr);
@@ -3838,7 +3833,7 @@ test "Overwrite with reference" {
     }
 }
 
-fn testSetCell(sheet: *Sheet, address: []const u8, expr: [:0]const u8) !void {
+fn testSetCell(sheet: *Sheet, address: []const u8, expr: []const u8) !void {
     try sheet.setCell(.fromValidAddress(address), expr, try ast.parseFromExpression(sheet, expr), .{});
 }
 
@@ -4016,20 +4011,4 @@ test "tree root getting set to invalid" {
     try sheet.expectCellEquals("B0", 2);
     try sheet.expectCellEquals("C0", 4);
     try sheet.expectCellEquals("A1", 7);
-}
-
-var fuzz_sheet: Sheet = undefined;
-
-var fuzz_dbg: std.heap.DebugAllocator(.{}) = .init;
-
-fn zig_fuzz_init() void {
-    fuzz_sheet = Sheet.init(fuzz_dbg.allocator()) catch @panic("guh");
-}
-
-fn zig_fuzz_test(ptr: [*]u8, len: isize) void {
-    const buf = ptr[0..@intCast(len)];
-
-    fuzz_sheet.clearRetainingCapacity();
-    var fbs = std.io.fixedBufferStream(buf);
-    fuzz_sheet.interpretSource(fbs.reader()) catch {};
 }

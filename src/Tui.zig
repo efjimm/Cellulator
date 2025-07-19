@@ -406,13 +406,14 @@ fn renderStatus(tui: *Tui) !void {
     try tui.setStyle(.status_line);
     try writer.print(" {f}", .{zc.mode});
 
+    const input = zc.inputSlice();
     if (zc.count != 0) {
         try tui.setStyle(.count);
-        try writer.print(" {d}{s}", .{ zc.getCount(), zc.input_buf.items });
+        try writer.print(" {d}{s}", .{ zc.getCount(), input });
         try tui.setStyle(.status_line);
-    } else if (zc.input_buf.items.len > 0) {
+    } else if (input.len > 0) {
         try tui.setStyle(.count);
-        try writer.print(" {s}", .{zc.input_buf.items});
+        try writer.print(" {s}", .{input});
         try tui.setStyle(.status_line);
     }
 

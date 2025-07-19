@@ -109,7 +109,7 @@ pub const NegativeOffset = enum(u32) {
 pub fn parseFromSource(
     gpa: std.mem.Allocator,
     nodes: *NodeSlice,
-    source: [:0]const u8,
+    source: []const u8,
 ) ParseError!Index {
     var reader: std.io.Reader = .fixed(source);
     var tokens = Tokenizer.collectTokens(
@@ -147,7 +147,7 @@ pub fn parseFromSource(
 const Token = Tokenizer.Token;
 pub fn initTokens(
     sheet: *Sheet,
-    source: [:0]const u8,
+    source: []const u8,
     token_tags: []const Token.Tag,
     token_starts: []const u32,
 ) ParseError!Parser {
@@ -170,7 +170,7 @@ pub fn initTokens(
     return parser;
 }
 
-pub fn parseFromExpression(sheet: *Sheet, source: [:0]const u8) ParseError!Index {
+pub fn parseFromExpression(sheet: *Sheet, source: []const u8) ParseError!Index {
     var reader: std.io.Reader = .fixed(source);
     var tokens = Tokenizer.collectTokens(
         sheet.allocator,
@@ -497,43 +497,16 @@ pub const EvalResult = union(enum) {
         };
     }
 
-    fn toStringAlloc(res: EvalResult, allocator: Allocator) ![]u8 {
-        return switch (res) {
-            .none => "",
-            .number => |n| std.fmt.allocPrint(allocator, "{d}", .{n}),
-            .string => |str| allocator.dupe(u8, str),
-            .cell_string => |i| {
-                const str = i.sheet.string_values.items(i.list_index);
-                return allocator.dupe(u8, str);
-            },
-        };
-    }
-
-    fn toString(res: EvalResult, writer: anytype) !void {
+    pub fn format(res: EvalResult, w: *std.io.Writer) !void {
         switch (res) {
             .none => {},
-            .number => |n| try writer.print("{d}", .{n}),
-            .string => |str| try writer.writeAll(str),
+            .number => |n| try w.print("{d}", .{n}),
+            .string => |str| try w.writeAll(str),
             .cell_string => |i| {
                 const str = i.sheet.string_values.items(i.list_index);
-                try writer.writeAll(str);
+                try w.writeAll(str);
             },
         }
-    }
-
-    /// Returns the number of bytes required to represent `res` as a string, without
-    fn lengthAsString(res: EvalResult) usize {
-        return switch (res) {
-            .none => 0,
-            .number => |n| {
-                var counting_writer = std.io.countingWriter(std.io.null_writer);
-                const writer = counting_writer.writer();
-                writer.print("{d}", .{n}) catch unreachable;
-                return @intCast(counting_writer.bytes_written);
-            },
-            .string => |str| str.len,
-            .cell_string => |i| i.sheet.string_values.len(i.list_index),
-        };
     }
 };
 
@@ -547,7 +520,7 @@ pub const EvalError = error{
 pub fn EvalContext(comptime Context: type) type {
     return struct {
         nodes: NodeSlice,
-        allocator: Allocator,
+        arena: Allocator,
         strings: []const u8,
         sheet: *Sheet,
         context: Context,
@@ -575,10 +548,7 @@ pub fn EvalContext(comptime Context: type) type {
         };
 
         // TODO: Pass references to `context.evalCell` instead of positions
-        fn eval(
-            self: @This(),
-            index: Index,
-        ) Error!EvalResult {
+        fn eval(self: *const @This(), index: Index) Error!EvalResult {
             const node = self.nodes.get(index.n);
 
             return switch (node.get()) {
@@ -633,14 +603,13 @@ pub fn EvalContext(comptime Context: type) type {
                     const lhs = try self.eval(index.sub(op.lhs));
                     const rhs = try self.eval(index.sub(op.rhs));
 
-                    const len = lhs.lengthAsString() + rhs.lengthAsString();
-                    const buf = try self.allocator.alloc(u8, len);
-                    var fbs = std.io.fixedBufferStream(buf);
-                    const writer = fbs.writer();
-                    lhs.toString(writer) catch unreachable;
-                    rhs.toString(writer) catch unreachable;
+                    const len = std.fmt.count("{f}{f}", .{ lhs, rhs });
+                    const buf = try self.arena.alloc(u8, len);
+                    var w: std.io.Writer = .fixed(buf);
+                    w.print("{f}{f}", .{ lhs, rhs }) catch unreachable;
+                    assert(w.end == w.buffer.len);
 
-                    return .{ .string = buf };
+                    return .{ .string = w.buffered() };
                 },
                 .string_literal => |str| .{ .string = self.strings[str.start..str.end] },
                 .column,
@@ -652,19 +621,21 @@ pub fn EvalContext(comptime Context: type) type {
             };
         }
 
-        fn evalUpper(self: @This(), arg: Index) ![]const u8 {
-            const str = try (try self.eval(arg)).toStringAlloc(self.allocator);
+        fn evalUpper(self: *const @This(), arg: Index) ![]const u8 {
+            const evaled_arg = try self.eval(arg);
+            const str = try std.fmt.allocPrint(self.arena, "{f}", .{evaled_arg});
             for (str) |*c| c.* = std.ascii.toUpper(c.*);
             return str;
         }
 
-        fn evalLower(self: @This(), arg: Index) ![]const u8 {
-            const str = try (try self.eval(arg)).toStringAlloc(self.allocator);
+        fn evalLower(self: *const @This(), arg: Index) ![]const u8 {
+            const evaled_arg = try self.eval(arg);
+            const str = try std.fmt.allocPrint(self.arena, "{f}", .{evaled_arg});
             for (str) |*c| c.* = std.ascii.toLower(c.*);
             return str;
         }
 
-        fn evalSum(self: @This(), start: Index, end: Index) !f64 {
+        fn evalSum(self: *const @This(), start: Index, end: Index) !f64 {
             const tags = self.nodes.items(.tag);
             const data = self.nodes.items(.data);
 
@@ -687,7 +658,7 @@ pub fn EvalContext(comptime Context: type) type {
         }
 
         /// Converts an ast range to a position range.
-        fn toPosRange(self: @This(), lhs: Index, rhs: Index) Position.Rect {
+        fn toPosRange(self: *const @This(), lhs: Index, rhs: Index) Position.Rect {
             const data = self.nodes.items(.data);
 
             if (self.nodes.items(.tag)[lhs.n] != .pos) {
@@ -702,11 +673,11 @@ pub fn EvalContext(comptime Context: type) type {
             return .initPos(data[lhs.n].pos, data[rhs.n].pos);
         }
 
-        fn sumRange(self: @This(), lhs: Index, rhs: Index) !f64 {
+        fn sumRange(self: *const @This(), lhs: Index, rhs: Index) !f64 {
             const range = self.toPosRange(lhs, rhs);
 
             var total: f64 = 0;
-            var results: std.ArrayList(Sheet.Cell.Handle) = .init(self.allocator);
+            var results: std.ArrayList(Sheet.Cell.Handle) = .init(self.arena);
             defer results.deinit();
             try self.sheet.cell_tree.queryWindow(
                 &.{ range.tl.x, range.tl.y },
@@ -721,7 +692,7 @@ pub fn EvalContext(comptime Context: type) type {
             return total;
         }
 
-        fn evalProd(self: @This(), start: Index, end: Index) !f64 {
+        fn evalProd(self: *const @This(), start: Index, end: Index) !f64 {
             const tags = self.nodes.items(.tag);
             const data = self.nodes.items(.data);
 
@@ -743,11 +714,11 @@ pub fn EvalContext(comptime Context: type) type {
             return total;
         }
 
-        fn prodRange(self: @This(), lhs: Index, rhs: Index) !f64 {
+        fn prodRange(self: *const @This(), lhs: Index, rhs: Index) !f64 {
             const range = self.toPosRange(lhs, rhs);
 
             var total: f64 = 1;
-            var results: std.ArrayList(Sheet.Cell.Handle) = .init(self.allocator);
+            var results: std.ArrayList(Sheet.Cell.Handle) = .init(self.arena);
             defer results.deinit();
             try self.sheet.cell_tree.queryWindow(
                 &.{ range.tl.x, range.tl.y },
@@ -764,7 +735,7 @@ pub fn EvalContext(comptime Context: type) type {
         }
 
         // TODO: This function assumes that ranges do not overlap?
-        fn evalAvg(self: @This(), start: Index, end: Index) !f64 {
+        fn evalAvg(self: *const @This(), start: Index, end: Index) !f64 {
             const tags = self.nodes.items(.tag);
             const data = self.nodes.items(.data);
 
@@ -797,7 +768,7 @@ pub fn EvalContext(comptime Context: type) type {
             return total / @as(f64, @floatFromInt(total_items));
         }
 
-        fn evalMax(self: @This(), start: Index, end: Index) !f64 {
+        fn evalMax(self: *const @This(), start: Index, end: Index) !f64 {
             const tags = self.nodes.items(.tag);
             const data = self.nodes.items(.data);
 
@@ -823,11 +794,11 @@ pub fn EvalContext(comptime Context: type) type {
             return max orelse 0;
         }
 
-        fn maxRange(self: @This(), lhs: Index, rhs: Index) !?f64 {
+        fn maxRange(self: *const @This(), lhs: Index, rhs: Index) !?f64 {
             const range = self.toPosRange(lhs, rhs);
 
             var max: ?f64 = null;
-            var results: std.ArrayList(Sheet.Cell.Handle) = .init(self.allocator);
+            var results: std.ArrayList(Sheet.Cell.Handle) = .init(self.arena);
             defer results.deinit();
             try self.sheet.cell_tree.queryWindow(
                 &.{ range.tl.x, range.tl.y },
@@ -843,7 +814,7 @@ pub fn EvalContext(comptime Context: type) type {
             return max;
         }
 
-        fn evalMin(self: @This(), start: Index, end: Index) !f64 {
+        fn evalMin(self: *const @This(), start: Index, end: Index) !f64 {
             const tags = self.nodes.items(.tag);
             const data = self.nodes.items(.data);
 
@@ -869,11 +840,11 @@ pub fn EvalContext(comptime Context: type) type {
             return min orelse 0;
         }
 
-        fn minRange(self: @This(), lhs: Index, rhs: Index) !?f64 {
+        fn minRange(self: *const @This(), lhs: Index, rhs: Index) !?f64 {
             const range = self.toPosRange(lhs, rhs);
 
             var min: ?f64 = null;
-            var results: std.ArrayList(Sheet.Cell.Handle) = .init(self.allocator);
+            var results: std.ArrayList(Sheet.Cell.Handle) = .init(self.arena);
             defer results.deinit();
             try self.sheet.cell_tree.queryWindow(
                 &.{ range.tl.x, range.tl.y },
@@ -911,13 +882,13 @@ pub fn eval(
     /// which evaluates the cell at the given position.
     context: anytype,
 ) !DynamicEvalResult {
-    var arena = std.heap.ArenaAllocator.init(sheet.allocator);
+    var arena: std.heap.ArenaAllocator = .init(sheet.allocator);
     defer arena.deinit();
 
     const ctx = EvalContext(@TypeOf(context)){
         .sheet = sheet,
         .nodes = nodes,
-        .allocator = arena.allocator(),
+        .arena = arena.allocator(),
         .strings = strings,
         .context = context,
         .pos = pos,
@@ -950,7 +921,7 @@ test "Parse and Eval Expression" {
     const Error = EvalContext(void).Error || Parser.ParseError;
 
     const testExpr = struct {
-        fn func(expected: Error!f64, expr: [:0]const u8) !void {
+        fn func(expected: Error!f64, expr: []const u8) !void {
             var sheet = try Sheet.init(t.allocator);
             defer sheet.deinit();
 
@@ -1004,7 +975,7 @@ test "Parse and Eval Expression" {
 test "Functions on Ranges" {
     const t = std.testing;
     const Test = struct {
-        fn testSheetExpr(expected: f64, expr: [:0]const u8) !void {
+        fn testSheetExpr(expected: f64, expr: []const u8) !void {
             var sheet = try Sheet.init(t.allocator);
             defer sheet.deinit();
 

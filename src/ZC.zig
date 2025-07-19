@@ -124,8 +124,7 @@ command_keymaps: KeyMap(CommandAction, CommandMapType),
 
 allocator: Allocator,
 
-input_buf_sfa: std.heap.StackFallbackAllocator(input_buf_len),
-input_buf: std.ArrayListUnmanaged(u8) = .empty,
+input_buf: std.io.Writer.Allocating,
 
 status_message_type: StatusMessageType = .info,
 status_message: std.BoundedArray(u8, 256) = .{},
@@ -134,8 +133,6 @@ status_message: std.BoundedArray(u8, 256) = .{},
 arena: std.heap.ArenaAllocator,
 
 yank: ?Rect = null,
-
-const input_buf_len = 256;
 
 pub const Mode = enum {
     normal,
@@ -235,8 +232,8 @@ pub fn init(zc: *ZC, allocator: Allocator, options: InitOptions) !void {
         .allocator = allocator,
         .keymaps = keys.sheet_keys,
         .command_keymaps = keys.command_keys,
-        .input_buf_sfa = std.heap.stackFallback(input_buf_len, allocator),
         .arena = .init(allocator),
+        .input_buf = .init(allocator),
     };
     errdefer for (zc.sheets.values()) |*sheet| sheet.deinit();
     errdefer zc.sheets.deinit(allocator);
@@ -287,7 +284,7 @@ pub fn deinit(zc: *ZC) void {
     zc.lua_ptr.deinit();
     zc.command.deinit(zc.allocator);
 
-    zc.input_buf.deinit(zc.allocator);
+    zc.input_buf.deinit();
     zc.keymaps.deinit(zc.allocator);
     zc.command_keymaps.deinit(zc.allocator);
 
@@ -304,16 +301,16 @@ pub fn emitEvent(zc: *ZC, event: [:0]const u8, args: anytype) void {
     lua.emitEvent(zc.lua_ptr, event, args) catch {}; // TODO: Make sure handled correctly
 }
 
-pub fn resetInputBuf(zc: *ZC) void {
-    zc.input_buf.items.len = 0;
-    zc.input_buf_sfa.fixed_buffer_allocator.reset();
+pub fn inputSentinelSlice(zc: *ZC) Allocator.Error![:0]u8 {
+    zc.input_buf.writer.writeByte(0) catch return error.OutOfMemory;
+    const buffered = zc.input_buf.getWritten();
+    const ret = buffered[0 .. buffered.len - 1 :0];
+    zc.input_buf.writer.end -= 1;
+    return ret;
 }
 
-pub fn inputBufSlice(zc: *ZC) Allocator.Error![:0]u8 {
-    const len = zc.input_buf.items.len;
-    try zc.input_buf.append(zc.allocator, 0);
-    zc.input_buf.items.len = len;
-    return zc.input_buf.items.ptr[0..len :0];
+pub fn inputSlice(zc: *ZC) []u8 {
+    return zc.input_buf.getWritten();
 }
 
 pub fn run(zc: *ZC) !void {
@@ -365,7 +362,6 @@ pub fn getSheetName(zc: *const ZC, index: usize) []const u8 {
     return zc.sheets.keys()[index];
 }
 
-/// Sets the cell at `pos` to the expression represented by `expr`.
 pub fn setCellString(zc: *ZC, pos: Position, expr: [:0]const u8, opts: ChangeCellOpts) !void {
     // TODO: This leaks memory if `setCell` fails, which can only happen on OOM.
     const expr_root = try ast.parseFromExpression(zc.currentSheet(), expr);
@@ -481,23 +477,24 @@ fn handleInput(zc: *ZC) !void {
     assert(zc.currentSheet().undos.len == 0 or zc.currentSheet().undos.items(.tag)[zc.currentSheet().undos.len - 1] == .sentinel);
     assert(zc.currentSheet().redos.len == 0 or zc.currentSheet().redos.items(.tag)[zc.currentSheet().redos.len - 1] == .sentinel);
 
-    var buf: [input_buf_len / 2]u8 = undefined;
+    var buf: [256]u8 = undefined;
     const slice = try zc.ui.term.readInput(&buf);
 
-    const writer = zc.input_buf.writer(zc.allocator);
-    try input.parse(&zc.ui.term, slice, writer);
+    try input.parse(&zc.ui.term, slice, &zc.input_buf.writer);
+    const bytes = try zc.inputSentinelSlice();
 
-    const bytes = try zc.inputBufSlice();
     const res = zc.getAction(bytes);
     switch (res) {
         .normal => |action| switch (zc.mode) {
-            .normal => try zc.doNormalMode(action),
+            .normal => zc.doNormalMode(action) catch |err| switch (err) {
+                else => zc.setStatusMessage(.err, "Unhandled error {}", .{err}),
+            },
             .visual, .select => zc.doVisualMode(action) catch |err| switch (err) {
                 error.OutOfMemory => zc.setStatusMessage(.err, "Out of memory!", .{}),
             },
             else => unreachable,
         },
-        .command => |action| zc.doCommandMode(action, zc.input_buf.items) catch |err| switch (err) {
+        .command => |action| zc.doCommandMode(action, bytes) catch |err| switch (err) {
             error.EmptyFileName => zc.setStatusMessage(.err, "Empty file name", .{}),
             error.InvalidCellAddress => zc.setStatusMessage(.err, "Invalid cell address", .{}),
             error.InvalidCommand => zc.setStatusMessage(.err, "Invalid command", .{}),
@@ -509,11 +506,13 @@ fn handleInput(zc: *ZC) !void {
         .not_found => {
             if (zc.mode.isCommandMode()) {
                 const n = std.mem.replace(u8, bytes, "<<", "<", bytes);
-                try zc.doCommandMode(.none, bytes[0 .. bytes.len - n]);
+                zc.doCommandMode(.none, bytes[0 .. bytes.len - n]) catch |err| switch (err) {
+                    else => zc.setStatusMessage(.err, "Unhandled error {}", .{err}),
+                };
             }
         },
     }
-    zc.resetInputBuf();
+    zc.input_buf.clearRetainingCapacity();
 }
 
 pub fn doCommandMode(zc: *ZC, action: CommandAction, keys: []const u8) !void {
@@ -526,7 +525,7 @@ pub fn doCommandMode(zc: *ZC, action: CommandAction, keys: []const u8) !void {
         .command_to_backwards,
         .command_until_forwards,
         .command_until_backwards,
-        => zc.doCommandToMode(action),
+        => zc.doCommandToMode(action, keys),
         else => unreachable,
     }
 }
@@ -576,24 +575,65 @@ fn clampScreenToCommandCursor(zc: *ZC) void {
     }
 }
 
+/// Doesn't wrap Command.Writer to avoid an unnecessary layer of indirection.
+const CmdWriter = struct {
+    interface: std.io.Writer,
+    zc: *ZC,
+
+    pub fn drain(io_writer: *std.io.Writer, data: []const []const u8, splat: usize) !usize {
+        const w: *CmdWriter = @fieldParentPtr("interface", io_writer);
+        defer w.zc.clampCommandCursor();
+        defer w.zc.clampScreenToCommandCursor();
+
+        const buffered = w.interface.buffered();
+        if (buffered.len > 0) {
+            const bytes_written = w.zc.command.write(w.zc.allocator, buffered) catch
+                return error.WriteFailed;
+
+            const remaining = w.interface.consume(bytes_written);
+            if (remaining != 0)
+                return 0;
+        }
+
+        var total_written: usize = 0;
+        for (data[0 .. data.len - 1]) |str| {
+            const bytes_written = w.zc.command.write(w.zc.allocator, str) catch
+                return error.WriteFailed;
+
+            total_written += bytes_written;
+            if (bytes_written < str.len) return total_written;
+        }
+
+        const pattern = data[data.len - 1];
+        for (0..splat) |_| {
+            const bytes_written = w.zc.command.write(w.zc.allocator, pattern) catch
+                return error.WriteFailed;
+
+            total_written += bytes_written;
+            if (bytes_written < pattern.len) return total_written;
+        }
+
+        return total_written;
+    }
+};
+
+pub fn commandWriter(zc: *ZC, buffer: []u8) CmdWriter {
+    return .{
+        .interface = .{
+            .vtable = &.{
+                .drain = CmdWriter.drain,
+            },
+            .buffer = buffer,
+        },
+        .zc = zc,
+    };
+}
+
 pub fn setCommandCursor(zc: *ZC, pos: u32) void {
     zc.command.setCursor(pos);
     zc.clampCommandCursor();
     zc.clampScreenToCommandCursor();
 }
-
-pub fn commandWrite(zc: *ZC, bytes: []const u8) Allocator.Error!usize {
-    const ret = try zc.command.write(zc.allocator, bytes);
-    zc.clampCommandCursor();
-    zc.clampScreenToCommandCursor();
-    return ret;
-}
-
-pub fn commandWriter(zc: *ZC) CommandWriter {
-    return .{ .context = zc };
-}
-
-const CommandWriter = std.io.GenericWriter(*ZC, Allocator.Error, commandWrite);
 
 pub fn submitCommand(zc: *ZC) !void {
     assert(zc.mode.isCommandMode());
@@ -755,8 +795,8 @@ fn doCommandInsertMode(zc: *ZC, action: CommandAction, keys: []const u8) !void {
     defer zc.clampScreenToCommandCursor();
     try switch (action) {
         .none => {
-            const writer = zc.commandWriter();
-            try writer.writeAll(keys);
+            var writer = zc.commandWriter(&.{});
+            writer.interface.writeAll(keys) catch return error.OutOfMemory;
         },
         .history_next => zc.commandHistoryNext(),
         .history_prev => zc.commandHistoryPrev(),
@@ -810,11 +850,10 @@ fn doCommandOperatorPendingMode(zc: *ZC, action: CommandAction) Allocator.Error!
     }
 }
 
-pub fn doCommandToMode(zc: *ZC, action: CommandAction) void {
+pub fn doCommandToMode(zc: *ZC, action: CommandAction, keys: []const u8) void {
     switch (action) {
         .enter_normal_mode => zc.setMode(.command_normal),
         .none => {
-            const keys = zc.input_buf.items;
             if (keys.len == 0) return;
             zc.setMode(zc.prev_mode);
             const motion: Motion = switch (zc.prev_mode) {
@@ -834,14 +873,14 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
     switch (action) {
         .enter_command_mode => {
             zc.setMode(.command_insert);
-            const writer = zc.commandWriter();
-            try writer.writeByte(':');
+            var writer = zc.commandWriter(&.{});
+            writer.interface.writeByte(':') catch return error.OutOfMemory;
         },
         .edit_cell => {
             zc.setMode(.command_insert);
-            var wr = zc.commandWriter().adaptToNewApi();
-            try wr.new_interface.print("let {f} = ", .{zc.cursor});
-            try zc.currentSheet().printCellExpression(zc.cursor, &wr.new_interface);
+            var wr = zc.commandWriter(&.{});
+            wr.interface.print("let {f} = ", .{zc.cursor}) catch return error.OutOfMemory;
+            zc.currentSheet().printCellExpression(zc.cursor, &wr.interface) catch return error.OutOfMemory;
         },
         .fit_text => try zc.expandWidthAtCursor(),
         .enter_visual_mode => zc.setMode(.visual),
@@ -918,7 +957,8 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
         .decrease_width => try zc.cursorDecWidth(),
         .assign_cell => {
             zc.setMode(.command_insert);
-            try zc.commandWriter().print("let {f} = ", .{zc.cursor});
+            var w = zc.commandWriter(&.{});
+            w.interface.print("let {f} = ", .{zc.cursor}) catch return error.OutOfMemory;
         },
 
         .zero => {
@@ -950,12 +990,12 @@ fn doVisualMode(zc: *ZC, action: Action) Allocator.Error!void {
         .select_cancel => zc.setMode(.command_insert),
         .select_submit => {
             defer zc.setMode(.command_insert);
-            const writer = zc.commandWriter();
+            var writer = zc.commandWriter(&.{});
 
             const tl = Position.topLeft(zc.cursor, zc.anchor);
             const br = Position.bottomRight(zc.cursor, zc.anchor);
 
-            try writer.print("{f}:{f}", .{ tl, br });
+            writer.interface.print("{f}:{f}", .{ tl, br }) catch return error.OutOfMemory;
         },
 
         .yank_cell => {
@@ -1002,7 +1042,7 @@ fn doVisualMode(zc: *ZC, action: Action) Allocator.Error!void {
     }
 }
 
-fn parseCommand(zc: *ZC, str: [:0]const u8) !void {
+fn parseCommand(zc: *ZC, str: []const u8) !void {
     if (str.len == 0) return;
 
     // TODO: Unify command and assignment parsing and handling
@@ -1285,7 +1325,7 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
     }
 }
 
-pub fn runCommand(zc: *ZC, str: [:0]const u8) !void {
+pub fn runCommand(zc: *ZC, str: []const u8) !void {
     var iter = utils.wordIterator(str);
     const cmd_str = iter.next() orelse return error.InvalidCommand;
     assert(cmd_str.len > 0);
@@ -2874,18 +2914,13 @@ fn testFile(gpa: std.mem.Allocator, path: []const u8) !void {
     const content = try std.mem.replaceOwned(u8, gpa, bytes, "$BUILD_TEMP_DIR", build.temp_dir);
     defer gpa.free(content);
 
-    for (content) |*c| {
-        if (c.* == '\n') c.* = 0;
-    }
-
     var has_errors = false;
-    var lines = std.mem.tokenizeScalar(u8, content, 0);
+    var lines = std.mem.tokenizeScalar(u8, content, '\n');
     while (lines.next()) |line| {
-        const null_terminated_line = line.ptr[0..line.len :0];
-        zc.parseCommand(null_terminated_line) catch |err| {
+        zc.parseCommand(line) catch |err| {
             var line_number: usize = 1;
             for (content[0..lines.index]) |c| {
-                if (c == 0) line_number += 1;
+                if (c == '\n') line_number += 1;
             }
             std.debug.print("Error {} at {s}:{d}\n", .{ err, path, line_number });
             has_errors = true;

@@ -124,21 +124,56 @@ pub fn replaceRange(
 
 /// Returns a writer that will write to the current cursor positon and advance the cursor
 /// accordingly.
-pub fn writer(self: *Self, allocator: Allocator) Writer {
-    return .{ .context = .{
-        .data = self,
+pub fn writer(self: *Self, allocator: Allocator, buffer: []u8) Writer {
+    return .{
+        .interface = .{
+            .vtable = &.{
+                .drain = Writer.drain,
+            },
+            .buffer = buffer,
+            .end = 0,
+        },
+        .cmd = self,
         .allocator = allocator,
-    } };
+    };
 }
 
-pub const Writer = std.io.GenericWriter(WriterContext, Allocator.Error, WriterContext.ctxWrite);
+pub const Writer = struct {
+    interface: std.io.Writer,
+    cmd: *Self,
+    allocator: std.mem.Allocator,
 
-pub const WriterContext = struct {
-    data: *Self,
-    allocator: Allocator,
+    pub fn drain(io_writer: *std.io.Writer, data: []const []const u8, splat: usize) !usize {
+        const w: *Writer = @fieldParentPtr("interface", io_writer);
+        const buffered = w.interface.buffered();
+        if (buffered.len > 0) {
+            const bytes_written = w.cmd.write(w.allocator, buffered) catch
+                return error.WriteFailed;
 
-    pub fn ctxWrite(ctx: @This(), bytes: []const u8) Allocator.Error!usize {
-        return ctx.data.write(ctx.allocator, bytes);
+            const remaining = w.interface.consume(bytes_written);
+            if (remaining != 0)
+                return 0;
+        }
+
+        var total_written: usize = 0;
+        for (data[0 .. data.len - 1]) |str| {
+            const bytes_written = w.cmd.write(w.allocator, str) catch
+                return error.WriteFailed;
+
+            total_written += bytes_written;
+            if (bytes_written < str.len) return total_written;
+        }
+
+        const pattern = data[data.len - 1];
+        for (0..splat) |_| {
+            const bytes_written = w.cmd.write(w.allocator, pattern) catch
+                return error.WriteFailed;
+
+            total_written += bytes_written;
+            if (bytes_written < pattern.len) return total_written;
+        }
+
+        return total_written;
     }
 };
 
@@ -300,8 +335,8 @@ test "Command" {
     var self = Self{};
     defer self.deinit(t.allocator);
 
-    const w = self.writer(t.allocator);
-    try w.writeAll("This is epic!");
+    var w = self.writer(t.allocator, &.{});
+    try w.interface.writeAll("This is epic!");
 
     try t.expectEqualStrings("This is epic!", self.buffer.items());
     try t.expectEqual(@as(usize, 0), self.history_indices.items.len);
@@ -316,8 +351,8 @@ test "Command" {
     try t.expectEqual(@as(u32, 0), self.index);
     try t.expect(self.cow);
 
-    try w.writeAll(" ...");
-    try w.writeAll(" Not!");
+    try w.interface.writeAll(" ...");
+    try w.interface.writeAll(" Not!");
     try t.expectEqual(@as(u32, 0), self.index);
     try t.expect(!self.cow);
 }

@@ -30,63 +30,63 @@ pub fn createKeymaps(allocator: Allocator) !struct {
 pub fn parse(
     term: *Term,
     bytes: []const u8,
-    writer: anytype,
-) @TypeOf(writer).Error!void {
+    w: *std.io.Writer,
+) !void {
     var iter = inputParser(bytes, term);
 
     while (iter.next()) |in| {
         var special = false;
         if (in.mod_ctrl and in.mod_alt) {
             special = true;
-            try writer.writeAll("<C-M-");
+            try w.writeAll("<C-M-");
         } else if (in.mod_ctrl) {
             special = true;
-            try writer.writeAll("<C-");
+            try w.writeAll("<C-");
         } else if (in.mod_alt) {
             special = true;
-            try writer.writeAll("<M-");
+            try w.writeAll("<M-");
         }
 
         switch (in.content) {
-            .escape => try writer.writeAll("<Escape>"),
-            .arrow_up => try writer.writeAll("<Up>"),
-            .arrow_down => try writer.writeAll("<Down>"),
-            .arrow_left => try writer.writeAll("<Left>"),
-            .arrow_right => try writer.writeAll("<Right>"),
-            .home => try writer.writeAll("<Home>"),
-            .end => try writer.writeAll("<End>"),
-            .begin => try writer.writeAll("<Begin>"),
-            .page_up => try writer.writeAll("<PageUp>"),
-            .page_down => try writer.writeAll("<PageDown>"),
-            .delete => try writer.writeAll("<Delete>"),
-            .insert => try writer.writeAll("<Insert>"),
-            .print => try writer.writeAll("<Print>"),
-            .scroll_lock => try writer.writeAll("<Scroll>"),
-            .pause => try writer.writeAll("<Pause>"),
-            .function => |function| try writer.print("<F{d}>", .{function}),
-            .enter => try writer.writeAll("<Return>"),
+            .escape => try w.writeAll("<Escape>"),
+            .arrow_up => try w.writeAll("<Up>"),
+            .arrow_down => try w.writeAll("<Down>"),
+            .arrow_left => try w.writeAll("<Left>"),
+            .arrow_right => try w.writeAll("<Right>"),
+            .home => try w.writeAll("<Home>"),
+            .end => try w.writeAll("<End>"),
+            .begin => try w.writeAll("<Begin>"),
+            .page_up => try w.writeAll("<PageUp>"),
+            .page_down => try w.writeAll("<PageDown>"),
+            .delete => try w.writeAll("<Delete>"),
+            .insert => try w.writeAll("<Insert>"),
+            .print => try w.writeAll("<Print>"),
+            .scroll_lock => try w.writeAll("<Scroll>"),
+            .pause => try w.writeAll("<Pause>"),
+            .function => |function| try w.print("<F{d}>", .{function}),
+            .enter => try w.writeAll("<Return>"),
             .command => {},
             .tab => {},
-            .backspace => try writer.writeAll("<Delete>"),
+            .backspace => try w.writeAll("<Delete>"),
             .codepoint => |cp| switch (cp) {
-                '<' => try writer.writeAll("<<"),
-                127 => try writer.writeAll("<Delete>"),
+                '<' => try w.writeAll("<<"),
+                127 => try w.writeAll("<Delete>"),
                 0...'\n' - 1, '\n' + 1...'\r' - 1, '\r' + 1...31 => {},
                 '\n', '\r', 32...'<' - 1, '<' + 1...126 => {
                     @branchHint(.likely);
-                    try writer.writeByte(@intCast(cp));
+                    try w.writeByte(@intCast(cp));
                 },
                 else => {
                     var buf: [4]u8 = undefined;
                     const len = std.unicode.utf8Encode(cp, &buf) catch continue;
-                    try writer.writeAll(buf[0..len]);
+                    try w.writeAll(buf[0..len]);
                 },
             },
             .mouse, .unknown => {},
         }
 
         if (special) {
-            try writer.writeByte('>');
+            try w.writeByte('>');
         }
     }
 }
