@@ -71,7 +71,6 @@ pub fn main() !void {
 
 fn panicFn(msg: []const u8, ret_addr: ?usize) noreturn {
     @branchHint(.cold);
-    _ = std.fs.cwd().createFile("GUHBUH", .{}) catch {};
     zc.ui.term.cook() catch {};
     std.debug.defaultPanic(msg, ret_addr);
 }

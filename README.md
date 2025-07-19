@@ -360,7 +360,7 @@ will repeat the following motion that many times. This does not currently work f
 - `gc` Move cursor to the count column
 - `gr` Move cursor to the count row
 - `gg` Move cursor to the first cell in the current column
-- `G` Move cursor to the last cell in the current column
+- `G`, `ge` Move cursor to the last cell in the current column
 - `w` Move cursor to the next populated cell
 - `b` Move cursor to the previous populated cell
 - `f` Increase decimal precision of the current column
@@ -568,8 +568,6 @@ filepath,
 cursor_pos,
 mode_indicator,
 count,
-expression,
-expression_error,
 command_line,
 
 column_heading_unselected,
@@ -588,4 +586,19 @@ cell_blank_selected,
 
 sheet_selected,
 sheet_unselected,
+
+token_number,
+token_let,
+token_builtin,
+token_whitespace,
+token_operator,
+token_cell_address,
+token_parentheses,
+token_single_quoted_string,
+token_double_quoted_string,
+
+completion_background,
+completion_title,
+completion_keys,
+completion_description,
 ```

@@ -79,6 +79,11 @@ pub const default_theme: Theme = .{
     .token_parentheses = .init(.{ .rgb = .{ 0x65, 0x73, 0x7e } }, .none, .none),
     .token_single_quoted_string = .init(.green, .none, .none),
     .token_double_quoted_string = .init(.green, .none, .none),
+
+    .completion_background = .init(.none, .bright_black, .none),
+    .completion_title = .init(.none, .bright_black, .none),
+    .completion_keys = .init(.none, .bright_black, .none),
+    .completion_description = .init(.none, .bright_black, .none),
 };
 
 pub const UiElement = enum {
@@ -119,6 +124,11 @@ pub const UiElement = enum {
     token_parentheses,
     token_single_quoted_string,
     token_double_quoted_string,
+
+    completion_background,
+    completion_title,
+    completion_keys,
+    completion_description,
 };
 
 const UpdateFlags = packed struct {
@@ -373,6 +383,11 @@ pub fn render(tui: *Tui, zc: *ZC) !void {
 fn setStyle(tui: *Tui, element: UiElement) !void {
     if (tui.current_style == element) return;
     const style = tui.styles.get(element);
+    if (tui.current_style) |cs| {
+        @branchHint(.likely);
+        const current_style = tui.styles.get(cs);
+        if (std.meta.eql(current_style, style)) return;
+    }
     try tui.rc.?.setStyle(style);
     tui.current_style = element;
 }
@@ -506,8 +521,11 @@ fn renderInputHints(tui: *Tui) !void {
     const input_res = stringWidthInternal(input, .{ .max_width = width - 2 });
 
     var b: [1][]const u8 = .{"─"};
+    try tui.setStyle(.completion_background);
     try w.writeAll("┌");
+    try tui.setStyle(.completion_title);
     try w.writeAll(input[0..input_res.len]);
+    try tui.setStyle(.completion_background);
     try w.writeSplatAll(&b, width - 2 - input_res.width);
     try w.writeAll("┐");
 
@@ -515,9 +533,19 @@ fn renderInputHints(tui: *Tui) !void {
     for (matches.items[0..height -| 2]) |match| {
         try rc.moveCursorTo(y + i, tui.term.width -| width);
 
-        try w.print("│ {s}", .{match.key});
-        try w.splatByteAll(' ', max_keys_width - match.key_width);
-        try w.print("  {s}", .{match.description});
+        try tui.setStyle(.completion_background);
+        try w.writeAll("│ ");
+
+        try tui.setStyle(.completion_keys);
+        try w.writeAll(match.key);
+
+        try tui.setStyle(.completion_background);
+        try w.splatByteAll(' ', max_keys_width - match.key_width + 2);
+
+        try tui.setStyle(.completion_description);
+        try w.writeAll(match.description);
+
+        try tui.setStyle(.completion_background);
         try w.splatByteAll(' ', max_desc_width - match.desc_width);
         try w.writeAll(" │");
 
@@ -563,14 +591,15 @@ fn renderStatus(tui: *Tui) !void {
         var wr: std.io.Writer = .fixed(buf);
         ast.print(sheet.ast_nodes, cell.expr_root, sheet.strings_buf.items, &wr) catch {};
 
-        var reader: std.io.Reader = .fixed(wr.buffer);
+        const bytes = wr.buffered();
+        var reader: std.io.Reader = .fixed(bytes);
         const tokens = try Tokenizer.collectTokens(arena, &reader, 128);
         const tags = tokens.items(.tag);
         const starts = tokens.items(.start);
         for (tags[0 .. tags.len - 1], starts[0 .. starts.len - 1], starts[1..]) |tag, start, end| {
-            try tui.writeToken(tag, buf[start..end]);
+            try tui.writeToken(tag, bytes[start..end]);
         }
-        try tui.writeToken(.eof, buf[starts[starts.len - 1]..]);
+        try tui.writeToken(.eof, bytes[starts[starts.len - 1]..]);
     }
 
     try tui.setStyle(.status_line);
