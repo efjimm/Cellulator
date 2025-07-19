@@ -248,12 +248,24 @@ fn applyThemeLua(state: *Lua) callconv(.c) c_int {
     return 0;
 }
 
+const zg = @import("zg");
+
 pub fn stringWidth(
     _: *anyopaque,
     bytes: []const u8,
     opts: ZC.Ui.StringWidthOptions,
 ) ZC.Ui.StringWidthResult {
-    const res = @import("zg").display_width.strWidth(bytes, .{
+    const res = zg.display_width.strWidth(bytes, .{
+        .max_width = opts.max_width,
+    });
+    return .{ .width = @intCast(res.width), .len = res.len };
+}
+
+pub fn stringWidthInternal(
+    bytes: []const u8,
+    opts: ZC.Ui.StringWidthOptions,
+) ZC.Ui.StringWidthResult {
+    const res = zg.display_width.strWidth(bytes, .{
         .max_width = opts.max_width,
     });
     return .{ .width = @intCast(res.width), .len = res.len };
@@ -329,7 +341,6 @@ pub fn render(tui: *Tui, zc: *ZC) !void {
     errdefer unreachable;
 
     // TODO: Don't update this every frame
-    try tui.renderStatus();
     if (tui.update_flags.column_headings)
         try tui.renderColumnHeadings();
 
@@ -340,11 +351,15 @@ pub fn render(tui: *Tui, zc: *ZC) !void {
         try tui.renderCells();
     }
 
+    try tui.renderInputHints();
+
     if (tui.update_flags.cursor) {
         try tui.renderCursor();
     }
 
     try tui.renderSheetList();
+
+    try tui.renderStatus();
 
     if (tui.update_flags.command or zc.mode.isCommandMode())
         tui.renderCommandLine() catch return tui.rc.?.writer.err.?;
@@ -390,6 +405,117 @@ fn renderSheetList(tui: *Tui) !void {
 
     try rpw.finish();
     try rc.clearToEol();
+}
+
+fn renderInputHints(tui: *Tui) !void {
+    const Key = struct {
+        key: []const u8,
+        description: []const u8,
+        key_width: u16,
+        desc_width: u16,
+    };
+
+    const Context = struct {
+        matches: *std.ArrayListUnmanaged(Key),
+        allocator: std.mem.Allocator,
+        input: []const u8,
+
+        pub fn apply(ctx: *@This(), kv: anytype) !void {
+            const full_slice = std.mem.span(kv.key);
+            if (!std.mem.startsWith(u8, full_slice, ctx.input)) return;
+
+            const slice = full_slice[ctx.input.len..];
+            const desc = @tagName(kv.value);
+
+            try ctx.matches.append(ctx.allocator, .{
+                .key = slice,
+                .description = desc,
+                .key_width = 0,
+                .desc_width = 0,
+            });
+        }
+    };
+
+    const zc = tui.zc.?;
+    if (zc.input_buf.writer.end == 0) return;
+
+    const arena = tui.arena.allocator();
+    const input = zc.inputSlice();
+
+    var matches: std.ArrayListUnmanaged(Key) = .empty;
+
+    const max_width = tui.term.width -| 4;
+
+    if (max_width == 0) {
+        @branchHint(.cold);
+        return;
+    }
+
+    var ctx: Context = .{
+        .matches = &matches,
+        .allocator = arena,
+        .input = input,
+    };
+    switch (zc.mode) {
+        inline else => |mode| {
+            const map = zc.getKeymap(mode);
+            const n = map.contains(input.ptr) orelse return;
+            try map.traverseNode(&.{ .inode = n }, .inode, &ctx);
+        },
+    }
+
+    if (matches.items.len == 0) return;
+
+    var max_keys_width: u16 = 0;
+    for (matches.items) |*match| {
+        const kw_res = stringWidthInternal(match.key, .{ .max_width = max_width });
+        if (kw_res.width > max_keys_width) max_keys_width = @intCast(kw_res.width);
+        match.key = match.key[0..kw_res.len];
+        match.key_width = @intCast(kw_res.width);
+    }
+
+    var max_desc_width: u16 = 0;
+    for (matches.items) |*match| {
+        const opts: ZC.Ui.StringWidthOptions = .{ .max_width = max_width - max_keys_width };
+        const dw_res = stringWidthInternal(match.description, opts);
+        if (dw_res.width > max_desc_width) max_desc_width = @intCast(dw_res.width);
+        match.description = match.description[0..dw_res.len];
+        match.desc_width = @intCast(dw_res.width);
+    }
+
+    const width = @min(tui.term.width, 2 + max_keys_width + 2 + max_desc_width + 2);
+
+    const rc: *Term.RenderContext = &tui.rc.?;
+    const height = @min(tui.cellViewHeight(), matches.items.len + 2);
+    const y = cell_view_line + (tui.cellViewHeight() - height);
+
+    try rc.moveCursorTo(y, tui.term.width -| width);
+    const w = &rc.writer.interface;
+
+    const input_res = stringWidthInternal(input, .{ .max_width = width - 2 });
+
+    var b: [1][]const u8 = .{"─"};
+    try w.writeAll("┌");
+    try w.writeAll(input[0..input_res.len]);
+    try w.writeSplatAll(&b, width - 2 - input_res.width);
+    try w.writeAll("┐");
+
+    var i: u16 = 1;
+    for (matches.items[0..height -| 2]) |match| {
+        try rc.moveCursorTo(y + i, tui.term.width -| width);
+
+        try w.print("│ {s}", .{match.key});
+        try w.splatByteAll(' ', max_keys_width - match.key_width);
+        try w.print("  {s}", .{match.description});
+        try w.splatByteAll(' ', max_desc_width - match.desc_width);
+        try w.writeAll(" │");
+
+        i += 1;
+    }
+    try rc.moveCursorTo(y + i, tui.term.width -| width);
+    try w.writeAll("└");
+    try w.writeSplatAll(&b, width - 2);
+    try w.writeAll("┘");
 }
 
 fn renderStatus(tui: *Tui) !void {

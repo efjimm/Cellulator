@@ -119,8 +119,7 @@ count: u32 = 0,
 command_screen_pos: u32 = 0,
 command: Command = .{},
 
-keymaps: KeyMap(Action, MapType),
-command_keymaps: KeyMap(CommandAction, CommandMapType),
+keymaps: input.KeyMaps,
 
 allocator: Allocator,
 
@@ -210,10 +209,7 @@ pub fn init(zc: *ZC, allocator: Allocator, options: InitOptions) !void {
     zc.allocator = allocator;
 
     var keys = try input.createKeymaps(allocator);
-    errdefer {
-        keys.sheet_keys.deinit(allocator);
-        keys.command_keys.deinit(allocator);
-    }
+    errdefer keys.deinit(allocator);
 
     var tui = try Tui.init(allocator);
     errdefer tui.deinit(allocator);
@@ -230,11 +226,11 @@ pub fn init(zc: *ZC, allocator: Allocator, options: InitOptions) !void {
         .ui = tui,
         .ui_interface = undefined,
         .allocator = allocator,
-        .keymaps = keys.sheet_keys,
-        .command_keymaps = keys.command_keys,
+        .keymaps = keys,
         .arena = .init(allocator),
-        .input_buf = .init(allocator),
+        .input_buf = try .initCapacity(allocator, 1),
     };
+    zc.clearInput();
     errdefer for (zc.sheets.values()) |*sheet| sheet.deinit();
     errdefer zc.sheets.deinit(allocator);
     const sheet = try zc.openSheet();
@@ -286,7 +282,6 @@ pub fn deinit(zc: *ZC) void {
 
     zc.input_buf.deinit();
     zc.keymaps.deinit(zc.allocator);
-    zc.command_keymaps.deinit(zc.allocator);
 
     for (zc.sheets.keys()) |key| zc.allocator.free(key);
     for (zc.sheets.values()) |*sheet| sheet.deinit();
@@ -309,8 +304,15 @@ pub fn inputSentinelSlice(zc: *ZC) Allocator.Error![:0]u8 {
     return ret;
 }
 
-pub fn inputSlice(zc: *ZC) []u8 {
-    return zc.input_buf.getWritten();
+pub fn inputSlice(zc: *const ZC) [:0]u8 {
+    return zc.input_buf.writer.buffer[0..zc.input_buf.writer.end :0];
+}
+
+fn clearInput(zc: *ZC) void {
+    if (zc.input_buf.writer.end > 0) zc.ui.update_flags.cells = true;
+    zc.input_buf.clearRetainingCapacity();
+    zc.input_buf.writer.writeByte(0) catch unreachable;
+    zc.input_buf.writer.end = 0;
 }
 
 pub fn run(zc: *ZC) !void {
@@ -431,45 +433,22 @@ pub fn setMode(zc: *ZC, new_mode: Mode) void {
     }
 }
 
-const GetActionResult = union(enum) {
-    normal: Action,
-    command: CommandAction,
-    prefix,
-    not_found,
-};
-
-fn getAction(zc: *const ZC, bytes: [:0]const u8) GetActionResult {
-    if (zc.mode.isCommandMode()) {
-        const keymap_type: CommandMapType = switch (zc.mode) {
-            .command_normal => .normal,
-            .command_insert => .insert,
-            .command_change, .command_delete => .operator_pending,
-            .command_to_forwards,
-            .command_to_backwards,
-            .command_until_forwards,
-            .command_until_backwards,
-            => .to,
-            else => unreachable,
-        };
-
-        return switch (zc.command_keymaps.get(keymap_type, bytes)) {
-            .value => |action| .{ .command = action },
-            .prefix => .prefix,
-            .not_found => .not_found,
-        };
-    }
-
-    const keymap_type: MapType = switch (zc.mode) {
-        .normal => .normal,
-        .visual => .visual,
-        .select => .select,
-        else => unreachable,
-    };
-
-    return switch (zc.keymaps.get(keymap_type, bytes)) {
-        .value => |action| .{ .normal = action },
-        .prefix => .prefix,
-        .not_found => .not_found,
+pub fn getKeymap(zc: *ZC, comptime mode: Mode) switch (mode) {
+    .normal, .visual, .select => *input.SheetKeyMap,
+    else => *input.CommandKeyMap,
+} {
+    return switch (mode) {
+        .command_normal => &zc.keymaps.command_normal,
+        .command_insert => &zc.keymaps.command_insert,
+        .command_change, .command_delete => &zc.keymaps.command_operator_pending,
+        .command_to_forwards,
+        .command_to_backwards,
+        .command_until_forwards,
+        .command_until_backwards,
+        => &zc.keymaps.command_to,
+        .normal => &zc.keymaps.sheet_normal,
+        .visual => &zc.keymaps.sheet_visual,
+        .select => &zc.keymaps.sheet_select,
     };
 }
 
@@ -483,36 +462,44 @@ fn handleInput(zc: *ZC) !void {
     try input.parse(&zc.ui.term, slice, &zc.input_buf.writer);
     const bytes = try zc.inputSentinelSlice();
 
-    const res = zc.getAction(bytes);
-    switch (res) {
-        .normal => |action| switch (zc.mode) {
-            .normal => zc.doNormalMode(action) catch |err| switch (err) {
-                else => zc.setStatusMessage(.err, "Unhandled error {}", .{err}),
-            },
-            .visual, .select => zc.doVisualMode(action) catch |err| switch (err) {
-                error.OutOfMemory => zc.setStatusMessage(.err, "Out of memory!", .{}),
-            },
-            else => unreachable,
-        },
-        .command => |action| zc.doCommandMode(action, bytes) catch |err| switch (err) {
-            error.EmptyFileName => zc.setStatusMessage(.err, "Empty file name", .{}),
-            error.InvalidCellAddress => zc.setStatusMessage(.err, "Invalid cell address", .{}),
-            error.InvalidCommand => zc.setStatusMessage(.err, "Invalid command", .{}),
-            error.OutOfMemory => zc.setStatusMessage(.err, "Out of memory!", .{}),
-            error.InvalidSyntax => zc.setStatusMessage(.err, "Invalid syntax", .{}),
-            else => zc.setStatusMessage(.err, "Unhandled error {}", .{err}),
-        },
-        .prefix => return,
-        .not_found => {
-            if (zc.mode.isCommandMode()) {
-                const n = std.mem.replace(u8, bytes, "<<", "<", bytes);
-                zc.doCommandMode(.none, bytes[0 .. bytes.len - n]) catch |err| switch (err) {
-                    else => zc.setStatusMessage(.err, "Unhandled error {}", .{err}),
-                };
+    switch (zc.mode) {
+        inline else => |mode| {
+            const map = zc.getKeymap(mode);
+            const res = map.get(bytes);
+            switch (res) {
+                .kv => |kv| {
+                    const action = kv.value;
+                    _ = switch (mode) {
+                        .normal => zc.doNormalMode(action),
+                        .visual, .select => zc.doVisualMode(action),
+                        .command_normal,
+                        .command_insert,
+                        .command_change,
+                        .command_delete,
+                        .command_to_forwards,
+                        .command_to_backwards,
+                        .command_until_forwards,
+                        .command_until_backwards,
+                        => zc.doCommandMode(action, bytes),
+                    } catch |err| {
+                        std.log.err("Error: {s}", .{@errorName(err)});
+                    };
+
+                    zc.clearInput();
+                },
+                .prefix => {},
+                .not_found => {
+                    if (comptime mode.isCommandMode()) {
+                        const n = std.mem.replace(u8, bytes, "<<", "<", bytes);
+                        zc.doCommandMode(.none, bytes[0 .. bytes.len - n]) catch |err| switch (err) {
+                            else => zc.setStatusMessage(.err, "Unhandled error {}", .{err}),
+                        };
+                    }
+                    zc.clearInput();
+                },
             }
         },
     }
-    zc.input_buf.clearRetainingCapacity();
 }
 
 pub fn doCommandMode(zc: *ZC, action: CommandAction, keys: []const u8) !void {
