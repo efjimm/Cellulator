@@ -133,6 +133,8 @@ arena: std.heap.ArenaAllocator,
 
 yank: ?Rect = null,
 
+had_prefix: bool = false,
+
 pub const Mode = enum {
     normal,
 
@@ -309,7 +311,7 @@ pub fn inputSlice(zc: *const ZC) [:0]u8 {
 }
 
 fn clearInput(zc: *ZC) void {
-    if (zc.input_buf.writer.end > 0) zc.ui.update_flags.cells = true;
+    if (zc.had_prefix) zc.ui.update_flags.cells = true;
     zc.input_buf.clearRetainingCapacity();
     zc.input_buf.writer.writeByte(0) catch unreachable;
     zc.input_buf.writer.end = 0;
@@ -498,6 +500,7 @@ fn handleInput(zc: *ZC) !void {
                     zc.clearInput();
                 },
             }
+            zc.had_prefix = res == .prefix;
         },
     }
 }
