@@ -14,7 +14,7 @@ token_starts: []const u32,
 tok_i: u32,
 
 /// Total byte length of all parsed string literals.
-strings_len: u32,
+strings_len: usize,
 
 src: []const u8,
 

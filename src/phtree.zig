@@ -275,8 +275,7 @@ pub fn PhTree(
                 if (parent == .invalid) {
                     tree.removeHandle(handle);
                     assert(tree.root == .invalid);
-                    const removed = tree.insertEmpty(removed_kv);
-                    assert(removed == .invalid);
+                    tree.insertEmpty(removed_kv);
                 } else {
                     const address = calculateHypercubeAddress(p, tree.branchItem(parent, .postfix_length).*);
                     tree.leafItem(removed_kv, .parent).* = parent;
@@ -317,10 +316,21 @@ pub fn PhTree(
             return tree.insertAssumeCapacity(p, kv);
         }
 
+        pub fn insertAssumeCapacityNoClobber(
+            tree: *@This(),
+            p: *const Point,
+            kv: Leaf.Handle,
+        ) void {
+            const removed = tree.insertAssumeCapacity(p, kv);
+            assert(removed == .invalid);
+        }
+
         pub fn insertAssumeCapacity(tree: *@This(), p: *const Point, kv: Leaf.Handle) Leaf.Handle {
             tree.leafItem(kv, .point).* = p.*;
-            if (tree.root == .invalid)
-                return tree.insertEmpty(kv);
+            if (tree.root == .invalid) {
+                tree.insertEmpty(kv);
+                return .invalid;
+            }
 
             if (tree.root == .leaf)
                 return tree.insertWithLeafRoot(kv);
@@ -331,7 +341,8 @@ pub fn PhTree(
 
             const root_pl = tree.branchItem(root, .postfix_length).*;
             if (root_conflicting_bit > root_pl + 1) {
-                return tree.insertAboveRoot(kv, root_conflicting_bit);
+                tree.insertAboveRoot(kv, root_conflicting_bit);
+                return .invalid;
             }
 
             return tree.insertGeneric(kv);
@@ -511,13 +522,12 @@ pub fn PhTree(
             return &tree.branches.items(tag)[handle.int()];
         }
 
-        fn insertEmpty(tree: *@This(), kv: Leaf.Handle) Leaf.Handle {
+        fn insertEmpty(tree: *@This(), kv: Leaf.Handle) void {
             assert(tree.root == .invalid);
             assert(kv != tree.freelist_head_leaf);
 
             tree.leafItem(kv, .parent).* = .invalid;
             tree.root = .init(kv);
-            return .invalid;
         }
 
         fn insertWithLeafRoot(tree: *@This(), kv: Leaf.Handle) Leaf.Handle {
@@ -549,7 +559,7 @@ pub fn PhTree(
             return .invalid;
         }
 
-        fn insertAboveRoot(tree: *@This(), kv: Leaf.Handle, root_conflicting_bit: u8) Leaf.Handle {
+        fn insertAboveRoot(tree: *@This(), kv: Leaf.Handle, root_conflicting_bit: u8) void {
             const p = tree.leafItem(kv, .point);
 
             // Need to insert a new branch node above the current root node.
@@ -565,7 +575,6 @@ pub fn PhTree(
             tree.setChild(new_root, root_address, .branch, root);
 
             tree.root = .init(new_root);
-            return .invalid;
         }
 
         fn insertGeneric(tree: *@This(), kv: Leaf.Handle) Leaf.Handle {

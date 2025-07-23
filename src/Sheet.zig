@@ -52,6 +52,7 @@ cols: Columns,
 undos: std.MultiArrayList(Undo),
 redos: std.MultiArrayList(Undo),
 
+/// Stores cell handles referenced in bulk cell insert/delete undos.
 cell_buffer: std.ArrayListUnmanaged(Cell.Handle) = .empty,
 
 search_buffer: std.ArrayListUnmanaged(Dependents.Leaf.Handle),
@@ -98,21 +99,6 @@ pub const Columns = PhTree(Column, 1, u32);
 pub const Dependents = PhTree(DepIndex, 4, usize);
 pub const CellTree = PhTree(Cell, 2, usize);
 
-pub const StringIndex = packed struct {
-    n: u32,
-
-    pub fn from(n: u32) StringIndex {
-        assert(n < std.math.maxInt(u32));
-        return .{ .n = n };
-    }
-
-    pub fn isValid(index: StringIndex) bool {
-        return index != invalid;
-    }
-
-    pub const invalid: StringIndex = .{ .n = std.math.maxInt(u32) };
-};
-
 pub const DepIndex = packed struct {
     n: u32,
 
@@ -150,9 +136,6 @@ pub const Cell = extern struct {
 
     /// Abstract syntax tree representing the expression in the cell.
     expr_root: ast.Index = .invalid,
-
-    // TODO: We can encode this information in the string AST nodes themselves.
-    strings: StringIndex = .invalid,
 
     pub const Handle = CellTree.Leaf.Handle;
 
@@ -272,8 +255,8 @@ pub const Undo = extern struct {
             handle: Dependents.Leaf.Handle,
             point: Dependents.Point,
         },
-        bulk_cell_delete: u32,
-        bulk_cell_insert: u32,
+        bulk_cell_delete: usize,
+        bulk_cell_insert: usize,
         bulk_cell_delete_contiguous: CellHandleInterval,
         bulk_cell_insert_contiguous: CellHandleInterval,
 
@@ -426,12 +409,6 @@ fn createDepAssumeCapacity(sheet: *Sheet, dep: Dep) DepIndex {
 fn destroyDep(sheet: *Sheet, dep: DepIndex) void {
     sheet.deps.items[dep.n].next = sheet.free_deps;
     sheet.free_deps = dep;
-}
-
-fn getStringSlice(sheet: *Sheet, index: StringIndex) [:0]const u8 {
-    if (!index.isValid()) return "";
-    const ptr: [*:0]const u8 = @ptrCast(sheet.strings_buf.items[index.n..].ptr);
-    return std.mem.span(ptr);
 }
 
 pub fn posFromCellHandle(sheet: *const Sheet, handle: Cell.Handle) Position {
@@ -589,19 +566,19 @@ const Tokenizer = @import("Tokenizer.zig");
 const Assignment = struct {
     root: ast.Index,
     pos: Position,
-    strings: StringIndex,
 };
 
 /// Parses many cell assignments in bulk, appending their AST nodes to `Sheet.ast_nodes`.
-/// Returns the total byte length of all parsed string literals
+/// Returns the total byte length of all parsed string literals. The assignments are
+/// guaranteed to be deduplicated based on position.
 fn bulkParse(
     sheet: *Sheet,
     src: []const u8,
     tokens_allocator: std.mem.Allocator,
     tokens: *std.MultiArrayList(Tokenizer.Token),
     cells_allocator: std.mem.Allocator,
-    cells: *std.MultiArrayList(Assignment),
-) !u32 {
+    assignments: *std.ArrayListUnmanaged(Assignment),
+) !usize {
     const line_count = blk: {
         var line_count: u32 = 1;
         for (src) |c| {
@@ -610,19 +587,9 @@ fn bulkParse(
         break :blk line_count;
     };
 
-    {
-        var m = sheet.ast_nodes.toMultiArrayList();
-        defer sheet.ast_nodes = m.slice();
-
-        try m.ensureUnusedCapacity(sheet.allocator, line_count * 2);
-    }
-
-    try cells.ensureTotalCapacity(cells_allocator, line_count + 1);
+    try sheet.ensureUnusedAstNodeCapacity(line_count * 2);
+    try assignments.ensureTotalCapacity(cells_allocator, line_count + 1);
     try tokens.ensureTotalCapacity(tokens_allocator, src.len / 2);
-
-    // Parse each line
-    var total_strings_len: u32 = 0;
-    var lines = std.mem.tokenizeScalar(u8, src, '\n');
 
     tokens.clearRetainingCapacity();
     var reader: std.io.Reader = .fixed(src);
@@ -636,10 +603,10 @@ fn bulkParse(
     const token_tags = tokens.items(.tag);
     const token_starts = tokens.items(.start);
 
-    var cells_slice = cells.slice();
-    defer cells.* = cells_slice.toMultiArrayList();
-
+    // Parse each line
+    var lines = std.mem.tokenizeScalar(u8, src, '\n');
     var token_index: u32 = 0;
+    var total_strings_len: usize = 0;
     while (lines.next()) |_| {
         const parser = ast.initTokens(
             sheet,
@@ -650,13 +617,19 @@ fn bulkParse(
             error.UnexpectedToken,
             error.InvalidCellAddress,
             error.InvalidBuiltin,
-            => continue,
-            error.OutOfMemory => return error.OutOfMemory,
+            => {
+                @branchHint(.unlikely);
+                continue;
+            },
+            error.OutOfMemory => {
+                @branchHint(.cold);
+                return error.OutOfMemory;
+            },
         };
         token_index += parser.tok_i;
         const expr_root: ast.Index = .from(@intCast(sheet.ast_nodes.len - 1));
 
-        total_strings_len += parser.strings_len + 1;
+        total_strings_len += parser.strings_len;
 
         const data = sheet.ast_nodes.items(.data);
         assert(sheet.ast_nodes.items(.tag)[expr_root.n] == .assignment);
@@ -664,11 +637,29 @@ fn bulkParse(
         sheet.ast_nodes.len -= 1;
         const spliced_root: ast.Index = .from(expr_root.n - 1);
 
-        const index = cells_slice.len;
-        cells_slice.len += 1;
-        cells_slice.items(.root)[index] = spliced_root;
-        cells_slice.items(.pos)[index] = pos;
+        assignments.appendAssumeCapacity(.{
+            .pos = pos,
+            .root = spliced_root,
+        });
     }
+
+    const Context = struct {
+        /// Column major ordering so we can easily get the indexes of the columns we need to
+        /// create.
+        pub fn lessThan(_: @This(), a: Assignment, b: Assignment) bool {
+            const a_int = @as(u64, a.pos.x) * (std.math.maxInt(u32) + 1) + a.pos.y;
+            const b_int = @as(u64, b.pos.x) * (std.math.maxInt(u32) + 1) + b.pos.y;
+            return a_int < b_int;
+        }
+
+        pub fn eql(_: @This(), a: Assignment, b: Assignment) bool {
+            return a.pos == b.pos;
+        }
+    };
+
+    std.mem.sortUnstable(Assignment, assignments.items, Context{}, Context.lessThan);
+    const new_len = utils.collapseRepeats(Assignment, assignments.items, Context{});
+    assignments.items.len = new_len;
 
     return total_strings_len;
 }
@@ -677,6 +668,7 @@ fn resetArena(sheet: *Sheet) void {
     _ = sheet.arena.reset(.{ .retain_with_limit = arena_retain_size });
 }
 
+// TODO: Make this function work for non-empty sheets
 // Optimized for bulk loading
 pub fn interpretSource(sheet: *Sheet, reader: *std.io.Reader) !void {
     assert(reader.buffer.len > 0);
@@ -685,7 +677,7 @@ pub fn interpretSource(sheet: *Sheet, reader: *std.io.Reader) !void {
     const arena = sheet.arena.allocator();
     defer sheet.resetArena();
 
-    var cells: std.MultiArrayList(Assignment) = .empty;
+    var assignments: std.ArrayListUnmanaged(Assignment) = .empty;
     var tokens: std.MultiArrayList(Tokenizer.Token) = .empty;
 
     while (true) {
@@ -698,11 +690,11 @@ pub fn interpretSource(sheet: *Sheet, reader: *std.io.Reader) !void {
         const src = bytes[0..end];
         reader.toss(@min(end + 1, bytes.len));
 
-        cells.clearRetainingCapacity();
+        assignments.clearRetainingCapacity();
         tokens.clearRetainingCapacity();
         const ast_nodes_start: u32 = @intCast(sheet.ast_nodes.len);
-        const total_strings_len = try sheet.bulkParse(src, arena, &tokens, arena, &cells);
-        if (cells.len == 0) continue;
+        const total_strings_len = try sheet.bulkParse(src, arena, &tokens, arena, &assignments);
+        if (assignments.items.len == 0) continue;
 
         const dependent_count = blk: {
             var dependent_count: Cell.Handle.Int = 0;
@@ -712,49 +704,50 @@ pub fn interpretSource(sheet: *Sheet, reader: *std.io.Reader) !void {
             break :blk dependent_count;
         };
 
-        try sheet.cell_tree.ensureUnusedCapacity(sheet.allocator, @intCast(cells.len));
-        try sheet.dependents.ensureUnusedCapacity(sheet.allocator, @intCast(dependent_count));
-        try sheet.deps.ensureUnusedCapacity(sheet.allocator, dependent_count);
-        try sheet.undos.ensureUnusedCapacity(sheet.allocator, cells.len + 1); // + 1 for sentinel
+        // Count the number of columns required
+        const col_count = blk: {
+            var col_count: u32 = 1;
+            for (
+                assignments.items[0 .. assignments.items.len - 1],
+                assignments.items[1..],
+            ) |assignment, next_assignment| {
+                const x1 = assignment.pos.x;
+                const x2 = next_assignment.pos.x;
+                if (x1 != x2) col_count += 1;
+            }
+            break :blk col_count;
+        };
 
-        try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, total_strings_len);
-        try sheet.cols.ensureUnusedCapacity(sheet.allocator, @intCast(cells.len));
-        try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, 1);
+        try sheet.ensureUnusedCellCapacity(assignments.items.len);
+        try sheet.dependents.ensureUnusedCapacity(sheet.allocator, dependent_count);
+        try sheet.deps.ensureUnusedCapacity(sheet.allocator, dependent_count);
+        try sheet.undos.ensureUnusedCapacity(sheet.allocator, assignments.items.len + 1); // + 1 for sentinel
+
+        try sheet.ensureUnusedStringsCapacity(total_strings_len);
+        try sheet.ensureUnusedColumnCapacity(col_count);
+        try sheet.ensureUnusedCellQueueCapacity(1);
         errdefer comptime unreachable;
 
-        const cells_slice = cells.slice();
+        sheet.dupeAstStrings(src, .from(ast_nodes_start), .from(@intCast(sheet.ast_nodes.len)));
 
-        // Copy the string values from every cell into the string table
-        var start: u32 = ast_nodes_start;
-        for (cells_slice.items(.root), cells_slice.items(.strings)) |root, *string_index| {
-            string_index.* = sheet.dupeAstStrings(src, .from(start), root);
-            start = root.n + 1;
-        }
-
-        // TODO: Should we even create undos for loading a sheet?
-        // Create all undos
-        for (cells_slice.items(.pos)) |pos| {
-            sheet.undos.appendAssumeCapacity(.init(.delete_cell, pos));
-        }
-
-        // Queue up all the to-be-inserted cells for update
         const start_node_index = sheet.cell_tree.leaves.len;
-        sheet.cell_tree.leaves.len += cells.len;
+        sheet.cell_tree.leaves.len += assignments.items.len;
         assert(sheet.cell_tree.leaves.len <= sheet.cell_tree.leaves.capacity);
+
+        sheet.undos.appendAssumeCapacity(.init(.bulk_cell_delete_contiguous, .{
+            .start = start_node_index,
+            .end = sheet.cell_tree.leaves.len,
+        }));
 
         sheet.queued_cells.appendAssumeCapacity(.{
             .from(@intCast(start_node_index)),
-            @intCast(cells.len),
+            @intCast(assignments.items.len),
         });
 
         sheet.has_changes = true;
 
-        for (
-            cells_slice.items(.root),
-            cells_slice.items(.pos),
-            cells_slice.items(.strings),
-            start_node_index..,
-        ) |root, pos, strings, i| {
+        for (assignments.items, start_node_index..) |assignment, i| {
+            const pos = assignment.pos;
             const handle: Cell.Handle = .from(@intCast(i));
             _ = sheet.createColumnAssumeCapacity(pos.x);
 
@@ -762,18 +755,14 @@ pub fn interpretSource(sheet: *Sheet, reader: *std.io.Reader) !void {
                 .point = .{ pos.x, pos.y },
                 .parent = .invalid,
                 .value = .{
-                    .expr_root = root,
-                    .strings = strings,
+                    .expr_root = assignment.root,
                     .state = .enqueued,
                 },
             });
 
-            const removed = sheet.cell_tree.insertAssumeCapacity(&.{ pos.x, pos.y }, handle);
-            if (removed != .invalid) {
-                sheet.cell_tree.destroyValue(removed);
-            }
+            sheet.cell_tree.insertAssumeCapacityNoClobber(&.{ pos.x, pos.y }, handle);
 
-            sheet.addCellAsDependentOfExprRanges(handle, root);
+            sheet.addCellAsDependentOfExprRanges(handle, assignment.root);
         }
     }
 }
@@ -1367,8 +1356,7 @@ fn bulkInsertCellHandles(sheet: *Sheet, handles: []const Cell.Handle) void {
     for (handles) |handle| {
         const cell = sheet.getCellFromHandle(handle);
         const p = sheet.cell_tree.getPoint(handle).*;
-        const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
-        assert(removed == .invalid);
+        sheet.cell_tree.insertAssumeCapacityNoClobber(&p, handle);
         sheet.addCellAsDependentOfExprRanges(handle, cell.expr_root);
         cell.state = .enqueued;
     }
@@ -1383,14 +1371,13 @@ fn bulkInsertCellHandlesContiguous(sheet: *Sheet, start: Cell.Handle.Int, end: C
         const handle: Cell.Handle = .from(@intCast(i));
         const cell = sheet.getCellFromHandle(handle);
         const p = sheet.cell_tree.getPoint(handle);
-        const removed = sheet.cell_tree.insertAssumeCapacity(p, handle);
-        assert(removed == .invalid);
+        sheet.cell_tree.insertAssumeCapacityNoClobber(p, handle);
         sheet.addCellAsDependentOfExprRanges(handle, cell.expr_root);
         cell.state = .enqueued;
     }
 }
 
-fn getUndoCellsSlice(sheet: *Sheet, index: u32) []Cell.Handle {
+fn getUndoCellsSlice(sheet: *Sheet, index: usize) []Cell.Handle {
     for (sheet.cell_buffer.items[index..], index..) |handle, i| {
         if (handle == .invalid) {
             assert(i > index);
@@ -1584,41 +1571,48 @@ pub fn needsUpdate(sheet: *const Sheet) bool {
     return sheet.queued_cells.items.len > 0;
 }
 
+fn dupeExprStrings(
+    sheet: *Sheet,
+    source: []const u8,
+    root_node: ast.Index,
+) void {
+    sheet.dupeAstStrings(
+        source,
+        ast.leftMostChild(sheet.ast_nodes, root_node),
+        .from(root_node.n + 1),
+    );
+}
+
 fn dupeAstStrings(
     sheet: *Sheet,
     source: []const u8,
     start: ast.Index,
-    root_node: ast.Index,
-) StringIndex {
-    assert(root_node.n < sheet.ast_nodes.len);
-    assert(start.n <= root_node.n);
+    end: ast.Index,
+) void {
+    assert(end.n <= sheet.ast_nodes.len);
+    assert(start.n < end.n);
 
-    const tags = sheet.ast_nodes.items(.tag)[start.n .. root_node.n + 1];
-    const data = sheet.ast_nodes.items(.data)[start.n .. root_node.n + 1];
-
-    const ret: StringIndex = .from(@intCast(sheet.strings_buf.items.len));
+    const slice = sheet.ast_nodes.subslice(start.n, end.n - start.n);
 
     // Append contents of all string literals to the list, and update their `start` and `end`
     // indices to be into this list.
-    for (tags, 0..) |tag, i| {
+    for (slice.items(.tag), 0..) |tag, i| {
         if (tag == .string_literal) {
-            const str = &data[i].string_literal;
+            const str = &slice.items(.data)[i].string_literal;
             const bytes = source[str.start..str.end];
             str.start = @intCast(sheet.strings_buf.items.len);
             str.end = @intCast(str.start + bytes.len);
             sheet.strings_buf.appendSliceAssumeCapacity(bytes);
         }
     }
-    sheet.strings_buf.appendAssumeCapacity(0);
-    return ret;
 }
 
 fn ensureUnusedCellCapacity(sheet: *Sheet, n: usize) !void {
     try sheet.cell_tree.ensureUnusedCapacity(sheet.allocator, n);
 }
 
-fn ensureUnusedStringsCapacity(sheet: *Sheet, n: u32) !void {
-    try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, n + 1);
+fn ensureUnusedStringsCapacity(sheet: *Sheet, n: usize) !void {
+    try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, n);
 }
 
 fn ensureUnusedCellQueueCapacity(sheet: *Sheet, n: usize) !void {
@@ -1636,7 +1630,7 @@ fn ensureUnusedAstNodeCapacity(sheet: *Sheet, n: u32) !void {
     try m.ensureUnusedCapacity(sheet.allocator, n);
 }
 
-fn ensureUnusedCellBufferCapacity(sheet: *Sheet, n: u32) !void {
+fn ensureUnusedCellBufferCapacity(sheet: *Sheet, n: usize) !void {
     try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, n);
 }
 
@@ -1718,7 +1712,6 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
         sheet.cell_tree.getValue(handle).* = .{
             .state = .enqueued,
             .expr_root = expr,
-            .strings = .invalid,
         };
     }
 
@@ -1766,8 +1759,7 @@ pub fn bulkInsertContiguousCells(
     for (cells_start.int()..end) |i| {
         const handle: Cell.Handle = .from(@intCast(i));
         const p = sheet.cell_tree.getPoint(handle).*;
-        const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
-        assert(removed == .invalid);
+        sheet.cell_tree.insertAssumeCapacityNoClobber(&p, handle);
         sheet.addCellAsDependentOfExprRanges(handle, sheet.getCellFromHandle(handle).expr_root);
         sheet.getCellFromHandle(handle).state = .enqueued;
     }
@@ -1817,7 +1809,7 @@ pub fn bulkSetCellExpr(
     const area: u32 = @intCast(range.area());
     const width = range.width();
     try sheet.ensureUnusedCellCapacity(area);
-    try sheet.ensureUnusedStringsCapacity(@intCast(source.len));
+    try sheet.ensureUnusedStringsCapacity(source.len);
     if (need_cell_eval)
         try sheet.ensureUnusedCellQueueCapacity(1);
     try sheet.ensureExpressionDependentsCapacity(expr);
@@ -1836,8 +1828,7 @@ pub fn bulkSetCellExpr(
 
     _ = sheet.deleteCellRangeAssumeCapacity(range, opts.undo_opts);
 
-    const ast_start_node = ast.leftMostChild(sheet.ast_nodes, expr);
-    const strings = sheet.dupeAstStrings(source, ast_start_node, expr);
+    sheet.dupeExprStrings(source, expr);
 
     const handles_start = sheet.cell_tree.leaves.len;
 
@@ -1878,7 +1869,6 @@ pub fn bulkSetCellExpr(
         .value_tag = opts.tag,
         .state = if (need_cell_eval) .enqueued else .up_to_date,
         .expr_root = expr,
-        .strings = strings,
     };
     sheet.cell_tree.leaves.len += area;
     // All created cells share the same cell value
@@ -1902,8 +1892,7 @@ pub fn bulkSetCellExpr(
             const p: CellTree.Point = .{ @intCast(x), @intCast(y) };
             point_slice[handle.int()] = p;
 
-            const removed = sheet.cell_tree.insertAssumeCapacity(&p, handle);
-            assert(removed == .invalid);
+            sheet.cell_tree.insertAssumeCapacityNoClobber(&p, handle);
         }
     }
 
@@ -1922,19 +1911,17 @@ pub fn setCell(
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
     try sheet.ensureUnusedCellCapacity(1);
-    try sheet.ensureUnusedStringsCapacity(@intCast(source.len));
+    try sheet.ensureUnusedStringsCapacity(source.len);
     try sheet.ensureUnusedCellQueueCapacity(1);
     try sheet.ensureExpressionDependentsCapacity(expr_root);
     try sheet.ensureUnusedUndoCapacity(1);
     _ = try sheet.createColumn(pos.x);
     errdefer comptime unreachable;
 
-    const ast_start_node = ast.leftMostChild(sheet.ast_nodes, expr_root);
-    const strings = sheet.dupeAstStrings(source, ast_start_node, expr_root);
+    sheet.dupeExprStrings(source, expr_root);
 
     const new_node = sheet.cell_tree.createValueAssumeCapacity(&.{ pos.x, pos.y }, .{
         .expr_root = expr_root,
-        .strings = strings,
     });
 
     return sheet.insertCellNode(new_node, undo_opts);
@@ -2232,8 +2219,7 @@ pub fn deleteColOrRowRange(
                 // This is undone by the .insert undo
                 p[index] -= deleted_count;
                 p[index + 2] -= deleted_count;
-                const removed = sheet.dependents.insertAssumeCapacity(p, handle);
-                assert(removed == .invalid);
+                sheet.dependents.insertAssumeCapacityNoClobber(p, handle);
             }
         } else if (p[index + 2] <= end) {
             // Deletion contains range end
@@ -2441,8 +2427,7 @@ pub fn insertColsOrRows(
     for (cells.items) |handle| {
         const p = sheet.cell_tree.getPoint(handle);
         p[dim] += n;
-        const removed = sheet.cell_tree.insertAssumeCapacity(p, handle);
-        assert(removed == .invalid);
+        sheet.cell_tree.insertAssumeCapacityNoClobber(p, handle);
     }
 
     // Remove affected dependency ranges
@@ -3018,7 +3003,6 @@ pub fn createCellCopiesContiguous(
                 .value = .{
                     .state = .enqueued,
                     .expr_root = expr_root,
-                    .strings = src_cell.strings,
                 },
             });
             dest_handle_int += 1;
@@ -3751,39 +3735,6 @@ test "Cell error propagation" {
     try expectCellError(&sheet, "B0");
 }
 
-test "DupeStrings" {
-    const t = std.testing;
-    var sheet = try Sheet.init(t.allocator);
-    defer sheet.deinit();
-
-    {
-        const source = "let a0 = 'this is epic' # 'nice' # 'string!'";
-        const expr_root = try ast.parseFromSource(sheet.allocator, &sheet.ast_nodes, source);
-
-        try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, source.len);
-        const strings = sheet.dupeAstStrings(
-            source,
-            ast.leftMostChild(sheet.ast_nodes, expr_root),
-            expr_root,
-        );
-
-        try t.expectEqualStrings("this is epicnicestring!", sheet.getStringSlice(strings));
-    }
-
-    {
-        const source = "let a0 = b0";
-        const expr_root = try ast.parseFromSource(sheet.allocator, &sheet.ast_nodes, source);
-
-        try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, source.len);
-        const strings = sheet.dupeAstStrings(
-            source,
-            ast.leftMostChild(sheet.ast_nodes, expr_root),
-            expr_root,
-        );
-        try t.expectEqualStrings("", sheet.getStringSlice(strings));
-    }
-}
-
 test "Overwrite with string" {
     const t = std.testing;
     var sheet = try Sheet.init(t.allocator);
@@ -4011,4 +3962,25 @@ test "tree root getting set to invalid" {
     try sheet.expectCellEquals("B0", 2);
     try sheet.expectCellEquals("C0", 4);
     try sheet.expectCellEquals("A1", 7);
+}
+
+test "read source with duplicate entries" {
+    const src =
+        \\let a0 = 10
+        \\let a0 = 20
+        \\let b0 = a0 * 2
+        \\let b0 = 5
+        \\
+    ;
+
+    var sheet = try init(std.testing.allocator);
+    defer sheet.deinit();
+
+    var r: std.io.Reader = .fixed(src);
+    try sheet.interpretSource(&r);
+
+    try sheet.update();
+
+    try sheet.expectCellEquals("A0", 20);
+    try sheet.expectCellEquals("B0", 5);
 }

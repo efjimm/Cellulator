@@ -17,6 +17,7 @@ const assert = std.debug.assert;
 
 pub const ParseError = Parser.ParseError;
 
+// TODO: Make these usize
 pub const String = extern struct {
     start: u32,
     end: u32,

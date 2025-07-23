@@ -2,6 +2,46 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
+/// Provides an `eql` method for `deduplicate` that works with any types supporting the `==`
+/// operator.
+pub const DeduplicateSimpleContext = struct {
+    pub fn eql(_: @This(), a: anytype, b: anytype) bool {
+        return a == b;
+    }
+};
+
+/// Collapse consecutive duplicate elements into one entry (the last one.)
+///
+/// `context` should provide a method with signature
+/// `fn eql(@TypeOf(context), a: T, b:T) bool`.
+pub fn collapseRepeats(T: type, items: []T, context: anytype) usize {
+    var i: usize = 0;
+    var copyback: usize = 0;
+
+    // Find the first duplicate
+    while (i + 1 < items.len) : (i += 1) {
+        if (context.eql(items[i], items[i + 1])) break;
+    }
+
+    while (i + 1 < items.len) : (i += 1) {
+        items[i - copyback] = items[i];
+
+        if (context.eql(items[i], items[i + 1])) {
+            copyback += 1;
+        }
+    }
+    items[i - copyback] = items[i];
+    return items.len - copyback;
+}
+
+test collapseRepeats {
+    var items = [_]u8{ 1, 1, 2, 3, 3, 4, 4, 4, 4, 5, 7, 7 };
+    const len = collapseRepeats(u8, &items, DeduplicateSimpleContext{});
+    const slice = items[0..len];
+    const expected = &[_]u8{ 1, 2, 3, 4, 5, 7 };
+    try std.testing.expectEqualSlices(u8, expected, slice);
+}
+
 pub fn enumFromEnum(E: type, a: anytype) E {
     return switch (a) {
         inline else => |t| @field(E, @tagName(t)),
