@@ -347,6 +347,7 @@ pub fn render(tui: *Tui, zc: *ZC) !void {
     defer {
         tui.zc = null;
         tui.rc = null;
+        tui.current_style = null;
     }
     errdefer unreachable;
 
