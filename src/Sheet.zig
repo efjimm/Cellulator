@@ -34,7 +34,7 @@ strings_buf: std.ArrayListUnmanaged(u8),
 /// that depend on that range.
 dependents: Dependents,
 
-// TODO: Make this not be linked list
+// TODO: This shit sucks
 deps: std.ArrayListUnmanaged(Dep) = .empty,
 free_deps: DepIndex = .none,
 
@@ -138,6 +138,8 @@ pub const Cell = extern struct {
     expr_root: ast.Index = .invalid,
 
     pub const Handle = CellTree.Leaf.Handle;
+
+    pub const Slice = CellTree.LeafSlice;
 
     // Non-extern unions get a hidden tag in safe builds which makes serialising them annoying.
     // So we use an extern union here.
@@ -721,7 +723,7 @@ pub fn interpretSource(sheet: *Sheet, reader: *std.io.Reader) !void {
         try sheet.ensureUnusedCellCapacity(assignments.items.len);
         try sheet.dependents.ensureUnusedCapacity(sheet.allocator, dependent_count);
         try sheet.deps.ensureUnusedCapacity(sheet.allocator, dependent_count);
-        try sheet.undos.ensureUnusedCapacity(sheet.allocator, assignments.items.len + 1); // + 1 for sentinel
+        try sheet.undos.ensureUnusedCapacity(sheet.allocator, 2); // + 1 for sentinel
 
         try sheet.ensureUnusedStringsCapacity(total_strings_len);
         try sheet.ensureUnusedColumnCapacity(col_count);
@@ -730,38 +732,36 @@ pub fn interpretSource(sheet: *Sheet, reader: *std.io.Reader) !void {
 
         sheet.dupeAstStrings(src, .from(ast_nodes_start), .from(@intCast(sheet.ast_nodes.len)));
 
-        const start_node_index = sheet.cell_tree.leaves.len;
-        sheet.cell_tree.leaves.len += assignments.items.len;
-        assert(sheet.cell_tree.leaves.len <= sheet.cell_tree.leaves.capacity);
+        const new_cells = sheet.cell_tree.addMany(assignments.items.len);
 
         sheet.undos.appendAssumeCapacity(.init(.bulk_cell_delete_contiguous, .{
-            .start = start_node_index,
-            .end = sheet.cell_tree.leaves.len,
+            .start = new_cells.offset,
+            .end = new_cells.end(),
         }));
 
         sheet.queued_cells.appendAssumeCapacity(.{
-            .from(@intCast(start_node_index)),
-            @intCast(assignments.items.len),
+            new_cells.handle(0),
+            new_cells.len,
         });
 
         sheet.has_changes = true;
 
-        for (assignments.items, start_node_index..) |assignment, i| {
+        for (assignments.items, 0..) |assignment, i| {
             const pos = assignment.pos;
-            const handle: Cell.Handle = .from(@intCast(i));
+            // TODO: Remove this
             _ = sheet.createColumnAssumeCapacity(pos.x);
 
-            sheet.cell_tree.leaves.set(handle.int(), .{
-                .point = .{ pos.x, pos.y },
+            new_cells.set(i, .{
                 .parent = .invalid,
+                .point = pos.array(),
                 .value = .{
                     .expr_root = assignment.root,
                     .state = .enqueued,
                 },
             });
 
-            sheet.cell_tree.insertAssumeCapacityNoClobber(&.{ pos.x, pos.y }, handle);
-
+            const handle = new_cells.handle(i);
+            sheet.cell_tree.insertAssumeCapacityNoClobber(&pos.array(), handle);
             sheet.addCellAsDependentOfExprRanges(handle, assignment.root);
         }
     }
@@ -1332,12 +1332,9 @@ fn bulkDeleteCellHandles(sheet: *Sheet, handles: []const Cell.Handle) void {
 }
 
 fn bulkDeleteCellHandlesContiguous(sheet: *Sheet, start: Cell.Handle.Int, end: Cell.Handle.Int) void {
-    assert(start < sheet.cell_tree.leaves.len);
-    assert(end <= sheet.cell_tree.leaves.len);
-
-    for (start..end) |i| {
-        const handle: Cell.Handle = .from(@intCast(i));
-        const cell = sheet.getCellFromHandle(handle);
+    const cells = sheet.cell_tree.slice(start, end - start);
+    for (cells.values(), 0..) |*cell, i| {
+        const handle = cells.handle(i);
         // TODO: Doing this in a separate loop from removeHandle might be better
         sheet.removeCellAsDependentOfExpr(handle, cell.expr_root, true);
         sheet.setCellError(cell);
@@ -1363,14 +1360,11 @@ fn bulkInsertCellHandles(sheet: *Sheet, handles: []const Cell.Handle) void {
 }
 
 fn bulkInsertCellHandlesContiguous(sheet: *Sheet, start: Cell.Handle.Int, end: Cell.Handle.Int) void {
-    assert(start < sheet.cell_tree.leaves.len);
-    assert(end <= sheet.cell_tree.leaves.len);
-
     sheet.queued_cells.appendAssumeCapacity(.{ .from(start), end - start });
-    for (start..end) |i| {
-        const handle: Cell.Handle = .from(@intCast(i));
-        const cell = sheet.getCellFromHandle(handle);
-        const p = sheet.cell_tree.getPoint(handle);
+
+    const cells = sheet.cell_tree.slice(start, end - start);
+    for (cells.values(), cells.points(), 0..) |*cell, *p, i| {
+        const handle = cells.handle(i);
         sheet.cell_tree.insertAssumeCapacityNoClobber(p, handle);
         sheet.addCellAsDependentOfExprRanges(handle, cell.expr_root);
         cell.state = .enqueued;
@@ -1721,17 +1715,17 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
 /// Creates a new cell handle for every cell in `range`. Only sets the point field of each handle.
 /// Only allocates memory for the cell tree.
 pub fn bulkCreateCellRange(sheet: *Sheet, range: Rect) Cell.Handle {
-    const area: u32 = @intCast(range.area());
+    // TODO: Fix this cast. This could feasibly overflow on 32-bit targets.
+    const area: usize = @intCast(range.area());
     // assert(sheet.cell_tree.nodes.capacity - sheet.cell_tree.nodes.len >= area);
-    const start: Cell.Handle = .from(@intCast(sheet.cell_tree.leaves.len));
-    sheet.cell_tree.leaves.len += area;
+    const new_cells = sheet.cell_tree.addMany(area);
 
-    var i = start.int();
+    var i: usize = 0;
     var y: u64 = range.tl.y;
     while (y <= range.br.y) : (y += 1) {
         var x: u64 = range.tl.x;
         while (x <= range.br.x) : (x += 1) {
-            sheet.cell_tree.getPoint(.from(i)).* = .{
+            new_cells.getPoint(i).* = .{
                 @intCast(x),
                 @intCast(y),
             };
@@ -1739,7 +1733,7 @@ pub fn bulkCreateCellRange(sheet: *Sheet, range: Rect) Cell.Handle {
         }
     }
 
-    return start;
+    return new_cells.handle(0);
 }
 
 /// Inserts all the cells from `cells_start` to `sheet.cell_tree.entries.len` into the cell tree.
@@ -1750,40 +1744,38 @@ pub fn bulkInsertContiguousCells(
     cells_start: Cell.Handle,
     opts: UndoOpts,
 ) void {
-    const cell_count = sheet.cell_tree.leaves.len - cells_start.int();
-    assert(sheet.cell_tree.leaves.len <= sheet.cell_tree.leaves.capacity);
-    assert(cell_count > 0);
-    assert(sheet.cell_buffer.capacity - sheet.cell_buffer.items.len >= cell_count + 1);
+    const cells = sheet.cell_tree.sliceToEnd(cells_start.int());
+    assert(cells.len > 0);
+    assert(sheet.cell_buffer.capacity - sheet.cell_buffer.items.len >= cells.len + 1);
 
-    const end = sheet.cell_tree.leaves.len;
-    for (cells_start.int()..end) |i| {
-        const handle: Cell.Handle = .from(@intCast(i));
-        const p = sheet.cell_tree.getPoint(handle).*;
-        sheet.cell_tree.insertAssumeCapacityNoClobber(&p, handle);
-        sheet.addCellAsDependentOfExprRanges(handle, sheet.getCellFromHandle(handle).expr_root);
-        sheet.getCellFromHandle(handle).state = .enqueued;
+    for (cells.points(), cells.values(), 0..) |*p, *cell, i| {
+        const handle = cells.handle(i);
+        sheet.cell_tree.insertAssumeCapacityNoClobber(p, handle);
+        sheet.addCellAsDependentOfExprRanges(handle, cell.expr_root);
+        cell.state = .enqueued;
     }
 
     sheet.pushUndoAssumeCapacity(.init(.bulk_cell_delete_contiguous, .{
-        .start = cells_start.int(),
-        .end = @intCast(end),
+        .start = cells.offset,
+        .end = cells.end(),
     }), opts);
 }
 
 /// Creates all the columns required by range.
 fn createColumnRangeAssumeCapacity(sheet: *Sheet, range: Rect) void {
     const width = range.width();
-    const cols_start = sheet.cols.leaves.len;
-    sheet.cols.leaves.len += width;
-    @memset(sheet.cols.leaves.items(.value)[cols_start..], .{});
+    const new_cols = sheet.cols.addMany(width);
+    @memset(new_cols.values(), .{});
 
-    for (range.tl.x.., cols_start..sheet.cols.leaves.len) |x, i| {
-        const handle: Column.Handle = .from(@intCast(i));
-        const existing = sheet.cols.insertAssumeCapacity(&.{@intCast(x)}, handle);
+    var i: u32 = 0;
+    while (i < new_cols.len) : (i += 1) {
+        const handle = new_cols.handle(i);
+        const x = range.tl.x + i;
+        const removed = sheet.cols.insertAssumeCapacity(&.{x}, handle);
 
-        if (existing != .invalid) {
-            sheet.cols.getValue(handle).* = sheet.cols.getValue(existing).*;
-            sheet.cols.destroyValue(existing);
+        if (removed != .invalid) {
+            sheet.cols.getValue(handle).* = sheet.cols.getValue(removed).*;
+            sheet.cols.destroyValue(removed);
         } else {
             sheet.cols.getValue(handle).* = .{};
         }
@@ -1830,7 +1822,7 @@ pub fn bulkSetCellExpr(
 
     sheet.dupeExprStrings(source, expr);
 
-    const handles_start = sheet.cell_tree.leaves.len;
+    const new_cells = sheet.cell_tree.addMany(area);
 
     // Create dependency information
     // For each range we depend on, prepend the cell handle of every cell we're creating
@@ -1845,12 +1837,11 @@ pub fn bulkSetCellExpr(
         if (!res.found_existing) head.* = .none;
 
         const start = sheet.deps.items.len;
-        sheet.deps.items.len += area;
-        const new_deps = sheet.deps.items[start..];
+        const new_deps = sheet.deps.addManyAtAssumeCapacity(sheet.deps.items.len, area);
         // TODO: Make this suck less
-        for (new_deps, start + 1.., handles_start..) |*dep, i, handle_index| {
+        for (new_deps, start + 1.., 0..) |*dep, i, j| {
             dep.* = .{
-                .handle = .from(@intCast(handle_index)),
+                .handle = new_cells.handle(j),
                 .next = .from(@intCast(i)),
             };
         }
@@ -1859,7 +1850,7 @@ pub fn bulkSetCellExpr(
     }
 
     if (need_cell_eval) {
-        sheet.queued_cells.appendAssumeCapacity(.{ .from(@intCast(handles_start)), area });
+        sheet.queued_cells.appendAssumeCapacity(.{ new_cells.handle(0), area });
     }
 
     sheet.createColumnRangeAssumeCapacity(range);
@@ -1870,35 +1861,34 @@ pub fn bulkSetCellExpr(
         .state = if (need_cell_eval) .enqueued else .up_to_date,
         .expr_root = expr,
     };
-    sheet.cell_tree.leaves.len += area;
     // All created cells share the same cell value
-    @memset(sheet.cell_tree.leaves.items(.value)[handles_start..], cell);
-    @memset(sheet.cell_tree.leaves.items(.parent)[handles_start..], .invalid);
+    @memset(new_cells.values(), cell);
+    @memset(new_cells.parents(), .invalid);
 
     // TODO: These inserts get slow when we start inserting millions of cells at once.
     //       Each insert does a separate lookup. We should find some way to exploit the internal
     //       layout of the phtree to make inserting consecutive points faster.
     //       We could build the tree bottom-up?
-    const end = sheet.cell_tree.leaves.len;
-    const point_slice = sheet.cell_tree.leaves.items(.point);
+    const points = new_cells.points();
     var y: u64 = range.tl.y;
     while (y <= range.br.y) : (y += 1) {
         var x: u64 = range.tl.x;
         while (x <= range.br.x) : (x += 1) {
             const y_off = (y - range.tl.y) * width;
             const x_off = x - range.tl.x;
-            const off = y_off + x_off;
-            const handle: Cell.Handle = .from(@intCast(handles_start + off));
-            const p: CellTree.Point = .{ @intCast(x), @intCast(y) };
-            point_slice[handle.int()] = p;
 
+            const off = y_off + x_off;
+            const p: CellTree.Point = .{ @intCast(x), @intCast(y) };
+            points[off] = p;
+
+            const handle = new_cells.handle(off);
             sheet.cell_tree.insertAssumeCapacityNoClobber(&p, handle);
         }
     }
 
     sheet.pushUndoAssumeCapacity(.init(.bulk_cell_delete_contiguous, .{
-        .start = @intCast(handles_start),
-        .end = @intCast(end),
+        .start = new_cells.offset,
+        .end = new_cells.end(),
     }), opts.undo_opts);
 }
 
@@ -2190,9 +2180,6 @@ pub fn deleteColOrRowRange(
     //  Deletion is before range and does not intersect it
     //   -> Range start and end needs to be decremented, no undo
     for (deps.items) |handle| {
-        if (handle.int() >= sheet.dependents.leaves.len)
-            continue;
-
         const p = sheet.dependents.getPoint(handle);
         sheet.dependents.removeHandle(handle);
         const head = sheet.dependents.getValue(handle);
@@ -2877,25 +2864,22 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Rect, comptime adjust: Adjust
     errdefer comptime unreachable;
 
     const new_cells = sheet.createCellCopiesContiguous(cells.items, src, dest.tl, tile_x, tile_y, adjust);
-    const end = sheet.cell_tree.leaves.len;
 
     _ = sheet.deleteCellRangeAssumeCapacity(real_dest, .{});
     sheet.bulkInsertCellHandlesContiguous(
-        new_cells.int(),
-        end,
+        new_cells.offset,
+        new_cells.end(),
     );
     sheet.pushUndo(.init(.bulk_cell_delete_contiguous, .{
-        .start = new_cells.int(),
-        .end = end,
+        .start = new_cells.offset,
+        .end = new_cells.end(),
     }), .{}) catch unreachable;
 }
 
 pub const Adjust = enum { adjust, no_adjust };
 
-/// Copies all the cells in `cell_handles`, returning the first cell handle created. The  strings
-/// are shared between the original and copied cells. The created cells are appended at the end of
-/// the cell tree's leaves array and as such have continuous handles. The cells are not inserted
-/// into the tree.
+/// Copies all the cells in `cell_handles`, returning a slice of the created cells. The cells are
+/// not inserted into the tree.
 ///
 /// The point of each cell is set to src + (dest - origin).
 pub fn createCellCopiesContiguous(
@@ -2906,15 +2890,14 @@ pub fn createCellCopiesContiguous(
     tile_x: u64,
     tile_y: u64,
     comptime adjust: Adjust,
-) Cell.Handle {
-    const start: Cell.Handle = .from(@intCast(sheet.cell_tree.leaves.len));
-
+) Cell.Slice {
     const x_diff, const y_diff = dest.diff(origin.tl);
     assert(x_diff != 0 or y_diff != 0);
     const height = origin.height2();
     const width = origin.width2();
 
-    var dest_handle_int = start.int();
+    var slice = sheet.cell_tree.endSlice(0);
+
     for (cell_handles) |src_handle| {
         const src_point = sheet.cell_tree.getPoint(src_handle);
         const src_pos: Position = .init(src_point[0], src_point[1]);
@@ -2995,9 +2978,7 @@ pub fn createCellCopiesContiguous(
                 .no_adjust => src_cell.expr_root,
             };
 
-            sheet.cell_tree.leaves.len += 1;
-            assert(sheet.cell_tree.leaves.len <= sheet.cell_tree.leaves.capacity);
-            sheet.cell_tree.leaves.set(dest_handle_int, .{
+            slice.append(.{
                 .point = .{ @intCast(tiled_x), @intCast(tiled_y) },
                 .parent = .invalid,
                 .value = .{
@@ -3005,11 +2986,11 @@ pub fn createCellCopiesContiguous(
                     .expr_root = expr_root,
                 },
             });
-            dest_handle_int += 1;
         }
     }
 
-    return start;
+    sheet.cell_tree.commitSlice(&slice);
+    return slice;
 }
 
 test "Sheet basics" {

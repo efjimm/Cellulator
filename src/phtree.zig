@@ -1,4 +1,3 @@
-// TODO: Discover and assert more invariants to improve robustness
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -142,6 +141,101 @@ pub fn PhTree(
             tree.branches.deinit(allocator);
             tree.leaves.deinit(allocator);
         }
+
+        /// Create many values at a time, returning a slice of the newly created values.
+        /// Sidesteps the free-list in order to provide a block of contiguous handles quickly. This
+        /// can be very, very, beneficial for performance for multiple reasons, but can cause memory
+        /// fragmentation. The handles being contiguous allows referring to all of them using just
+        /// a start index and a length. The memory for the cells is also contiguous. It also means
+        /// allocating them is just bumping the length, instead of traversing the free list.
+        pub fn addMany(tree: *@This(), n: HandleInt) LeafSlice {
+            assert(tree.leaves.capacity - tree.leaves.len >= n);
+            const start = tree.leaves.len;
+            tree.leaves.len += n;
+            const ret = tree.slice(@intCast(start), n);
+            if (runtime_safety) {
+                for (0..n) |i| ret.set(@intCast(i), undefined);
+            }
+            return ret;
+        }
+
+        pub fn slice(tree: *@This(), i: HandleInt, len: HandleInt) LeafSlice {
+            assert(i + len <= tree.leaves.len);
+            return .{
+                .points_ptr = tree.leaves.items(.point)[i..].ptr,
+                .parents_ptr = tree.leaves.items(.parent)[i..].ptr,
+                .values_ptr = tree.leaves.items(.value)[i..].ptr,
+                .len = len,
+                .offset = i,
+                .capacity = @intCast(tree.leaves.capacity - i),
+            };
+        }
+
+        // Returns a slice of the last `n` leaves.
+        pub fn endSlice(tree: *@This(), n: HandleInt) LeafSlice {
+            return tree.slice(@intCast(tree.leaves.len - n), n);
+        }
+
+        pub fn sliceToEnd(tree: *@This(), offset: HandleInt) LeafSlice {
+            return tree.slice(offset, @intCast(tree.leaves.len - offset));
+        }
+
+        pub fn commitSlice(tree: *@This(), s: *const LeafSlice) void {
+            if (s.offset + s.len > tree.leaves.len) {
+                tree.leaves.len = s.offset + s.len;
+                assert(tree.leaves.len <= tree.leaves.capacity);
+            }
+        }
+
+        pub const LeafSlice = struct {
+            points_ptr: [*]Point,
+            parents_ptr: [*]Branch.Handle,
+            values_ptr: [*]V,
+
+            offset: HandleInt,
+            len: HandleInt,
+            capacity: HandleInt,
+
+            pub fn set(s: *const LeafSlice, i: HandleInt, leaf: Leaf) void {
+                assert(i < s.len);
+                s.parents_ptr[i] = leaf.parent;
+                s.points_ptr[i] = leaf.point;
+                s.values_ptr[i] = leaf.value;
+            }
+
+            pub fn getPoint(s: *const LeafSlice, i: HandleInt) *Point {
+                assert(i < s.len);
+                return &s.points_ptr[i];
+            }
+
+            pub fn end(s: *const LeafSlice) HandleInt {
+                return s.offset + s.len;
+            }
+
+            /// Converts an index into this slice into a handle.
+            pub fn handle(s: *const LeafSlice, i: HandleInt) Leaf.Handle {
+                return .from(s.offset + i);
+            }
+
+            pub fn values(s: *const LeafSlice) []V {
+                return s.values_ptr[0..s.len];
+            }
+
+            pub fn parents(s: *const LeafSlice) []Branch.Handle {
+                return s.parents_ptr[0..s.len];
+            }
+
+            pub fn points(s: *const LeafSlice) []Point {
+                return s.points_ptr[0..s.len];
+            }
+
+            /// Assumes that `s` is at the end of the original list.
+            pub fn append(s: *LeafSlice, leaf: Leaf) void {
+                assert(s.len < s.capacity);
+                s.len += 1;
+                s.set(s.len - 1, leaf);
+            }
+        };
 
         pub fn clearRetainingCapacity(tree: *@This()) void {
             tree.branches.len = 0;
@@ -304,6 +398,10 @@ pub fn PhTree(
 
         pub fn getValue(tree: *const @This(), handle: Leaf.Handle) *V {
             return tree.leafItem(handle, .value);
+        }
+
+        pub fn isValidHandle(tree: *const @This(), handle: Leaf.Handle) bool {
+            return handle.int() < tree.leaves.len;
         }
 
         pub fn insert(

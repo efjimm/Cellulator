@@ -22,6 +22,14 @@ pub const Position = packed struct {
         return .{ .x = x, .y = y };
     }
 
+    pub fn array(pos: Position) [2]Int {
+        return .{ pos.x, pos.y };
+    }
+
+    pub fn fromArray(arr: [2]Int) Position {
+        return .{ .x = arr[0], .y = arr[1] };
+    }
+
     /// Pushes the string representation of `pos` to the stack of the given Lua
     /// state. Also pushes a table containing the `x` and `y` values of `pos`.
     pub fn toLua(pos: Position, state: *Lua) !i32 {
@@ -293,6 +301,7 @@ pub const Position = packed struct {
             return r.br.y - r.tl.y;
         }
 
+        // TODO: Vet all usages of this function
         pub fn area(r: Rect) HashInt {
             return @as(HashInt, r.width()) * r.height();
         }
