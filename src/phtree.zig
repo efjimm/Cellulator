@@ -752,8 +752,9 @@ pub fn PhTree(
 
         pub fn largestDim(tree: *@This(), dim: u8) Leaf.Handle {
             var largest: Leaf.Handle = .invalid;
-            for (tree.leaves.items(.point), 0..) |p, i| {
-                const handle: Leaf.Handle = .from(@intCast(i));
+            const s = tree.slice(0, @intCast(tree.leaves.len));
+            for (s.points(), 0..) |p, i| {
+                const handle = s.handle(i);
                 if (largest == .invalid or tree.leafItem(largest, .point)[dim] < p[dim])
                     largest = handle;
             }

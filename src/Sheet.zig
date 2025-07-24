@@ -34,7 +34,6 @@ strings_buf: std.ArrayListUnmanaged(u8),
 /// that depend on that range.
 dependents: Dependents,
 
-// TODO: This shit sucks
 deps: std.ArrayListUnmanaged(Dep) = .empty,
 free_deps: DepIndex = .none,
 
@@ -546,8 +545,6 @@ pub fn deserialize(sheet: *Sheet, gpa: Allocator, file: std.fs.File) !void {
 }
 
 pub fn clearRetainingCapacity(sheet: *Sheet) void {
-    sheet.cols.root = .invalid;
-
     sheet.queued_cells.clearRetainingCapacity();
 
     sheet.cell_tree.clearRetainingCapacity();
@@ -807,7 +804,11 @@ pub fn writeFile(
 
     var buf: [8192]u8 = undefined;
     var writer = atomic_file.file.writer(&buf);
-    try sheet.writeContents(&writer.interface);
+    if (std.mem.endsWith(u8, filepath, ".csv")) {
+        try sheet.writeCsv(&writer.interface);
+    } else {
+        try sheet.writeContents(&writer.interface);
+    }
     try atomic_file.finish();
 
     if (opts.filepath) |path|
@@ -822,6 +823,59 @@ pub fn writeContents(sheet: *Sheet, writer: *std.io.Writer) !void {
         try writer.print("let {f}=", .{pos});
         try sheet.printCellExpression(pos, writer);
         try writer.writeByte('\n');
+    }
+
+    try writer.flush();
+}
+
+// TODO: This is terrible.
+pub fn writeCsv(sheet: *Sheet, writer: *std.io.Writer) !void {
+    const arena = sheet.arena.allocator();
+    defer sheet.resetArena();
+
+    const cap = sheet.cell_tree.leaves.len - sheet.cell_tree.freelist_count_leaf;
+    var handles: std.ArrayList(Cell.Handle) = try .initCapacity(arena, cap);
+    try sheet.cell_tree.queryWindow(&@splat(0), &@splat(std.math.maxInt(u32)), &handles);
+
+    const Context = struct {
+        tree: *const CellTree,
+
+        pub fn lessThan(ctx: @This(), a: Cell.Handle, b: Cell.Handle) bool {
+            const a_pos: Position = .fromArray(ctx.tree.getPoint(a).*);
+            const b_pos: Position = .fromArray(ctx.tree.getPoint(b).*);
+            return a_pos.hash() < b_pos.hash();
+        }
+    };
+
+    std.mem.sortUnstable(Cell.Handle, handles.items, Context{ .tree = &sheet.cell_tree }, Context.lessThan);
+
+    var last_line: u32 = 0;
+    var last_col: u32 = 0;
+    for (handles.items) |handle| {
+        const p = sheet.cell_tree.getPoint(handle).*;
+        if (p[1] != last_line) {
+            try writer.splatByteAll('\n', p[1] - last_line);
+            last_col = 0;
+        }
+
+        if (p[0] != last_col) {
+            try writer.splatByteAll(',', p[0] - last_col);
+        }
+        const cell = sheet.cell_tree.getValue(handle);
+        switch (cell.value_tag) {
+            .number => {
+                try writer.print("{d}", .{cell.value.number});
+            },
+            .string => {
+                const string = sheet.cellStringValue(cell);
+                try writer.writeAll(string);
+            },
+            .err => {
+                try writer.writeAll("ERROR");
+            },
+        }
+        last_line = p[1];
+        last_col = p[0];
     }
 
     try writer.flush();
@@ -3955,4 +4009,43 @@ test "read source with duplicate entries" {
 
     try sheet.expectCellEquals("A0", 20);
     try sheet.expectCellEquals("B0", 5);
+}
+
+test "save csv" {
+    const src1 =
+        \\let a0 = 10
+        \\let b0 = 20
+        \\let c0 = 30
+        \\let d5 = 10
+        \\let a1 = 3
+        \\let c2 = 5
+    ;
+
+    var sheet = try init(std.testing.allocator);
+    defer sheet.deinit();
+
+    var r: std.io.Reader = .fixed(src1);
+    try sheet.interpretSource(&r);
+    try sheet.update();
+
+    try sheet.expectCellEquals("a0", 10);
+    try sheet.expectCellEquals("b0", 20);
+    try sheet.expectCellEquals("c0", 30);
+    try sheet.expectCellEquals("d5", 10);
+    try sheet.expectCellEquals("a1", 3);
+    try sheet.expectCellEquals("c2", 5);
+
+    var aw: std.io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    try sheet.writeCsv(&aw.writer);
+    const expected1 =
+        \\10,20,30
+        \\3
+        \\,,5
+        \\
+        \\
+        \\,,,10
+    ;
+    try std.testing.expectEqualStrings(expected1, aw.getWritten());
 }

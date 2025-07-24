@@ -146,5 +146,4 @@ let D20 = D19+C20
 let E20 = E19+D20
 let F20 = F19+E20
 let G20 = G19+F20
-
-let A22 = @sum(a0:g20)
+let A22 = @sum(A0:G20)
