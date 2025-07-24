@@ -228,6 +228,10 @@ pub const Position = packed struct {
             return initPos(p, p);
         }
 
+        pub fn array(r: Rect) [4]Int {
+            return .{ r.tl.x, r.tl.y, r.br.x, r.br.y };
+        }
+
         pub fn perimeter(r: Rect) u64 {
             return @as(u64, r.width()) * 2 + @as(u64, r.height() * 2);
         }

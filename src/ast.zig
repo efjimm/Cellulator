@@ -77,9 +77,9 @@ pub const Node = extern struct {
 pub const NodeList = std.MultiArrayList(Node);
 pub const NodeSlice = NodeList.Slice;
 pub const Index = packed struct {
-    n: u32,
+    n: usize,
 
-    pub fn from(n: u32) Index {
+    pub fn from(n: usize) Index {
         return .{ .n = n };
     }
 
@@ -91,7 +91,7 @@ pub const Index = packed struct {
         return i != invalid;
     }
 
-    pub const invalid: Index = .{ .n = std.math.maxInt(u32) };
+    pub const invalid: Index = .{ .n = std.math.maxInt(usize) };
 };
 
 pub const NegativeOffset = enum(u32) {

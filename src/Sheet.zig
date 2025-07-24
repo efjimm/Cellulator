@@ -885,11 +885,7 @@ fn addCellAsDependentOfRange(
         range,
     });
 
-    const p: Dependents.Point = .{
-        range.tl.x, range.tl.y,
-        range.br.x, range.br.y,
-    };
-    const res = sheet.dependents.getOrPutAssumeCapacity(&p);
+    const res = sheet.dependents.getOrPutAssumeCapacity(&range.array());
     const head_ptr = res.value_ptr;
     if (!res.found_existing) {
         head_ptr.* = .none;
@@ -937,10 +933,7 @@ fn removeCellAsDependentOfRange(
     //     sheet.rectFromCellHandle(dependent),
     //     range,
     // });
-    const p: Dependents.Point = .{
-        range.tl.x, range.tl.y,
-        range.br.x, range.br.y,
-    };
+    const p = range.array();
     const head = sheet.dependents.find(&p) orelse return;
 
     while (head.isValid() and sheet.deps.items[head.n].handle == dependent) {
@@ -1035,8 +1028,8 @@ fn findExtantRow(sheet: *Sheet, r: Rect, comptime p: enum { first, last }) ?PosI
 
     var ctx: Context = .{ .sheet = sheet };
     sheet.cell_tree.traverse(
-        &.{ r.tl.x, r.tl.y },
-        &.{ r.br.x, r.br.y },
+        &r.tl.array(),
+        &r.br.array(),
         &ctx,
     ) catch unreachable;
 
@@ -1068,8 +1061,8 @@ fn findExtantCol(sheet: *Sheet, r: Rect, comptime p: enum { first, last }) ?PosI
 
     var ctx: Context = .{ .sheet = sheet };
     sheet.cell_tree.traverse(
-        &.{ r.tl.x, r.tl.y },
-        &.{ r.br.x, r.br.y },
+        &r.tl.array(),
+        &r.br.array(),
         &ctx,
     ) catch unreachable;
 
@@ -1617,7 +1610,7 @@ fn ensureUnusedColumnCapacity(sheet: *Sheet, n: u32) !void {
     try sheet.cols.ensureUnusedCapacity(sheet.allocator, n);
 }
 
-fn ensureUnusedAstNodeCapacity(sheet: *Sheet, n: u32) !void {
+fn ensureUnusedAstNodeCapacity(sheet: *Sheet, n: usize) !void {
     var m = sheet.ast_nodes.toMultiArrayList();
     defer sheet.ast_nodes = m.slice();
 
@@ -1640,11 +1633,7 @@ fn deleteCellRangeAssumeCapacity(sheet: *Sheet, range: Rect, opts: UndoOpts) u32
         var buf = sheet.cell_buffer.toManaged(sheet.allocator);
         defer sheet.cell_buffer = buf.moveToUnmanaged();
         const start = buf.items.len;
-        sheet.cell_tree.queryWindow(
-            &.{ range.tl.x, range.tl.y },
-            &.{ range.br.x, range.br.y },
-            &buf,
-        ) catch unreachable;
+        sheet.cell_tree.queryWindow(&range.tl.array(), &range.br.array(), &buf) catch unreachable;
 
         if (buf.items.len == start) {
             return std.math.maxInt(u32);
@@ -1670,13 +1659,16 @@ fn deleteCellRangeAssumeCapacity(sheet: *Sheet, range: Rect, opts: UndoOpts) u32
 }
 
 pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr: f64, opts: UndoOpts) !void {
-    const area: u32 = @intCast(range.area());
+    const area = std.math.cast(usize, range.area()) orelse {
+        @branchHint(.cold);
+        return error.OutOfMemory;
+    };
     try sheet.ensureUnusedCellCapacity(area);
     try sheet.ensureUnusedAstNodeCapacity(area);
     // One for deleting existing cells, one for inserting new cells
     try sheet.ensureUnusedUndoCapacity(2);
     try sheet.ensureUnusedCellQueueCapacity(1);
-    try sheet.ensureUnusedCellBufferCapacity(area + 1);
+    try sheet.ensureUnusedCellBufferCapacity(area + 1); // Can't overflow, we'll OOM before that
     try sheet.ensureUnusedColumnCapacity(range.width());
     errdefer comptime unreachable;
 
@@ -1714,10 +1706,10 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
 
 /// Creates a new cell handle for every cell in `range`. Only sets the point field of each handle.
 /// Only allocates memory for the cell tree.
+///
+/// Asserts that the `area.range() <= std.math.maxInt(usize)`
 pub fn bulkCreateCellRange(sheet: *Sheet, range: Rect) Cell.Handle {
-    // TODO: Fix this cast. This could feasibly overflow on 32-bit targets.
     const area: usize = @intCast(range.area());
-    // assert(sheet.cell_tree.nodes.capacity - sheet.cell_tree.nodes.len >= area);
     const new_cells = sheet.cell_tree.addMany(area);
 
     var i: usize = 0;
@@ -1798,7 +1790,8 @@ pub fn bulkSetCellExpr(
 ) !void {
     const need_cell_eval = opts.tag == .err;
     // Pre-allocate memory
-    const area: u32 = @intCast(range.area());
+    const area = std.math.cast(usize, range.area()) orelse
+        return error.OutOfMemory;
     const width = range.width();
     try sheet.ensureUnusedCellCapacity(area);
     try sheet.ensureUnusedStringsCapacity(source.len);
@@ -1828,10 +1821,7 @@ pub fn bulkSetCellExpr(
     // For each range we depend on, prepend the cell handle of every cell we're creating
     var iter: ExprRangeIterator = .init(sheet, expr);
     while (iter.next()) |expr_range| {
-        const p: Dependents.Point = .{
-            expr_range.tl.x, expr_range.tl.y,
-            expr_range.br.x, expr_range.br.y,
-        };
+        const p = expr_range.array();
         const res = sheet.dependents.getOrPutAssumeCapacity(&p);
         const head = res.value_ptr;
         if (!res.found_existing) head.* = .none;
@@ -1870,9 +1860,9 @@ pub fn bulkSetCellExpr(
     //       layout of the phtree to make inserting consecutive points faster.
     //       We could build the tree bottom-up?
     const points = new_cells.points();
-    var y: u64 = range.tl.y;
+    var y: u32 = range.tl.y;
     while (y <= range.br.y) : (y += 1) {
-        var x: u64 = range.tl.x;
+        var x: u32 = range.tl.x;
         while (x <= range.br.x) : (x += 1) {
             const y_off = (y - range.tl.y) * width;
             const x_off = x - range.tl.x;
@@ -1910,7 +1900,7 @@ pub fn setCell(
 
     sheet.dupeExprStrings(source, expr_root);
 
-    const new_node = sheet.cell_tree.createValueAssumeCapacity(&.{ pos.x, pos.y }, .{
+    const new_node = sheet.cell_tree.createValueAssumeCapacity(&pos.array(), .{
         .expr_root = expr_root,
     });
 
@@ -1976,16 +1966,18 @@ pub fn deleteCell(
     pos: Position,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
-    const handle = sheet.cell_tree.findEntry(&.{ pos.x, pos.y });
+    const handle = sheet.cell_tree.findEntry(&pos.array());
 
     if (handle != .invalid)
         return sheet.deleteCellByHandle(handle, undo_opts);
 }
 
 pub fn deleteCellRange(sheet: *Sheet, r: Rect, opts: UndoOpts) Allocator.Error!void {
+    const area: usize = std.math.cast(usize, r.area() +| 1) orelse
+        return error.OutOfMemory;
     try sheet.ensureUnusedUndoCapacity(1);
-    try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, r.area() + 1);
-    try sheet.ensureUnusedCellQueueCapacity(r.area() + 1);
+    try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, area);
+    try sheet.ensureUnusedCellQueueCapacity(area);
     const n = sheet.deleteCellRangeAssumeCapacity(r, opts);
     for (sheet.cell_buffer.items[n .. sheet.cell_buffer.items.len - 1]) |cell| {
         sheet.queued_cells.appendAssumeCapacity(.{ cell, 1 });
@@ -1997,15 +1989,15 @@ pub fn getCell(sheet: *Sheet, pos: Position) ?Cell {
 }
 
 pub fn getCellPtr(sheet: *Sheet, pos: Position) ?*Cell {
-    return sheet.cell_tree.find(&.{ pos.x, pos.y });
+    return sheet.cell_tree.find(&pos.array());
 }
 
 pub fn getCellHandleByPos(sheet: *Sheet, pos: Position) Cell.Handle {
-    return sheet.cell_tree.findEntry(&.{ pos.x, pos.y });
+    return sheet.cell_tree.findEntry(&pos.array());
 }
 
 pub fn getCellHandleByPosOrNull(sheet: *Sheet, pos: Position) ?Cell.Handle {
-    const handle = sheet.cell_tree.findEntry(&.{ pos.x, pos.y });
+    const handle = sheet.cell_tree.findEntry(&pos.array());
     if (handle != .invalid) return handle;
     return null;
 }
@@ -2587,8 +2579,8 @@ fn markDirty(
 
     const pos = sheet.posFromCellHandle(handle);
     try sheet.dependents.queryWindowRect(
-        .{ pos.x, pos.y },
-        .{ pos.x, pos.y },
+        pos.array(),
+        pos.array(),
         &list,
     );
 
@@ -2648,8 +2640,8 @@ fn queueDependents(sheet: *Sheet, rect: Rect) Allocator.Error!void {
     defer sheet.search_buffer = list.moveToUnmanaged();
 
     try sheet.dependents.queryWindowRect(
-        .{ rect.tl.x, rect.tl.y },
-        .{ rect.br.x, rect.br.y },
+        rect.tl.array(),
+        rect.br.array(),
         &list,
     );
 
@@ -2834,16 +2826,15 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Rect, comptime adjust: Adjust
     const tile_count = tile_x * tile_y;
 
     var cells: std.ArrayList(Cell.Handle) = try .initCapacity(arena, 128);
-    try sheet.cell_tree.queryWindow(
-        &.{ src.tl.x, src.tl.y },
-        &.{ src.br.x, src.br.y },
-        &cells,
-    );
+    try sheet.cell_tree.queryWindow(&src.tl.array(), &src.br.array(), &cells);
 
     if (cells.items.len == 0) return;
 
+    const cell_count = std.math.cast(usize, cells.items.len * tile_count + 1) orelse
+        return error.OutOfMemory;
+
     try sheet.ensureUnusedUndoCapacity(2);
-    try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, (cells.items.len * tile_count) + 1);
+    try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, cell_count);
 
     var total_asts_len: usize = 0;
     var total_deps: u32 = 0;
@@ -2854,11 +2845,11 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Rect, comptime adjust: Adjust
         while (iter.next()) |_| total_deps += @intCast(tile_count);
     }
 
-    try sheet.ensureUnusedCellCapacity(cells.items.len * tile_count);
+    try sheet.ensureUnusedCellCapacity(cell_count - 1);
     try sheet.deps.ensureUnusedCapacity(sheet.allocator, total_deps);
-    try sheet.ensureUnusedCellQueueCapacity(cells.items.len * tile_count);
+    try sheet.ensureUnusedCellQueueCapacity(cell_count - 1);
     if (adjust == .adjust) {
-        try sheet.dependents.ensureUnusedCapacity(sheet.allocator, cells.items.len * tile_count);
+        try sheet.dependents.ensureUnusedCapacity(sheet.allocator, cell_count - 1);
         try sheet.ensureUnusedAstNodeCapacity(@intCast(total_asts_len * tile_count));
     }
     errdefer comptime unreachable;
@@ -3608,7 +3599,7 @@ pub fn expectRangeNonExtant(sheet: *Sheet, address: []const u8) !void {
     const a = sfa.get();
 
     var results: std.ArrayList(Cell.Handle) = .init(a);
-    try sheet.cell_tree.queryWindow(&.{ r.tl.x, r.tl.y }, &.{ r.br.x, r.br.y }, &results);
+    try sheet.cell_tree.queryWindow(&r.tl.array(), &r.br.array(), &results);
     defer results.deinit();
 
     if (results.items.len != 0) {
