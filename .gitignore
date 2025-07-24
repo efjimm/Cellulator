@@ -12,3 +12,4 @@
 !LICENSE
 !bench
 !bench/*
+!afl.c
