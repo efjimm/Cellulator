@@ -137,6 +137,11 @@ pub const Action = union(enum) {
     put_cell,
     put_cell_adjust,
 
+    page_down,
+    page_up,
+    half_page_down,
+    half_page_up,
+
     cell_cursor_up,
     cell_cursor_down,
     cell_cursor_left,
@@ -202,6 +207,10 @@ pub const Action = union(enum) {
             .goto_prev_sheet => "Goto previous sheet",
             .close_sheet => "Close the current sheet",
 
+            .page_up => "Page up",
+            .page_down => "Page down",
+            .half_page_up => "Half page up",
+            .half_page_down => "Half page down",
             .cell_cursor_up => "Move cursor up",
             .cell_cursor_down => "Move cursor down",
             .cell_cursor_left => "Move cursor left",
@@ -499,6 +508,10 @@ const sheet_common: []const SheetKey = &.{
 };
 
 const sheet_motions: []const SheetKey = &.{
+    .{ "<C-f>", .page_down },
+    .{ "<C-b>", .page_up },
+    .{ "<C-d>", .half_page_down },
+    .{ "<C-u>", .half_page_up },
     .{ "j", .cell_cursor_down },
     .{ "k", .cell_cursor_up },
     .{ "h", .cell_cursor_left },

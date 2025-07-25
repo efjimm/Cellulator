@@ -294,8 +294,8 @@ The following is a list of all operators that return number values. They try to 
 operands (e.g. strings) to numbers. Strings that cannot be converted to numbers will return an
 InvalidCoercion error.
 
-- unary `+` Positive numeric literal
-- unary `-` Negative numeric literal
+- unary `+` Positive value (absolute value)
+- unary `-` Negative value (* -1)
 - binary `+` Addition
 - binary `-` Subtraction
 - `*` Multiplication
@@ -350,6 +350,10 @@ will repeat the following motion that many times. This does not currently work f
 - `k`, `Up` Move cursor up
 - `h`, `Left` Move cursor left
 - `l`, `Right` Move cursor right
+- `C-f` Page down
+- `C-b` Page up
+- `C-d` Half page down
+- `C-u` Half page up
 - `:` Enter command insert mode
 - `=` Enter command insert mode, with text set to `let cellname = `, where cellname is the cell
   under the cursor

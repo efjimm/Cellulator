@@ -893,6 +893,26 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
         },
         .put_cell => try zc.put(zc.anyCursorRange(), .no_adjust),
         .put_cell_adjust => try zc.put(zc.anyCursorRange(), .adjust),
+        .page_down => {
+            const n = zc.getCount() *| zc.ui.cellViewHeight();
+            zc.setCursor(.init(zc.cursor.x, zc.cursor.y +| n));
+            zc.resetCount();
+        },
+        .page_up => {
+            const n = zc.getCount() *| zc.ui.cellViewHeight();
+            zc.setCursor(.init(zc.cursor.x, zc.cursor.y -| n));
+            zc.resetCount();
+        },
+        .half_page_down => {
+            const n = zc.getCount() *| (zc.ui.cellViewHeight() / 2);
+            zc.setCursor(.init(zc.cursor.x, zc.cursor.y +| n));
+            zc.resetCount();
+        },
+        .half_page_up => {
+            const n = zc.getCount() *| (zc.ui.cellViewHeight() / 2);
+            zc.setCursor(.init(zc.cursor.x, zc.cursor.y -| n));
+            zc.resetCount();
+        },
         .cell_cursor_up => zc.cursorUp(),
         .cell_cursor_down => zc.cursorDown(),
         .cell_cursor_left => zc.cursorLeft(),
