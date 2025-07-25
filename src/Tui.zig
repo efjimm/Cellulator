@@ -1009,7 +1009,7 @@ fn visibleColumnCount(tui: *const Tui) u16 {
 }
 
 fn SheetTreeContext(comptime field_name: []const u8) type {
-    const Handle = @FieldType(Sheet, field_name).Leaf.Handle;
+    const Handle = @FieldType(Sheet, field_name).Entry.Handle;
     return struct {
         sheet: *Sheet,
         zc: *ZC,

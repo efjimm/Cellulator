@@ -54,7 +54,7 @@ redos: std.MultiArrayList(Undo),
 /// Stores cell handles referenced in bulk cell insert/delete undos.
 cell_buffer: std.ArrayListUnmanaged(Cell.Handle) = .empty,
 
-search_buffer: std.ArrayListUnmanaged(Dependents.Leaf.Handle),
+search_buffer: std.ArrayListUnmanaged(Dependents.Entry.Handle),
 
 filepath: std.BoundedArray(u8, std.fs.max_path_bytes),
 
@@ -84,7 +84,7 @@ pub const TextAttrs = extern struct {
         .alignment = .center,
     };
 
-    pub const Handle = @FieldType(Sheet, "text_attrs").Leaf.Handle;
+    pub const Handle = @FieldType(Sheet, "text_attrs").Entry.Handle;
 };
 
 const arena_retain_size = std.math.pow(usize, 2, 20);
@@ -133,12 +133,13 @@ pub const Cell = extern struct {
         computing,
     } = .up_to_date,
 
+    // TODO: Allow this to be invalid if the cell is a number literal.
     /// Abstract syntax tree representing the expression in the cell.
     expr_root: ast.Index = .invalid,
 
-    pub const Handle = CellTree.Leaf.Handle;
+    pub const Handle = CellTree.Entry.Handle;
 
-    pub const Slice = CellTree.LeafSlice;
+    pub const Slice = CellTree.Slice;
 
     // Non-extern unions get a hidden tag in safe builds which makes serialising them annoying.
     // So we use an extern union here.
@@ -188,7 +189,7 @@ pub const Column = extern struct {
     width: u16 = default_width,
     precision: u8 = 2,
 
-    pub const Handle = Columns.Leaf.Handle;
+    pub const Handle = Columns.Entry.Handle;
 };
 
 /// This is an extern struct instead of a tagged union for serialization purposes.
@@ -251,9 +252,9 @@ pub const Undo = extern struct {
             ast_node: ast.Index,
             pos: Position,
         },
-        insert_dep: Dependents.Leaf.Handle,
+        insert_dep: Dependents.Entry.Handle,
         update_dep: extern struct {
-            handle: Dependents.Leaf.Handle,
+            handle: Dependents.Entry.Handle,
             point: Dependents.Point,
         },
         bulk_cell_delete: usize,
@@ -562,9 +563,35 @@ pub fn clearRetainingCapacity(sheet: *Sheet) void {
 
 const Tokenizer = @import("Tokenizer.zig");
 
+const CsvAssignment = struct {
+    pos: Position,
+    f: f64,
+    root: ast.Index,
+};
+
 const Assignment = struct {
     root: ast.Index,
     pos: Position,
+};
+
+const AssignmentsContext = struct {
+    /// Column major ordering so we can easily get the indexes of the columns we need to
+    /// create.
+    pub fn lessThan(_: @This(), a: Assignment, b: Assignment) bool {
+        const a_int = @as(u64, a.pos.x) * (std.math.maxInt(u32) + 1) + a.pos.y;
+        const b_int = @as(u64, b.pos.x) * (std.math.maxInt(u32) + 1) + b.pos.y;
+        return a_int < b_int;
+    }
+
+    pub fn lessThanCsv(_: @This(), a: CsvAssignment, b: CsvAssignment) bool {
+        const a_int = @as(u64, a.pos.x) * (std.math.maxInt(u32) + 1) + a.pos.y;
+        const b_int = @as(u64, b.pos.x) * (std.math.maxInt(u32) + 1) + b.pos.y;
+        return a_int < b_int;
+    }
+
+    pub fn eql(_: @This(), a: anytype, b: anytype) bool {
+        return a.pos == b.pos;
+    }
 };
 
 /// Parses many cell assignments in bulk, appending their AST nodes to `Sheet.ast_nodes`.
@@ -641,23 +668,22 @@ fn bulkParse(
             .root = spliced_root,
         });
     }
+    if (assignments.items.len == 0) {
+        @branchHint(.unlikely);
+        return 0;
+    }
 
-    const Context = struct {
-        /// Column major ordering so we can easily get the indexes of the columns we need to
-        /// create.
-        pub fn lessThan(_: @This(), a: Assignment, b: Assignment) bool {
-            const a_int = @as(u64, a.pos.x) * (std.math.maxInt(u32) + 1) + a.pos.y;
-            const b_int = @as(u64, b.pos.x) * (std.math.maxInt(u32) + 1) + b.pos.y;
-            return a_int < b_int;
-        }
-
-        pub fn eql(_: @This(), a: Assignment, b: Assignment) bool {
-            return a.pos == b.pos;
-        }
-    };
-
-    std.mem.sortUnstable(Assignment, assignments.items, Context{}, Context.lessThan);
-    const new_len = utils.collapseRepeats(Assignment, assignments.items, Context{});
+    std.mem.sortUnstable(
+        Assignment,
+        assignments.items,
+        AssignmentsContext{},
+        AssignmentsContext.lessThan,
+    );
+    const new_len = utils.collapseRepeats(
+        Assignment,
+        assignments.items,
+        AssignmentsContext{},
+    );
     assignments.items.len = new_len;
 
     return total_strings_len;
@@ -786,7 +812,149 @@ pub fn loadFile(sheet: *Sheet, filepath: []const u8) !void {
     const buf = try arena.alloc(u8, 1 << 18);
 
     var reader = file.reader(buf);
-    try sheet.interpretSource(&reader.interface);
+    if (std.mem.endsWith(u8, filepath, ".csv")) {
+        try sheet.loadCsv(&reader.interface);
+    } else {
+        try sheet.interpretSource(&reader.interface);
+    }
+}
+
+// TODO: This is a very naive unoptimized implementation becasu I was tired when I wrote ti.
+//       `interpretSource` is heavily optimized.
+pub fn loadCsv(sheet: *Sheet, r: *std.io.Reader) !void {
+    errdefer sheet.clearRetainingCapacity();
+
+    const arena = sheet.arena.allocator();
+    defer sheet.resetArena();
+
+    var assignments: std.ArrayListUnmanaged(CsvAssignment) = .empty;
+
+    var col: u32 = 0;
+    var row: u32 = 0;
+    while (true) {
+        r.fill(r.buffer.len) catch |err| switch (err) {
+            error.EndOfStream => if (r.bufferedLen() == 0) break,
+            else => |e| return e,
+        };
+        const bytes = r.buffered();
+        const end = if (bytes.len < r.buffer.len)
+            bytes.len
+        else
+            std.mem.lastIndexOfScalar(u8, bytes, ',') orelse {
+                // A single value is larger than the buffer, ignore it
+                r.tossBuffered();
+                _ = r.discardDelimiterInclusive(',') catch |err| switch (err) {
+                    error.EndOfStream => break,
+                    else => |e| return e,
+                };
+                continue;
+            };
+        const src = bytes[0..end];
+        r.toss(@min(end + 1, bytes.len));
+
+        const ast_nodes_start = sheet.ast_nodes.len;
+
+        var total_strings_len: usize = 0;
+        assignments.clearRetainingCapacity();
+        var lines = std.mem.splitScalar(u8, src, '\n');
+        var prev_col = col;
+        var j: usize = 0;
+        while (lines.next()) |line| : (row += 1) {
+            var fields = std.mem.splitScalar(u8, line, ',');
+            while (fields.next()) |field| : ({
+                col += 1;
+                j += field.len + 1;
+            }) {
+                if (field.len == 0) continue;
+
+                const pos: Position = .init(col, row);
+                var ass: CsvAssignment = .{ .pos = pos, .f = 0, .root = .invalid };
+                if (std.fmt.parseFloat(f64, field)) |f| {
+                    ass.f = f;
+                } else |_| {
+                    const root: ast.Index = .from(@intCast(sheet.ast_nodes.len));
+                    var m = sheet.ast_nodes.toMultiArrayList();
+                    try m.append(sheet.allocator, .{
+                        .tag = .string_literal,
+                        .data = .{
+                            .string_literal = .{
+                                .start = @intCast(j),
+                                .end = @intCast(j + field.len),
+                            },
+                        },
+                    });
+                    total_strings_len += @intCast(field.len);
+                    sheet.ast_nodes = m.toOwnedSlice();
+                    ass.root = root;
+                }
+                try assignments.append(arena, ass);
+            }
+            prev_col = col;
+            col = 0;
+        }
+        row -= 1;
+        col = prev_col;
+
+        std.mem.sortUnstable(
+            CsvAssignment,
+            assignments.items,
+            AssignmentsContext{},
+            AssignmentsContext.lessThanCsv,
+        );
+
+        const col_count = blk: {
+            var col_count: u32 = 1;
+            for (
+                assignments.items[0 .. assignments.items.len - 1],
+                assignments.items[1..],
+            ) |assignment, next_assignment| {
+                const x1 = assignment.pos.x;
+                const x2 = next_assignment.pos.x;
+                if (x1 != x2) col_count += 1;
+            }
+            break :blk col_count;
+        };
+
+        try sheet.ensureUnusedCellCapacity(assignments.items.len);
+        try sheet.ensureUnusedColumnCapacity(col_count);
+        try sheet.ensureUnusedUndoCapacity(2);
+        try sheet.ensureUnusedStringsCapacity(total_strings_len);
+        try sheet.ensureUnusedCellQueueCapacity(1);
+
+        if (ast_nodes_start < sheet.ast_nodes.len)
+            sheet.dupeAstStrings(
+                src,
+                .from(ast_nodes_start),
+                .from(@intCast(sheet.ast_nodes.len)),
+            );
+
+        const new_cells = sheet.cell_tree.addMany(assignments.items.len);
+
+        for (assignments.items, 0..) |assignment, i| {
+            const pos = assignment.pos;
+            _ = sheet.createColumnAssumeCapacity(pos.x);
+
+            new_cells.set(i, .{
+                .parent = .invalid,
+                .point = pos.array(),
+                .value = .{
+                    .expr_root = assignment.root,
+                    .state = if (!assignment.root.isValid()) .up_to_date else .enqueued,
+                    .value = .{ .number = assignment.f },
+                    .value_tag = .number,
+                },
+            });
+
+            const handle = new_cells.handle(i);
+            sheet.cell_tree.insertAssumeCapacityNoClobber(&pos.array(), handle);
+            sheet.addCellAsDependentOfExprRanges(handle, assignment.root);
+        }
+
+        sheet.queued_cells.appendAssumeCapacity(.{
+            new_cells.handle(0),
+            new_cells.len,
+        });
+    }
 }
 
 pub fn writeFile(
@@ -828,12 +996,11 @@ pub fn writeContents(sheet: *Sheet, writer: *std.io.Writer) !void {
     try writer.flush();
 }
 
-// TODO: This is terrible.
 pub fn writeCsv(sheet: *Sheet, writer: *std.io.Writer) !void {
     const arena = sheet.arena.allocator();
     defer sheet.resetArena();
 
-    const cap = sheet.cell_tree.leaves.len - sheet.cell_tree.freelist_count_leaf;
+    const cap = sheet.cell_tree.entries.len - sheet.cell_tree.freelist_count_entries;
     var handles: std.ArrayList(Cell.Handle) = try .initCapacity(arena, cap);
     try sheet.cell_tree.queryWindow(&@splat(0), &@splat(std.math.maxInt(u32)), &handles);
 
@@ -889,6 +1056,13 @@ const ExprRangeIterator = struct {
     start: ast.Index,
 
     fn init(sheet: *const Sheet, expr_root: ast.Index) ExprRangeIterator {
+        if (!expr_root.isValid()) {
+            return .{
+                .sheet = sheet,
+                .i = expr_root,
+                .start = expr_root,
+            };
+        }
         return .{
             .sheet = sheet,
             .i = .from(expr_root.n + 1),
@@ -2077,9 +2251,9 @@ pub fn deleteColOrRowRange(
     // List of cells that are affected
     var cells: std.ArrayList(Cell.Handle) = .init(arena);
     // List of dependency ranges that need to be updated
-    var deps: std.ArrayList(Dependents.Leaf.Handle) = .init(arena);
+    var deps: std.ArrayList(Dependents.Entry.Handle) = .init(arena);
     // List of dependency ranges whose depending cells will need to be re-calculated
-    var intersecting_deps: std.ArrayList(Dependents.Leaf.Handle) = .init(arena);
+    var intersecting_deps: std.ArrayList(Dependents.Entry.Handle) = .init(arena);
     // List of columns whose position needs to be adjusted
     var cols: std.ArrayList(Column.Handle) = .init(arena);
 
@@ -2115,7 +2289,7 @@ pub fn deleteColOrRowRange(
         }
 
         for (deps.items) |handle| {
-            assert(handle != sheet.dependents.freelist_head_leaf);
+            assert(handle != sheet.dependents.freelist_head_entries);
             const p = sheet.dependents.getPoint(handle).*;
             const needs_resize_or_delete = !(p[index] > end or (p[index] < start and p[index + 2] > end));
             undo_count += @intFromBool(needs_resize_or_delete);
@@ -2375,7 +2549,7 @@ pub fn insertColsOrRows(
     defer sheet.resetArena();
 
     var cells: std.ArrayList(Cell.Handle) = .init(arena);
-    var deps: std.ArrayList(Dependents.Leaf.Handle) = .init(arena);
+    var deps: std.ArrayList(Dependents.Entry.Handle) = .init(arena);
     var cols: std.ArrayList(Column.Handle) = .init(arena);
 
     const f = switch (axis) {
@@ -2681,6 +2855,7 @@ pub fn freeCellString(sheet: *Sheet, cell: *Cell) void {
 }
 
 pub fn setCellError(sheet: *Sheet, cell: *Cell) void {
+    if (!cell.expr_root.isValid()) return;
     if (cell.value_tag == .string)
         sheet.string_values.destroyList(cell.value.string);
 
@@ -2715,10 +2890,14 @@ fn queueDependents(sheet: *Sheet, rect: Rect) Allocator.Error!void {
 
 pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) ast.EvalError!ast.EvalResult {
     const cell = sheet.getCellFromHandle(handle);
-    switch (cell.state) {
+    sw: switch (cell.state) {
         .up_to_date => {},
         .computing => return error.CyclicalReference,
         .enqueued, .dirty => {
+            if (!cell.expr_root.isValid()) {
+                cell.state = .up_to_date;
+                break :sw;
+            }
             cell.state = .computing;
 
             const pos = sheet.posFromCellHandle(handle);
@@ -2727,12 +2906,11 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) ast.EvalError!ast.Ev
             // dependents.
             try sheet.queueDependents(sheet.rectFromCellHandle(handle));
 
-            const p = sheet.cell_tree.getPoint(handle).*;
             // Evaluate
             const res = ast.eval(
                 sheet.ast_nodes,
                 cell.expr_root,
-                .init(p[0], p[1]),
+                pos,
                 sheet,
                 sheet.strings_buf.items,
                 sheet,
@@ -2782,6 +2960,19 @@ pub fn evalCellByPos(sheet: *Sheet, pos: Position) ast.EvalError!ast.EvalResult 
 
 pub fn printCellExpression(sheet: *Sheet, pos: Position, writer: *std.io.Writer) !void {
     const cell = sheet.getCellPtr(pos) orelse return;
+    if (!cell.expr_root.isValid()) {
+        switch (cell.value_tag) {
+            .number => {
+                try writer.print("{d}", .{cell.value.number});
+            },
+            .string => {
+                const str = sheet.cellStringValue(cell);
+                try writer.writeAll(str);
+            },
+            .err => {},
+        }
+        return;
+    }
     try ast.print(
         sheet.ast_nodes,
         cell.expr_root,
@@ -4048,4 +4239,22 @@ test "save csv" {
         \\,,,10
     ;
     try std.testing.expectEqualStrings(expected1, aw.getWritten());
+}
+
+test "load csv" {
+    const src =
+        \\10,20,30
+        \\3
+        \\,,5
+        \\
+        \\
+        \\,,,10
+    ;
+
+    var sheet = try init(std.testing.allocator);
+    defer sheet.deinit();
+
+    var r: std.io.Reader = .fixed(src);
+    try sheet.loadCsv(&r);
+    try sheet.update();
 }

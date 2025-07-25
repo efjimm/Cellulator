@@ -233,8 +233,8 @@ pub fn init(zc: *ZC, allocator: Allocator, options: InitOptions) !void {
         .input_buf = try .initCapacity(allocator, 1),
     };
     zc.clearInput();
-    errdefer for (zc.sheets.values()) |*sheet| sheet.deinit();
     errdefer zc.sheets.deinit(allocator);
+    errdefer for (zc.sheets.values()) |*sheet| sheet.deinit();
     const sheet = try zc.openSheet();
     zc.setCurrentSheet(sheet);
 

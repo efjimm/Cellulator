@@ -2,6 +2,8 @@ This is a schizo document that contains basically every idea I thought should be
 working on cellulator. It's completely unorganised and some parts are very outdated. I thought it
 might be an interesting read so I committed it. The stuff at the top is probably newer.
 
+- ctrl-d/u/f/b bindings
+
 - Store undos and redos in a single list and just keep an index into where the current undo is.
   When an undo happens we can just invert the Undo operation at the index and decrement the index
   by one. When a redo happens we invert the operation at index+1 and increment the index by one.

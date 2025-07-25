@@ -20,29 +20,29 @@ pub fn PhTree(
     comptime HandleInt: type,
 ) type {
     return struct {
-        leaves: std.MultiArrayList(Leaf).Slice,
-        branches: std.MultiArrayList(Branch).Slice,
+        entries: std.MultiArrayList(Entry).Slice,
+        nodes: std.MultiArrayList(Node).Slice,
 
-        root: Node,
+        root: NodeOrEntry,
 
-        freelist_head_leaf: Leaf.Handle,
-        freelist_count_leaf: Leaf.Handle.Int,
-        freelist_head_branch: Branch.Handle,
-        freelist_count_branch: Branch.Handle.Int,
+        freelist_head_entries: Entry.Handle,
+        freelist_count_entries: Entry.Handle.Int,
+        freelist_head_nodes: Node.Handle,
+        freelist_count_nodes: Node.Handle.Int,
 
         /// Prevents a mismatch between requested allocation size and actual allocation size.
         /// We always allocate more than the requested alloc size for performance reasons, so this
         /// variable is necessary to keep track of the actual requested size.
-        requested_values_alloc: if (runtime_safety) usize else u0,
+        requested_entries_alloc: if (runtime_safety) usize else u0,
 
         /// See `requested_values_alloc`.
         requested_nodes_alloc: if (runtime_safety) usize else u0,
 
         pub const Point = [dims]u32;
 
-        pub const Leaf = extern struct {
+        pub const Entry = extern struct {
             point: Point,
-            parent: Branch.Handle,
+            parent: Node.Handle,
             value: V,
 
             /// Integer handle for leaf nodes. Is an index into the `values` array.
@@ -68,7 +68,7 @@ pub fn PhTree(
             };
         };
 
-        pub const Branch = extern struct {
+        pub const Node = extern struct {
             // TODO: Investigate if it's possible to remove this field.
             point: Point,
             parent: Handle,
@@ -83,7 +83,7 @@ pub fn PhTree(
             postfix_length: u8,
 
             pub const FlagInt = std.meta.Int(.unsigned, @max(1 << dims, 8));
-            pub const Tag = enum(u8) { leaf, branch };
+            pub const Tag = enum(u8) { entry, node };
 
             /// Integer handle for internal nodes. Is an index in the `nodes` array.
             pub const Handle = enum(HandleInt) {
@@ -108,38 +108,38 @@ pub fn PhTree(
             };
         };
 
-        pub const Node = union(enum) {
-            leaf: Leaf.Handle,
-            branch: Branch.Handle,
+        pub const NodeOrEntry = union(enum) {
+            entry: Entry.Handle,
+            node: Node.Handle,
             invalid,
 
-            pub fn init(value: anytype) Node {
+            pub fn init(value: anytype) NodeOrEntry {
                 assert(value != .invalid);
                 return switch (@TypeOf(value)) {
-                    Leaf.Handle => .{ .leaf = value },
-                    Branch.Handle => .{ .branch = value },
+                    Entry.Handle => .{ .entry = value },
+                    Node.Handle => .{ .node = value },
                     else => comptime unreachable,
                 };
             }
         };
 
         pub const empty: @This() = .{
-            .branches = .empty,
-            .leaves = .empty,
+            .nodes = .empty,
+            .entries = .empty,
 
             .root = .invalid,
 
-            .freelist_head_leaf = .invalid,
-            .freelist_count_leaf = 0,
-            .freelist_head_branch = .invalid,
-            .freelist_count_branch = 0,
-            .requested_values_alloc = 0,
+            .freelist_head_entries = .invalid,
+            .freelist_count_entries = 0,
+            .freelist_head_nodes = .invalid,
+            .freelist_count_nodes = 0,
+            .requested_entries_alloc = 0,
             .requested_nodes_alloc = 0,
         };
 
         pub fn deinit(tree: *@This(), allocator: Allocator) void {
-            tree.branches.deinit(allocator);
-            tree.leaves.deinit(allocator);
+            tree.nodes.deinit(allocator);
+            tree.entries.deinit(allocator);
         }
 
         /// Create many values at a time, returning a slice of the newly created values.
@@ -148,10 +148,10 @@ pub fn PhTree(
         /// fragmentation. The handles being contiguous allows referring to all of them using just
         /// a start index and a length. The memory for the cells is also contiguous. It also means
         /// allocating them is just bumping the length, instead of traversing the free list.
-        pub fn addMany(tree: *@This(), n: HandleInt) LeafSlice {
-            assert(tree.leaves.capacity - tree.leaves.len >= n);
-            const start = tree.leaves.len;
-            tree.leaves.len += n;
+        pub fn addMany(tree: *@This(), n: HandleInt) Slice {
+            assert(tree.entries.capacity - tree.entries.len >= n);
+            const start = tree.entries.len;
+            tree.entries.len += n;
             const ret = tree.slice(@intCast(start), n);
             if (runtime_safety) {
                 for (0..n) |i| ret.set(@intCast(i), undefined);
@@ -159,78 +159,78 @@ pub fn PhTree(
             return ret;
         }
 
-        pub fn slice(tree: *@This(), i: HandleInt, len: HandleInt) LeafSlice {
-            assert(i + len <= tree.leaves.len);
+        pub fn slice(tree: *@This(), i: HandleInt, len: HandleInt) Slice {
+            assert(i + len <= tree.entries.len);
             return .{
-                .points_ptr = tree.leaves.items(.point)[i..].ptr,
-                .parents_ptr = tree.leaves.items(.parent)[i..].ptr,
-                .values_ptr = tree.leaves.items(.value)[i..].ptr,
+                .points_ptr = tree.entries.items(.point)[i..].ptr,
+                .parents_ptr = tree.entries.items(.parent)[i..].ptr,
+                .values_ptr = tree.entries.items(.value)[i..].ptr,
                 .len = len,
                 .offset = i,
-                .capacity = @intCast(tree.leaves.capacity - i),
+                .capacity = @intCast(tree.entries.capacity - i),
             };
         }
 
         // Returns a slice of the last `n` leaves.
-        pub fn endSlice(tree: *@This(), n: HandleInt) LeafSlice {
-            return tree.slice(@intCast(tree.leaves.len - n), n);
+        pub fn endSlice(tree: *@This(), n: HandleInt) Slice {
+            return tree.slice(@intCast(tree.entries.len - n), n);
         }
 
-        pub fn sliceToEnd(tree: *@This(), offset: HandleInt) LeafSlice {
-            return tree.slice(offset, @intCast(tree.leaves.len - offset));
+        pub fn sliceToEnd(tree: *@This(), offset: HandleInt) Slice {
+            return tree.slice(offset, @intCast(tree.entries.len - offset));
         }
 
-        pub fn commitSlice(tree: *@This(), s: *const LeafSlice) void {
-            if (s.offset + s.len > tree.leaves.len) {
-                tree.leaves.len = s.offset + s.len;
-                assert(tree.leaves.len <= tree.leaves.capacity);
+        pub fn commitSlice(tree: *@This(), s: *const Slice) void {
+            if (s.offset + s.len > tree.entries.len) {
+                tree.entries.len = s.offset + s.len;
+                assert(tree.entries.len <= tree.entries.capacity);
             }
         }
 
-        pub const LeafSlice = struct {
+        pub const Slice = struct {
             points_ptr: [*]Point,
-            parents_ptr: [*]Branch.Handle,
+            parents_ptr: [*]Node.Handle,
             values_ptr: [*]V,
 
             offset: HandleInt,
             len: HandleInt,
             capacity: HandleInt,
 
-            pub fn set(s: *const LeafSlice, i: HandleInt, leaf: Leaf) void {
+            pub fn set(s: *const Slice, i: HandleInt, leaf: Entry) void {
                 assert(i < s.len);
                 s.parents_ptr[i] = leaf.parent;
                 s.points_ptr[i] = leaf.point;
                 s.values_ptr[i] = leaf.value;
             }
 
-            pub fn getPoint(s: *const LeafSlice, i: HandleInt) *Point {
+            pub fn getPoint(s: *const Slice, i: HandleInt) *Point {
                 assert(i < s.len);
                 return &s.points_ptr[i];
             }
 
-            pub fn end(s: *const LeafSlice) HandleInt {
+            pub fn end(s: *const Slice) HandleInt {
                 return s.offset + s.len;
             }
 
             /// Converts an index into this slice into a handle.
-            pub fn handle(s: *const LeafSlice, i: HandleInt) Leaf.Handle {
+            pub fn handle(s: *const Slice, i: HandleInt) Entry.Handle {
                 return .from(s.offset + i);
             }
 
-            pub fn values(s: *const LeafSlice) []V {
+            pub fn values(s: *const Slice) []V {
                 return s.values_ptr[0..s.len];
             }
 
-            pub fn parents(s: *const LeafSlice) []Branch.Handle {
+            pub fn parents(s: *const Slice) []Node.Handle {
                 return s.parents_ptr[0..s.len];
             }
 
-            pub fn points(s: *const LeafSlice) []Point {
+            pub fn points(s: *const Slice) []Point {
                 return s.points_ptr[0..s.len];
             }
 
             /// Assumes that `s` is at the end of the original list.
-            pub fn append(s: *LeafSlice, leaf: Leaf) void {
+            pub fn append(s: *Slice, leaf: Entry) void {
                 assert(s.len < s.capacity);
                 s.len += 1;
                 s.set(s.len - 1, leaf);
@@ -238,15 +238,15 @@ pub fn PhTree(
         };
 
         pub fn clearRetainingCapacity(tree: *@This()) void {
-            tree.branches.len = 0;
-            tree.leaves.len = 0;
+            tree.nodes.len = 0;
+            tree.entries.len = 0;
 
             tree.root = .invalid;
 
-            tree.freelist_head_branch = .invalid;
-            tree.freelist_count_branch = 0;
-            tree.freelist_head_leaf = .invalid;
-            tree.freelist_count_leaf = 0;
+            tree.freelist_head_nodes = .invalid;
+            tree.freelist_count_nodes = 0;
+            tree.freelist_head_entries = .invalid;
+            tree.freelist_count_entries = 0;
         }
 
         /// Create a value and return a handle to it. Does not insert the value into the tree.
@@ -257,89 +257,89 @@ pub fn PhTree(
             allocator: Allocator,
             p: *const Point,
             value: V,
-        ) Allocator.Error!Leaf.Handle {
-            var m = tree.leaves.toMultiArrayList();
+        ) Allocator.Error!Entry.Handle {
+            var m = tree.entries.toMultiArrayList();
             try m.ensureUnusedCapacity(allocator, 1);
-            tree.leaves = m.toOwnedSlice();
+            tree.entries = m.toOwnedSlice();
             if (runtime_safety)
-                tree.requested_values_alloc = @max(tree.requested_values_alloc, m.len + 1);
+                tree.requested_entries_alloc = @max(tree.requested_entries_alloc, m.len + 1);
             return tree.createValueAssumeCapacity(p, value);
         }
 
-        pub fn createValueAssumeCapacity(tree: *@This(), p: *const Point, value: V) Leaf.Handle {
-            if (tree.freelist_head_leaf != .invalid) {
-                assert(tree.freelist_count_leaf > 0);
-                const ret = tree.freelist_head_leaf;
-                tree.freelist_head_leaf = .fromUnchecked(tree.leafItem(ret, .parent).int());
-                tree.freelist_count_leaf -= 1;
+        pub fn createValueAssumeCapacity(tree: *@This(), p: *const Point, value: V) Entry.Handle {
+            if (tree.freelist_head_entries != .invalid) {
+                assert(tree.freelist_count_entries > 0);
+                const ret = tree.freelist_head_entries;
+                tree.freelist_head_entries = .fromUnchecked(tree.entryItem(ret, .parent).int());
+                tree.freelist_count_entries -= 1;
 
-                tree.leaves.set(ret.int(), .{
+                tree.entries.set(ret.int(), .{
                     .point = p.*,
                     .parent = .invalid,
                     .value = value,
                 });
 
-                assert(tree.root != .leaf or tree.root.leaf != ret);
-                assert(tree.freelist_head_leaf != ret);
-                assert(tree.freelist_head_leaf == .invalid or
-                    tree.freelist_head_leaf.int() < tree.leaves.len);
+                assert(tree.root != .entry or tree.root.entry != ret);
+                assert(tree.freelist_head_entries != ret);
+                assert(tree.freelist_head_entries == .invalid or
+                    tree.freelist_head_entries.int() < tree.entries.len);
                 return ret;
             }
 
-            assert(tree.requestedCapacity() > tree.leaves.len);
-            const handle: Leaf.Handle = .from(@intCast(tree.leaves.len));
-            tree.leaves.len += 1;
+            assert(tree.requestedCapacity() > tree.entries.len);
+            const handle: Entry.Handle = .from(@intCast(tree.entries.len));
+            tree.entries.len += 1;
 
-            tree.leaves.set(handle.int(), .{
+            tree.entries.set(handle.int(), .{
                 .point = p.*,
                 .parent = .invalid,
                 .value = value,
             });
 
-            assert(tree.root != .leaf or tree.root.leaf != handle);
+            assert(tree.root != .entry or tree.root.entry != handle);
             return handle;
         }
 
-        pub fn destroyValue(tree: *@This(), handle: Leaf.Handle) void {
-            assert(tree.root != .leaf or tree.root.leaf != handle);
+        pub fn destroyValue(tree: *@This(), handle: Entry.Handle) void {
+            assert(tree.root != .entry or tree.root.entry != handle);
 
-            if (handle.int() == tree.leaves.len - 1) {
-                tree.leafItem(handle, .parent).* = .invalid;
-                tree.leaves.len -= 1;
+            if (handle.int() == tree.entries.len - 1) {
+                tree.entryItem(handle, .parent).* = .invalid;
+                tree.entries.len -= 1;
             } else {
-                tree.leaves.set(handle.int(), .{
+                tree.entries.set(handle.int(), .{
                     .point = @splat(0),
-                    .parent = .fromUnchecked(tree.freelist_head_leaf.int()),
+                    .parent = .fromUnchecked(tree.freelist_head_entries.int()),
                     .value = undefined,
                 });
-                tree.freelist_head_leaf = handle;
-                tree.freelist_count_leaf += 1;
+                tree.freelist_head_entries = handle;
+                tree.freelist_count_entries += 1;
             }
         }
 
-        pub fn ensureUnusedCapacity(tree: *@This(), allocator: Allocator, n: Branch.Handle.Int) Allocator.Error!void {
-            const count = std.math.mul(Branch.Handle.Int, n, 2) catch return error.OutOfMemory;
-            if (tree.branches.len + count > tree.branches.capacity) {
-                var m = tree.branches.toMultiArrayList();
+        pub fn ensureUnusedCapacity(tree: *@This(), allocator: Allocator, n: Node.Handle.Int) Allocator.Error!void {
+            const count = std.math.mul(Node.Handle.Int, n, 2) catch return error.OutOfMemory;
+            if (tree.nodes.len + count > tree.nodes.capacity) {
+                var m = tree.nodes.toMultiArrayList();
                 try m.setCapacity(allocator, m.len * 2 + count);
-                tree.branches = m.slice();
+                tree.nodes = m.slice();
             }
 
             if (runtime_safety)
-                tree.requested_nodes_alloc = @max(tree.requested_nodes_alloc, tree.branches.len + count);
+                tree.requested_nodes_alloc = @max(tree.requested_nodes_alloc, tree.nodes.len + count);
 
-            if (tree.leaves.len + n > tree.leaves.capacity) {
-                var m = tree.leaves.toMultiArrayList();
+            if (tree.entries.len + n > tree.entries.capacity) {
+                var m = tree.entries.toMultiArrayList();
                 try m.setCapacity(allocator, m.len * 2 + n);
-                tree.leaves = m.slice();
+                tree.entries = m.slice();
             }
 
             if (runtime_safety)
-                tree.requested_values_alloc = @max(tree.requested_values_alloc, tree.leaves.len + n);
+                tree.requested_entries_alloc = @max(tree.requested_entries_alloc, tree.entries.len + n);
         }
 
         pub const GetOrPutResult = struct {
-            handle: Leaf.Handle,
+            handle: Entry.Handle,
             value_ptr: *V,
             found_existing: bool,
         };
@@ -365,15 +365,15 @@ pub fn PhTree(
             const removed_kv = tree.insertAssumeCapacity(p, handle);
             if (removed_kv != .invalid) {
                 // Re-insert this kv and destroy the new one
-                const parent = tree.leafItem(handle, .parent).*;
+                const parent = tree.entryItem(handle, .parent).*;
                 if (parent == .invalid) {
                     tree.removeHandle(handle);
                     assert(tree.root == .invalid);
                     tree.insertEmpty(removed_kv);
                 } else {
                     const address = calculateHypercubeAddress(p, tree.branchItem(parent, .postfix_length).*);
-                    tree.leafItem(removed_kv, .parent).* = parent;
-                    tree.setChild(parent, address, .leaf, removed_kv);
+                    tree.entryItem(removed_kv, .parent).* = parent;
+                    tree.setChild(parent, address, .entry, removed_kv);
                 }
 
                 tree.destroyValue(handle);
@@ -392,24 +392,24 @@ pub fn PhTree(
             };
         }
 
-        pub fn getPoint(tree: *const @This(), handle: Leaf.Handle) *Point {
-            return tree.leafItem(handle, .point);
+        pub fn getPoint(tree: *const @This(), handle: Entry.Handle) *Point {
+            return tree.entryItem(handle, .point);
         }
 
-        pub fn getValue(tree: *const @This(), handle: Leaf.Handle) *V {
-            return tree.leafItem(handle, .value);
+        pub fn getValue(tree: *const @This(), handle: Entry.Handle) *V {
+            return tree.entryItem(handle, .value);
         }
 
-        pub fn isValidHandle(tree: *const @This(), handle: Leaf.Handle) bool {
-            return handle.int() < tree.leaves.len;
+        pub fn isValidHandle(tree: *const @This(), handle: Entry.Handle) bool {
+            return handle.int() < tree.entries.len;
         }
 
         pub fn insert(
             tree: *@This(),
             allocator: Allocator,
             p: *const Point,
-            kv: Leaf.Handle,
-        ) Allocator.Error!Leaf.Handle {
+            kv: Entry.Handle,
+        ) Allocator.Error!Entry.Handle {
             try tree.ensureUnusedCapacity(allocator, 1);
             return tree.insertAssumeCapacity(p, kv);
         }
@@ -417,23 +417,23 @@ pub fn PhTree(
         pub fn insertAssumeCapacityNoClobber(
             tree: *@This(),
             p: *const Point,
-            kv: Leaf.Handle,
+            kv: Entry.Handle,
         ) void {
             const removed = tree.insertAssumeCapacity(p, kv);
             assert(removed == .invalid);
         }
 
-        pub fn insertAssumeCapacity(tree: *@This(), p: *const Point, kv: Leaf.Handle) Leaf.Handle {
-            tree.leafItem(kv, .point).* = p.*;
+        pub fn insertAssumeCapacity(tree: *@This(), p: *const Point, kv: Entry.Handle) Entry.Handle {
+            tree.entryItem(kv, .point).* = p.*;
             if (tree.root == .invalid) {
                 tree.insertEmpty(kv);
                 return .invalid;
             }
 
-            if (tree.root == .leaf)
+            if (tree.root == .entry)
                 return tree.insertWithLeafRoot(kv);
 
-            const root = tree.root.branch;
+            const root = tree.root.node;
             const root_point = tree.branchItem(root, .point);
             const root_conflicting_bit = firstDifferingBit(p, root_point);
 
@@ -446,33 +446,33 @@ pub fn PhTree(
             return tree.insertGeneric(kv);
         }
 
-        fn childTag(tree: *const @This(), handle: Branch.Handle, index: u8) Branch.Tag {
-            const mask = @as(Branch.FlagInt, 1) << @intCast(index);
-            const flags = tree.branches.items(.child_flags)[handle.int()];
+        fn childTag(tree: *const @This(), handle: Node.Handle, index: u8) Node.Tag {
+            const mask = @as(Node.FlagInt, 1) << @intCast(index);
+            const flags = tree.nodes.items(.child_flags)[handle.int()];
             return @enumFromInt((flags & mask) >> @intCast(index));
         }
 
         fn setChild(
             tree: *const @This(),
-            handle: Branch.Handle,
+            handle: Node.Handle,
             address: u8,
-            comptime tag: Branch.Tag,
+            comptime tag: Node.Tag,
             child: switch (tag) {
-                .leaf => Leaf.Handle,
-                .branch => Branch.Handle,
+                .entry => Entry.Handle,
+                .node => Node.Handle,
             },
         ) void {
-            const mask = @as(Branch.FlagInt, 1) << @intCast(address);
-            const flags = &tree.branches.items(.child_flags)[handle.int()];
+            const mask = @as(Node.FlagInt, 1) << @intCast(address);
+            const flags = &tree.nodes.items(.child_flags)[handle.int()];
 
             switch (tag) {
-                .leaf => {
+                .entry => {
                     flags.* &= ~mask;
                     tree.branchItem(handle, .children)[address] = .fromUnchecked(child.int());
                     if (child != .invalid)
-                        tree.leafItem(child, .parent).* = handle;
+                        tree.entryItem(child, .parent).* = handle;
                 },
-                .branch => {
+                .node => {
                     flags.* |= mask;
                     tree.branchItem(handle, .children)[address] = child;
                     if (child != .invalid)
@@ -481,19 +481,19 @@ pub fn PhTree(
             }
         }
 
-        fn getChild(tree: *const @This(), handle: Branch.Handle, address: u8) Node {
+        fn getChild(tree: *const @This(), handle: Node.Handle, address: u8) NodeOrEntry {
             const children = tree.branchItem(handle, .children);
             return switch (tree.childTag(handle, address)) {
-                .leaf => {
-                    const child: Leaf.Handle = .fromUnchecked(children[address].int());
+                .entry => {
+                    const child: Entry.Handle = .fromUnchecked(children[address].int());
                     if (child == .invalid) return .invalid;
                     return .init(child);
                 },
-                .branch => .init(children[address]),
+                .node => .init(children[address]),
             };
         }
 
-        fn getInfixLength(tree: *@This(), handle: Branch.Handle) u8 {
+        fn getInfixLength(tree: *@This(), handle: Node.Handle) u8 {
             const parent = tree.branchItem(handle, .parent).*;
             const parent_pl =
                 if (parent != .invalid)
@@ -517,13 +517,13 @@ pub fn PhTree(
         }
 
         fn requestedCapacity(tree: *const @This()) usize {
-            return if (runtime_safety) tree.requested_values_alloc else tree.leaves.capacity;
+            return if (runtime_safety) tree.requested_entries_alloc else tree.entries.capacity;
         }
 
-        fn createBranchNode(tree: *@This(), allocator: Allocator) Allocator.Error!Branch.Handle {
-            if (tree.freelist_head_branch == .invalid) {
-                var m = tree.branches.toMultiArrayList();
-                defer tree.branches = m.slice();
+        fn createBranchNode(tree: *@This(), allocator: Allocator) Allocator.Error!Node.Handle {
+            if (tree.freelist_head_nodes == .invalid) {
+                var m = tree.nodes.toMultiArrayList();
+                defer tree.nodes = m.slice();
 
                 try m.ensureUnusedCapacity(allocator, 1);
                 if (runtime_safety)
@@ -533,42 +533,42 @@ pub fn PhTree(
             return tree.createBranchNodeAssumeCapacity();
         }
 
-        fn createBranchNodeAssumeCapacity(tree: *@This()) Branch.Handle {
-            if (tree.freelist_head_branch != .invalid) {
-                const ret = tree.freelist_head_branch;
-                tree.freelist_head_branch = tree.branchItem(ret, .parent).*;
-                tree.freelist_count_branch -= 1;
+        fn createBranchNodeAssumeCapacity(tree: *@This()) Node.Handle {
+            if (tree.freelist_head_nodes != .invalid) {
+                const ret = tree.freelist_head_nodes;
+                tree.freelist_head_nodes = tree.branchItem(ret, .parent).*;
+                tree.freelist_count_nodes -= 1;
 
-                assert(tree.freelist_head_branch == .invalid or
-                    tree.freelist_head_branch.int() < tree.branches.len);
+                assert(tree.freelist_head_nodes == .invalid or
+                    tree.freelist_head_nodes.int() < tree.nodes.len);
                 assert(ret != .invalid);
                 return ret;
             }
 
-            assert(tree.branches.capacity > tree.branches.len);
+            assert(tree.nodes.capacity > tree.nodes.len);
 
-            tree.branches.len += 1;
-            return .from(@intCast(tree.branches.len - 1));
+            tree.nodes.len += 1;
+            return .from(@intCast(tree.nodes.len - 1));
         }
 
-        fn destroyHandle(tree: *@This(), branch: Branch.Handle) void {
-            if (branch.int() == tree.branches.len - 1) {
+        fn destroyHandle(tree: *@This(), branch: Node.Handle) void {
+            if (branch.int() == tree.nodes.len - 1) {
                 tree.branchItem(branch, .parent).* = .invalid;
-                tree.branches.len -= 1;
+                tree.nodes.len -= 1;
             } else {
-                tree.branches.set(branch.int(), undefined);
-                tree.branchItem(branch, .parent).* = tree.freelist_head_branch;
-                tree.freelist_head_branch = branch;
-                tree.freelist_count_branch += 1;
+                tree.nodes.set(branch.int(), undefined);
+                tree.branchItem(branch, .parent).* = tree.freelist_head_nodes;
+                tree.freelist_head_nodes = branch;
+                tree.freelist_count_nodes += 1;
             }
         }
 
         fn createNodeAssumeCapacity(
             tree: *@This(),
-            parent: Branch.Handle,
+            parent: Node.Handle,
             postfix_length: u8,
             p: *const Point,
-        ) Branch.Handle {
+        ) Node.Handle {
             const handle = tree.createBranchNodeAssumeCapacity();
             assert(handle != .invalid);
 
@@ -579,7 +579,7 @@ pub fn PhTree(
                 v.* |= @as(u32, 1) << @intCast(postfix_length);
             }
 
-            tree.branches.set(handle.int(), .{
+            tree.nodes.set(handle.int(), .{
                 .point = new_point,
                 .parent = parent,
                 .children = @splat(.invalid),
@@ -602,43 +602,43 @@ pub fn PhTree(
             return ret;
         }
 
-        pub fn leafItem(
+        pub fn entryItem(
             tree: *const @This(),
-            handle: Leaf.Handle,
-            comptime tag: std.MultiArrayList(Leaf).Field,
-        ) *@FieldType(Leaf, @tagName(tag)) {
+            handle: Entry.Handle,
+            comptime tag: std.MultiArrayList(Entry).Field,
+        ) *@FieldType(Entry, @tagName(tag)) {
             assert(handle != .invalid);
-            return &tree.leaves.items(tag)[handle.int()];
+            return &tree.entries.items(tag)[handle.int()];
         }
 
         fn branchItem(
             tree: *const @This(),
-            handle: Branch.Handle,
-            comptime tag: std.meta.FieldEnum(Branch),
-        ) *@FieldType(Branch, @tagName(tag)) {
+            handle: Node.Handle,
+            comptime tag: std.meta.FieldEnum(Node),
+        ) *@FieldType(Node, @tagName(tag)) {
             assert(handle != .invalid);
-            return &tree.branches.items(tag)[handle.int()];
+            return &tree.nodes.items(tag)[handle.int()];
         }
 
-        fn insertEmpty(tree: *@This(), kv: Leaf.Handle) void {
+        fn insertEmpty(tree: *@This(), kv: Entry.Handle) void {
             assert(tree.root == .invalid);
-            assert(kv != tree.freelist_head_leaf);
+            assert(kv != tree.freelist_head_entries);
 
-            tree.leafItem(kv, .parent).* = .invalid;
+            tree.entryItem(kv, .parent).* = .invalid;
             tree.root = .init(kv);
         }
 
-        fn insertWithLeafRoot(tree: *@This(), kv: Leaf.Handle) Leaf.Handle {
+        fn insertWithLeafRoot(tree: *@This(), kv: Entry.Handle) Entry.Handle {
             assert(kv != .invalid);
-            const p = tree.leafItem(kv, .point);
+            const p = tree.entryItem(kv, .point);
 
-            const root = tree.root.leaf;
-            const root_point = tree.leafItem(root, .point);
+            const root = tree.root.entry;
+            const root_point = tree.entryItem(root, .point);
             const root_conflicting_bit = firstDifferingBit(p, root_point);
 
             // The points are the same
             if (root_conflicting_bit == 0) {
-                tree.leafItem(kv, .parent).* = .invalid;
+                tree.entryItem(kv, .parent).* = .invalid;
                 tree.root = .init(kv);
                 return root;
             }
@@ -647,40 +647,40 @@ pub fn PhTree(
             const pl = root_conflicting_bit - 1;
             const new_root = tree.createNodeAssumeCapacity(.invalid, pl, p);
             const address = calculateHypercubeAddress(p, pl);
-            tree.setChild(new_root, address, .leaf, kv);
+            tree.setChild(new_root, address, .entry, kv);
 
             const root_address = calculateHypercubeAddress(root_point, pl);
             assert(address != root_address);
-            tree.setChild(new_root, root_address, .leaf, root);
+            tree.setChild(new_root, root_address, .entry, root);
 
             tree.root = .init(new_root);
             return .invalid;
         }
 
-        fn insertAboveRoot(tree: *@This(), kv: Leaf.Handle, root_conflicting_bit: u8) void {
-            const p = tree.leafItem(kv, .point);
+        fn insertAboveRoot(tree: *@This(), kv: Entry.Handle, root_conflicting_bit: u8) void {
+            const p = tree.entryItem(kv, .point);
 
             // Need to insert a new branch node above the current root node.
             const pl = root_conflicting_bit - 1;
             const new_root = tree.createNodeAssumeCapacity(.invalid, pl, p);
 
             const address = calculateHypercubeAddress(p, pl);
-            tree.setChild(new_root, address, .leaf, kv);
+            tree.setChild(new_root, address, .entry, kv);
 
-            const root = tree.root.branch;
+            const root = tree.root.node;
             const root_address = calculateHypercubeAddress(tree.branchItem(root, .point), pl);
             assert(address != root_address);
-            tree.setChild(new_root, root_address, .branch, root);
+            tree.setChild(new_root, root_address, .node, root);
 
             tree.root = .init(new_root);
         }
 
-        fn insertGeneric(tree: *@This(), kv: Leaf.Handle) Leaf.Handle {
-            const p = tree.leafItem(kv, .point);
+        fn insertGeneric(tree: *@This(), kv: Entry.Handle) Entry.Handle {
+            const p = tree.entryItem(kv, .point);
             // PH trees cannot be deeper than the bit length of their keys.
             const max_depth = @typeInfo(@typeInfo(Point).array.child).int.bits;
             var last_pl: u8 = max_depth;
-            var handle = tree.root.branch;
+            var handle = tree.root.node;
             for (0..max_depth) |_| {
                 const pl = tree.branchItem(handle, .postfix_length).*;
                 assert(last_pl > pl);
@@ -689,35 +689,35 @@ pub fn PhTree(
 
                 const child_handle = tree.getChild(handle, address);
                 if (child_handle == .invalid) {
-                    tree.setChild(handle, address, .leaf, kv);
+                    tree.setChild(handle, address, .entry, kv);
                     return .invalid;
                 }
 
-                if (child_handle == .leaf) {
-                    const child = child_handle.leaf;
-                    const child_point = tree.leafItem(child, .point);
+                if (child_handle == .entry) {
+                    const child = child_handle.entry;
+                    const child_point = tree.entryItem(child, .point);
                     assert(calculateHypercubeAddress(child_point, pl) == address);
                     const conflicting_bit = firstDifferingBit(p, child_point);
                     if (conflicting_bit == 0) {
-                        tree.leafItem(child, .parent).* = .invalid;
-                        tree.setChild(handle, address, .leaf, kv);
+                        tree.entryItem(child, .parent).* = .invalid;
+                        tree.setChild(handle, address, .entry, kv);
                         return child;
                     }
                     assert(conflicting_bit <= pl);
                     const new_pl = conflicting_bit - 1;
                     const new_handle = tree.createNodeAssumeCapacity(handle, new_pl, p);
-                    tree.setChild(handle, address, .branch, new_handle);
+                    tree.setChild(handle, address, .node, new_handle);
 
                     const old_child_address = calculateHypercubeAddress(child_point, new_pl);
                     const new_child_address = calculateHypercubeAddress(p, new_pl);
                     assert(old_child_address != new_child_address);
-                    tree.setChild(new_handle, old_child_address, .leaf, child);
-                    tree.setChild(new_handle, new_child_address, .leaf, kv);
+                    tree.setChild(new_handle, old_child_address, .entry, child);
+                    tree.setChild(new_handle, new_child_address, .entry, kv);
                     return .invalid;
                 }
 
                 // Both nodes are branch nodes
-                const child = child_handle.branch;
+                const child = child_handle.node;
                 assert(child != handle);
 
                 if (tree.getInfixLength(child) == 0) {
@@ -740,37 +740,37 @@ pub fn PhTree(
                 const new_pl = conflicting_bit - 1;
                 const new_handle = tree.createNodeAssumeCapacity(handle, new_pl, p);
 
-                tree.setChild(handle, address, .branch, new_handle);
+                tree.setChild(handle, address, .node, new_handle);
 
                 const new_node_address = calculateHypercubeAddress(child_point, new_pl);
-                tree.setChild(new_handle, new_node_address, .branch, child);
+                tree.setChild(new_handle, new_node_address, .node, child);
 
                 handle = new_handle;
             }
             unreachable;
         }
 
-        pub fn largestDim(tree: *@This(), dim: u8) Leaf.Handle {
-            var largest: Leaf.Handle = .invalid;
-            const s = tree.slice(0, @intCast(tree.leaves.len));
+        pub fn largestDim(tree: *@This(), dim: u8) Entry.Handle {
+            var largest: Entry.Handle = .invalid;
+            const s = tree.slice(0, @intCast(tree.entries.len));
             for (s.points(), 0..) |p, i| {
                 const handle = s.handle(i);
-                if (largest == .invalid or tree.leafItem(largest, .point)[dim] < p[dim])
+                if (largest == .invalid or tree.entryItem(largest, .point)[dim] < p[dim])
                     largest = handle;
             }
             return largest;
         }
 
-        pub fn findEntry(tree: *@This(), p: *const Point) Leaf.Handle {
+        pub fn findEntry(tree: *@This(), p: *const Point) Entry.Handle {
             if (tree.root == .invalid) return .invalid;
 
-            if (tree.root == .leaf) {
-                const root = tree.root.leaf;
-                const p2 = tree.leafItem(root, .point);
+            if (tree.root == .entry) {
+                const root = tree.root.entry;
+                const p2 = tree.entryItem(root, .point);
                 return if (std.mem.eql(u32, p, p2)) root else .invalid;
             }
 
-            var h = tree.root.branch;
+            var h = tree.root.node;
             const max_depth = @typeInfo(@typeInfo(Point).array.child).int.bits + 2;
             for (0..max_depth) |_| {
                 if (h == .invalid) return .invalid;
@@ -779,11 +779,11 @@ pub fn PhTree(
                 const address = calculateHypercubeAddress(p, pl);
                 switch (tree.getChild(h, address)) {
                     .invalid => return .invalid,
-                    .leaf => |child| {
-                        const child_point = tree.leafItem(child, .point);
+                    .entry => |child| {
+                        const child_point = tree.entryItem(child, .point);
                         return if (std.mem.eql(u32, p, child_point)) child else .invalid;
                     },
-                    .branch => |child| {
+                    .node => |child| {
                         assert(child.int() != h.int());
                         h = child;
                     },
@@ -793,26 +793,26 @@ pub fn PhTree(
             unreachable;
         }
 
-        pub fn findParent(tree: *const @This(), p: *const Point) struct { Leaf.Handle, Branch.Handle } {
+        pub fn findParent(tree: *const @This(), p: *const Point) struct { Entry.Handle, Node.Handle } {
             switch (tree.root) {
                 .invalid => return .{ .invalid, .invalid },
-                .leaf => |leaf| return .{ leaf, .invalid },
-                .branch => {},
+                .entry => |leaf| return .{ leaf, .invalid },
+                .node => {},
             }
 
-            var h = tree.root.branch;
-            var parent: Branch.Handle = .invalid;
+            var h = tree.root.node;
+            var parent: Node.Handle = .invalid;
             var address: u8 = 0;
             while (h != .invalid) {
                 parent = h;
                 address = calculateHypercubeAddress(p, tree.branchItem(h, .postfix_length).*);
                 const children = tree.branchItem(h, .children);
                 switch (tree.childTag(h, address)) {
-                    .leaf => return .{
+                    .entry => return .{
                         .fromUnchecked(children[address].int()),
                         h,
                     },
-                    .branch => h = children[address],
+                    .node => h = children[address],
                 }
             }
 
@@ -822,19 +822,19 @@ pub fn PhTree(
 
         pub const Iterator = struct {
             tree: *const PhTree(V, dims, HandleInt),
-            current: Node,
+            current: NodeOrEntry,
             index: u8,
 
-            pub fn next(iter: *Iterator) ?Leaf.Handle {
+            pub fn next(iter: *Iterator) ?Entry.Handle {
                 const tree = iter.tree;
                 switch (iter.current) {
                     .invalid => return null,
-                    .leaf => |handle| {
-                        const parent = tree.leafItem(handle, .parent).*;
+                    .entry => |handle| {
+                        const parent = tree.entryItem(handle, .parent).*;
 
                         if (parent != .invalid) {
                             iter.current = .init(parent);
-                            const p = tree.leafItem(handle, .point);
+                            const p = tree.entryItem(handle, .point);
                             iter.index = 1 + calculateHypercubeAddress(
                                 p,
                                 tree.branchItem(parent, .postfix_length).*,
@@ -844,7 +844,7 @@ pub fn PhTree(
                         }
                         return handle;
                     },
-                    .branch => |handle| {
+                    .node => |handle| {
                         const children = tree.branchItem(handle, .children);
                         for (children[iter.index..], iter.index..) |child_handle, i| {
                             if (child_handle == .invalid) continue;
@@ -914,12 +914,12 @@ pub fn PhTree(
             return null;
         }
 
-        pub fn removeHandle(tree: *@This(), handle: Leaf.Handle) void {
-            const p: *const Point = tree.leafItem(handle, .point);
-            const parent = tree.leafItem(handle, .parent).*;
-            tree.leafItem(handle, .parent).* = .invalid;
+        pub fn removeHandle(tree: *@This(), handle: Entry.Handle) void {
+            const p: *const Point = tree.entryItem(handle, .point);
+            const parent = tree.entryItem(handle, .parent).*;
+            tree.entryItem(handle, .parent).* = .invalid;
             if (parent == .invalid) {
-                if (tree.root == .leaf and tree.root.leaf == handle)
+                if (tree.root == .entry and tree.root.entry == handle)
                     tree.root = .invalid;
                 return;
             }
@@ -928,7 +928,7 @@ pub fn PhTree(
             assert(tree.getChildrenLen(parent) >= 2);
             // Remove the value from its parent
             const address = calculateHypercubeAddress(p, tree.branchItem(parent, .postfix_length).*);
-            tree.setChild(parent, address, .leaf, .invalid);
+            tree.setChild(parent, address, .entry, .invalid);
 
             if (tree.getChildrenLen(parent) >= 2) return;
 
@@ -944,8 +944,8 @@ pub fn PhTree(
                 tree.destroyHandle(parent);
                 switch (reparented_node) {
                     .invalid => unreachable,
-                    .leaf => |h| tree.leafItem(h, .parent).* = .invalid,
-                    .branch => |h| tree.branchItem(h, .parent).* = .invalid,
+                    .entry => |h| tree.entryItem(h, .parent).* = .invalid,
+                    .node => |h| tree.branchItem(h, .parent).* = .invalid,
                 }
                 tree.root = reparented_node;
                 return;
@@ -954,16 +954,16 @@ pub fn PhTree(
             const grandparent_pl = tree.branchItem(grandparent, .postfix_length).*;
             const address2 = calculateHypercubeAddress(p, grandparent_pl);
             assert(address2 == calculateHypercubeAddress(tree.branchItem(parent, .point), grandparent_pl));
-            assert(tree.getChild(grandparent, address2).branch == parent);
+            assert(tree.getChild(grandparent, address2).node == parent);
             switch (reparented_node) {
                 .invalid => unreachable,
-                .leaf => |h| tree.setChild(grandparent, address2, .leaf, h),
-                .branch => |h| tree.setChild(grandparent, address2, .branch, h),
+                .entry => |h| tree.setChild(grandparent, address2, .entry, h),
+                .node => |h| tree.setChild(grandparent, address2, .node, h),
             }
             tree.destroyHandle(parent);
         }
 
-        pub fn remove(tree: *@This(), p: *const Point) ?Leaf.Handle {
+        pub fn remove(tree: *@This(), p: *const Point) ?Entry.Handle {
             const handle = tree.findEntry(p);
             if (handle == .invalid) return null;
             tree.removeHandle(handle);
@@ -978,12 +978,12 @@ pub fn PhTree(
         ) !void {
             switch (tree.root) {
                 .invalid => {},
-                .leaf => |root| {
-                    const p = tree.leafItem(root, .point);
+                .entry => |root| {
+                    const p = tree.entryItem(root, .point);
                     if (entryInWindow(p, min, max))
                         try ctx.func(root);
                 },
-                .branch => |root| {
+                .node => |root| {
                     try tree.traverseNodeWindow(root, min, max, ctx);
                 },
             }
@@ -994,12 +994,12 @@ pub fn PhTree(
             tree: *@This(),
             min: *const Point,
             max: *const Point,
-            results: *std.ArrayList(Leaf.Handle),
+            results: *std.ArrayList(Entry.Handle),
         ) Allocator.Error!void {
             const Context = struct {
-                results: *std.ArrayList(Leaf.Handle),
+                results: *std.ArrayList(Entry.Handle),
 
-                pub fn func(ctx: @This(), h: Leaf.Handle) !void {
+                pub fn func(ctx: @This(), h: Entry.Handle) !void {
                     try ctx.results.append(h);
                 }
             };
@@ -1014,7 +1014,7 @@ pub fn PhTree(
             tree: *@This(),
             min: [2]u32,
             max: [2]u32,
-            results: *std.ArrayList(Leaf.Handle),
+            results: *std.ArrayList(Entry.Handle),
         ) Allocator.Error!void {
             if (dims != 4) {
                 @compileError("queryWindowRect only supports 4 dimensional trees");
@@ -1027,7 +1027,7 @@ pub fn PhTree(
             );
         }
 
-        fn getChildrenLen(tree: *const @This(), handle: Branch.Handle) u8 {
+        fn getChildrenLen(tree: *const @This(), handle: Node.Handle) u8 {
             var count: u8 = 0;
             for (tree.branchItem(handle, .children)) |child| {
                 if (child != .invalid) count += 1;
@@ -1036,67 +1036,67 @@ pub fn PhTree(
         }
 
         pub const Header = extern struct {
-            nodes_len: Branch.Handle.Int,
-            nodes_cap: Branch.Handle.Int,
-            values_len: Branch.Handle.Int,
-            values_cap: Branch.Handle.Int,
-            root: Branch.Handle.Int,
+            nodes_len: Node.Handle.Int,
+            nodes_cap: Node.Handle.Int,
+            values_len: Node.Handle.Int,
+            values_cap: Node.Handle.Int,
+            root: Node.Handle.Int,
             root_tag: blk: {
-                var t = @typeInfo(@typeInfo(Node).@"union".tag_type.?);
+                var t = @typeInfo(@typeInfo(NodeOrEntry).@"union".tag_type.?);
                 t.@"enum".tag_type = u8;
                 break :blk @Type(t);
             },
-            free: Branch.Handle,
-            free_count: Branch.Handle.Int,
+            free: Node.Handle,
+            free_count: Node.Handle.Int,
         };
 
         pub fn iovecs(tree: *@This()) [8][]u8 {
-            return utils.multiArrayListSliceIoVec(&tree.branches) ++
-                utils.multiArrayListSliceIoVec(&tree.leaves);
+            return utils.multiArrayListSliceIoVec(&tree.nodes) ++
+                utils.multiArrayListSliceIoVec(&tree.entries);
         }
 
         pub fn getHeader(tree: *@This()) Header {
             return .{
-                .nodes_len = @intCast(tree.branches.len),
-                .nodes_cap = @intCast(tree.branches.capacity),
-                .values_len = @intCast(tree.leaves.len),
-                .values_cap = @intCast(tree.leaves.capacity),
+                .nodes_len = @intCast(tree.nodes.len),
+                .nodes_cap = @intCast(tree.nodes.capacity),
+                .values_len = @intCast(tree.entries.len),
+                .values_cap = @intCast(tree.entries.capacity),
                 .root = switch (tree.root) {
-                    .invalid => Leaf.Handle.invalid.int(),
-                    .leaf => |handle| handle.int(),
-                    .branch => |handle| handle.int(),
+                    .invalid => Entry.Handle.invalid.int(),
+                    .entry => |handle| handle.int(),
+                    .node => |handle| handle.int(),
                 },
                 .root_tag = @enumFromInt(@intFromEnum(tree.root)),
-                .free = tree.freelist_head_branch,
-                .free_count = tree.freelist_count_branch,
+                .free = tree.freelist_head_nodes,
+                .free_count = tree.freelist_count_nodes,
             };
         }
 
         pub fn initFromHeader(tree: *@This(), allocator: Allocator, header: Header) !void {
-            var nodes = tree.branches.toMultiArrayList();
+            var nodes = tree.nodes.toMultiArrayList();
             try nodes.setCapacity(allocator, header.nodes_cap);
             errdefer nodes.deinit(allocator);
 
-            var values = tree.leaves.toMultiArrayList();
+            var values = tree.entries.toMultiArrayList();
             try values.setCapacity(allocator, header.values_cap);
 
             nodes.len = header.nodes_len;
-            tree.branches = nodes.slice();
+            tree.nodes = nodes.slice();
 
             values.len = header.values_len;
-            tree.leaves = values.slice();
+            tree.entries = values.slice();
 
             tree.root = switch (header.root_tag) {
                 .invalid => .invalid,
-                .leaf => .init(Leaf.Handle.from(header.root)),
-                .branch => .init(Branch.Handle.from(header.root)),
+                .entry => .init(Entry.Handle.from(header.root)),
+                .node => .init(Node.Handle.from(header.root)),
             };
-            tree.freelist_head_branch = header.free;
-            tree.freelist_count_branch = header.free_count;
+            tree.freelist_head_nodes = header.free;
+            tree.freelist_count_nodes = header.free_count;
 
             if (runtime_safety) {
-                tree.requested_values_alloc = tree.leaves.capacity;
-                tree.requested_nodes_alloc = tree.branches.capacity;
+                tree.requested_entries_alloc = tree.entries.capacity;
+                tree.requested_nodes_alloc = tree.nodes.capacity;
             }
         }
 
@@ -1146,7 +1146,7 @@ pub fn PhTree(
 
         fn traverseNodeWindow(
             tree: *@This(),
-            handle: Branch.Handle,
+            handle: Node.Handle,
             min: *const Point,
             max: *const Point,
             ctx: anytype,
@@ -1171,14 +1171,14 @@ pub fn PhTree(
 
                 switch (tree.getChild(handle, @intCast(i))) {
                     .invalid => {},
-                    .leaf => |leaf| {
-                        const child_point = tree.leafItem(leaf, .point);
+                    .entry => |leaf| {
+                        const child_point = tree.entryItem(leaf, .point);
                         if (entryInWindow(child_point, min, max)) {
-                            const h: Leaf.Handle = .from(child_handle.int());
+                            const h: Entry.Handle = .from(child_handle.int());
                             try ctx.func(h);
                         }
                     },
-                    .branch => |branch| {
+                    .node => |branch| {
                         try tree.traverseNodeWindow(branch, min, max, ctx);
                     },
                 }
@@ -1186,21 +1186,21 @@ pub fn PhTree(
         }
 
         pub fn validate(tree: *const @This()) bool {
-            if (tree.requested_nodes_alloc < tree.branches.len) return false;
-            if (tree.requested_values_alloc < tree.leaves.len) return false;
+            if (tree.requested_nodes_alloc < tree.nodes.len) return false;
+            if (tree.requested_entries_alloc < tree.entries.len) return false;
 
             if (tree.root != .invalid) {
-                if (tree.root == .branch and tree.branches.len == 0) return false;
+                if (tree.root == .node and tree.nodes.len == 0) return false;
             }
 
-            if (tree.root == .invalid and tree.branches.len > 0) {
-                if (tree.freelist_head_branch == .invalid) return false;
-                if (tree.freelist_count_branch == 0) return false;
+            if (tree.root == .invalid and tree.nodes.len > 0) {
+                if (tree.freelist_head_nodes == .invalid) return false;
+                if (tree.freelist_count_nodes == 0) return false;
             }
 
-            if (tree.root == .invalid and tree.leaves.len > 0) {
-                if (tree.freelist_head_leaf == .invalid) return false;
-                if (tree.freelist_count_leaf == 0) return false;
+            if (tree.root == .invalid and tree.entries.len > 0) {
+                if (tree.freelist_head_entries == .invalid) return false;
+                if (tree.freelist_count_entries == 0) return false;
             }
 
             var iter = tree.iterator();
@@ -1238,9 +1238,9 @@ test "phtree remove basic" {
     _ = try tree.getOrPut(std.testing.allocator, &.{0});
     _ = try tree.getOrPut(std.testing.allocator, &.{1});
 
-    try expect(tree.root == .branch);
+    try expect(tree.root == .node);
     _ = tree.remove(&.{1});
-    try expect(tree.root == .leaf);
+    try expect(tree.root == .entry);
     _ = tree.remove(&.{0});
 }
 
@@ -1263,8 +1263,8 @@ test "phtree remove last" {
     const last = positions[positions.len - 1];
     const removed = tree.remove(&.{last}).?;
 
-    try expect(tree.branchItem(tree.root.branch, .postfix_length).* == 2);
-    const child = tree.branchItem(tree.root.branch, .children)[1];
+    try expect(tree.branchItem(tree.root.node, .postfix_length).* == 2);
+    const child = tree.branchItem(tree.root.node, .children)[1];
     try expect(tree.branchItem(child, .postfix_length).* == 0);
     try expect(tree.getInfixLength(child) == 1);
 
@@ -1293,7 +1293,7 @@ test "phtree iterator" {
     var iter = tree.iterator();
     var i: usize = 0;
     while (iter.next()) |handle| : (i += 1) {
-        const point = tree.leafItem(handle, .point);
+        const point = tree.entryItem(handle, .point);
         const value = tree.getValue(handle);
         try std.testing.expectEqual(positions[i], point[0]);
         try std.testing.expectEqual(i, value.*);
@@ -1322,7 +1322,7 @@ test "phtree query" {
         .{ 2, 3 },
     };
 
-    var results: std.ArrayList(Tree.Leaf.Handle) = .init(a);
+    var results: std.ArrayList(Tree.Entry.Handle) = .init(a);
     defer results.deinit();
 
     for (ranges) |range| {
@@ -1332,7 +1332,7 @@ test "phtree query" {
         try tree.queryWindow(&.{min}, &.{max}, &results);
         try std.testing.expectEqual(max - min + 1, results.items.len);
         for (results.items, min..) |item, i| {
-            const p = tree.leafItem(item, .point);
+            const p = tree.entryItem(item, .point);
             try std.testing.expectEqual(i, p[0]);
         }
     }

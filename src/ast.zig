@@ -430,6 +430,7 @@ pub fn print(
     strings: []const u8,
     writer: *std.io.Writer,
 ) std.io.Writer.Error!void {
+    if (!root.isValid()) return;
     return printFromIndex(nodes, root, writer, strings);
 }
 

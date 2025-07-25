@@ -127,6 +127,7 @@ fn configureTests(
     });
 
     opts.addOption([]const []const u8, "test_files", &.{
+        "test/csv.zc",
         "test/general.zc",
         "test/undo-redo.zc",
         "test/string.zc",
