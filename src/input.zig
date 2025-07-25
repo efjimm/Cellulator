@@ -569,7 +569,7 @@ const sheet_visual: SheetKeyMapData = .{
 };
 
 const sheet_select: SheetKeyMapData = .{
-    .inherit = &.{ sheet_common, sheet_motions_visual },
+    .inherit = &.{ sheet_common, sheet_motions, sheet_motions_visual },
     .keys = &.{
         .{ "<C-[>", .select_cancel },
         .{ "<Escape>", .select_cancel },
