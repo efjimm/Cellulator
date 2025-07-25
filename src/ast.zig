@@ -44,6 +44,7 @@ pub const Node = extern struct {
         mul: BinaryOperator,
         div: BinaryOperator,
         mod: BinaryOperator,
+        pow: BinaryOperator,
         builtin: Builtin,
         range: BinaryOperator,
         invalidated_pos: Position,
@@ -296,6 +297,27 @@ pub fn printFromNode(
                 else => try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings),
             }
         },
+        .pow => |b| {
+            const lhs = nodes.get(index.sub(b.lhs).n);
+            switch (lhs.tag) {
+                .add, .sub => {
+                    try writer.writeByte('(');
+                    try printFromNode(nodes, index.sub(b.lhs), lhs, writer, strings);
+                    try writer.writeByte(')');
+                },
+                else => try printFromNode(nodes, index.sub(b.lhs), lhs, writer, strings),
+            }
+            try writer.writeAll("^");
+            const rhs = nodes.get(index.sub(b.rhs).n);
+            switch (rhs.tag) {
+                .add, .sub, .mul, .div, .mod => {
+                    try writer.writeByte('(');
+                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
+                    try writer.writeByte(')');
+                },
+                else => try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings),
+            }
+        },
         .div => |b| {
             const lhs = nodes.get(index.sub(b.lhs).n);
             switch (lhs.tag) {
@@ -460,6 +482,7 @@ pub fn leftMostChild(
         .mod,
         .range,
         .invalidated_range,
+        .pow,
         => |b| leftMostChild(nodes, index.sub(b.lhs)),
         .builtin => |b| leftMostChild(nodes, index.sub(b.first_arg)),
     };
@@ -589,6 +612,14 @@ pub fn EvalContext(comptime Context: type) type {
                     const rhs = try self.eval(index.sub(op.rhs));
 
                     return .{ .number = @rem(try lhs.toNumber(0), try rhs.toNumber(0)) };
+                },
+                .pow => |op| {
+                    const lhs = try self.eval(index.sub(op.lhs));
+                    const rhs = try self.eval(index.sub(op.rhs));
+
+                    return .{
+                        .number = std.math.pow(f64, try lhs.toNumber(0), try rhs.toNumber(0)),
+                    };
                 },
 
                 .builtin => |b| switch (b.tag) {

@@ -185,14 +185,14 @@ fn parseAddExpr(parser: *Parser) !Index {
     return index;
 }
 
-/// MulExpr <- PrimaryExpr (('*' / '/' / '%') PrimaryExpr)*
+/// MulExpr <- PowExpr (('*' / '/' / '%') PowExpr)*
 fn parseMulExpr(parser: *Parser) !Index {
-    var index = try parser.parsePrimaryExpr();
+    var index = try parser.parsePowExpr();
 
     while (true) switch (parser.token_tags[parser.tok_i]) {
         inline .asterisk, .forward_slash, .percent => |tag| {
             parser.tok_i += 1;
-            const rhs = try parser.parsePrimaryExpr();
+            const rhs = try parser.parsePowExpr();
             const len: u32 = @intCast(parser.nodes.len);
             const op = BinaryOperator{
                 .lhs = @enumFromInt(len - index.n),
@@ -210,6 +210,25 @@ fn parseMulExpr(parser: *Parser) !Index {
         },
         else => break,
     };
+
+    return index;
+}
+
+/// PowExpr <- PrimaryExpr ('^' PrimaryExpr)*
+fn parsePowExpr(parser: *Parser) !Index {
+    var index = try parser.parsePrimaryExpr();
+
+    while (parser.eatToken(.caret)) |_| {
+        const rhs = try parser.parsePrimaryExpr();
+        const len: u32 = @intCast(parser.nodes.len);
+        const op: BinaryOperator = .{
+            .lhs = @enumFromInt(len - index.n),
+            .rhs = @enumFromInt(len - rhs.n),
+        };
+
+        const node: Node = .init(.pow, op);
+        index = try parser.addNode(node);
+    }
 
     return index;
 }

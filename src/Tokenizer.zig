@@ -59,6 +59,7 @@ pub const Token = struct {
         comma,
         colon,
         hash,
+        caret,
 
         lparen,
         rparen,
@@ -100,6 +101,7 @@ pub const Token = struct {
                 .double_string_literal_end = "'\"'",
                 .keyword_let = "'let'",
                 .eof = "eof",
+                .caret = "^",
                 .unknown = "",
             });
 
@@ -205,6 +207,10 @@ pub fn next(t: *Tokenizer) !Token {
             },
             '%' => {
                 tag = .percent;
+                t.toss(1);
+            },
+            '^' => {
+                tag = .caret;
                 t.toss(1);
             },
             '(' => {
