@@ -127,7 +127,6 @@ fn configureTests(
     });
 
     opts.addOption([]const []const u8, "test_files", &.{
-        "test/csv.zc",
         "test/general.zc",
         "test/undo-redo.zc",
         "test/string.zc",
@@ -140,6 +139,8 @@ fn configureTests(
         "test/yank-put.zc",
         "test/yank-put-adjust.zc",
         "test/paste.zc",
+        "test/unary-plus-minus.zc",
+        "test/csv.zc",
     });
     opts.addOption(bool, "fast_tests", fast_tests);
 

@@ -1,0 +1,63 @@
+-- --- Start of CSV Save/Load Tests ---
+
+-- Test Basic CSV Save/Load (Numbers and Strings)
+let A0 = "CSV Test"
+let B0 = 123
+let C0 = "Another String"
+let A1 = 45.67
+:w $BUILD_TEMP_DIR/test_basic.csv
+:delete A0:C0 A1
+:expect-non-extant A0:C0 A1
+:e $BUILD_TEMP_DIR/test_basic.csv
+:expect-eql-string A0 "CSV Test"
+:expect-eql-number B0 123
+:expect-eql-string C0 "Another String"
+:expect-eql-number A1 45.67
+:expect-non-extant B1 -- Ensure cells outside the saved range are not created
+:delete A0:C0 A1 -- Clean up for next test
+:undo
+:expect-eql-string A0 "CSV Test"
+:expect-eql-number B0 123
+:expect-eql-string C0 "Another String"
+:expect-eql-number A1 45.67
+:expect-non-extant B1 -- Ensure cells outside the saved range are not created
+:redo
+
+-- Test CSV Save/Load with Expressions (Evaluated Values)
+let D0 = 10
+let E0 = 20
+let F0 = D0 + E0 -- Evaluates to 30
+let G0 = @upper("hello") -- Evaluates to "HELLO"
+let H0 = F0 # G0 -- Evaluates to "30HELLO"
+:w $BUILD_TEMP_DIR/test_expr_csv.csv
+:delete D0:H0 -- Clear sheet before loading
+:expect-non-extant D0:H0
+:e $BUILD_TEMP_DIR/test_expr_csv.csv
+:expect-eql-number D0 10 -- Original number
+:expect-eql-number E0 20 -- Original number
+:expect-eql-number F0 30 -- Evaluated number, not formula
+:expect-eql-string G0 "HELLO" -- Evaluated string, not formula
+:expect-eql-string H0 "30HELLO" -- Evaluated string, not formula
+:delete D0:H0 -- Clean up for next test
+
+-- Test CSV Save/Load with Empty Cells
+let I0 = "Data"
+let K0 = "More Data"
+:w $BUILD_TEMP_DIR/test_empty_csv.csv
+:delete I0 K0 -- Clear sheet before loading
+:expect-non-extant I0 K0
+:e $BUILD_TEMP_DIR/test_empty_csv.csv
+:expect-eql-string I0 "Data"
+:expect-non-extant J0 -- J0 was empty in source, should remain non-extant
+:expect-eql-string K0 "More Data"
+:delete I0 K0 -- Clean up for next test
+
+
+-- Final cleanup for all operations in this entire test file
+-- Calculate total 'let' and 'delete' operations within this CSV test suite
+-- Basic CSV: 4 lets + 1 delete + 4 lets + 1 delete = 10
+-- Expr CSV: 5 lets + 1 delete + 5 lets + 1 delete = 12
+-- Empty CSV: 2 lets + 1 delete + 2 lets + 1 delete = 8
+-- Total = 10 + 12 + 8 = 30 operations
+:undo 30
+:expect-non-extant A0:C0 A1 D0:H0 I0 K0

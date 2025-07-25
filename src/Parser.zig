@@ -214,12 +214,29 @@ fn parseMulExpr(parser: *Parser) !Index {
     return index;
 }
 
+fn parseUnaryExpr(parser: *Parser) !Index {
+    return switch (parser.token_tags[parser.tok_i]) {
+        .minus => {
+            parser.tok_i += 1;
+            _ = try parser.parsePrimaryExpr();
+            const ret = try parser.addNode(.init(.minus, {}));
+            return ret;
+        },
+        .plus => {
+            parser.tok_i += 1;
+            _ = try parser.parsePrimaryExpr();
+            return parser.addNode(.init(.plus, {}));
+        },
+        else => parser.parsePrimaryExpr(),
+    };
+}
+
 /// PowExpr <- PrimaryExpr ('^' PrimaryExpr)*
 fn parsePowExpr(parser: *Parser) !Index {
-    var index = try parser.parsePrimaryExpr();
+    var index = try parser.parseUnaryExpr();
 
     while (parser.eatToken(.caret)) |_| {
-        const rhs = try parser.parsePrimaryExpr();
+        const rhs = try parser.parseUnaryExpr();
         const len: u32 = @intCast(parser.nodes.len);
         const op: BinaryOperator = .{
             .lhs = @enumFromInt(len - index.n),
@@ -236,7 +253,7 @@ fn parsePowExpr(parser: *Parser) !Index {
 /// PrimaryExpr <- Number / Range / StsringLiteral / Builtin / '(' Expression ')'
 fn parsePrimaryExpr(parser: *Parser) !Index {
     return switch (parser.token_tags[parser.tok_i]) {
-        .minus, .plus, .number => parser.parseNumber(),
+        .number => parser.parseNumber(),
         .cell_name => parser.parseRange(),
         .lparen => {
             try parser.expectToken(.lparen);
@@ -495,10 +512,10 @@ test "parser" {
     }.func;
 
     try testParser("let a0 = 5", &.{ .number, .assignment });
-    try testParser("let a0 = 5.0 + +5.0", &.{ .number, .number, .add, .assignment });
-    try testParser("let a0 = 5.0 + -5.0", &.{ .number, .number, .add, .assignment });
-    try testParser("let a0 = 5.0 - +5.0", &.{ .number, .number, .sub, .assignment });
-    try testParser("let a0 = 5.0 - -5.0", &.{ .number, .number, .sub, .assignment });
+    try testParser("let a0 = 5.0 + +5.0", &.{ .number, .number, .plus, .add, .assignment });
+    try testParser("let a0 = 5.0 + -5.0", &.{ .number, .number, .minus, .add, .assignment });
+    try testParser("let a0 = 5.0 - +5.0", &.{ .number, .number, .plus, .sub, .assignment });
+    try testParser("let a0 = 5.0 - -5.0", &.{ .number, .number, .minus, .sub, .assignment });
     try testParser("let b0 = 0.0 + 1.123", &.{ .number, .number, .add, .assignment });
     try testParser("let xxx50000 = 000000 - 11111122222223333333444444", &.{ .number, .number, .sub, .assignment });
     try testParser("let c30 = 123_123.231 * 2", &.{ .number, .number, .mul, .assignment });

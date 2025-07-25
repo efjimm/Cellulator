@@ -23,6 +23,31 @@ pub const String = extern struct {
     end: u32,
 };
 
+pub fn isSingle(tag: Node.Tag) bool {
+    return switch (tag) {
+        .number,
+        .column,
+        .pos,
+        .string_literal,
+        .range,
+        .builtin,
+        .invalidated_pos,
+        .invalidated_range,
+        => true,
+        .minus,
+        .plus,
+        .assignment,
+        .concat,
+        .add,
+        .sub,
+        .mul,
+        .div,
+        .mod,
+        .pow,
+        => false,
+    };
+}
+
 pub const Node = extern struct {
     tag: Tag,
     data: Payload,
@@ -37,6 +62,8 @@ pub const Node = extern struct {
         number: f64,
         column: PosInt,
         pos: Position,
+        minus: void,
+        plus: void,
         assignment: Position,
         concat: BinaryOperator,
         add: BinaryOperator,
@@ -85,7 +112,11 @@ pub const Index = packed struct {
     }
 
     pub fn sub(index: Index, offset: NegativeOffset) Index {
-        return .from(index.n - offset.int());
+        return index.subN(offset.int());
+    }
+
+    pub fn subN(index: Index, offset: u32) Index {
+        return .from(index.n - offset);
     }
 
     pub fn isValid(i: Index) bool {
@@ -244,6 +275,25 @@ pub fn printFromNode(
         .assignment => |pos| {
             try writer.print("let {f} = ", .{pos});
             try printFromIndex(nodes, .from(index.n - 1), writer, strings);
+        },
+        inline .plus, .minus => |_, t| {
+            const n = index.subN(1);
+            const rhs = nodes.get(n.n);
+
+            const byte = switch (t) {
+                .plus => '+',
+                .minus => '-',
+                else => comptime unreachable,
+            };
+
+            try writer.writeByte(byte);
+            if (isSingle(rhs.tag)) {
+                try printFromNode(nodes, n, rhs, writer, strings);
+            } else {
+                try writer.writeByte('(');
+                try printFromNode(nodes, n, rhs, writer, strings);
+                try writer.writeByte(')');
+            }
         },
         .add => |b| {
             try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
@@ -485,6 +535,7 @@ pub fn leftMostChild(
         .pow,
         => |b| leftMostChild(nodes, index.sub(b.lhs)),
         .builtin => |b| leftMostChild(nodes, index.sub(b.first_arg)),
+        .minus, .plus => leftMostChild(nodes, index.subN(1)),
     };
 }
 
@@ -580,6 +631,14 @@ pub fn EvalContext(comptime Context: type) type {
                 .number => |n| .{ .number = n },
                 .pos => |pos| {
                     return self.context.evalCellByPos(pos);
+                },
+                .minus => {
+                    const rhs = try self.eval(index.subN(1));
+                    return .{ .number = -(try rhs.toNumber(0)) };
+                },
+                .plus => {
+                    const rhs = try self.eval(index.subN(1));
+                    return .{ .number = @abs(try rhs.toNumber(0)) };
                 },
                 .add => |op| {
                     const lhs = try self.eval(index.sub(op.lhs));

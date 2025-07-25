@@ -1,0 +1,42 @@
+let a0 = 10
+let b0 = -10
+let c0 = +10
+
+:expect-eql-number a0 10
+:expect-eql-number b0 -10
+:expect-eql-number c0 10
+
+let a1 = -a0
+let b1 = +a0
+
+:expect-eql-number a1 -10
+:expect-eql-number b1 10
+
+let a2 = -b0
+let b2 = +b0
+
+:expect-eql-number a2 10
+:expect-eql-number b2 10
+
+let a3 = -c0
+let b3 = +c0
+
+:expect-eql-number a3 -10
+:expect-eql-number b3 10
+
+-- Test precedence
+let a4 = -3^2
+let b4 = -(3^2)
+
+:expect-eql-number a4 9
+:expect-eql-number b4 -9
+
+let a5 = +(-10)
+
+:expect-eql-number a5 10
+
+let a6 = -@sum(a0:c0)
+let b6 = +@sum(a0:c0)
+
+:expect-eql-number a6 -10
+:expect-eql-number b6 10
