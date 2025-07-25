@@ -633,7 +633,7 @@ fn tokenStyle(tag: Token.Tag) UiElement {
         .asterisk,
         .percent,
         => .token_operator,
-        .cell_name => .token_cell_address,
+        .rel_rel, .rel_abs, .abs_rel, .abs_abs => .token_cell_address,
         .lparen, .rparen => .token_parentheses,
         .single_string_literal_start, .single_string_literal_end => .token_single_quoted_string,
         .double_string_literal_start, .double_string_literal_end => .token_double_quoted_string,

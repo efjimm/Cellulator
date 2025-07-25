@@ -27,7 +27,10 @@ pub fn isSingle(tag: Node.Tag) bool {
     return switch (tag) {
         .number,
         .column,
-        .pos,
+        .rel_rel,
+        .abs_abs,
+        .abs_rel,
+        .rel_abs,
         .string_literal,
         .range,
         .builtin,
@@ -61,7 +64,10 @@ pub const Node = extern struct {
     pub const Payload = extern union {
         number: f64,
         column: PosInt,
-        pos: Position,
+        abs_abs: Position,
+        abs_rel: Position,
+        rel_abs: Position,
+        rel_rel: Position,
         minus: void,
         plus: void,
         assignment: Position,
@@ -261,7 +267,16 @@ pub fn printFromNode(
     switch (node.get()) {
         .number => |n| try writer.print("{d}", .{n}),
         .column => |col| try writer.print("{f}", .{Position.fmtColumnAddress(col)}),
-        .pos => |pos| try writer.print("{f}", .{pos}),
+        .rel_rel => |pos| try writer.print("{f}", .{pos}),
+        .rel_abs => |pos| try writer.print("{f}${d}", .{
+            Position.fmtColumnAddress(pos.x), pos.y,
+        }),
+        .abs_rel => |pos| try writer.print("${f}{d}", .{
+            Position.fmtColumnAddress(pos.x), pos.y,
+        }),
+        .abs_abs => |pos| try writer.print("${f}${d}", .{
+            Position.fmtColumnAddress(pos.x), pos.y,
+        }),
         .invalidated_pos => |pos| try writer.print("{f}", .{pos}),
 
         .string_literal => |str| {
@@ -496,6 +511,30 @@ pub fn argIteratorForwards(nodes: NodeSlice, start: Index, end: Index) ArgIterat
     };
 }
 
+pub const FormatData = struct {
+    nodes: NodeSlice,
+    root: Index,
+    strings: []const u8,
+};
+
+pub fn fmtAst(
+    nodes: NodeSlice,
+    root: Index,
+    strings: []const u8,
+) std.fmt.Formatter(FormatData, formatAst) {
+    return .{
+        .data = .{
+            .nodes = nodes,
+            .root = root,
+            .strings = strings,
+        },
+    };
+}
+
+pub fn formatAst(data: FormatData, w: *std.io.Writer) !void {
+    return print(data.nodes, data.root, data.strings, w);
+}
+
 pub fn print(
     nodes: NodeSlice,
     root: Index,
@@ -519,8 +558,11 @@ pub fn leftMostChild(
         .string_literal,
         .number,
         .column,
-        .pos,
         .invalidated_pos,
+        .rel_rel,
+        .rel_abs,
+        .abs_rel,
+        .abs_abs,
         => index,
         .assignment => leftMostChild(nodes, .from(index.n - 1)),
         // branch nodes
@@ -629,7 +671,7 @@ pub fn EvalContext(comptime Context: type) type {
 
             return switch (node.get()) {
                 .number => |n| .{ .number = n },
-                .pos => |pos| {
+                .rel_rel, .abs_abs, .abs_rel, .rel_abs => |pos| {
                     return self.context.evalCellByPos(pos);
                 },
                 .minus => {
@@ -753,16 +795,23 @@ pub fn EvalContext(comptime Context: type) type {
         fn toPosRange(self: *const @This(), lhs: Index, rhs: Index) Position.Rect {
             const data = self.nodes.items(.data);
 
-            if (self.nodes.items(.tag)[lhs.n] != .pos) {
-                std.debug.print("{}\n", .{self.nodes.items(.tag)[lhs.n]});
-                unreachable;
-            }
-            if (self.nodes.items(.tag)[rhs.n] != .pos) {
-                std.debug.print("{}\n", .{self.nodes.items(.tag)[rhs.n]});
-                unreachable;
+            switch (self.nodes.items(.tag)[lhs.n]) {
+                .rel_rel, .abs_abs, .rel_abs, .abs_rel => {},
+                else => {
+                    std.debug.print("{}\n", .{self.nodes.items(.tag)[lhs.n]});
+                    unreachable;
+                },
             }
 
-            return .initPos(data[lhs.n].pos, data[rhs.n].pos);
+            switch (self.nodes.items(.tag)[rhs.n]) {
+                .rel_rel, .abs_abs, .rel_abs, .abs_rel => {},
+                else => {
+                    std.debug.print("{}\n", .{self.nodes.items(.tag)[rhs.n]});
+                    unreachable;
+                },
+            }
+
+            return .initPos(data[lhs.n].rel_rel, data[rhs.n].rel_rel);
         }
 
         fn sumRange(self: *const @This(), lhs: Index, rhs: Index) !f64 {
@@ -843,8 +892,8 @@ pub fn EvalContext(comptime Context: type) type {
                     total += try self.sumRange(lhs, rhs);
 
                     const rect: Rect = .initPos(
-                        data[lhs.n].pos,
-                        data[rhs.n].pos,
+                        data[lhs.n].rel_rel,
+                        data[rhs.n].rel_rel,
                     );
 
                     total_items += rect.area();

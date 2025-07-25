@@ -1259,6 +1259,7 @@ const DebugCmd = enum {
     expect_eql_string,
     expect_non_extant,
     expect_error,
+    expect_expr,
     update_cell,
 };
 
@@ -1268,6 +1269,7 @@ const debug_cmds: std.StaticStringMap(DebugCmd) = .initComptime(.{
     .{ "expect-non-extant", .expect_non_extant },
     .{ "expect-error", .expect_error },
     .{ "update-cell", .update_cell },
+    .{ "expect-expr", .expect_expr },
 });
 
 const RunCommandError = error{
@@ -1330,6 +1332,38 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
             if (zc.currentSheet().getCellHandleByPosOrNull(pos)) |handle| {
                 try zc.currentSheet().enqueueUpdate(handle);
                 zc.ui.update(&.{.cells});
+            }
+        },
+        .expect_expr => {
+            const arg1 = iter.next() orelse return error.InvalidSyntax;
+            const rest = iter.string[iter.index..];
+
+            var aw: std.io.Writer.Allocating = .init(zc.allocator);
+            defer aw.deinit();
+
+            const pos = try Position.fromAddress(arg1);
+
+            // try zc.currentSheet().printCellExpression(pos, &aw.writer);
+
+            // Normalize the passed in expression
+            const sheet = zc.currentSheet();
+            const start = sheet.ast_nodes.len;
+            const expr = try ast.parseFromExpression(sheet, rest);
+            const cell = sheet.getCell(pos) orelse return error.CellNotFound;
+            const cell_left = ast.leftMostChild(sheet.ast_nodes, cell.expr_root);
+            errdefer std.debug.print("Expected '{f}', found '{f}'\n", .{
+                ast.fmtAst(sheet.ast_nodes, expr, rest),
+                sheet.fmtCellExpr(pos),
+            });
+
+            if (cell.expr_root.n - cell_left.n != expr.n - start)
+                return error.TestExpectedEqualExpressions;
+
+            for (start..expr.n + 1, cell_left.n..) |i, j| {
+                const n1 = sheet.ast_nodes.get(i).get();
+                const n2 = sheet.ast_nodes.get(j).get();
+                if (!std.meta.eql(n1, n2))
+                    return error.TestExpectedEqualExpressions;
             }
         },
     }

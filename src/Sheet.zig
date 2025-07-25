@@ -133,7 +133,6 @@ pub const Cell = extern struct {
         computing,
     } = .up_to_date,
 
-    // TODO: Allow this to be invalid if the cell is a number literal.
     /// Abstract syntax tree representing the expression in the cell.
     expr_root: ast.Index = .invalid,
 
@@ -251,6 +250,7 @@ pub const Undo = extern struct {
         update_pos: extern struct {
             ast_node: ast.Index,
             pos: Position,
+            tag: ast.Node.Tag,
         },
         insert_dep: Dependents.Entry.Handle,
         update_dep: extern struct {
@@ -724,7 +724,14 @@ pub fn interpretSource(sheet: *Sheet, reader: *std.io.Reader) !void {
         const dependent_count = blk: {
             var dependent_count: Cell.Handle.Int = 0;
             for (sheet.ast_nodes.items(.tag)[ast_nodes_start..]) |tag| {
-                if (tag == .pos) dependent_count += 1;
+                switch (tag) {
+                    .rel_rel,
+                    .abs_abs,
+                    .rel_abs,
+                    .abs_rel,
+                    => dependent_count += 1,
+                    else => {},
+                }
             }
             break :blk dependent_count;
         };
@@ -1079,8 +1086,8 @@ const ExprRangeIterator = struct {
         defer it.i = .from(@intCast(it.start.n + iter.index));
 
         while (iter.next()) |tag| switch (tag) {
-            .pos => {
-                return .initSinglePos(data[it.start.n + iter.index].pos);
+            .rel_rel, .rel_abs, .abs_rel, .abs_abs => {
+                return .initSinglePos(data[it.start.n + iter.index].rel_rel);
             },
             .invalidated_range => {
                 _ = iter.next().?;
@@ -1090,8 +1097,8 @@ const ExprRangeIterator = struct {
                 const r = data[it.start.n + iter.index].range;
                 const start: ast.Index = .from(@intCast(it.start.n + iter.index));
                 const lhs, const rhs = r.resolve(start);
-                const p1 = data[lhs.n].pos;
-                const p2 = data[rhs.n].pos;
+                const p1 = data[lhs.n].rel_rel;
+                const p2 = data[rhs.n].rel_rel;
                 _ = iter.next().?;
                 _ = iter.next().?;
                 return .{ .tl = p1, .br = p2 };
@@ -1142,8 +1149,14 @@ fn ensureExpressionDependentsCapacity(sheet: *Sheet, expr_root: ast.Index) Alloc
     const left = ast.leftMostChild(sheet.ast_nodes, expr_root);
     var dependent_count: u32 = 0;
     for (sheet.ast_nodes.items(.tag)[left.n .. expr_root.n + 1]) |tag| {
-        if (tag == .pos)
-            dependent_count += 1;
+        switch (tag) {
+            .rel_rel,
+            .abs_abs,
+            .rel_abs,
+            .abs_rel,
+            => dependent_count += 1,
+            else => {},
+        }
     }
 
     try sheet.dependents.ensureUnusedCapacity(sheet.allocator, dependent_count);
@@ -1486,7 +1499,8 @@ pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
         .update_pos => {
             const pos = u.payload.update_pos.pos;
             const i = u.payload.update_pos.ast_node;
-            try sheet.updatePos(i, pos, opts);
+            const tag = u.payload.update_pos.tag;
+            try sheet.updatePos(i, pos, tag, opts);
         },
         .insert_dep => {
             const handle = u.payload.insert_dep;
@@ -1603,14 +1617,23 @@ fn getUndoCellsSlice(sheet: *Sheet, index: usize) []Cell.Handle {
     unreachable;
 }
 
-fn updatePos(sheet: *Sheet, index: ast.Index, new_pos: Position, _: UndoOpts) !void {
-    const tag = sheet.ast_nodes.items(.tag)[index.n];
-    assert(tag == .pos or tag == .invalidated_pos);
+fn updatePos(
+    sheet: *Sheet,
+    index: ast.Index,
+    new_pos: Position,
+    new_tag: ast.Node.Tag,
+    _: UndoOpts,
+) !void {
+    switch (new_tag) {
+        .rel_rel, .rel_abs, .abs_rel, .abs_abs => {},
+        else => assert(false),
+    }
+    // const tag = sheet.ast_nodes.items(.tag)[index.n];
+    // assert(tag == .pos or tag == .invalidated_pos);
     try sheet.ensureUnusedUndoCapacity(1);
 
-    const ptr = &sheet.ast_nodes.items(.data)[index.n];
-    ptr.pos = new_pos;
-    sheet.ast_nodes.items(.tag)[index.n] = .pos;
+    sheet.ast_nodes.items(.data)[index.n].rel_rel = new_pos;
+    sheet.ast_nodes.items(.tag)[index.n] = new_tag;
 }
 
 fn updateRange(sheet: *Sheet, index: ast.Index, new_range: Rect, _: UndoOpts) !void {
@@ -1619,11 +1642,9 @@ fn updateRange(sheet: *Sheet, index: ast.Index, new_range: Rect, _: UndoOpts) !v
     try sheet.ensureUnusedUndoCapacity(1);
 
     const l, const r = sheet.ast_nodes.items(.data)[index.n].range.resolve(index);
-    const lhs = &sheet.ast_nodes.items(.data)[l.n].pos;
-    const rhs = &sheet.ast_nodes.items(.data)[r.n].pos;
+    sheet.ast_nodes.items(.data)[l.n].rel_rel = new_range.tl;
+    sheet.ast_nodes.items(.data)[r.n].rel_rel = new_range.br;
 
-    lhs.* = new_range.tl;
-    rhs.* = new_range.br;
     sheet.ast_nodes.items(.tag)[index.n] = .range;
 }
 
@@ -2301,8 +2322,8 @@ pub fn deleteColOrRowRange(
         while (i > 0) {
             i -= 1;
             switch (tags[i]) {
-                .pos => {
-                    const pos = data[i].pos;
+                .rel_rel, .rel_abs, .abs_rel, .abs_abs => {
+                    const pos = data[i].rel_rel;
                     undo_count += @intFromBool(@field(pos, f) >= start);
                 },
                 .invalidated_range => {
@@ -2310,8 +2331,8 @@ pub fn deleteColOrRowRange(
                 },
                 .range => {
                     const lhs, const rhs = data[i].range.resolve(.from(i));
-                    const tl: Position = data[lhs.n].pos;
-                    const br: Position = data[rhs.n].pos;
+                    const tl: Position = data[lhs.n].rel_rel;
+                    const br: Position = data[rhs.n].rel_rel;
                     const tl_f = @field(tl, f);
                     const br_f = @field(br, f);
                     const needs_resize_or_delete = !(tl_f > end or (tl_f < start and br_f > end));
@@ -2451,13 +2472,14 @@ pub fn deleteColOrRowRange(
     while (i > 0) {
         i -= 1;
         switch (tags[i]) {
-            .pos => {
-                const pos: *Position = &data[i].pos;
+            .rel_rel, .abs_abs, .rel_abs, .abs_rel => {
+                const pos: *Position = &data[i].rel_rel;
                 const n = @field(pos, f);
                 if (n >= start) {
                     sheet.pushUndoAssumeCapacity(.init(.update_pos, .{
                         .ast_node = .from(i),
                         .pos = pos.*,
+                        .tag = tags[i],
                     }), undo_opts);
 
                     if (n <= end) {
@@ -2472,8 +2494,8 @@ pub fn deleteColOrRowRange(
             },
             .range => {
                 const lhs, const rhs = data[i].range.resolve(.from(i));
-                const tl: *Position = &data[lhs.n].pos;
-                const br: *Position = &data[rhs.n].pos;
+                const tl: *Position = &data[lhs.n].rel_rel;
+                const br: *Position = &data[rhs.n].rel_rel;
                 const u: Undo = .init(.update_range, .{
                     .ast_node = .from(i),
                     .range = .{
@@ -2565,16 +2587,16 @@ pub fn insertColsOrRows(
         while (i > 0) {
             i -= 1;
             switch (tags[i]) {
-                .pos => {
-                    const pos = data[i].pos;
+                .rel_rel, .rel_abs, .abs_rel, .abs_abs => {
+                    const pos = data[i].rel_rel;
                     const pos_f = @field(pos, f);
                     undo_count += @intFromBool(pos_f >= index);
                 },
                 .invalidated_range => i -= 2,
                 .range => {
                     const lhs, const rhs = data[i].range.resolve(.from(i));
-                    const tl: Position = data[lhs.n].pos;
-                    const br: Position = data[rhs.n].pos;
+                    const tl: Position = data[lhs.n].rel_rel;
+                    const br: Position = data[rhs.n].rel_rel;
                     const tl_f = @field(tl, f);
                     const br_f = @field(br, f);
                     undo_count += @intFromBool(tl_f >= index or br_f >= index);
@@ -2668,12 +2690,13 @@ pub fn insertColsOrRows(
     while (i > 0) {
         i -= 1;
         switch (tags[i]) {
-            .pos => {
-                const pos = &data[i].pos;
+            .rel_rel, .rel_abs, .abs_rel, .abs_abs => {
+                const pos = &data[i].rel_rel;
                 if (@field(pos, f) >= index) {
                     sheet.pushUndoAssumeCapacity(.init(.update_pos, .{
                         .ast_node = .from(i),
                         .pos = pos.*,
+                        .tag = tags[i],
                     }), undo_opts);
                     @field(pos, f) += n;
                 }
@@ -2683,8 +2706,8 @@ pub fn insertColsOrRows(
             },
             .range => {
                 const lhs, const rhs = data[i].range.resolve(.from(i));
-                const tl = &data[lhs.n].pos;
-                const br = &data[rhs.n].pos;
+                const tl = &data[lhs.n].rel_rel;
+                const br = &data[rhs.n].rel_rel;
                 assert(tl.x <= br.x);
                 assert(tl.y <= br.y);
 
@@ -2990,8 +3013,8 @@ pub fn formatCellExpression(d: FmtData, writer: *std.io.Writer) !void {
     try d.sheet.printCellExpression(d.pos, writer);
 }
 
-pub fn fmtCellExpr(f: FmtData) std.fmt.Alt(FmtData, formatCellExpression) {
-    return .{ .data = f };
+pub fn fmtCellExpr(sheet: *Sheet, pos: Position) std.fmt.Alt(FmtData, formatCellExpression) {
+    return .{ .data = .{ .pos = pos, .sheet = sheet } };
 }
 
 fn setRowOrColumn(
@@ -3194,17 +3217,41 @@ pub fn createCellCopiesContiguous(
                 ) |src_tag, src_data, *dest_tag, *dest_data| {
                     dest_tag.* = src_tag;
                     dest_data.* = src_data;
-                    if (src_tag == .pos) {
-                        const added_x, ox = @addWithOverflow(dest_data.pos.x, tiled_diff_x);
-                        const added_y, oy = @addWithOverflow(dest_data.pos.y, tiled_diff_y);
-                        if (ox == 1 or oy == 1 or added_x < 0 or added_y < 0) {
-                            @branchHint(.unlikely);
-                            dest_tag.* = .invalidated_pos;
-                            continue;
-                        }
+                    switch (src_tag) {
+                        .rel_rel => {
+                            const added_x, ox = @addWithOverflow(dest_data.rel_rel.x, tiled_diff_x);
+                            const added_y, oy = @addWithOverflow(dest_data.rel_rel.y, tiled_diff_y);
+                            if (ox == 1 or oy == 1 or added_x < 0 or added_y < 0) {
+                                @branchHint(.unlikely);
+                                dest_tag.* = .invalidated_pos;
+                                continue;
+                            }
 
-                        dest_data.pos.x = @intCast(added_x);
-                        dest_data.pos.y = @intCast(added_y);
+                            dest_data.rel_rel.x = @intCast(added_x);
+                            dest_data.rel_rel.y = @intCast(added_y);
+                        },
+                        .abs_abs => {},
+                        .rel_abs => {
+                            const added_x, ox = @addWithOverflow(dest_data.rel_rel.x, tiled_diff_x);
+                            if (ox == 1 or added_x < 0) {
+                                @branchHint(.unlikely);
+                                dest_tag.* = .invalidated_pos;
+                                continue;
+                            }
+
+                            dest_data.rel_rel.x = @intCast(added_x);
+                        },
+                        .abs_rel => {
+                            const added_y, oy = @addWithOverflow(dest_data.rel_rel.y, tiled_diff_y);
+                            if (oy == 1 or added_y < 0) {
+                                @branchHint(.unlikely);
+                                dest_tag.* = .invalidated_pos;
+                                continue;
+                            }
+
+                            dest_data.rel_rel.y = @intCast(added_y);
+                        },
+                        else => {},
                     }
                 }
             }
@@ -3877,7 +3924,7 @@ pub fn expectCellEquals(sheet: *Sheet, address: []const u8, expected_value: f64)
             "Cell {f} ({f}) with value {d} not within tolerance of expected value {d}\n",
             .{
                 pos,
-                fmtCellExpr(.{ .sheet = sheet, .pos = pos }),
+                fmtCellExpr(sheet, pos),
                 cell.value.number,
                 expected_value,
             },

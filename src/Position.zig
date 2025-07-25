@@ -167,17 +167,60 @@ pub const Position = packed struct {
     }
 
     pub fn fromAddress(address: []const u8) FromAddressError!Position {
-        const letters_end = for (address, 0..) |c, i| {
+        if (address.len == 0) return error.InvalidCellAddress;
+
+        const start = @intFromBool(address[0] == '$');
+        const letters_end = for (address[start..], start..) |c, i| {
             if (!std.ascii.isAlphabetic(c))
                 break i;
         } else return error.InvalidCellAddress;
 
-        if (letters_end == 0) return error.InvalidCellAddress;
+        if (letters_end == start) return error.InvalidCellAddress;
+        const extra = @intFromBool(address[letters_end] == '$');
 
         return .{
-            .x = try columnFromAddress(address[0..letters_end]),
-            .y = std.fmt.parseInt(Int, address[letters_end..], 0) catch
+            .x = try columnFromAddress(address[start..letters_end]),
+            .y = std.fmt.parseInt(Int, address[letters_end + extra ..], 0) catch
                 return error.InvalidCellAddress,
+        };
+    }
+
+    const FromAddress2Result = struct {
+        pos: Position,
+        tag: enum {
+            rel_rel,
+            rel_abs,
+            abs_rel,
+            abs_abs,
+        },
+    };
+
+    pub fn fromAddress2(address: []const u8) FromAddressError!FromAddress2Result {
+        if (address.len == 0) return error.InvalidCellAddress;
+
+        const start = @intFromBool(address[0] == '$');
+        const letters_end = for (address[start..], start..) |c, i| {
+            if (!std.ascii.isAlphabetic(c))
+                break i;
+        } else return error.InvalidCellAddress;
+
+        if (letters_end == start) return error.InvalidCellAddress;
+        const extra = @intFromBool(address[letters_end] == '$');
+
+        return .{
+            .pos = .{
+                .x = try columnFromAddress(address[start..letters_end]),
+                .y = std.fmt.parseInt(Int, address[letters_end + extra ..], 0) catch
+                    return error.InvalidCellAddress,
+            },
+            .tag = if (start == 0 and extra == 0)
+                .rel_rel
+            else if (start == 0 and extra == 1)
+                .rel_abs
+            else if (start == 1 and extra == 0)
+                .abs_rel
+            else
+                .abs_abs,
         };
     }
 

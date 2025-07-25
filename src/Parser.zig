@@ -136,7 +136,12 @@ fn parseStringLiteral(parser: *Parser, comptime expected_tag: Token.Tag) ParseEr
 
 /// Assignment <- CellReference '=' Expression
 pub fn parseAssignment(parser: *Parser) ParseError!Index {
-    const start = try parser.expectTokenGet(.cell_name);
+    switch (parser.token_tags[parser.tok_i]) {
+        .rel_rel, .rel_abs, .abs_rel, .abs_abs => {},
+        else => return error.UnexpectedToken,
+    }
+    const start = parser.token_starts[parser.tok_i];
+    parser.tok_i += 1;
     const raw = parser.src[start..parser.token_starts[parser.tok_i]];
     const text = std.mem.trimRight(u8, raw, " \t\r\n");
 
@@ -254,7 +259,7 @@ fn parsePowExpr(parser: *Parser) !Index {
 fn parsePrimaryExpr(parser: *Parser) !Index {
     return switch (parser.token_tags[parser.tok_i]) {
         .number => parser.parseNumber(),
-        .cell_name => parser.parseRange(),
+        .rel_rel, .rel_abs, .abs_rel, .abs_abs => parser.parseRange(),
         .lparen => {
             try parser.expectToken(.lparen);
             const ret = parser.parseExpression();
@@ -350,16 +355,32 @@ fn parseNumber(parser: *Parser) !Index {
 
 /// CellReference <- ('a'-'z' / 'A'-'Z')+ ('0'-'9')+
 fn parseCellName(parser: *Parser) !Index {
-    const start = try parser.expectTokenGet(.cell_name);
+    switch (parser.token_tags[parser.tok_i]) {
+        .rel_rel, .rel_abs, .abs_rel, .abs_abs => {},
+        else => return error.UnexpectedToken,
+    }
+    const start = parser.token_starts[parser.tok_i];
+    parser.tok_i += 1;
     const raw = parser.src[start..parser.token_starts[parser.tok_i]];
     const text = std.mem.trimRight(u8, raw, " \t\r\n");
 
-    const pos = Position.fromAddress(text) catch return parser.setError(
+    const res = Position.fromAddress2(text) catch return parser.setError(
         error.InvalidCellAddress,
         .{ .invalid_cell_address = text },
     );
 
-    return parser.addNode(.init(.pos, pos));
+    switch (res.tag) {
+        inline else => |t| {
+            const tag: Node.Tag = switch (t) {
+                .abs_abs => .abs_abs,
+                .abs_rel => .abs_rel,
+                .rel_abs => .rel_abs,
+                .rel_rel => .rel_rel,
+            };
+
+            return parser.addNode(.init(tag, res.pos));
+        },
+    }
 }
 
 fn addNode(noalias parser: *Parser, node: Node) Allocator.Error!Index {

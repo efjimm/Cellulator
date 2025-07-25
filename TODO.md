@@ -2,6 +2,21 @@ This is a schizo document that contains basically every idea I thought should be
 working on cellulator. It's completely unorganised and some parts are very outdated. I thought it
 might be an interesting read so I committed it. The stuff at the top is probably newer.
 
+- Performance: Store cached cell values separately from ASTs
+- OOM resistance
+  - Should not crash
+  - Basic functionality should still work
+    - UI
+    - Command line
+    - Saving
+
+- Interpolation in strings
+  - Allow for any arbitrary numeric or string expression
+  - format is "{specifier:expr}"
+    - 'specifier' is either 'd' or 's' for numeric/string expressions respectively
+    - 'expr' is any numeric or string expression, depending on the specifier
+  - Expression's AST is part of the overall AST
+
 - Store undos and redos in a single list and just keep an index into where the current undo is.
   When an undo happens we can just invert the Undo operation at the index and decrement the index
   by one. When a redo happens we invert the operation at index+1 and increment the index by one.
@@ -51,11 +66,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
     - Correctly adjust when updating rows/columns
     - Integrate with undos
     - Integrate with serialization
-  - Copy cells
-    - Absolute references
-    - Virtual copies of cell expressions
-      - Would significantly reduce memory usage when copying many cells
-      - Requires making cell references in AST nodes relative
   - 'Precision as shown' option
   - Random numbers
   - Insert cells feature from libreoffice
@@ -63,9 +73,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
   - Go to definition for cell references
   - Show the expression and cached value for hovered over cells in command mode
 
-- Implement constant folding
-  - Full expressions still need to exist in the Ast for printing purposes
-    - Do they tho?
 - Investigate FAP sets
 
 - Lua
@@ -85,12 +92,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
     - Quit
     - Input
 
-- Interpolation in strings
-  - Allow for any arbitrary numeric or string expression
-  - format is "{specifier:expr}"
-    - 'specifier' is either 'd' or 's' for numeric/string expressions respectively
-    - 'expr' is any numeric or string expression, depending on the specifier
-  - Expression's AST is part of the overall AST
 - Undo/redo for command mode
 - Detailed error reporting in parser
 
@@ -100,12 +101,11 @@ might be an interesting read so I committed it. The stuff at the top is probably
   - csv
   - xls / xlsx
 
-- Store string dependencies in a single buffer in Sheet
-  - Undos and redos are sequential in time, so when we nuke redos we can just chop off the end
-    portion of the buffer.
+- Undos and redos are sequential in time, so when we nuke redos we can just chop off the end
+  portion of the buffer.
 - Consider changing functionality of `w` motion and adding `e` motion
   - Currently `w` just goes to the next populated cell. It may be better to have it function
-    similar to vim's `w`, where it goes to the first cell in the next set of column-continuous cells.
+    similar to vim's `w`, where it goes to the first cell in the next set of column-contiguous cells.
     This may make it easier to work with 'blocks' of values.
     Going to the next populated cell can still be done, either by hitting `w` if the current/next cell
     is blank or pressing `l` if not.
@@ -116,5 +116,3 @@ might be an interesting read so I committed it. The stuff at the top is probably
 - Multi-threaded evaluation of cells
 - Per-cell colors
 - GNUPlot integration
-
-- Optimize aroundDelimiters function

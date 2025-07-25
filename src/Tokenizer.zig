@@ -65,7 +65,10 @@ pub const Token = struct {
         rparen,
 
         column_name,
-        cell_name,
+        rel_rel,
+        rel_abs,
+        abs_rel,
+        abs_abs,
         builtin,
 
         single_string_literal_start,
@@ -93,7 +96,10 @@ pub const Token = struct {
                 .lparen = "'('",
                 .rparen = "')'",
                 .column_name = "column name",
-                .cell_name = "cell address",
+                .rel_rel = "cell address",
+                .rel_abs = "cell address",
+                .abs_rel = "cell address",
+                .abs_abs = "cell address",
                 .builtin = "builtin",
                 .single_string_literal_start = "\"'\"",
                 .single_string_literal_end = "\"'\"",
@@ -173,7 +179,12 @@ pub fn next(t: *Tokenizer) !Token {
                 t.toss(1);
                 continue :state .start;
             },
+            '$' => {
+                tag = .abs_rel;
+                continue :state .word;
+            },
             'a'...'z', 'A'...'Z' => |c| {
+                tag = .rel_rel;
                 kw_buf.appendAssumeCapacity(c);
                 continue :state .word;
             },
@@ -280,8 +291,14 @@ pub fn next(t: *Tokenizer) !Token {
                     kw_buf.appendAssumeCapacity(c);
                     continue :state .word;
                 },
-                '0'...'9', '_' => {
-                    tag = .cell_name;
+                '0'...'9', '_' => { // TODO: Should we accept _ here?
+                    continue :state .cell_address;
+                },
+                '$' => {
+                    tag = switch (tag) {
+                        .abs_rel => .abs_abs,
+                        else => .rel_abs,
+                    };
                     continue :state .cell_address;
                 },
                 else => {
@@ -371,9 +388,12 @@ test "Tokens" {
         .{ "123.123.123", .{ .number, .number, .eof } },
         .{ "123_123_123", .{ .number, .eof } },
         .{ "=+-*/%,:#", .{ .equals_sign, .plus, .minus, .asterisk, .forward_slash, .percent, .comma, .colon, .hash, .eof } },
-        .{ "() aaaaaa a0", .{ .lparen, .rparen, .column_name, .cell_name } },
+        .{ "() aaaaaa a0", .{ .lparen, .rparen, .column_name, .rel_rel } },
         .{ "let a = 3", .{ .keyword_let, .column_name, .equals_sign, .number, .eof } },
         .{ "@max(34, 100 + 45, @min(3, 1))", .{ .builtin, .lparen, .number, .comma, .number, .plus, .number, .comma, .builtin, .lparen, .number, .comma, .number, .rparen, .rparen, .eof } },
+        .{ "$a1", .{ .abs_rel, .eof } },
+        .{ "$a$1", .{ .abs_abs, .eof } },
+        .{ "a$1", .{ .rel_abs, .eof } },
     };
 
     inline for (data) |d| {
@@ -392,7 +412,7 @@ test "Token text range" {
     try t.expectEqual(.keyword_let, token.tag);
     try t.expectEqual(0, token.start);
     token = try tokenizer.next();
-    try t.expectEqual(.cell_name, token.tag);
+    try t.expectEqual(.rel_rel, token.tag);
     try t.expectEqual("let ".len, token.start);
     token = try tokenizer.next();
     try t.expectEqual(.equals_sign, token.tag);
