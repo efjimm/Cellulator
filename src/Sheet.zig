@@ -974,15 +974,15 @@ pub fn writeFile(
     if (filepath.len == 0)
         return error.EmptyFileName;
 
-    var atomic_file = try std.fs.cwd().atomicFile(filepath, .{});
+    var buf: [8192]u8 = undefined;
+    var atomic_file = try std.fs.cwd().atomicFile(filepath, .{ .write_buffer = &buf });
     defer atomic_file.deinit();
 
-    var buf: [8192]u8 = undefined;
-    var writer = atomic_file.file.writer(&buf);
+    const w = &atomic_file.file_writer.interface;
     if (std.mem.endsWith(u8, filepath, ".csv")) {
-        try sheet.writeCsv(&writer.interface);
+        try sheet.writeCsv(w);
     } else {
-        try sheet.writeContents(&writer.interface);
+        try sheet.writeContents(w);
     }
     try atomic_file.finish();
 
