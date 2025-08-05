@@ -1,0 +1,25 @@
+let a0 = 10
+let a1 = a0 * 2
+let b1 = $a0 * 2
+let c1 = a$0 * 2
+let d1 = $a$0 * 2
+
+:expect-eql-number a0 10
+:expect-eql-number a1 20
+:expect-eql-number b1 20
+:expect-eql-number c1 20
+:expect-eql-number d1 20
+
+:expect-expr a0 10
+:expect-expr a1 a0 * 2
+:expect-expr b1 $a0 * 2
+:expect-expr c1 a$0 * 2
+:expect-expr d1 $a$0 * 2
+
+:yank a1:d1
+:put-adjust b2
+
+:expect-expr b2 b1 * 2
+:expect-expr c2 $a1 * 2
+:expect-expr d2 b$0 * 2
+:expect-expr e2 $a$0 * 2
