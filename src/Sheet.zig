@@ -2765,9 +2765,8 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
 
     // log.debug("Marking dirty cells", .{});
 
-    var sfa = std.heap.stackFallback(16384, sheet.allocator);
-    var dirty_cells: std.ArrayList(Cell.Handle) = .init(sfa.get());
-    defer dirty_cells.deinit();
+    var dirty_cells: std.ArrayList(Cell.Handle) = .init(sheet.arena.allocator());
+    defer sheet.resetArena();
 
     for (sheet.queued_cells.items) |data| {
         const cell_start, const len = data;

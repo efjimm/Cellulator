@@ -14,6 +14,7 @@ const assert = std.debug.assert;
 
 const shovel = @import("shovel");
 const Term = shovel.Term;
+const Screen = shovel.Screen;
 pub const RenderError = Term.WriteError;
 
 const Position = @import("Position.zig").Position;
@@ -34,6 +35,9 @@ rc: ?Term.RenderContext = null,
 zc: ?*ZC = null,
 styles: Styles,
 current_style: ?UiElement = null,
+db: Screen.DoubleBuffer,
+cursor: Screen.Cursor = .reset,
+left: u16 = 0,
 
 arena: std.heap.ArenaAllocator,
 
@@ -73,7 +77,7 @@ pub const default_theme: Theme = .{
     .token_number = .init(.green, .none, .none),
     .token_builtin = .init(.red, .none, .none),
     .token_let = .init(.yellow, .none, .none),
-    .token_whitespace = .init(.{ .rgb = .{ 0x65, 0x73, 0x7e } }, .none, .none),
+    .token_whitespace = .init(.none, .none, .none),
     .token_operator = .init(.magenta, .none, .none),
     .token_cell_address = .init(.cyan, .none, .{ .bold = true }),
     .token_parentheses = .init(.{ .rgb = .{ 0x65, 0x73, 0x7e } }, .none, .none),
@@ -285,25 +289,33 @@ pub const InitError = Term.InitError || Term.UncookError || error{OperationNotSu
 
 pub fn init(allocator: std.mem.Allocator) InitError!Tui {
     std.posix.sigaction(std.posix.SIG.WINCH, &.{
-        .handler = .{
-            .handler = resizeHandler,
-        },
+        .handler = .{ .handler = resizeHandler },
         .mask = std.posix.sigemptyset(),
         .flags = 0,
     }, null);
 
     try shovel.initUnicodeData(allocator);
 
+    const term: Term = try .init(allocator, .{
+        .truecolour = .check,
+        .terminfo = .{
+            .fallback = .@"xterm-256color",
+            .fallback_mode = .last_resort,
+        },
+    });
+
     return .{
-        .term = try .init(allocator, .{ .truecolour = .check }),
+        .term = term,
         .arena = .init(allocator),
         .styles = .init(default_theme),
+        .db = .init(allocator, term.terminfo, term.grapheme_clustering_mode),
     };
 }
 
 pub fn deinit(tui: *Tui, allocator: std.mem.Allocator) void {
     tui.term.deinit(allocator);
     tui.arena.deinit();
+    tui.db.deinit();
     shovel.deinitUnicodeData(allocator);
     tui.* = undefined;
 }
@@ -321,67 +333,131 @@ pub fn cellViewHeight(tui: *const Tui) u16 {
 
 pub fn render(tui: *Tui, zc: *ZC) !void {
     defer _ = tui.arena.reset(.{ .retain_with_limit = 1 << 20 });
-    assert(tui.rc == null);
 
     if (needs_resize.load(.monotonic)) {
         try tui.term.fetchSize();
+        try tui.db.resize(tui.term.width, tui.term.height);
         zc.clampScreenToCursor();
         tui.update_flags = .all;
         needs_resize.store(false, .monotonic);
     }
 
+    tui.left = zc.leftReservedColumns();
+
     var buf: [1 << 14]u8 = undefined;
-    var rc = try tui.term.getRenderContext(&buf);
-    rc.hideCursor() catch unreachable;
+
+    tui.zc = zc;
+    defer {
+        tui.zc = null;
+        tui.current_style = null;
+    }
+
+    var b: [2048]u8 = undefined;
+    var wr = tui.db.write.writerFull(&b, .truncate, .ascii);
+    var term_writer = tui.term.writer(&buf);
 
     if (tui.term.width < 15 or tui.term.height < 5) {
-        rc.clear() catch unreachable;
-        rc.moveCursorTo(0, 0) catch unreachable;
-        rc.writeAllWrapping("Terminal too small") catch unreachable;
-        try rc.done();
+        wr.clear();
+        wr.overflow_mode = .wrap;
+        try wr.interface.writeAll("Terminal too small");
+        try wr.flush();
+        try tui.db.dump(&term_writer.interface);
+        try term_writer.interface.flush();
         return;
     }
 
+    if (!zc.mode.isCommandMode() and tui.term.cursor_visible) {
+        try tui.term.terminfo.write(&term_writer.interface, .cursor_invisible, .{});
+        tui.term.cursor_visible = false;
+    }
+
+    try tui.renderColumnHeadings(&wr);
+    try tui.renderRowNumbers(&wr);
+    try tui.renderCells(&wr);
+    try tui.renderCursor(&wr);
+    try tui.renderInputHints(&wr);
+    try tui.renderSheetList(&wr);
+    try tui.renderStatus(&wr);
+    try tui.renderCommandLine(&wr);
+
+    try wr.flush();
+
+    // var rc = try tui.term.getRenderContext(&b);
+    try tui.db.dump(&term_writer.interface);
+    const cx: i32 = @intCast(tui.cursor.cell_offset % tui.term.width);
+    const cy: i32 = @intCast(tui.cursor.cell_offset / tui.term.width);
+    if (zc.mode.isCommandMode()) {
+        if (!tui.term.cursor_visible) {
+            try tui.term.terminfo.write(&term_writer.interface, .cursor_visible, .{});
+            tui.term.cursor_visible = true;
+        }
+
+        const cursor_shape: Term.CursorShape = switch (zc.mode) {
+            .normal, .visual, .select => unreachable,
+            .command_normal => .block,
+            .command_insert => .bar,
+            .command_to_forwards,
+            .command_to_backwards,
+            .command_until_forwards,
+            .command_until_backwards,
+            .command_change,
+            .command_delete,
+            => .underline,
+        };
+        try tui.term.setCursorShape(&term_writer.interface, cursor_shape);
+        try tui.term.terminfo.write(&term_writer.interface, .cursor_address, .{ cy, cx });
+    }
+    try term_writer.interface.flush();
+
+    tui.update_flags = .none;
+}
+
+pub fn render2(tui: *Tui, zc: *ZC) !void {
+    defer _ = tui.arena.reset(.{ .retain_with_limit = 1 << 20 });
+
+    if (needs_resize.load(.monotonic)) {
+        try tui.term.fetchSize();
+        try tui.db.resize(tui.term.width, tui.term.height);
+        zc.clampScreenToCursor();
+        tui.update_flags = .all;
+        needs_resize.store(false, .monotonic);
+    }
+
     tui.zc = zc;
-    tui.rc = rc;
     defer {
         tui.zc = null;
-        tui.rc = null;
         tui.current_style = null;
     }
-    errdefer unreachable;
 
-    // TODO: Don't update this every frame
-    if (tui.update_flags.column_headings)
-        try tui.renderColumnHeadings();
+    tui.left = zc.leftReservedColumns();
+    var b: [2048]u8 = undefined;
+    var wr = tui.db.write.writerFull(&b, .truncate, .ascii);
 
-    if (tui.update_flags.row_numbers)
-        try tui.renderRowNumbers();
-
-    if (tui.update_flags.cells) {
-        try tui.renderCells();
+    if (tui.term.width < 15 or tui.term.height < 5) {
+        wr.clear();
+        wr.overflow_mode = .wrap;
+        try wr.interface.writeAll("Terminal too small");
+        try wr.flush();
+        return;
     }
 
-    try tui.renderInputHints();
+    try tui.renderColumnHeadings(&wr);
+    try tui.renderRowNumbers(&wr);
+    try tui.renderCells(&wr);
+    try tui.renderInputHints(&wr);
+    try tui.renderCursor(&wr);
 
-    if (tui.update_flags.cursor) {
-        try tui.renderCursor();
-    }
+    try tui.renderSheetList(&wr);
+    try tui.renderStatus(&wr);
+    try tui.renderCommandLine(&wr);
 
-    try tui.renderSheetList();
-
-    try tui.renderStatus();
-
-    if (tui.update_flags.command or zc.mode.isCommandMode())
-        tui.renderCommandLine() catch return tui.rc.?.writer.err.?;
-
-    try tui.rc.?.done();
+    try wr.flush();
 
     tui.update_flags = .none;
 }
 
 /// Sets the current style to the style associated with `element`.
-fn setStyle(tui: *Tui, element: UiElement) !void {
+fn setStyle(tui: *Tui, element: UiElement, wr: *Screen.Writer) !void {
     if (tui.current_style == element) return;
     const style = tui.styles.get(element);
     if (tui.current_style) |cs| {
@@ -389,19 +465,22 @@ fn setStyle(tui: *Tui, element: UiElement) !void {
         const current_style = tui.styles.get(cs);
         if (std.meta.eql(current_style, style)) return;
     }
-    try tui.rc.?.setStyle(style);
+    try wr.setStyle(style);
     tui.current_style = element;
 }
 
-fn renderSheetList(tui: *Tui) !void {
-    const rc = &tui.rc.?;
+fn renderSheetList(tui: *Tui, wr: *Screen.Writer) !void {
     const zc = tui.zc.?;
 
-    try rc.moveCursorTo(tui.term.height - 1, 0);
-    var rpw = rc.cellWriter(tui.term.width);
-    const writer = &rpw.interface;
+    try wr.setRectClamp(.{
+        .x = 0,
+        .y = tui.term.height - 1,
+        .width = tui.term.width,
+        .height = 1,
+    });
+    const w = &wr.interface;
 
-    try tui.setStyle(.sheet_unselected);
+    try tui.setStyle(.sheet_unselected, wr);
 
     for (zc.sheets.values(), zc.sheets.keys(), 0..) |sheet, name, i| {
         const style: UiElement =
@@ -410,20 +489,18 @@ fn renderSheetList(tui: *Tui) !void {
             else
                 .sheet_selected;
 
-        try tui.setStyle(style);
-        try writer.print("{s} {s} ", .{
+        try tui.setStyle(style, wr);
+        try w.print("{s} {s} ", .{
             if (sheet.has_changes) "[+]" else "",
             name,
         });
 
-        try tui.setStyle(.sheet_unselected);
+        try tui.setStyle(.sheet_unselected, wr);
     }
-
-    try rpw.finish();
-    try rc.clearToEol();
+    try wr.clearToEol();
 }
 
-fn renderInputHints(tui: *Tui) !void {
+fn renderInputHints(tui: *Tui, wr: *Screen.Writer) !void {
     const Key = struct {
         // Integer value of the action enum. This is used to sort the entries based on the order in
         // the source code.
@@ -458,6 +535,9 @@ fn renderInputHints(tui: *Tui) !void {
 
     const zc = tui.zc.?;
     if (zc.input_buf.writer.end == 0) return;
+    const old_mode = wr.unicode_mode;
+    wr.unicode_mode = .unicode;
+    defer wr.unicode_mode = old_mode;
 
     const arena = tui.arena.allocator();
     const input = zc.inputSlice();
@@ -510,77 +590,88 @@ fn renderInputHints(tui: *Tui) !void {
         match.desc_width = @intCast(dw_res.width);
     }
 
+    // Actually start rendering
+
     const width = @min(tui.term.width, 2 + max_keys_width + 2 + max_desc_width + 2);
 
-    const rc: *Term.RenderContext = &tui.rc.?;
     const height = @min(tui.cellViewHeight(), matches.items.len + 2);
     const y = cell_view_line + (tui.cellViewHeight() - height);
+    const x = tui.term.width -| width;
 
-    try rc.moveCursorTo(y, tui.term.width -| width);
-    const w = &rc.writer.interface;
+    try wr.setRect(.{
+        .x = x,
+        .y = y,
+        .height = height,
+        .width = width,
+    });
+    const w = &wr.interface;
 
     const input_res = stringWidthInternal(input, .{ .max_width = width - 2 });
 
     var b: [1][]const u8 = .{"─"};
-    try tui.setStyle(.completion_background);
+    try tui.setStyle(.completion_background, wr);
     try w.writeAll("┌");
-    try tui.setStyle(.completion_title);
+    try tui.setStyle(.completion_title, wr);
     try w.writeAll(input[0..input_res.len]);
-    try tui.setStyle(.completion_background);
+    try tui.setStyle(.completion_background, wr);
     try w.writeSplatAll(&b, width - 2 - input_res.width);
     try w.writeAll("┐");
 
     var i: u16 = 1;
     for (matches.items[0..height -| 2]) |match| {
-        try rc.moveCursorTo(y + i, tui.term.width -| width);
+        try wr.setCursor(i, 0);
 
-        try tui.setStyle(.completion_background);
+        try tui.setStyle(.completion_background, wr);
         try w.writeAll("│ ");
 
-        try tui.setStyle(.completion_keys);
+        try tui.setStyle(.completion_keys, wr);
         try w.writeAll(match.key);
 
-        try tui.setStyle(.completion_background);
+        try tui.setStyle(.completion_background, wr);
         try w.splatByteAll(' ', max_keys_width - match.key_width + 2);
 
-        try tui.setStyle(.completion_description);
+        try tui.setStyle(.completion_description, wr);
         try w.writeAll(match.description);
 
-        try tui.setStyle(.completion_background);
+        try tui.setStyle(.completion_background, wr);
         try w.splatByteAll(' ', max_desc_width - match.desc_width);
         try w.writeAll(" │");
 
         i += 1;
     }
-    try rc.moveCursorTo(y + i, tui.term.width -| width);
+    try wr.setCursor(i, 0);
     try w.writeAll("└");
     try w.writeSplatAll(&b, width - 2);
     try w.writeAll("┘");
+    try wr.flush();
 }
 
-fn renderStatus(tui: *Tui) !void {
-    const rc = &tui.rc.?;
+fn renderStatus(tui: *Tui, wr: *Screen.Writer) !void {
     const zc = tui.zc.?;
     const arena = tui.arena.allocator();
-    try rc.moveCursorTo(status_line, 0);
-    try rc.hideCursor();
+    try wr.setRect(.{
+        .x = 0,
+        .y = status_line,
+        .width = tui.term.width,
+        .height = 1,
+    });
 
-    const writer = &rc.writer.interface;
+    const writer = &wr.interface;
 
-    try tui.setStyle(.token_cell_address);
+    try tui.setStyle(.token_cell_address, wr);
     try writer.print(" {f}", .{zc.cursor});
-    try tui.setStyle(.status_line);
+    try tui.setStyle(.status_line, wr);
     try writer.print(" {f}", .{zc.mode});
 
     const input = zc.inputSlice();
     if (zc.count != 0) {
-        try tui.setStyle(.count);
+        try tui.setStyle(.count, wr);
         try writer.print(" {d}{s}", .{ zc.getCount(), input });
-        try tui.setStyle(.status_line);
+        try tui.setStyle(.status_line, wr);
     } else if (input.len > 0) {
-        try tui.setStyle(.count);
+        try tui.setStyle(.count, wr);
         try writer.print(" {s}", .{input});
-        try tui.setStyle(.status_line);
+        try tui.setStyle(.status_line, wr);
     }
 
     try writer.writeAll(" [");
@@ -589,32 +680,32 @@ fn renderStatus(tui: *Tui) !void {
         const ast = @import("ast.zig");
 
         const buf = try arena.alloc(u8, 4096);
-        var wr: std.io.Writer = .fixed(buf);
-        ast.print(sheet.ast_nodes, cell.expr_root, sheet.strings_buf.items, &wr) catch {};
+        var br: std.io.Writer = .fixed(buf);
+        ast.print(sheet.ast_nodes, cell.expr_root, sheet.strings_buf.items, &br) catch {};
 
-        const bytes = wr.buffered();
+        const bytes = br.buffered();
         var reader: std.io.Reader = .fixed(bytes);
         const tokens = try Tokenizer.collectTokens(arena, &reader, 128);
         const tags = tokens.items(.tag);
         const starts = tokens.items(.start);
         for (tags[0 .. tags.len - 1], starts[0 .. starts.len - 1], starts[1..]) |tag, start, end| {
-            try tui.writeToken(tag, bytes[start..end]);
+            try tui.writeToken(tag, bytes[start..end], wr);
         }
-        try tui.writeToken(.eof, bytes[starts[starts.len - 1]..]);
+        try tui.writeToken(.eof, bytes[starts[starts.len - 1]..], wr);
     }
 
-    try tui.setStyle(.status_line);
+    try tui.setStyle(.status_line, wr);
     try writer.writeByte(']');
 
     const path = sheet.filepath.constSlice();
     if (path.len > 0) {
-        try tui.setStyle(.filepath);
+        try tui.setStyle(.filepath, wr);
         try writer.print(" {s}", .{path});
     } else {
         try writer.writeAll(" No file");
     }
 
-    try rc.clearToEol();
+    try wr.clearToEol();
 }
 
 const Tokenizer = @import("Tokenizer.zig");
@@ -641,10 +732,9 @@ fn tokenStyle(tag: Token.Tag) UiElement {
     };
 }
 
-fn writeToken(tui: *Tui, tag: Token.Tag, slice: []const u8) !void {
-    const rc = &tui.rc.?;
-    const writer = &rc.writer.interface;
-    try tui.setStyle(tokenStyle(tag));
+fn writeToken(tui: *Tui, tag: Token.Tag, slice: []const u8, wr: *Screen.Writer) !void {
+    const writer = &wr.interface;
+    try tui.setStyle(tokenStyle(tag), wr);
     switch (tag) {
         // These tags allow trailing whitespace as part of their contents
         .single_string_literal_start, .double_string_literal_start => {
@@ -655,20 +745,26 @@ fn writeToken(tui: *Tui, tag: Token.Tag, slice: []const u8) !void {
             try writer.writeAll(trimmed);
             const whitespace = slice[trimmed.len..];
             if (whitespace.len > 0) {
-                try tui.setStyle(.token_whitespace);
+                try tui.setStyle(.token_whitespace, wr);
                 try writer.writeAll(whitespace);
             }
         },
     }
 }
 
-fn renderCommandLine(tui: *Tui) !void {
-    const rc = &tui.rc.?;
+fn renderCommandLine(tui: *Tui, wr: *Screen.Writer) !void {
     const zc = tui.zc.?;
-    try rc.moveCursorTo(input_line, 0);
-    try tui.setStyle(.command_line);
-    try rc.clearToEol();
-    const writer = &rc.writer.interface;
+    try wr.setRect(.{
+        .x = 0,
+        .y = input_line,
+        .width = tui.term.width,
+        .height = 1,
+    });
+    try tui.setStyle(.command_line, wr);
+    try wr.clearToEol();
+    const writer = &wr.interface;
+
+    wr.overflow_mode = .truncate;
 
     const arena = tui.arena.allocator();
 
@@ -687,23 +783,21 @@ fn renderCommandLine(tui: *Tui) !void {
             if (c > left.len) {
                 try writer.writeAll(left[i..]);
                 try writer.writeAll(right[0 .. c - left.len]);
-                try rc.saveCursor();
             } else {
                 try writer.writeAll(left[i..c]);
-                try rc.saveCursor();
             }
         } else {
             try writer.writeAll(right[i - left.len .. c - left.len]);
-            try rc.saveCursor();
         }
+        try wr.flush();
+        tui.cursor = wr.cursor;
+        try wr.setCursor(0, 0);
 
         const tokens = try Tokenizer.collectTokens(
             arena,
             &reader.interface,
             zc.command.length() / 2,
         );
-
-        try rc.moveCursorTo(input_line, 0);
 
         const tags = tokens.items(.tag);
         const starts = tokens.items(.start);
@@ -718,7 +812,7 @@ fn renderCommandLine(tui: *Tui) !void {
             starts[0..index],
             starts[1 .. index + 1],
         ) |tag, start, end| {
-            try tui.writeToken(tag, left[start..@min(left.len, end)]);
+            try tui.writeToken(tag, left[start..@min(left.len, end)], wr);
         }
 
         try writer.writeAll(right[0..cutoff]);
@@ -731,169 +825,155 @@ fn renderCommandLine(tui: *Tui) !void {
             const adjusted_start = start - left.len;
             const adjusted_end = end - left.len;
 
-            try tui.writeToken(tag, right[adjusted_start..adjusted_end]);
+            try tui.writeToken(tag, right[adjusted_start..adjusted_end], wr);
         }
 
         const last_start = starts[starts.len - 1];
         if (last_start < left.len) {
-            try tui.writeToken(.eof, left[last_start..]);
+            try tui.writeToken(.eof, left[last_start..], wr);
             try writer.writeAll(right);
         } else {
-            try tui.writeToken(.eof, right[last_start - left.len ..]);
+            try tui.writeToken(.eof, right[last_start - left.len ..], wr);
         }
-
-        switch (zc.mode) {
-            .normal, .visual, .select => unreachable,
-            .command_normal => try rc.setCursorShape(.block),
-            .command_insert => try rc.setCursorShape(.bar),
-            .command_to_forwards,
-            .command_to_backwards,
-            .command_until_forwards,
-            .command_until_backwards,
-            .command_change,
-            .command_delete,
-            => try rc.setCursorShape(.underline),
-        }
-        try rc.restoreCursor();
-        try rc.showCursor();
     } else if (zc.status_message.len > 0) {
         switch (zc.status_message_type) {
             .info => {
-                try tui.setStyle(.status_info);
+                try tui.setStyle(.status_info, wr);
                 try writer.writeAll("Info: ");
             },
             .warn => {
-                try tui.setStyle(.status_warn);
+                try tui.setStyle(.status_warn, wr);
                 try writer.writeAll("Warning: ");
             },
             .err => {
-                try tui.setStyle(.status_err);
+                try tui.setStyle(.status_err, wr);
                 try writer.writeAll("Error: ");
             },
         }
-        try tui.setStyle(.command_line);
+        try tui.setStyle(.command_line, wr);
         try writer.writeAll(zc.status_message.slice());
     }
+
+    try tui.setStyle(.command_line, wr);
+    try wr.clearToEol();
 }
 
-fn renderColumnHeadings(tui: *Tui) !void {
-    const rc = &tui.rc.?;
+fn renderColumnHeadings(tui: *Tui, wr: *Screen.Writer) !void {
     const zc = tui.zc.?;
+    const sheet = zc.currentSheet();
 
-    const reserved_cols = zc.leftReservedColumns();
-    try rc.moveCursorTo(col_heading_line, reserved_cols);
-    try rc.clearToBol();
+    const widths = try tui.arena.allocator().alloc(u16, @as(u32, tui.term.width) + 1);
+    @memset(widths, Column.default_width);
+    sheet.cols.traverse(&.{zc.screen_pos.x}, &.{zc.screen_pos.x +| tui.term.width}, GetColsContext{
+        .sheet = sheet,
+        .widths = widths,
+        .screen_x = zc.screen_pos.x,
+    }) catch unreachable;
+
+    try wr.setRect(.{
+        .x = 0,
+        .y = col_heading_line,
+        .height = 1,
+        .width = tui.term.width,
+    });
 
     var x = zc.screen_pos.x;
-    var w = reserved_cols;
+    var w = tui.left;
 
-    try tui.setStyle(.column_heading_unselected);
+    try tui.setStyle(.column_heading_unselected, wr);
+    try wr.interface.splatByteAll(' ', tui.left);
 
-    // TODO: Clean up these calls to getColumn
     while (w < tui.term.width) : (x += 1) {
-        const col: Column = zc.currentSheet().getColumn(x) orelse .{};
-        const width = @min(tui.term.width - reserved_cols, col.width);
-
+        const col_width = widths[x - zc.screen_pos.x];
         var buf: [Position.max_str_len]u8 = undefined;
         const name = Position.columnAddressBuf(x, &buf);
 
+        const n = (col_width -| name.len) / 2;
         if (zc.isSelectedCol(x)) {
-            try tui.setStyle(.column_heading_selected);
-            try shovel.writeTruncating(name, width, .center, &rc.writer.interface);
-            try tui.setStyle(.column_heading_unselected);
+            try tui.setStyle(.column_heading_selected, wr);
+            if (name.len >= col_width) {
+                try wr.interface.writeAll(name[0..col_width]);
+            } else {
+                try wr.interface.splatByteAll(' ', n);
+                try wr.interface.writeAll(name);
+                try wr.interface.splatByteAll(' ', col_width -| name.len - n);
+            }
+            try tui.setStyle(.column_heading_unselected, wr);
         } else {
-            try shovel.writeTruncating(name, width, .center, &rc.writer.interface);
+            if (name.len >= col_width) {
+                try wr.interface.writeAll(name[0..col_width]);
+            } else {
+                try wr.interface.splatByteAll(' ', n);
+                try wr.interface.writeAll(name);
+                try wr.interface.splatByteAll(' ', col_width -| name.len - n);
+            }
         }
 
         if (x == std.math.maxInt(Position.Int)) {
-            try rc.clearToEol();
+            @branchHint(.unlikely);
+            try wr.clearToEol();
             break;
         }
-        w += width;
+        w += col_width;
     }
+    try wr.flush();
 }
 
-fn renderRowNumbers(tui: *Tui) !void {
-    const rc = &tui.rc.?;
+fn renderRowNumbers(tui: *Tui, wr: *Screen.Writer) !void {
     const zc = tui.zc.?;
-    const width = zc.leftReservedColumns();
-    try tui.setStyle(.row_heading_unselected);
+    try tui.setStyle(.row_heading_unselected, wr);
 
-    try rc.moveCursorTo(col_heading_line, 0);
-    try rc.writer.interface.splatByteAll(' ', width);
+    try wr.setRect(.{
+        .x = 0,
+        .y = cell_view_line,
+        .width = tui.left,
+        .height = tui.cellViewHeight(),
+    });
 
-    for (
-        cell_view_line..cell_view_line + tui.cellViewHeight(),
-        zc.screen_pos.y..,
-    ) |screen_line, sheet_line| {
-        try rc.moveCursorTo(@intCast(screen_line), 0);
+    wr.overflow_mode = .wrap;
 
-        var rpw = rc.cellWriter(width);
-
-        if (zc.isSelectedRow(@intCast(sheet_line))) {
-            try tui.setStyle(.row_heading_selected);
-
-            try rpw.interface.print("{d: ^[1]}", .{ sheet_line, width });
-            try rpw.pad();
-
-            try tui.setStyle(.row_heading_unselected);
+    var y: u64 = zc.screen_pos.y;
+    while (y < @as(u64, zc.screen_pos.y) + tui.cellViewHeight()) : (y += 1) {
+        if (zc.isSelectedRow(@intCast(y))) {
+            @branchHint(.unlikely);
+            try tui.setStyle(.row_heading_selected, wr);
+            try wr.interface.print("{d: ^[1]}", .{ y, tui.left });
+            try tui.setStyle(.row_heading_unselected, wr);
         } else {
-            try rpw.interface.print("{d: ^[1]}", .{ sheet_line, width });
-            try rpw.pad();
+            try wr.interface.print("{d: ^[1]}", .{ y, tui.left });
         }
     }
+    try wr.flush();
 }
 
-fn renderCursor(tui: *Tui) !void {
+fn renderCursor(tui: *Tui, wr: *Screen.Writer) !void {
     const zc = tui.zc.?;
-
-    // Overwrite the old cursor if it's still on screen
-    const old_col_handle = zc.currentSheet().cols.findEntry(&.{zc.prev_cursor.x});
-    const x_on_screen, const y_on_screen = tui.isOnScreen(zc, zc.prev_cursor);
-
-    if (x_on_screen and y_on_screen) {
-        const old_x = posXToScreenX(zc, zc.prev_cursor.x);
-        const old_y = posYToScreenY(zc, zc.prev_cursor.y);
-        try tui.renderCursorAtPos(zc.prev_cursor, old_col_handle, old_x, old_y);
-    }
-
-    if (x_on_screen and zc.cursor.x != zc.prev_cursor.x) {
-        const old_x = posXToScreenX(zc, zc.prev_cursor.x);
-        try tui.overwriteColumnHeading(zc.prev_cursor, old_col_handle, old_x);
-    }
-    if (y_on_screen and zc.cursor.y != zc.prev_cursor.y)
-        try tui.overwriteRowHeading(zc.prev_cursor);
 
     // Draw the new cursor
     const new_col_handle = zc.currentSheet().cols.findEntry(&.{zc.cursor.x});
-    const new_x = posXToScreenX(zc, zc.cursor.x);
+    const new_x = posXToScreenX(zc, zc.cursor.x, tui.left);
     const new_y = posYToScreenY(zc, zc.cursor.y);
-    try tui.renderCursorAtPos(zc.cursor, new_col_handle, new_x, new_y);
-    if (zc.cursor.y != zc.prev_cursor.y)
-        try tui.overwriteRowHeading(zc.cursor);
-    if (zc.cursor.x != zc.prev_cursor.x)
-        try tui.overwriteColumnHeading(zc.cursor, new_col_handle, new_x);
+    try tui.renderCursorAtPos(zc.cursor, new_col_handle, new_x, new_y, wr);
 }
 
-fn overwriteRowHeading(tui: *Tui, pos: Position) !void {
+fn overwriteRowHeading(tui: *Tui, pos: Position, wr: *Screen.Writer) !void {
     const zc = tui.zc.?;
-    const rc = &tui.rc.?;
-    const left = zc.leftReservedColumns();
 
     const y = posYToScreenY(zc, pos.y);
 
-    try rc.moveCursorTo(y, 0);
+    try wr.setCursor(y, 0);
     try tui.setStyle(
         if (isSelected(zc, pos))
             .row_heading_selected
         else
             .row_heading_unselected,
+        wr,
     );
-    try rc.writer.interface.print("{d: ^[1]}", .{ pos.y, left });
+    try wr.interface.print("{d: ^[1]}", .{ pos.y, tui.left });
 }
 
-fn posXToScreenX(zc: *ZC, px: Position.Int) u16 {
-    var x = zc.leftReservedColumns();
+fn posXToScreenX(zc: *ZC, px: Position.Int, left: u16) u16 {
+    var x = left;
     var i = zc.screen_pos.x;
     while (i < px) : (i += 1) {
         const c: Column = zc.currentSheet().getColumn(i) orelse .{};
@@ -906,45 +986,86 @@ fn posYToScreenY(zc: *ZC, py: Position.Int) u16 {
     return @intCast(py - zc.screen_pos.y + cell_view_line);
 }
 
-fn overwriteColumnHeading(tui: *Tui, pos: Position, col_handle: Column.Handle, screen_x: u16) !void {
+fn overwriteColumnHeading(tui: *Tui, pos: Position, col_handle: Column.Handle, screen_x: u16, wr: *Screen.Writer) !void {
     const zc = tui.zc.?;
-    const rc = &tui.rc.?;
-    const left = zc.leftReservedColumns();
 
     const col = zc.currentSheet().getColumnByHandleOrDefault(col_handle);
 
-    const width = @min(col.width, rc.term.width - left);
-    try rc.moveCursorTo(col_heading_line, screen_x);
+    const width = @min(col.width, wr.s.width - tui.left);
+    try wr.setRectClamp(.init(screen_x, col_heading_line, width, 1));
     try tui.setStyle(
         if (isSelected(zc, pos))
             .column_heading_selected
         else
             .column_heading_unselected,
+        wr,
     );
 
     var buf: [Position.max_str_len]u8 = undefined;
     const slice = Position.columnAddressBuf(pos.x, &buf);
-    try shovel.writeTruncating(slice, width, .center, &rc.writer.interface);
+
+    const n = (width - slice.len) / 2;
+    try wr.interface.splatByteAll(' ', n);
+    try wr.interface.writeAll(slice);
+    try wr.interface.splatByteAll(' ', width - slice.len - n);
 }
 
-fn renderCursorAtPos(tui: *Tui, pos: Position, col_handle: Column.Handle, screen_x: u16, screen_y: u16) !void {
-    const rc = &tui.rc.?;
+fn renderCursorAtPos(
+    tui: *Tui,
+    pos: Position,
+    col_handle: Column.Handle,
+    screen_x: u16,
+    screen_y: u16,
+    wr: *Screen.Writer,
+) !void {
     const zc = tui.zc.?;
+    const sheet = zc.currentSheet();
 
     if (zc.mode.isVisual()) return;
+    wr.overflow_mode = .truncate;
 
     // Render the cells and headings at the current cursor position with a specific colour.
-    const col = zc.currentSheet().getColumnByHandleOrDefault(col_handle);
-    const cell_handle = zc.currentSheet().getCellHandleByPos(pos);
-    const text_attrs_handle = zc.currentSheet().text_attrs.findEntry(&.{ pos.x, pos.y });
-    try rc.moveCursorTo(screen_y, screen_x);
-    try tui.renderCell(
-        pos,
-        cell_handle,
-        col.precision,
-        col.width,
-        zc.currentSheet().getTextAttrs(text_attrs_handle),
-    );
+    const col = sheet.getColumnByHandleOrDefault(col_handle);
+    const cell_handle = sheet.getCellHandleByPos(pos);
+    const text_attrs_handle = sheet.text_attrs.findEntry(&.{ pos.x, pos.y });
+    try wr.setRectClamp(.{
+        .x = screen_x,
+        .y = screen_y,
+        .height = 1,
+        .width = col.width,
+    });
+
+    const selected = isSelected(zc, pos);
+
+    try wr.setRectClampAtCursor(col.width, 1);
+    wr.overflow_mode = .truncate;
+
+    if (cell_handle == .invalid) {
+        try tui.setStyle(if (selected) .cell_blank_selected else .cell_blank_unselected, wr);
+        const remaining = wr.remainingCellsInLine();
+        try wr.interface.splatByteAll(' ', remaining);
+        return;
+    }
+
+    const cell: *const Cell = sheet.getCellFromHandle(cell_handle);
+
+    switch (cell.value_tag) {
+        .number => {
+            try tui.setStyle(if (selected) .cell_number_selected else .cell_number_unselected, wr);
+            try wr.interface.print("{d: >[1].[2]}", .{ cell.value.number, col.width, col.precision });
+        },
+        .string => {
+            try tui.setStyle(if (selected) .cell_text_selected else .cell_text_unselected, wr);
+
+            const text = sheet.cellStringValue(cell);
+            const alignment = utils.enumFromEnum(shovel.TextAlignment, sheet.getTextAttrs(text_attrs_handle).alignment);
+            try shovel.writeTruncating(text, col.width, alignment, &wr.interface);
+        },
+        .err => {
+            try tui.setStyle(if (selected) .cell_error_selected else .cell_error_unselected, wr);
+            try wr.interface.print("{s: >[1]}", .{ "ERROR", col.width });
+        },
+    }
 }
 
 fn isSelected(zc: *const ZC, pos: Position) bool {
@@ -961,51 +1082,39 @@ fn divCeil(n: anytype, d: @TypeOf(n)) @TypeOf(n) {
     return std.math.divCeil(@TypeOf(n), n, d) catch unreachable;
 }
 
+const GetColsContext = struct {
+    widths: []u16,
+    sheet: *const Sheet,
+    screen_x: u32,
+
+    pub fn func(ctx: @This(), h: Column.Handle) !void {
+        const x = ctx.sheet.cols.getPoint(h)[0] - ctx.screen_x;
+        ctx.widths[x] = ctx.sheet.cols.getValue(h).width;
+    }
+};
+
 /// Returns the number of columns currently visible on screen.
-fn visibleColumnCount(tui: *const Tui) u16 {
+fn visibleColumnCount(tui: *Tui) !u16 {
     const zc = tui.zc.?;
+    const sheet = zc.currentSheet();
 
-    var width: u16 = 0;
-    var col_count: u16 = 0;
-    var last = zc.screen_pos.x;
-    const view_width = tui.term.width - zc.leftReservedColumns();
+    const widths = try tui.arena.allocator().alloc(u16, @as(u32, tui.term.width) + 1);
+    @memset(widths, Column.default_width);
+    sheet.cols.traverse(&.{zc.screen_pos.x}, &.{zc.screen_pos.x +| tui.term.width}, GetColsContext{
+        .sheet = sheet,
+        .widths = widths,
+        .screen_x = zc.screen_pos.x,
+    }) catch unreachable;
 
-    var cols_iter = zc.currentSheet().cols.iteratorAt(.{zc.screen_pos.x});
-    while (cols_iter.next()) |handle| {
-        assert(last >= zc.screen_pos.x);
-
-        const col = zc.currentSheet().cols.getPoint(handle)[0];
-        // TODO: This is a hack for a deficiency in `PhTree.iteratorAt`
-        if (col < zc.screen_pos.x) {
-            return @min(
-                divCeil(view_width, Column.default_width),
-                std.math.maxInt(Position.Int) - zc.screen_pos.x +| 1,
-            );
-        }
-
-        const diff: u16 = @intCast(@min(view_width, col - last));
-        const diff_width = diff * Column.default_width;
-        const w = diff_width + zc.currentSheet().cols.getValue(handle).width;
-
-        if (width + w >= view_width) {
-            const remaining_width = view_width - width;
-            if (remaining_width > diff_width) {
-                col_count += diff + 1;
-                break;
-            }
-            col_count += divCeil(remaining_width, Column.default_width);
-
-            break;
-        }
-        width += w;
-        col_count += diff + 1;
-        last = col +% 1;
-    } else {
-        col_count += divCeil(view_width -| width, Column.default_width);
-        col_count = @min(col_count, std.math.maxInt(Position.Int) - zc.screen_pos.x +| 1);
+    var total_width: u16 = 0;
+    var i: u16 = 0;
+    for (widths) |w| {
+        total_width += w;
+        i += 1;
+        if (total_width >= tui.term.width) break;
     }
 
-    return col_count;
+    return i;
 }
 
 fn SheetTreeContext(comptime field_name: []const u8) type {
@@ -1013,7 +1122,7 @@ fn SheetTreeContext(comptime field_name: []const u8) type {
     return struct {
         sheet: *Sheet,
         zc: *ZC,
-        col_count: u32,
+        col_count: u16,
 
         fn lessThan(ctx: @This(), a: Handle, b: Handle) bool {
             const p1 = @field(ctx.sheet, field_name).getPoint(a);
@@ -1031,30 +1140,41 @@ fn SheetTreeContext(comptime field_name: []const u8) type {
     };
 }
 
-fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !struct {
-    []const Column.Handle,
-    []const Cell.Handle,
-    []const Sheet.TextAttrs,
-} {
-    const ColContext = struct {
-        zc: *ZC,
-        sheet: *Sheet,
+const C = struct {
+    value: Cell.Value,
+    tag: Tag,
 
-        pub fn newIndex(ctx: @This(), handle: Column.Handle) usize {
-            return ctx.sheet.cols.getPoint(handle)[0] - ctx.zc.screen_pos.x;
-        }
+    const Tag = enum {
+        number,
+        string,
+        err,
+        blank,
     };
+};
 
-    const CellContext = SheetTreeContext("cell_tree");
-    const TextAttrsContext = SheetTreeContext("text_attrs");
+const ScreenData = struct {
+    widths: []const u16,
+    precisions: []const u8,
+    values: []const Cell.Value,
+    tags: []const C.Tag,
+    attrs: []const Sheet.TextAttrs,
+};
 
+fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !ScreenData {
     const zc = tui.zc.?;
     const sheet = zc.currentSheet();
     const arena = tui.arena.allocator();
 
-    var cols: std.ArrayList(Column.Handle) = try .initCapacity(arena, col_count);
-    var cells: std.ArrayList(Cell.Handle) = try .initCapacity(arena, cell_count);
-    var attr_handles: std.ArrayList(Sheet.TextAttrs.Handle) = try .initCapacity(arena, cell_count);
+    const widths = try arena.alloc(u16, col_count);
+    const precisions = try arena.alloc(u8, col_count);
+    const values = try arena.alloc(Cell.Value, cell_count);
+    const tags = try arena.alloc(C.Tag, cell_count);
+    const attrs = try arena.alloc(Sheet.TextAttrs, cell_count);
+
+    @memset(widths, Column.default_width);
+    @memset(precisions, 2);
+    @memset(tags, .blank);
+    @memset(attrs, .default);
 
     const tl: *const [2]u32 = &.{ zc.screen_pos.x, zc.screen_pos.y };
     const br: *const [2]u32 = &.{
@@ -1062,115 +1182,153 @@ fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !struct {
         zc.screen_pos.y +| (tui.cellViewHeight() - 1),
     };
 
-    sheet.cols.queryWindow(&.{tl[0]}, &.{br[0]}, &cols) catch unreachable;
-    sheet.cell_tree.queryWindow(tl, br, &cells) catch unreachable;
-    sheet.text_attrs.queryWindow(tl, br, &attr_handles) catch unreachable;
+    const CellContext = struct {
+        values: []Cell.Value,
+        tags: []C.Tag,
+        sheet: *Sheet,
+        zc: *ZC,
+        col_count: u16,
 
-    const cell_context: CellContext = .{ .sheet = sheet, .zc = zc, .col_count = col_count };
-    const text_context: TextAttrsContext = .{ .sheet = sheet, .zc = zc, .col_count = col_count };
-    const col_context: ColContext = .{ .zc = zc, .sheet = sheet };
+        pub fn func(ctx: @This(), h: Cell.Handle) !void {
+            const p = ctx.sheet.cell_tree.getPoint(h);
+            const x = p[0] - ctx.zc.screen_pos.x;
+            const y = p[1] - ctx.zc.screen_pos.y;
+            const cell = ctx.sheet.cell_tree.getValue(h).*;
+            ctx.tags[y * ctx.col_count + x] = @enumFromInt(@intFromEnum(cell.value_tag));
+            ctx.values[y * ctx.col_count + x] = cell.value;
+        }
+    };
 
-    std.mem.sortUnstable(Cell.Handle, cells.items, cell_context, CellContext.lessThan);
-    std.mem.sortUnstable(Sheet.TextAttrs.Handle, attr_handles.items, text_context, TextAttrsContext.lessThan);
+    const AttrContext = struct {
+        attrs: []Sheet.TextAttrs,
+        sheet: *Sheet,
+        zc: *ZC,
+        col_count: u16,
 
-    const padList = @import("utils.zig").padList;
-    padList(Cell.Handle, &cells, .invalid, cell_count, cell_context);
-    padList(Sheet.TextAttrs.Handle, &attr_handles, .invalid, cell_count, text_context);
-    padList(Column.Handle, &cols, .invalid, col_count, col_context);
+        pub fn func(ctx: @This(), h: Sheet.TextAttrs.Handle) !void {
+            const p = ctx.sheet.text_attrs.getPoint(h);
+            const x = p[0] - ctx.zc.screen_pos.x;
+            const y = p[1] - ctx.zc.screen_pos.y;
+            ctx.attrs[y * ctx.col_count + x] = ctx.sheet.text_attrs.getValue(h).*;
+        }
+    };
 
-    const attrs = try arena.alloc(Sheet.TextAttrs, cell_count);
-    for (attr_handles.items, attrs) |handle, *dest| {
-        dest.* = sheet.getTextAttrs(handle);
-    }
+    const ColContext = struct {
+        widths: []u16,
+        precisions: []u8,
+        sheet: *Sheet,
+        zc: *ZC,
+        col_count: u16,
+
+        pub fn func(ctx: @This(), h: Column.Handle) !void {
+            const p = ctx.sheet.cols.getPoint(h);
+            const x = p[0] - ctx.zc.screen_pos.x;
+            const col = ctx.sheet.cols.getValue(h);
+            ctx.widths[x] = col.width;
+            ctx.precisions[x] = col.precision;
+        }
+    };
+
+    sheet.cols.traverse(&.{tl[0]}, &.{br[0]}, ColContext{
+        .widths = widths,
+        .precisions = precisions,
+        .sheet = sheet,
+        .zc = zc,
+        .col_count = col_count,
+    }) catch unreachable;
+
+    // sheet.cell_tree.queryWindow(tl, br, &cells) catch unreachable;
+    sheet.cell_tree.traverse(tl, br, CellContext{
+        .tags = tags,
+        .values = values,
+        .sheet = sheet,
+        .zc = zc,
+        .col_count = col_count,
+    }) catch unreachable;
+
+    sheet.text_attrs.traverse(tl, br, AttrContext{
+        .attrs = attrs,
+        .sheet = sheet,
+        .zc = zc,
+        .col_count = col_count,
+    }) catch unreachable;
 
     return .{
-        try cols.toOwnedSlice(),
-        try cells.toOwnedSlice(),
-        attrs,
+        .widths = widths,
+        .precisions = precisions,
+        .values = values,
+        .tags = tags,
+        .attrs = attrs,
     };
 }
 
-fn renderCells(tui: *Tui) !void {
-    const rc = &tui.rc.?;
+fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
     const zc = tui.zc.?;
     const sheet = zc.currentSheet();
 
-    const col_count = tui.visibleColumnCount();
+    const col_count = try tui.visibleColumnCount();
+
     const height = tui.cellViewHeight();
+
     const cell_count = col_count * height;
+    const data = try tui.screenData(col_count, cell_count);
 
-    const cols, const cells, const text_attrs = try tui.screenData(col_count, cell_count);
+    const screen_col_start = tui.left;
+    try wr.setRectClamp(.{
+        .x = screen_col_start,
+        .y = cell_view_line,
+        .width = tui.term.width,
+        .height = tui.term.height,
+    });
 
-    const screen_col_start = zc.leftReservedColumns();
-    const view_width = tui.term.width - screen_col_start;
+    wr.overflow_mode = .wrap;
+    wr.unicode_mode = .ascii;
+
     var y: Position.Int = 0; // Relative to the screen pos
+    var i: usize = 0;
     while (y < height) : (y += 1) {
-        const screen_line = cell_view_line + y;
-        try rc.moveCursorTo(@intCast(screen_line), screen_col_start);
-
         var w: u16 = 0;
         var x: Position.Int = 0; // Relative to the screen pos
-        while (x < col_count) : (x += 1) {
-            const i = y * col_count + x;
-            const cell_handle = cells[i];
-            const attrs = text_attrs[i];
+        while (x < col_count) : ({
+            x += 1;
+            i += 1;
+        }) {
+            const width = @min(data.widths[x], wr.rect.width -| w);
 
-            const col = sheet.getColumnByHandleOrDefault(cols[x]);
-            const cell_width = @min(col.width, view_width - w);
+            switch (data.tags[i]) {
+                .number => {
+                    try tui.setStyle(.cell_number_unselected, wr);
+                    var buf: [128]u8 = undefined;
+                    var bw: std.io.Writer = .fixed(&buf);
+                    try bw.print("{d: >[1].[2]}", .{
+                        data.values[i].number,
+                        width,
+                        data.precisions[x],
+                    });
+                    try wr.interface.writeAll(bw.buffered()[0..width]);
+                },
+                .string => {
+                    try tui.setStyle(.cell_text_unselected, wr);
 
-            const pos = zc.screen_pos.add(.init(x, y));
-            assert(cell_handle == .invalid or pos.eql(sheet.posFromCellHandle(cell_handle)));
-
-            try tui.renderCell(pos, cell_handle, col.precision, cell_width, attrs);
-            w += col.width;
+                    const text = sheet.string_values.items(data.values[i].string);
+                    const alignment = utils.enumFromEnum(
+                        shovel.TextAlignment,
+                        data.attrs[i].alignment,
+                    );
+                    try shovel.writeTruncating(text, width, alignment, &wr.interface);
+                },
+                .err => {
+                    try tui.setStyle(.cell_error_unselected, wr);
+                    try wr.interface.print("{s: >[1]}", .{ "ERROR", width });
+                },
+                .blank => {
+                    try tui.setStyle(.cell_blank_unselected, wr);
+                    try wr.interface.splatByteAll(' ', width);
+                },
+            }
+            w += width;
         }
-
-        try tui.setStyle(.cell_blank_unselected);
-        try rc.clearToEol();
-    }
-}
-
-fn renderCell(
-    tui: *Tui,
-    pos: Position,
-    cell_handle: Cell.Handle,
-    precision: @FieldType(Column, "precision"),
-    width: @FieldType(Column, "width"),
-    text_attrs: Sheet.TextAttrs,
-) !void {
-    const rc = &tui.rc.?;
-    const zc = tui.zc.?;
-    const sheet = zc.currentSheet();
-    const selected = isSelected(zc, pos);
-
-    var rpw = rc.cellWriter(width);
-
-    if (cell_handle == .invalid) {
-        try tui.setStyle(if (selected) .cell_blank_selected else .cell_blank_unselected);
-        try rpw.pad();
-        return;
-    }
-
-    const cell: *const Cell = sheet.getCellFromHandle(cell_handle);
-
-    switch (cell.value_tag) {
-        .number => {
-            try tui.setStyle(if (selected) .cell_number_selected else .cell_number_unselected);
-            try rpw.interface.print("{d: >[1].[2]}", .{ cell.value.number, width, precision });
-            try rpw.pad();
-        },
-        .string => {
-            try tui.setStyle(if (selected) .cell_text_selected else .cell_text_unselected);
-
-            const text = zc.currentSheet().cellStringValue(cell);
-            const alignment = utils.enumFromEnum(shovel.TextAlignment, text_attrs.alignment);
-            try shovel.writeTruncating(text, width, alignment, &rc.writer.interface);
-        },
-        .err => {
-            try tui.setStyle(if (selected) .cell_error_selected else .cell_error_unselected);
-            try rpw.interface.print("{s: >[1]}", .{ "ERROR", width });
-            try rpw.pad();
-        },
+        try wr.flush();
     }
 }
 

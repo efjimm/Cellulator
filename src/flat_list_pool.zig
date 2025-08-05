@@ -86,7 +86,7 @@ pub fn FlatListPool(comptime T: type) type {
             pool.free_entries_head = list_index;
         }
 
-        pub fn items(pool: *Pool, list_index: List.Index) []T {
+        pub fn items(pool: *const Pool, list_index: List.Index) []T {
             const list = pool.entries.items[list_index.n].list;
             return pool.buf.items[list.offset..][0..list.len];
         }

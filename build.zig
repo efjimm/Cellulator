@@ -194,21 +194,32 @@ fn configureBenchmarks(
     b: *std.Build,
     zc_mod: *std.Build.Module,
 ) void {
-    const fill_exe = b.addExecutable(.{
-        .name = "fill",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/bench-fill.zig"),
-            .target = zc_mod.resolved_target,
-            .optimize = zc_mod.optimize.?,
-        }),
-    });
-
-    fill_exe.root_module.addImport("zc", zc_mod);
-
-    const install_fill = b.addInstallArtifact(fill_exe, .{
-        .dest_dir = .{ .override = .{ .custom = "bench" } },
-    });
-
     const bench_step = b.step("bench", "Build benchmark executables");
-    bench_step.dependOn(&install_fill.step);
+
+    const benchmarks = [_]struct { []const u8, []const u8 }{
+        .{ "fill", "bench/fill.zig" },
+        .{ "tui", "bench/tui.zig" },
+    };
+
+    for (benchmarks) |benchmark| {
+        const name, const path = benchmark;
+        const exe = b.addExecutable(.{
+            .name = name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(path),
+                .target = zc_mod.resolved_target,
+                .optimize = zc_mod.optimize.?,
+            }),
+        });
+        var iter = zc_mod.import_table.iterator();
+        while (iter.next()) |entry| {
+            exe.root_module.addImport(entry.key_ptr.*, entry.value_ptr.*);
+        }
+        exe.root_module.addImport("zc", zc_mod);
+
+        const install = b.addInstallArtifact(exe, .{
+            .dest_dir = .{ .override = .{ .custom = "bench" } },
+        });
+        bench_step.dependOn(&install.step);
+    }
 }

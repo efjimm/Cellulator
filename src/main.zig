@@ -25,6 +25,8 @@ pub fn deinitUnicodeData(allocator: std.mem.Allocator) void {
 var zc: ZC = undefined;
 
 pub fn main() !void {
+    zc.ui.term.cooked_termios = null;
+
     if (logfile_path) |path| {
         logfile = try std.fs.cwd().createFile(path, .{});
     }

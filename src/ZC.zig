@@ -547,7 +547,7 @@ fn clampScreenToCommandCursor(zc: *ZC) void {
     var w: u16 = if (zc.command.cursor < len) blk: {
         const grapheme_len = zc.command.nextCharacter(x, 1);
         const grapheme_slice = zc.command.slice(x, grapheme_len);
-        break :blk @intCast(zc.ui.term.graphemeWidth(grapheme_slice));
+        break :blk @intCast(zc.ui.term.stringWidth(grapheme_slice));
     } else 1;
 
     while (true) {
@@ -556,7 +556,7 @@ fn clampScreenToCommandCursor(zc: *ZC) void {
         if (prev == x or x < zc.screen_pos.x) break;
 
         const graphemeSlice = zc.command.slice(x, prev - x);
-        w += @intCast(zc.ui.term.graphemeWidth(graphemeSlice));
+        w += @intCast(zc.ui.term.stringWidth(graphemeSlice));
 
         if (w > zc.ui.term.width) {
             if (prev > zc.command_screen_pos) zc.command_screen_pos = prev;
@@ -1491,7 +1491,7 @@ pub fn runCommand(zc: *ZC, str: []const u8) !void {
                     };
                 },
                 .truecolor => {
-                    zc.ui.term.truecolor_enabled = false;
+                    zc.ui.term.terminfo.truecolour = .none;
                     zc.ui.update_flags = .all;
                 },
             }
@@ -1511,7 +1511,7 @@ pub fn runCommand(zc: *ZC, str: []const u8) !void {
             const arg2 = iter.next() orelse {
                 switch (property) {
                     .truecolor => {
-                        zc.ui.term.truecolor_enabled = true;
+                        zc.ui.term.terminfo.queryTrueColour();
                         zc.ui.update_flags = .all;
                     },
                     else => {
@@ -1529,9 +1529,9 @@ pub fn runCommand(zc: *ZC, str: []const u8) !void {
                 },
                 .truecolor => {
                     if (std.ascii.eqlIgnoreCase(arg2, "true")) {
-                        zc.ui.term.truecolor_enabled = true;
+                        zc.ui.term.terminfo.queryTrueColour();
                     } else if (std.ascii.eqlIgnoreCase(arg2, "false")) {
-                        zc.ui.term.truecolor_enabled = false;
+                        zc.ui.term.terminfo.truecolour = .none;
                     } else return;
 
                     zc.ui.update_flags = .all;
