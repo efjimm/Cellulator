@@ -185,7 +185,7 @@ pub fn next(t: *Tokenizer) !Token {
             },
             'a'...'z', 'A'...'Z' => |c| {
                 tag = .rel_rel;
-                kw_buf.appendAssumeCapacity(c);
+                kw_buf.append(c) catch {};
                 continue :state .word;
             },
             '@' => {
@@ -288,7 +288,7 @@ pub fn next(t: *Tokenizer) !Token {
             t.toss(1);
             switch (try t.byte()) {
                 'a'...'z', 'A'...'Z' => |c| {
-                    kw_buf.appendAssumeCapacity(c);
+                    kw_buf.append(c) catch {};
                     continue :state .word;
                 },
                 '0'...'9', '_' => { // TODO: Should we accept _ here?
