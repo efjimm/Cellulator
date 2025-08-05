@@ -135,6 +135,20 @@ yank: ?Rect = null,
 
 had_prefix: bool = false,
 
+selected_completion: ?usize = null,
+
+dir_entries_buffer: std.ArrayListUnmanaged(u8) = .empty,
+dir_entries: std.ArrayListUnmanaged(DirEntry) = .empty,
+dir_entries_filtered: std.ArrayListUnmanaged(DirEntry) = .empty,
+last_dirname: []const u8 = "",
+recalc_dir_entries_width: bool = true,
+
+pub const DirEntry = struct {
+    offset: usize,
+    len: usize,
+    is_dir: bool,
+};
+
 pub const Mode = enum {
     normal,
 
@@ -282,6 +296,10 @@ pub fn deinit(zc: *ZC) void {
     zc.lua_ptr.deinit();
     zc.command.deinit(zc.allocator);
 
+    zc.dir_entries.deinit(zc.allocator);
+    zc.dir_entries_buffer.deinit(zc.allocator);
+    zc.dir_entries_filtered.deinit(zc.allocator);
+
     zc.input_buf.deinit();
     zc.keymaps.deinit(zc.allocator);
 
@@ -296,6 +314,27 @@ pub fn deinit(zc: *ZC) void {
 pub fn emitEvent(zc: *ZC, event: [:0]const u8, args: anytype) void {
     log.debug("Emitting event '{s}' with {d} arguments", .{ event, args.len });
     lua.emitEvent(zc.lua_ptr, event, args) catch {}; // TODO: Make sure handled correctly
+}
+
+/// If we're in command mode and typing a file name, returns the partially typed file name from the
+/// command buffer. If we're not in command mode or we're not typing a filepath, return null.
+pub fn fileCompletionQuery(zc: *ZC) ?struct { offset: usize, len: usize } {
+    if (!zc.mode.isCommandMode()) return null;
+
+    const in = zc.command.left();
+    const c = [_][]const u8{ ":e", ":w", ":be", ":bw" };
+    for (c) |cmd| {
+        if (std.mem.startsWith(u8, in, cmd)) break;
+    } else return null;
+
+    var iter = utils.wordIterator(in);
+    _ = iter.next().?;
+    const arg = iter.next() orelse in[in.len..];
+
+    return .{
+        .offset = @intFromPtr(arg.ptr) - @intFromPtr(in.ptr),
+        .len = arg.len,
+    };
 }
 
 pub fn inputSentinelSlice(zc: *ZC) Allocator.Error![:0]u8 {
@@ -625,6 +664,28 @@ pub fn setCommandCursor(zc: *ZC, pos: u32) void {
     zc.clampScreenToCommandCursor();
 }
 
+pub fn submitCompletion(zc: *ZC, index: usize) !void {
+    const query_res = zc.fileCompletionQuery() orelse return;
+    const query = zc.command.left()[query_res.offset..][0..query_res.len];
+    // TODO: Support windows paths
+    const basename =
+        if (query.len > 0 and query[query.len - 1] == '/')
+            query[query.len..]
+        else if (query.len == 1 and query[0] == '/')
+            query[query.len..]
+        else
+            utils.basenamePosix(query);
+    const off = @intFromPtr(basename.ptr) - @intFromPtr(zc.command.left().ptr);
+    const f = zc.dir_entries_filtered.items[index];
+    const ft = zc.dir_entries_buffer.items[f.offset..][0..f.len];
+    try zc.command.replaceRange(zc.allocator, @intCast(off), @intCast(basename.len), ft);
+    zc.command.setCursor(@intCast(zc.command.cursor + (ft.len - basename.len)));
+    if (f.is_dir) {
+        var wr = zc.command.writer(zc.allocator, &.{});
+        try wr.interface.writeByte('/');
+    }
+}
+
 pub fn submitCommand(zc: *ZC) !void {
     assert(zc.mode.isCommandMode());
     zc.dismissStatusMessage();
@@ -722,6 +783,8 @@ pub fn doCommandNormalMode(zc: *ZC, action: CommandAction) !void {
     switch (action) {
         .history_next => zc.commandHistoryNext(),
         .history_prev => zc.commandHistoryPrev(),
+        .completion_next => try zc.completionNext(),
+        .completion_prev => zc.completionPrev(),
         .submit_command => try zc.submitCommand(),
         .enter_normal_mode => {
             zc.command.resetBuffer();
@@ -781,9 +844,27 @@ pub fn doCommandNormalMode(zc: *ZC, action: CommandAction) !void {
     }
 }
 
+fn completionNext(zc: *ZC) !void {
+    if (zc.dir_entries_filtered.items.len == 1) {
+        try zc.submitCompletion(0);
+    } else if (zc.selected_completion) |*sc| {
+        sc.* = (sc.* + 1) % zc.dir_entries_filtered.items.len;
+    } else if (zc.dir_entries_filtered.items.len > 0) {
+        zc.selected_completion = 0;
+    }
+}
+
+fn completionPrev(zc: *ZC) void {
+    if (zc.selected_completion == 0 or zc.selected_completion == null) {
+        zc.selected_completion = zc.dir_entries_filtered.items.len -| 1;
+    } else {
+        zc.selected_completion.? -= 1;
+    }
+}
+
 fn doCommandInsertMode(zc: *ZC, action: CommandAction, keys: []const u8) !void {
     defer zc.clampScreenToCommandCursor();
-    try switch (action) {
+    switch (action) {
         .none => {
             var writer = zc.commandWriter(&.{});
             writer.interface.writeAll(keys) catch return error.OutOfMemory;
@@ -794,8 +875,22 @@ fn doCommandInsertMode(zc: *ZC, action: CommandAction, keys: []const u8) !void {
             const len = text.prevCharacter(zc.command, zc.command.cursor, 1);
             try zc.command.deleteBackwards(zc.allocator, len);
         },
-        .submit_command => zc.submitCommand(),
-        .enter_normal_mode => zc.setMode(.command_normal),
+        .completion_next => try zc.completionNext(),
+        .completion_prev => zc.completionPrev(),
+        .submit_command => {
+            if (zc.selected_completion) |sc| {
+                try zc.submitCompletion(sc);
+            } else {
+                try zc.submitCommand();
+            }
+        },
+        .enter_normal_mode => {
+            if (zc.selected_completion != null) {
+                zc.selected_completion = null;
+            } else {
+                zc.setMode(.command_normal);
+            }
+        },
         .enter_select_mode => zc.setMode(.select),
         .backwards_delete_word => {
             zc.setMode(.command_change);
@@ -814,7 +909,82 @@ fn doCommandInsertMode(zc: *ZC, action: CommandAction, keys: []const u8) !void {
                 zc.doCommandMotion(action.toMotion()) catch unreachable;
             }
         },
-    };
+    }
+
+    switch (action) {
+        .completion_next,
+        .completion_prev,
+        => {},
+        else => zc.selected_completion = null,
+    }
+
+    zc.dir_entries_filtered.clearRetainingCapacity();
+    const query_res = zc.fileCompletionQuery() orelse return;
+    const query = zc.command.left()[query_res.offset..][0..query_res.len];
+
+    const dirname, const basename =
+        if (query.len == 1 and query[0] == '/') .{
+            query,
+            query[query.len..],
+        } else if (query.len > 0 and query[query.len - 1] == '/') .{
+            query[0 .. query.len - 1],
+            query[query.len..],
+        } else .{
+            std.fs.path.dirname(query) orelse ".",
+            std.fs.path.basename(query),
+        };
+
+    if (!std.mem.eql(u8, dirname, zc.last_dirname)) {
+        std.log.debug("Repopulating directory entries ({s}) ({s})", .{ dirname, zc.last_dirname });
+        zc.dir_entries.clearRetainingCapacity();
+        zc.dir_entries_buffer.clearRetainingCapacity();
+
+        var dir = std.fs.cwd().openDir(dirname, .{ .iterate = true }) catch {
+            zc.last_dirname = dirname;
+            return;
+        };
+        defer dir.close();
+
+        var dir_iter = dir.iterate();
+        while (try dir_iter.next()) |entry| {
+            const start = zc.dir_entries_buffer.items.len;
+            try zc.dir_entries.ensureUnusedCapacity(zc.allocator, 1);
+            try zc.dir_entries_buffer.ensureUnusedCapacity(zc.allocator, entry.name.len);
+
+            zc.dir_entries_buffer.appendSliceAssumeCapacity(entry.name);
+            zc.dir_entries.appendAssumeCapacity(.{
+                .len = entry.name.len,
+                .offset = start,
+                .is_dir = entry.kind == .directory,
+            });
+        }
+
+        zc.last_dirname = std.mem.trimRight(u8, dirname, "/");
+
+        const Context = struct {
+            fn lessThan(z: *ZC, a: DirEntry, b: DirEntry) bool {
+                const a_text = z.dir_entries_buffer.items[a.offset..][0..a.len];
+                const b_text = z.dir_entries_buffer.items[b.offset..][0..b.len];
+                var i: usize = 0;
+                while (i < a_text.len and i < b_text.len) : (i += 1) {
+                    if (a_text[i] < b_text[i]) return true;
+                    if (a_text[i] > b_text[i]) return false;
+                }
+                return true;
+            }
+        };
+
+        std.mem.sortUnstable(DirEntry, zc.dir_entries.items, zc, Context.lessThan);
+    }
+
+    try zc.dir_entries_filtered.ensureTotalCapacity(zc.allocator, zc.dir_entries.items.len);
+    zc.dir_entries_filtered.clearRetainingCapacity();
+
+    for (zc.dir_entries.items) |entry| {
+        const str = zc.dir_entries_buffer.items[entry.offset..][0..entry.len];
+        if (std.ascii.indexOfIgnoreCase(str, basename) != null)
+            zc.dir_entries_filtered.appendAssumeCapacity(entry);
+    }
 }
 
 /// Handles common actions between operator modes

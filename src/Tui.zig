@@ -88,6 +88,9 @@ pub const default_theme: Theme = .{
     .completion_title = .init(.none, .bright_black, .none),
     .completion_keys = .init(.none, .bright_black, .none),
     .completion_description = .init(.none, .bright_black, .none),
+
+    .cli_completion_selected = .init(.black, .blue, .none),
+    .cli_completion_unselected = .init(.none, .bright_black, .none),
 };
 
 pub const UiElement = enum {
@@ -133,6 +136,9 @@ pub const UiElement = enum {
     completion_title,
     completion_keys,
     completion_description,
+
+    cli_completion_selected,
+    cli_completion_unselected,
 };
 
 const UpdateFlags = packed struct {
@@ -353,7 +359,7 @@ pub fn render(tui: *Tui, zc: *ZC) !void {
     }
 
     var b: [2048]u8 = undefined;
-    var wr = tui.db.write.writerFull(&b, .truncate, .ascii);
+    var wr = tui.db.write.writerFull(&b, .truncate, .unicode);
     var term_writer = tui.term.writer(&buf);
 
     if (tui.term.width < 15 or tui.term.height < 5) {
@@ -371,13 +377,14 @@ pub fn render(tui: *Tui, zc: *ZC) !void {
         tui.term.cursor_visible = false;
     }
 
-    try tui.renderColumnHeadings(&wr);
     try tui.renderRowNumbers(&wr);
     try tui.renderCells(&wr);
     try tui.renderCursor(&wr);
     try tui.renderInputHints(&wr);
     try tui.renderSheetList(&wr);
     try tui.renderStatus(&wr);
+    try tui.renderColumnHeadings(&wr);
+    try tui.renderFileCompletion(&wr);
     try tui.renderCommandLine(&wr);
 
     try wr.flush();
@@ -500,6 +507,46 @@ fn renderSheetList(tui: *Tui, wr: *Screen.Writer) !void {
     try wr.clearToEol();
 }
 
+fn renderFileCompletion(tui: *Tui, wr: *shovel.Screen.Writer) !void {
+    const zc = tui.zc.?;
+    if (zc.fileCompletionQuery() == null) return;
+
+    const height = tui.cellViewHeight() / 2;
+
+    try wr.setRectClamp(.{
+        .x = 0,
+        .y = input_line + 1,
+        .height = height,
+        .width = tui.term.width,
+    });
+    try tui.setStyle(.sheet_unselected, wr);
+
+    const old_mode = wr.unicode_mode;
+    wr.unicode_mode = .unicode;
+    defer wr.unicode_mode = old_mode;
+
+    try tui.setStyle(.cli_completion_unselected, wr);
+    var y: u16 = 0;
+    var i: usize = if (zc.selected_completion) |sc| sc / height * height else 0;
+    while (y < height and i < zc.dir_entries_filtered.items.len) : ({
+        y += 1;
+        i += 1;
+    }) {
+        try wr.setCursor(y, 0);
+
+        const entry = zc.dir_entries_filtered.items[i];
+        const text = zc.dir_entries_buffer.items[entry.offset..][0..entry.len];
+        if (i == zc.selected_completion) {
+            try tui.setStyle(.cli_completion_selected, wr);
+            try wr.interface.writeAll(text);
+            try tui.setStyle(.cli_completion_unselected, wr);
+        } else {
+            try wr.interface.writeAll(text);
+        }
+        try wr.clearToEol();
+    }
+}
+
 fn renderInputHints(tui: *Tui, wr: *Screen.Writer) !void {
     const Key = struct {
         // Integer value of the action enum. This is used to sort the entries based on the order in
@@ -535,9 +582,7 @@ fn renderInputHints(tui: *Tui, wr: *Screen.Writer) !void {
 
     const zc = tui.zc.?;
     if (zc.input_buf.writer.end == 0) return;
-    const old_mode = wr.unicode_mode;
     wr.unicode_mode = .unicode;
-    defer wr.unicode_mode = old_mode;
 
     const arena = tui.arena.allocator();
     const input = zc.inputSlice();
@@ -598,12 +643,7 @@ fn renderInputHints(tui: *Tui, wr: *Screen.Writer) !void {
     const y = cell_view_line + (tui.cellViewHeight() - height);
     const x = tui.term.width -| width;
 
-    try wr.setRect(.{
-        .x = x,
-        .y = y,
-        .height = height,
-        .width = width,
-    });
+    try wr.setRect(.{ .x = x, .y = y, .height = height, .width = width });
     const w = &wr.interface;
 
     const input_res = stringWidthInternal(input, .{ .max_width = width - 2 });
@@ -754,17 +794,17 @@ fn writeToken(tui: *Tui, tag: Token.Tag, slice: []const u8, wr: *Screen.Writer) 
 
 fn renderCommandLine(tui: *Tui, wr: *Screen.Writer) !void {
     const zc = tui.zc.?;
-    try wr.setRect(.{
+    try wr.setRectClamp(.{
         .x = 0,
         .y = input_line,
         .width = tui.term.width,
-        .height = 1,
+        .height = tui.term.height,
     });
     try tui.setStyle(.command_line, wr);
     try wr.clearToEol();
     const writer = &wr.interface;
 
-    wr.overflow_mode = .truncate;
+    wr.overflow_mode = .wrap;
 
     const arena = tui.arena.allocator();
 
@@ -1282,7 +1322,9 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
     });
 
     wr.overflow_mode = .wrap;
-    wr.unicode_mode = .ascii;
+    const old_mode = wr.unicode_mode;
+    wr.unicode_mode = .unicode;
+    defer wr.unicode_mode = old_mode;
 
     var y: Position.Int = 0; // Relative to the screen pos
     var i: usize = 0;

@@ -10,6 +10,27 @@ pub const DeduplicateSimpleContext = struct {
     }
 };
 
+pub fn basenamePosix(path: []const u8) []const u8 {
+    if (path.len == 0)
+        return path[path.len..];
+
+    var end_index: usize = path.len - 1;
+    while (path[end_index] == '/') {
+        if (end_index == 0)
+            return path[path.len..];
+        end_index -= 1;
+    }
+    var start_index: usize = end_index;
+    end_index += 1;
+    while (path[start_index] != '/') {
+        if (start_index == 0)
+            return path[0..end_index];
+        start_index -= 1;
+    }
+
+    return path[start_index + 1 .. end_index];
+}
+
 /// Collapse consecutive duplicate elements into one entry (the last one.)
 ///
 /// `context` should provide a method with signature

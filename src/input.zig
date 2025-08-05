@@ -78,6 +78,9 @@ pub fn parse(
         } else if (in.mod_alt) {
             special = true;
             try w.writeAll("<M-");
+        } else if (in.mod_shift) {
+            special = true;
+            try w.writeAll("<S-");
         }
 
         switch (in.content) {
@@ -99,7 +102,7 @@ pub fn parse(
             .function => |function| try w.print("<F{d}>", .{function}),
             .enter => try w.writeAll("<Return>"),
             .command => {},
-            .tab => {},
+            .tab => try w.writeAll("<Tab>"),
             .backspace => try w.writeAll("<Delete>"),
             .codepoint => |cp| switch (cp) {
                 '<' => try w.writeAll("<<"),
@@ -302,6 +305,9 @@ pub const CommandAction = union(enum(u6)) {
 
     // End of duplication
 
+    completion_next,
+    completion_prev,
+
     submit_command,
     enter_normal_mode,
 
@@ -375,6 +381,9 @@ pub const CommandAction = union(enum(u6)) {
             .motion_line => "Line",
             .motion_eol => "To end of line",
             .motion_bol => "To beginning of line",
+
+            .completion_next => "Next completion",
+            .completion_prev => "Previous completion",
 
             .submit_command => "Submit command",
             .enter_normal_mode => "Enter normal mode",
@@ -656,6 +665,8 @@ const command_normal: CommandKeyMapData = .{
 const command_insert: CommandKeyMapData = .{
     .inherit = &.{command_common},
     .keys = &.{
+        .{ "<Tab>", .completion_next },
+        .{ "<S-<Tab>>", .completion_prev },
         .{ "<C-p>", .history_prev },
         .{ "<C-n>", .history_next },
         .{ "<Up>", .history_prev },

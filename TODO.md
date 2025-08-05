@@ -2,6 +2,12 @@ This is a schizo document that contains basically every idea I thought should be
 working on cellulator. It's completely unorganised and some parts are very outdated. I thought it
 might be an interesting read so I committed it. The stuff at the top is probably newer.
 
+- Per-sheet cursor
+- Fix cli text not scrolling when it goes off screen
+  - Make it wrap to multiple lines instead!
+    - Much easier
+    - Better visuals
+
 - Performance: Store cached cell values separately from ASTs
 - OOM resistance
   - Should not crash
