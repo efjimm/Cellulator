@@ -230,7 +230,7 @@ pub fn init(zc: *ZC, allocator: Allocator, options: InitOptions) !void {
     var tui = try Tui.init(allocator);
     errdefer tui.deinit(allocator);
 
-    if (options.ui) try tui.term.uncook(allocator, .{});
+    if (options.ui) try tui.uncook();
 
     var lua_state = try lua.init(zc);
     errdefer lua_state.deinit();
@@ -350,7 +350,6 @@ pub fn inputSlice(zc: *const ZC) [:0]u8 {
 }
 
 fn clearInput(zc: *ZC) void {
-    if (zc.had_prefix) zc.ui.update_flags.cells = true;
     zc.input_buf.clearRetainingCapacity();
     zc.input_buf.writer.writeByte(0) catch unreachable;
     zc.input_buf.writer.end = 0;
@@ -378,8 +377,6 @@ pub fn setCell(
     opts: ChangeCellOpts,
 ) !void {
     try zc.currentSheet().setCell(pos, source, expr_root, .{});
-    zc.ui.update_flags.cursor = true;
-    zc.ui.update_flags.cells = true;
     if (opts.emit_event) {
         const expr_string =
             for (source, 0..) |c, i| {
@@ -415,8 +412,6 @@ pub fn setCellString(zc: *ZC, pos: Position, expr: [:0]const u8, opts: ChangeCel
 // TODO: merge this and `deleteCell`
 pub fn deleteCell2(zc: *ZC, pos: Position, opts: ChangeCellOpts) !void {
     try zc.currentSheet().deleteCell(pos, opts.undo_opts);
-    zc.ui.update_flags.cursor = true;
-    zc.ui.update_flags.cells = true;
     if (opts.emit_event)
         zc.emitEvent("DeleteCell", .{pos});
 }
@@ -434,12 +429,10 @@ pub fn setStatusMessage(
     zc.status_message_type = t;
     const writer = zc.status_message.writer();
     writer.print(fmt, args) catch {};
-    zc.ui.update_flags.command = true;
 }
 
 pub fn dismissStatusMessage(zc: *ZC) void {
     zc.status_message.len = 0;
-    zc.ui.update_flags.command = true;
 }
 
 pub fn updateCells(zc: *ZC) Allocator.Error!void {
@@ -447,24 +440,6 @@ pub fn updateCells(zc: *ZC) Allocator.Error!void {
 }
 
 pub fn setMode(zc: *ZC, new_mode: Mode) void {
-    switch (zc.mode) {
-        .normal => {},
-        .visual, .select => {
-            zc.ui.update_flags.cells = true;
-            zc.ui.update_flags.column_headings = true;
-            zc.ui.update_flags.row_numbers = true;
-        },
-        .command_normal,
-        .command_insert,
-        .command_delete,
-        .command_change,
-        .command_to_forwards,
-        .command_to_backwards,
-        .command_until_forwards,
-        .command_until_backwards,
-        => zc.ui.update_flags.command = true,
-    }
-
     zc.prev_mode = zc.mode;
     zc.anchor = zc.cursor;
     zc.mode = new_mode;
@@ -1098,14 +1073,12 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
             const count = zc.getCount() - 1;
             try zc.currentSheet().deleteColOrRowRange(zc.cursor.x, zc.cursor.x + count, .{}, .col);
             zc.currentSheet().endUndoGroup();
-            zc.ui.update(&.{ .column_headings, .cells });
         },
         .delete_row => {
             defer zc.resetCount();
             const count = zc.getCount() - 1;
             try zc.currentSheet().deleteColOrRowRange(zc.cursor.y, zc.cursor.y + count, .{}, .row);
             zc.currentSheet().endUndoGroup();
-            zc.ui.update(&.{ .row_numbers, .cells });
         },
         .insert_column => {
             defer zc.resetCount();
@@ -1114,7 +1087,6 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
                 else => |e| return e,
             };
             zc.currentSheet().endUndoGroup();
-            zc.ui.update(&.{ .column_headings, .cells });
         },
         .insert_row => {
             defer zc.resetCount();
@@ -1123,7 +1095,6 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
                 else => |e| return e,
             };
             zc.currentSheet().endUndoGroup();
-            zc.ui.update(&.{ .row_numbers, .cells });
         },
 
         .delete_cell => zc.deleteCell() catch |err| switch (err) {
@@ -1501,7 +1472,6 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
             const pos = zc.cursor;
             if (zc.currentSheet().getCellHandleByPosOrNull(pos)) |handle| {
                 try zc.currentSheet().enqueueUpdate(handle);
-                zc.ui.update(&.{.cells});
             }
         },
         .expect_expr => {
@@ -1662,7 +1632,6 @@ pub fn runCommand(zc: *ZC, str: []const u8) !void {
                 },
                 .truecolor => {
                     zc.ui.term.terminfo.truecolour = .none;
-                    zc.ui.update_flags = .all;
                 },
             }
         },
@@ -1682,7 +1651,6 @@ pub fn runCommand(zc: *ZC, str: []const u8) !void {
                 switch (property) {
                     .truecolor => {
                         zc.ui.term.terminfo.queryTrueColour();
-                        zc.ui.update_flags = .all;
                     },
                     else => {
                         zc.setStatusMessage(.err, "{s}", .{usage});
@@ -1703,8 +1671,6 @@ pub fn runCommand(zc: *ZC, str: []const u8) !void {
                     } else if (std.ascii.eqlIgnoreCase(arg2, "false")) {
                         zc.ui.term.terminfo.truecolour = .none;
                     } else return;
-
-                    zc.ui.update_flags = .all;
                 },
             }
         },
@@ -1726,7 +1692,6 @@ pub fn runCommand(zc: *ZC, str: []const u8) !void {
                 return;
             };
             zc.currentSheet().has_changes = false;
-            zc.ui.update(&.{.sheet_list});
         },
         .binary_save => {
             const filepath = iter.next() orelse {
@@ -1797,7 +1762,6 @@ pub fn runCommand(zc: *ZC, str: []const u8) !void {
                 });
                 zc.currentSheet().queued_cells.items.len = 0;
                 zc.currentSheet().endUndoGroup();
-                zc.ui.update(&.{.cells});
                 return;
             };
 
@@ -1806,7 +1770,6 @@ pub fn runCommand(zc: *ZC, str: []const u8) !void {
 
             try zc.currentSheet().insertIncrementingCellRange(range, value, increment, .{});
             zc.currentSheet().endUndoGroup();
-            zc.ui.update(&.{.cells});
         },
         .fill_expr => {
             const arg1 = iter.next() orelse {
@@ -1825,7 +1788,6 @@ pub fn runCommand(zc: *ZC, str: []const u8) !void {
             };
             try zc.currentSheet().bulkSetCellExpr(range, expr_str, expr, .{});
             zc.currentSheet().endUndoGroup();
-            zc.ui.update(&.{ .cursor, .cells });
         },
         inline .undo, .redo => |tag| {
             const count = blk: {
@@ -1882,7 +1844,6 @@ pub fn runCommand(zc: *ZC, str: []const u8) !void {
 
             try zc.currentSheet().deleteColOrRowRange(start, end, .{}, .col);
             zc.currentSheet().endUndoGroup();
-            zc.ui.update(&.{ .cells, .column_headings, .cursor });
         },
         .delete_rows => {
             const start, const end = blk: {
@@ -1907,7 +1868,6 @@ pub fn runCommand(zc: *ZC, str: []const u8) !void {
 
             try zc.currentSheet().deleteColOrRowRange(start, end, .{}, .row);
             zc.currentSheet().endUndoGroup();
-            zc.ui.update(&.{ .cells, .row_numbers, .cursor });
         },
         .insert_columns => {
             const column, const count = blk: {
@@ -1934,7 +1894,6 @@ pub fn runCommand(zc: *ZC, str: []const u8) !void {
                     else => |e| return e,
                 };
                 zc.currentSheet().endUndoGroup();
-                zc.ui.update(&.{ .cells, .column_headings, .cursor });
             }
         },
         .insert_rows => {
@@ -1962,7 +1921,6 @@ pub fn runCommand(zc: *ZC, str: []const u8) !void {
                     else => |e| return e,
                 };
                 zc.currentSheet().endUndoGroup();
-                zc.ui.update(&.{ .cells, .row_numbers, .cursor });
             }
         },
         .set_text_align => {
@@ -2009,8 +1967,6 @@ fn setTextAlignment(zc: *ZC, r: Rect, alignment: Sheet.TextAttrs.Alignment) !voi
 
     for (cells.items) |cell|
         zc.currentSheet().setTextAlignment(cell, alignment) catch unreachable;
-
-    zc.ui.update(&.{.cells});
 }
 
 pub fn loadCmdBinary(zc: *ZC, filepath: []const u8) !void {
@@ -2065,7 +2021,6 @@ fn loadFile(zc: *ZC, sheet_index: usize, filepath: []const u8) !void {
 
 fn setCurrentSheet(zc: *ZC, index: usize) void {
     zc.current_sheet = index;
-    zc.ui.update_flags = .all;
 }
 
 fn prevSheet(zc: *ZC) void {
@@ -2094,7 +2049,6 @@ fn openSheet(zc: *ZC) !usize {
 
     zc.max_sheet_n += 1;
     zc.sheets.putAssumeCapacityNoClobber(new_sheet_name, new_sheet);
-    zc.ui.update(&.{.sheet_list});
 
     return zc.sheets.entries.len - 1;
 }
@@ -2131,7 +2085,6 @@ fn renameSheet(zc: *ZC, index: usize, new_name: []const u8) !void {
     };
 
     zc.allocator.free(old_key);
-    zc.ui.update_flags.sheet_list = true;
 }
 
 fn setDefaultTheme(zc: *ZC) !void {
@@ -2169,14 +2122,12 @@ fn put(zc: *ZC, dest: Rect, comptime adjust: Sheet.Adjust) !void {
         if (!yank.eql(dest)) {
             try zc.currentSheet().copyRangeTo(yank, dest, adjust);
             zc.currentSheet().endUndoGroup();
-            zc.ui.update(&.{.cells});
         }
     }
 }
 
 fn undo(zc: *ZC) Allocator.Error!void {
     defer zc.resetCount();
-    zc.ui.update(&.{ .cells, .column_headings, .row_numbers });
 
     for (0..zc.getCount()) |_| {
         try zc.currentSheet().undo();
@@ -2185,14 +2136,13 @@ fn undo(zc: *ZC) Allocator.Error!void {
 
 fn redo(zc: *ZC) Allocator.Error!void {
     defer zc.resetCount();
-    zc.ui.update(&.{ .cells, .column_headings, .row_numbers });
 
     for (0..zc.getCount()) |_| {
         try zc.currentSheet().redo();
     }
 }
 
-fn anyCursorRange(zc: *const ZC) Rect {
+pub fn anyCursorRange(zc: *const ZC) Rect {
     if (zc.mode == .visual or zc.mode == .select)
         return zc.visualRange();
     return .initSinglePos(zc.cursor);
@@ -2207,24 +2157,17 @@ pub fn deleteCell(zc: *ZC) Allocator.Error!void {
     assert(zc.mode != .visual);
     try zc.currentSheet().deleteCell(zc.cursor, .{});
     zc.currentSheet().endUndoGroup();
-
-    zc.ui.update(&.{ .cells, .cursor });
 }
 
 pub fn deleteCellRange(zc: *ZC, rect: Rect) Allocator.Error!void {
     try zc.currentSheet().deleteCellRange(rect, .{});
     zc.currentSheet().endUndoGroup();
-
-    zc.ui.update(&.{ .cells, .cursor });
 }
 
 pub fn setCursor(zc: *ZC, new_pos: Position) void {
     zc.prev_cursor = zc.cursor;
     zc.cursor = new_pos;
     zc.clampScreenToCursor();
-
-    if (zc.mode.isVisual()) zc.ui.update(&.{ .cells, .column_headings, .row_numbers });
-    zc.ui.update(&.{.cursor});
 }
 
 pub fn cursorUp(zc: *ZC) void {
@@ -2341,13 +2284,11 @@ pub fn clampScreenToCursorY(zc: *ZC) void {
     } else {
         return;
     }
-    zc.ui.update(&.{ .column_headings, .row_numbers, .cells });
 }
 
 pub fn clampScreenToCursorX(zc: *ZC) void {
     if (zc.cursor.x < zc.screen_pos.x) {
         zc.screen_pos.x = zc.cursor.x;
-        zc.ui.update(&.{ .column_headings, .cells });
         return;
     }
 
@@ -2362,7 +2303,6 @@ pub fn clampScreenToCursorX(zc: *ZC) void {
         if (w > zc.ui.term.width) {
             if (x < zc.cursor.x) {
                 zc.screen_pos.x = x +| 1;
-                zc.ui.update(&.{ .column_headings, .cells });
             }
             break;
         }
@@ -2372,19 +2312,16 @@ pub fn clampScreenToCursorX(zc: *ZC) void {
 pub fn setPrecision(zc: *ZC, column: Position.Int, new_precision: u8) Allocator.Error!void {
     try zc.currentSheet().setPrecision(column, new_precision, .{});
     zc.currentSheet().endUndoGroup();
-    zc.ui.update_flags.cells = true;
 }
 
 pub fn incPrecision(zc: *ZC, column: Position.Int, count: u8) Allocator.Error!void {
     try zc.currentSheet().incPrecision(column, count, .{});
     zc.currentSheet().endUndoGroup();
-    zc.ui.update_flags.cells = true;
 }
 
 pub fn decPrecision(zc: *ZC, column: Position.Int, count: u8) Allocator.Error!void {
     try zc.currentSheet().decPrecision(column, count, .{});
     zc.currentSheet().endUndoGroup();
-    zc.ui.update_flags.cells = true;
 }
 
 pub inline fn cursorIncPrecision(zc: *ZC) Allocator.Error!void {
@@ -2402,15 +2339,11 @@ pub inline fn cursorDecPrecision(zc: *ZC) Allocator.Error!void {
 pub fn incWidth(zc: *ZC, column: Position.Int, n: u8) Allocator.Error!void {
     try zc.currentSheet().incWidth(column, n, .{});
     zc.currentSheet().endUndoGroup();
-    zc.ui.update_flags.cells = true;
-    zc.ui.update_flags.column_headings = true;
 }
 
 pub fn decWidth(zc: *ZC, column: Position.Int, n: u8) Allocator.Error!void {
     try zc.currentSheet().decWidth(column, n, .{});
     zc.currentSheet().endUndoGroup();
-    zc.ui.update_flags.cells = true;
-    zc.ui.update_flags.column_headings = true;
 }
 
 pub inline fn cursorIncWidth(zc: *ZC) Allocator.Error!void {
@@ -2491,7 +2424,6 @@ pub fn expandWidthAtCursor(zc: *ZC) Allocator.Error!void {
     try zc.currentSheet().setColWidth(handle, zc.cursor.x, width_needed, .{});
     zc.currentSheet().endUndoGroup();
     zc.clampScreenToCursorX();
-    zc.ui.update(&.{ .cells, .column_headings });
 }
 
 pub fn cursorToFirstCellInRow(zc: *ZC) void {

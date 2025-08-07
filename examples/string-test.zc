@@ -1,4 +1,4 @@
-let A0 = "1"
+let A0 = "🧑‍🌾"
 let B0 = A0 # "2"
 let C0 = B0 # "3"
 let D0 = C0 # "4"
