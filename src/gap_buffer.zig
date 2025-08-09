@@ -255,7 +255,7 @@ pub fn GapBuffer(comptime T: type) type {
         }
 
         pub fn deleteRange(self: *Self, start: u32, end: u32) void {
-            assert(start < self.len);
+            assert(start <= self.len);
             assert(end <= self.len);
             const len = end - start;
             self.setGap(start);
