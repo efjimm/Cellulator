@@ -87,10 +87,10 @@ pub const default_theme: Theme = .{
     .token_single_quoted_string = .init(.green, .none, .none),
     .token_double_quoted_string = .init(.green, .none, .none),
 
-    .completion_background = .init(.none, .bright_black, .none),
-    .completion_title = .init(.none, .bright_black, .none),
-    .completion_keys = .init(.none, .bright_black, .none),
-    .completion_description = .init(.none, .bright_black, .none),
+    .input_hints_background = .init(.none, .bright_black, .none),
+    .input_hints_title = .init(.none, .bright_black, .none),
+    .input_hints_keys = .init(.none, .bright_black, .none),
+    .input_hints_description = .init(.none, .bright_black, .none),
 
     .cli_completion_selected = .init(.black, .blue, .none),
     .cli_completion_unselected = .init(.none, .bright_black, .none),
@@ -145,10 +145,10 @@ pub const UiElement = enum {
     token_single_quoted_string,
     token_double_quoted_string,
 
-    completion_background,
-    completion_title,
-    completion_keys,
-    completion_description,
+    input_hints_background,
+    input_hints_title,
+    input_hints_keys,
+    input_hints_description,
 
     cli_completion_selected,
     cli_completion_unselected,
@@ -409,7 +409,7 @@ pub fn render(tui: *Tui, zc: *ZC) !void {
     try tui.renderSheetList(&wr);
     try tui.renderStatus(&wr);
     try tui.renderColumnHeadings(&wr);
-    try tui.renderFileCompletion(&wr);
+    try tui.renderCommandLineCompletions(&wr);
     try tui.renderCommandLine(&wr);
 
     try wr.flush();
@@ -527,11 +527,12 @@ fn renderSheetList(tui: *Tui, wr: *Screen.Writer) !void {
     try wr.clearToEol();
 }
 
-fn renderFileCompletion(tui: *Tui, wr: *shovel.Screen.Writer) !void {
+fn renderCommandLineCompletions(tui: *Tui, wr: *shovel.Screen.Writer) !void {
     const zc = tui.zc.?;
-    if (zc.fileCompletionQuery() == null) return;
+    if (zc.completionQuery() == null) return;
 
     const height = tui.cellViewHeight() / 2;
+    if (height == 0) return;
 
     try wr.setRectClamp(.{
         .x = 0,
@@ -548,22 +549,23 @@ fn renderFileCompletion(tui: *Tui, wr: *shovel.Screen.Writer) !void {
     try tui.setStyle(.cli_completion_unselected, wr);
     var y: u16 = 0;
     var i: usize = if (zc.selected_completion) |sc| sc / height * height else 0;
-    while (y < height and i < zc.dir_entries_filtered.items.len) : ({
+    while (y < height and i < zc.completion_strings.items.len) : ({
         y += 1;
         i += 1;
     }) {
         try wr.setCursor(y, 0);
 
-        const entry = zc.dir_entries_filtered.items[i];
-        const text = zc.dir_entries_buffer.items[entry.offset..][0..entry.len];
+        const entry = zc.completion_strings.items[i];
+        const text = zc.completions_buffer.items[entry.offset..][0..entry.len];
         if (i == zc.selected_completion) {
             try tui.setStyle(.cli_completion_selected, wr);
             try wr.interface.writeAll(text);
+            try wr.clearToEol();
             try tui.setStyle(.cli_completion_unselected, wr);
         } else {
             try wr.interface.writeAll(text);
+            try wr.clearToEol();
         }
-        try wr.clearToEol();
     }
 }
 
@@ -669,11 +671,11 @@ fn renderInputHints(tui: *Tui, wr: *Screen.Writer) !void {
     const input_res = stringWidthInternal(input, .{ .max_width = width - 2 });
 
     var b: [1][]const u8 = .{"─"};
-    try tui.setStyle(.completion_background, wr);
+    try tui.setStyle(.input_hints_background, wr);
     try w.writeAll("┌");
-    try tui.setStyle(.completion_title, wr);
+    try tui.setStyle(.input_hints_title, wr);
     try w.writeAll(input[0..input_res.len]);
-    try tui.setStyle(.completion_background, wr);
+    try tui.setStyle(.input_hints_background, wr);
     try w.writeSplatAll(&b, width - 2 - input_res.width);
     try w.writeAll("┐");
 
@@ -681,19 +683,19 @@ fn renderInputHints(tui: *Tui, wr: *Screen.Writer) !void {
     for (matches.items[0..height -| 2]) |match| {
         try wr.setCursor(i, 0);
 
-        try tui.setStyle(.completion_background, wr);
+        try tui.setStyle(.input_hints_background, wr);
         try w.writeAll("│ ");
 
-        try tui.setStyle(.completion_keys, wr);
+        try tui.setStyle(.input_hints_keys, wr);
         try w.writeAll(match.key);
 
-        try tui.setStyle(.completion_background, wr);
+        try tui.setStyle(.input_hints_background, wr);
         try w.splatByteAll(' ', max_keys_width - match.key_width + 2);
 
-        try tui.setStyle(.completion_description, wr);
+        try tui.setStyle(.input_hints_description, wr);
         try w.writeAll(match.description);
 
-        try tui.setStyle(.completion_background, wr);
+        try tui.setStyle(.input_hints_background, wr);
         try w.splatByteAll(' ', max_desc_width - match.desc_width);
         try w.writeAll(" │");
 
@@ -849,6 +851,24 @@ fn renderCommandLine(tui: *Tui, wr: *Screen.Writer) !void {
         tui.cursor = wr.cursor;
         try wr.setCursor(0, 0);
 
+        // writeToken does not write the initial whitespace, so do that first
+        const leading_whitespace_left =
+            std.mem.indexOfNone(u8, left, &std.ascii.whitespace) orelse left.len;
+        const leading_whitespace_right =
+            if (leading_whitespace_left == left.len)
+                std.mem.indexOfNone(u8, right, &std.ascii.whitespace) orelse right.len
+            else
+                0;
+
+        try tui.setStyle(.token_whitespace, wr);
+        if (leading_whitespace_left > 0) {
+            try wr.interface.writeAll(left[0..leading_whitespace_left]);
+        }
+
+        if (leading_whitespace_right > 0) {
+            try wr.interface.writeAll(right[0..leading_whitespace_right]);
+        }
+
         const tokens = try Tokenizer.collectTokens(
             arena,
             &reader.interface,
@@ -894,27 +914,6 @@ fn renderCommandLine(tui: *Tui, wr: *Screen.Writer) !void {
 
         try tui.setStyle(.command_line, wr);
         try wr.clearToEol();
-        // } else if (zc.status_message.len > 0) {
-        //     switch (zc.status_message_type) {
-        //         .info => {
-        //             try tui.setStyle(.status_info, wr);
-        //             try writer.writeAll("Info: ");
-        //             try tui.setStyle(.status_info_text, wr);
-        //         },
-        //         .warn => {
-        //             try tui.setStyle(.status_warn, wr);
-        //             try writer.writeAll("Warning: ");
-        //             try tui.setStyle(.status_warn_text, wr);
-        //         },
-        //         .err => {
-        //             try tui.setStyle(.status_err, wr);
-        //             try writer.writeAll("Error: ");
-        //             try tui.setStyle(.status_err_text, wr);
-        //         },
-        //     }
-        //     try writer.writeAll(zc.status_message.slice());
-        //     try wr.clearToEol();
-        // } else if (zc.status.msg.items.len > 0) {
     } else switch (zc.status.tag) {
         .none => {
             try wr.clearToEol();

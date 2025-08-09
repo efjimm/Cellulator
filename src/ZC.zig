@@ -7,7 +7,7 @@ const Lua = @import("zlua").Lua;
 const wcWidth = @import("wcwidth").wcWidth;
 
 const ast = @import("ast.zig");
-const Command = @import("Command.zig");
+const CommandLine = @import("Command.zig");
 const input = @import("input.zig");
 const Action = input.Action;
 const CommandAction = input.CommandAction;
@@ -120,7 +120,7 @@ cursor: Position = .origin,
 count: u32 = 0,
 
 command_screen_pos: u32 = 0,
-command: Command = .{},
+command: CommandLine = .{},
 
 keymaps: input.KeyMaps,
 
@@ -137,13 +137,19 @@ had_prefix: bool = false,
 
 selected_completion: ?usize = null,
 
-dir_entries_buffer: std.ArrayListUnmanaged(u8) = .empty,
+completions_buffer: std.ArrayListUnmanaged(u8) = .empty,
+completion_strings: std.ArrayListUnmanaged(CompletionString) = .empty,
+
 dir_entries: std.ArrayListUnmanaged(DirEntry) = .empty,
-dir_entries_filtered: std.ArrayListUnmanaged(DirEntry) = .empty,
 last_dirname: []const u8 = "",
 recalc_dir_entries_width: bool = true,
 
 status: Status = .{},
+
+const CompletionString = struct {
+    offset: usize,
+    len: usize,
+};
 
 pub const Status = struct {
     /// General status message, used by all tags.
@@ -191,7 +197,6 @@ pub const Status = struct {
 pub const DirEntry = struct {
     offset: usize,
     len: usize,
-    is_dir: bool,
 };
 
 pub const Mode = enum {
@@ -343,8 +348,8 @@ pub fn deinit(zc: *ZC) void {
     zc.command.deinit(zc.allocator);
 
     zc.dir_entries.deinit(zc.allocator);
-    zc.dir_entries_buffer.deinit(zc.allocator);
-    zc.dir_entries_filtered.deinit(zc.allocator);
+    zc.completions_buffer.deinit(zc.allocator);
+    zc.completion_strings.deinit(zc.allocator);
 
     zc.input_buf.deinit();
     zc.keymaps.deinit(zc.allocator);
@@ -362,25 +367,60 @@ pub fn emitEvent(zc: *ZC, event: [:0]const u8, args: anytype) void {
     lua.emitEvent(zc.lua_ptr, event, args) catch {}; // TODO: Make sure handled correctly
 }
 
-/// If we're in command mode and typing a file name, returns the partially typed file name from the
-/// command buffer. If we're not in command mode or we're not typing a filepath, return null.
-pub fn fileCompletionQuery(zc: *ZC) ?struct { offset: usize, len: usize } {
+pub const QueryType = enum {
+    path,
+    command,
+};
+
+pub fn completionQuery(zc: *ZC) ?struct { type: QueryType, offset: usize, len: usize } {
     if (!zc.mode.isCommandMode()) return null;
 
-    const in = zc.command.left();
-    const c = [_][]const u8{ ":e ", ":w ", ":be ", ":bw " };
-    for (c) |cmd_string| {
-        if (std.mem.startsWith(u8, in, cmd_string)) break;
-    } else return null;
+    var iter = utils.wordIterator(zc.command.left());
+    const in = iter.next() orelse return null;
+    if (in.len == 0 or in[0] != ':') return null;
 
-    var iter = utils.wordIterator(in);
-    _ = iter.next().?;
-    const arg = iter.next() orelse in[in.len..];
+    const map: std.StaticStringMap(void) = .initComptime(.{
+        .{":e"},
+        .{":w"},
+        .{":be"},
+        .{":bw"},
+    });
 
-    return .{
-        .offset = @intFromPtr(arg.ptr) - @intFromPtr(in.ptr),
-        .len = arg.len,
+    const query_type: QueryType = blk: {
+        const first_arg_size = (in.ptr - zc.command.left().ptr) + in.len;
+        if (zc.command.cursor <= first_arg_size)
+            break :blk .command;
+
+        if (map.has(in))
+            break :blk .path;
+        return null;
     };
+
+    sw: switch (query_type) {
+        .path => {
+            const arg = iter.next() orelse blk: {
+                const offset = (in.ptr - iter.string.ptr) + in.len;
+                if (zc.command.cursor <= offset)
+                    continue :sw .command;
+
+                break :blk in[in.len..];
+            };
+
+            return .{
+                .type = .path,
+                .offset = arg.ptr - in.ptr,
+                .len = arg.len,
+            };
+        },
+        .command => {
+            const arg = in[1..];
+            return .{
+                .type = .command,
+                .offset = arg.ptr - in.ptr,
+                .len = arg.len,
+            };
+        },
+    }
 }
 
 pub fn inputSentinelSlice(zc: *ZC) Oom![:0]u8 {
@@ -639,12 +679,12 @@ fn clampScreenToCommandCursor(zc: *ZC) void {
 }
 
 /// Doesn't wrap Command.Writer to avoid an unnecessary layer of indirection.
-const CmdWriter = struct {
+const CommandWriter = struct {
     interface: std.io.Writer,
     zc: *ZC,
 
     pub fn drain(io_writer: *std.io.Writer, data: []const []const u8, splat: usize) !usize {
-        const w: *CmdWriter = @fieldParentPtr("interface", io_writer);
+        const w: *CommandWriter = @fieldParentPtr("interface", io_writer);
         defer w.zc.clampCommandCursor();
         defer w.zc.clampScreenToCommandCursor();
 
@@ -680,11 +720,11 @@ const CmdWriter = struct {
     }
 };
 
-pub fn commandWriter(zc: *ZC, buffer: []u8) CmdWriter {
+pub fn commandWriter(zc: *ZC, buffer: []u8) CommandWriter {
     return .{
         .interface = .{
             .vtable = &.{
-                .drain = CmdWriter.drain,
+                .drain = CommandWriter.drain,
             },
             .buffer = buffer,
         },
@@ -699,24 +739,33 @@ pub fn setCommandCursor(zc: *ZC, pos: u32) void {
 }
 
 pub fn submitCompletion(zc: *ZC, index: usize) !void {
-    const query_res = zc.fileCompletionQuery() orelse return;
+    // TODO: Allow any query
+    const query_res = zc.completionQuery() orelse return;
     const query = zc.command.left()[query_res.offset..][0..query_res.len];
-    // TODO: Support windows paths
-    const basename =
-        if (query.len > 0 and query[query.len - 1] == '/')
-            query[query.len..]
-        else if (query.len == 1 and query[0] == '/')
-            query[query.len..]
-        else
-            utils.basenamePosix(query);
-    const off = @intFromPtr(basename.ptr) - @intFromPtr(zc.command.left().ptr);
-    const f = zc.dir_entries_filtered.items[index];
-    const ft = zc.dir_entries_buffer.items[f.offset..][0..f.len];
-    try zc.command.replaceRange(zc.allocator, @intCast(off), @intCast(basename.len), ft);
-    zc.command.setCursor(@intCast(zc.command.cursor + (ft.len - basename.len)));
-    if (f.is_dir) {
-        var wr = zc.command.writer(zc.allocator, &.{});
-        try wr.interface.writeByte('/');
+
+    switch (query_res.type) {
+        .path => {
+            // TODO: Support windows paths
+            const basename =
+                if (query.len > 0 and query[query.len - 1] == '/')
+                    query[query.len..]
+                else if (query.len == 1 and query[0] == '/')
+                    query[query.len..]
+                else
+                    utils.basenamePosix(query);
+            const off = basename.ptr - zc.command.left().ptr;
+            const completion = zc.completion_strings.items[index];
+            const ft = zc.completions_buffer.items[completion.offset..][0..completion.len];
+            try zc.command.replaceRange(zc.allocator, @intCast(off), @intCast(basename.len), ft);
+            zc.command.setCursor(@intCast(zc.command.cursor + (ft.len - basename.len)));
+        },
+        .command => {
+            const completion = zc.completion_strings.items[index];
+            const ft = zc.completions_buffer.items[completion.offset..][0..completion.len];
+            const off = query.ptr - zc.command.left().ptr;
+            try zc.command.replaceRange(zc.allocator, @intCast(off), @intCast(query.len), ft);
+            zc.command.setCursor(@intCast(zc.command.cursor + (ft.len - query.len)));
+        },
     }
 }
 
@@ -879,18 +928,18 @@ pub fn doCommandNormalMode(zc: *ZC, action: CommandAction) !void {
 }
 
 fn completionNext(zc: *ZC) !void {
-    if (zc.dir_entries_filtered.items.len == 1) {
+    if (zc.completion_strings.items.len == 1) {
         try zc.submitCompletion(0);
     } else if (zc.selected_completion) |*sc| {
-        sc.* = (sc.* + 1) % zc.dir_entries_filtered.items.len;
-    } else if (zc.dir_entries_filtered.items.len > 0) {
+        sc.* = (sc.* + 1) % zc.completion_strings.items.len;
+    } else if (zc.completion_strings.items.len > 0) {
         zc.selected_completion = 0;
     }
 }
 
 fn completionPrev(zc: *ZC) void {
     if (zc.selected_completion == 0 or zc.selected_completion == null) {
-        zc.selected_completion = zc.dir_entries_filtered.items.len -| 1;
+        zc.selected_completion = zc.completion_strings.items.len -| 1;
     } else {
         zc.selected_completion.? -= 1;
     }
@@ -952,10 +1001,50 @@ fn doCommandInsertMode(zc: *ZC, action: CommandAction, keys: []const u8) !void {
         else => zc.selected_completion = null,
     }
 
-    zc.dir_entries_filtered.clearRetainingCapacity();
-    const query_res = zc.fileCompletionQuery() orelse return;
+    try zc.populateCompletions();
+}
+
+fn populateCompletions(zc: *ZC) !void {
+    zc.completion_strings.clearRetainingCapacity();
+    const query_res = zc.completionQuery() orelse return;
     const query = zc.command.left()[query_res.offset..][0..query_res.len];
 
+    switch (query_res.type) {
+        .path => {
+            try zc.populatePathCompletions(query);
+        },
+        .command => {
+            zc.last_dirname = "";
+            try zc.populateCommandCompletions(query);
+        },
+    }
+}
+
+fn populateCommandCompletions(zc: *ZC, query: []const u8) !void {
+    const total_commands_size = comptime blk: {
+        var total_size: usize = 0;
+        for (Command.map.keys()) |key| total_size += key.len;
+        break :blk total_size;
+    };
+
+    zc.completion_strings.clearRetainingCapacity();
+    zc.completions_buffer.clearRetainingCapacity();
+    try zc.completion_strings.ensureTotalCapacity(zc.allocator, Command.map.keys().len);
+    try zc.completions_buffer.ensureTotalCapacity(zc.allocator, total_commands_size);
+
+    for (Command.map.keys()) |key| {
+        if (std.ascii.indexOfIgnoreCase(key, query)) |_| {
+            const start = zc.completions_buffer.items.len;
+            zc.completions_buffer.appendSliceAssumeCapacity(key);
+            zc.completion_strings.appendAssumeCapacity(.{
+                .offset = start,
+                .len = zc.completions_buffer.items.len - start,
+            });
+        }
+    }
+}
+
+fn populatePathCompletions(zc: *ZC, query: []const u8) !void {
     const dirname, const basename =
         if (query.len == 1 and query[0] == '/') .{
             query,
@@ -971,7 +1060,7 @@ fn doCommandInsertMode(zc: *ZC, action: CommandAction, keys: []const u8) !void {
     if (!std.mem.eql(u8, dirname, zc.last_dirname)) {
         std.log.debug("Repopulating directory entries ({s}) ({s})", .{ dirname, zc.last_dirname });
         zc.dir_entries.clearRetainingCapacity();
-        zc.dir_entries_buffer.clearRetainingCapacity();
+        zc.completions_buffer.clearRetainingCapacity();
 
         var dir = std.fs.cwd().openDir(dirname, .{ .iterate = true }) catch {
             zc.last_dirname = dirname;
@@ -981,15 +1070,17 @@ fn doCommandInsertMode(zc: *ZC, action: CommandAction, keys: []const u8) !void {
 
         var dir_iter = dir.iterate();
         while (try dir_iter.next()) |entry| {
-            const start = zc.dir_entries_buffer.items.len;
+            const start = zc.completions_buffer.items.len;
             try zc.dir_entries.ensureUnusedCapacity(zc.allocator, 1);
-            try zc.dir_entries_buffer.ensureUnusedCapacity(zc.allocator, entry.name.len);
+            try zc.completions_buffer.ensureUnusedCapacity(zc.allocator, entry.name.len + 1);
 
-            zc.dir_entries_buffer.appendSliceAssumeCapacity(entry.name);
+            zc.completions_buffer.appendSliceAssumeCapacity(entry.name);
+            if (entry.kind == .directory)
+                zc.completions_buffer.appendAssumeCapacity('/');
+
             zc.dir_entries.appendAssumeCapacity(.{
-                .len = entry.name.len,
                 .offset = start,
-                .is_dir = entry.kind == .directory,
+                .len = zc.completions_buffer.items.len - start,
             });
         }
 
@@ -997,8 +1088,8 @@ fn doCommandInsertMode(zc: *ZC, action: CommandAction, keys: []const u8) !void {
 
         const Context = struct {
             fn lessThan(z: *ZC, a: DirEntry, b: DirEntry) bool {
-                const a_text = z.dir_entries_buffer.items[a.offset..][0..a.len];
-                const b_text = z.dir_entries_buffer.items[b.offset..][0..b.len];
+                const a_text = z.completions_buffer.items[a.offset..][0..a.len];
+                const b_text = z.completions_buffer.items[b.offset..][0..b.len];
                 var i: usize = 0;
                 while (i < a_text.len and i < b_text.len) : (i += 1) {
                     if (a_text[i] < b_text[i]) return true;
@@ -1011,13 +1102,16 @@ fn doCommandInsertMode(zc: *ZC, action: CommandAction, keys: []const u8) !void {
         std.mem.sortUnstable(DirEntry, zc.dir_entries.items, zc, Context.lessThan);
     }
 
-    try zc.dir_entries_filtered.ensureTotalCapacity(zc.allocator, zc.dir_entries.items.len);
-    zc.dir_entries_filtered.clearRetainingCapacity();
+    try zc.completion_strings.ensureTotalCapacity(zc.allocator, zc.dir_entries.items.len);
+    zc.completion_strings.clearRetainingCapacity();
 
     for (zc.dir_entries.items) |entry| {
-        const str = zc.dir_entries_buffer.items[entry.offset..][0..entry.len];
+        const str = zc.completions_buffer.items[entry.offset..][0..entry.len];
         if (std.ascii.indexOfIgnoreCase(str, basename) != null)
-            zc.dir_entries_filtered.appendAssumeCapacity(entry);
+            zc.completion_strings.appendAssumeCapacity(.{
+                .len = entry.len,
+                .offset = entry.offset,
+            });
     }
 }
 
@@ -1069,6 +1163,7 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
             zc.setMode(.command_insert);
             var writer = zc.commandWriter(&.{});
             writer.interface.writeByte(':') catch return error.OutOfMemory;
+            try zc.populateCompletions();
         },
         .edit_cell => {
             zc.setMode(.command_insert);
@@ -1391,7 +1486,7 @@ pub fn resetCount(zc: *ZC) void {
     zc.count = 0;
 }
 
-const Cmd = enum {
+const Command = enum {
     save,
     save_force,
     load,
@@ -1420,39 +1515,854 @@ const Cmd = enum {
     close_sheet_force,
     rename_sheet,
     goto,
-};
 
-const cmds = std.StaticStringMap(Cmd).initComptime(.{
-    .{ "w", .save },
-    .{ "e", .load_force },
-    .{ "q", .quit },
-    .{ "q!", .quit_force },
-    .{ "fill", .fill },
-    .{ "fill-expr", .fill_expr },
-    .{ "bw", .binary_save },
-    .{ "be", .binary_load_force },
-    .{ "undo", .undo },
-    .{ "redo", .redo },
-    .{ "delete", .delete },
-    .{ "delete-cols", .delete_columns },
-    .{ "delete-rows", .delete_rows },
-    .{ "insert-cols", .insert_columns },
-    .{ "insert-rows", .insert_rows },
-    .{ "text-align", .set_text_align },
-    .{ "set", .set },
-    .{ "unset", .unset },
-    .{ "yank", .yank },
-    .{ "put", .put },
-    .{ "p", .put },
-    .{ "put-adjust", .put_adjust },
-    .{ "pa", .put_adjust },
-    .{ "sheet-close", .close_sheet },
-    .{ "sheet-close!", .close_sheet_force },
-    .{ "sc", .close_sheet },
-    .{ "sc!", .close_sheet_force },
-    .{ "sheet-rename", .rename_sheet },
-    .{ "go", .goto },
-});
+    /// Maps the string versions of commands to their corresponding enum tag.
+    const map = std.StaticStringMap(Command).initComptime(.{
+        .{ "w", .save },
+        .{ "e", .load_force },
+        .{ "q", .quit },
+        .{ "q!", .quit_force },
+        .{ "fill", .fill },
+        .{ "fill-expr", .fill_expr },
+        .{ "bw", .binary_save },
+        .{ "be", .binary_load_force },
+        .{ "undo", .undo },
+        .{ "redo", .redo },
+        .{ "delete", .delete },
+        .{ "delete-cols", .delete_columns },
+        .{ "delete-rows", .delete_rows },
+        .{ "insert-cols", .insert_columns },
+        .{ "insert-rows", .insert_rows },
+        .{ "text-align", .set_text_align },
+        .{ "set", .set },
+        .{ "unset", .unset },
+        .{ "yank", .yank },
+        .{ "put", .put },
+        .{ "p", .put },
+        .{ "put-adjust", .put_adjust },
+        .{ "pa", .put_adjust },
+        .{ "sheet-close", .close_sheet },
+        .{ "sheet-close!", .close_sheet_force },
+        .{ "sc", .close_sheet },
+        .{ "sc!", .close_sheet_force },
+        .{ "sheet-rename", .rename_sheet },
+        .{ "go", .goto },
+    });
+    const ArgumentIndex = enum(u8) {
+        valid = std.math.maxInt(u8),
+        _,
+
+        fn from(n: u8) ArgumentIndex {
+            return @enumFromInt(n);
+        }
+    };
+
+    fn dispatch(
+        zc: *ZC,
+        iter: *utils.WordIterator,
+        comptime tag: Command,
+        name: []const u8,
+    ) !void {
+        const funcs, const description = switch (tag) {
+            .save, .save_force => .{
+                .{ cmdSave, cmdSavePath },
+                \\Save to the given filepath, or to the sheet's filepath if not specified.
+            },
+            .quit => .{
+                .{cmdQuit},
+                "Quit the program only if there are no unsaved changes. Use :q! to discard unsaved changes.",
+            },
+            .quit_force => .{
+                .{cmdQuitForce},
+                "Quit the program, discarding any unsaved changes.",
+            },
+            .fill => .{
+                .{ cmdFill, cmdFillIncrement },
+                \\Fills the given range with value, incrementing each cell.
+                \\Increment is applied left to right, top to bottom.
+                \\The increment defaults to 1 if not specified.
+                \\
+                \\Example:
+                \\  :fill b1:d12 30 0.2
+            },
+            .fill_expr => .{
+                .{cmdFillExpr},
+                \\Fills the given range with an expression.
+                \\
+                \\Example:
+                \\  :fill-expr a0:c3 1 / 2 + 3
+            },
+            .binary_save => .{
+                .{cmdSaveBinary},
+                \\Save to the given filepath in a binary format. This format
+                \\is significantly faster to save/load.
+            },
+            .binary_load, .binary_load_force => .{
+                .{cmdLoadBinary},
+                \\Load from the given filepath in a binary format.
+                \\Significantly faster to load than a normal file.
+                \\
+                \\ **WARNING**
+                \\Binary files are not validated beyond a simple magic number
+                \\and version check. Binary files are loaded directly into the
+                \\internal state of the program without modification. It is
+                \\conceivable that a malicious file could contain an invalid
+                \\state that causes undefined behaviour. Only open binary
+                \\files you trust.
+            },
+            .load, .load_force => .{
+                .{ cmdLoadNoPath, cmdLoad },
+                \\Creates a new sheet with the given filepath. If the filepath
+                \\exists it will load attempt to load the file into the new sheet.
+            },
+            .undo => .{
+                .{ cmdUndoOne, cmdUndoCount },
+                \\Undo 1 or count times.
+            },
+            .redo => .{
+                .{ cmdRedoOne, cmdRedoCount },
+                \\Redo 1 or count times.
+            },
+            .delete => .{
+                .{ cmdDeleteCursor, cmdDelete },
+                \\Delete range or the range underneath the cursor if not specified.
+            },
+            .delete_columns => .{
+                .{ cmdDeleteColumnsCursor, cmdDeleteColumns },
+                \\Delete the given columns, or the columns under the cursor
+                \\if no arguments are given. The column range is specified
+                \\like a cell range but with the row numbers omitted.
+                \\
+                \\Examples:
+                \\  :delete-cols
+                \\  :delete-cols A
+                \\  :delete-cols C:F
+            },
+            .delete_rows => .{
+                .{ cmdDeleteRowsCursor, cmdDeleteRows },
+                \\Delete the given rows, or the rows under the cursor if
+                \\no arguments are given. The row range is specified like
+                \\a cell range but with the column letters omitted.
+                \\
+                \\Examples:
+                \\  :delete-rows
+                \\  :delete-rows 3
+                \\  :delete-rows 9:15
+            },
+            .insert_columns => .{
+                .{ cmdInsertColumnsCursor, cmdInsertColumnsCount, cmdInsertColumns },
+                \\Insert columns into the sheet. The two argument variant
+                \\inserts N columns at column START. The one argument variant
+                \\inserts N columns at the cursor, and the zero argument
+                \\variant inserts 1 column at the cursor.
+            },
+            .insert_rows => .{
+                .{ cmdInsertRowsCursor, cmdInsertRowsCount, cmdInsertRows },
+                \\Insert rows into the sheet. The two argument variant
+                \\inserts N rows at row START. The one argument variant
+                \\inserts N rows at the cursor, and the zero argument
+                \\variant inserts 1 row at the cursor.
+            },
+            .set_text_align => .{
+                .{ cmdTextAlignCursor, cmdTextAlign },
+                \\Set the alignment of the text in the specified cells or
+                \\under the cursor if not specified. Only cells with a text
+                \\value can have be aligned.
+            },
+            .goto => .{
+                .{cmdGoto},
+                \\Moves the cursor to the given cell or range. If a range is
+                \\given the mode changes to visual and the range is selected.
+            },
+            .put => .{
+                .{ cmdPutCursor, cmdPut },
+                \\Pastes the current contents of the range held by the yank
+                \\buffer at the given position or at the cursor. Expressions
+                \\are copied literally, with no modification. If the range
+                \\to copy to is larger than the source range, then the source
+                \\range is tiled over the destination range. The full source
+                \\range is always pasted, regardless of whether it overflows
+                \\the destination range or not.
+            },
+            .put_adjust => .{
+                .{ cmdPutAdjustCursor, cmdPutAdjust },
+                \\Same as `:put`, but automatically adjusts cell references
+                \\based on the new position.
+            },
+            .yank => .{
+                .{ cmdYankCursor, cmdYank },
+                \\Copies the given range or the cursor range to the yank buffer.
+            },
+            .close_sheet => .{
+                .{cmdCloseSheet},
+                \\Closes the currently selected sheet
+            },
+            .close_sheet_force => .{
+                .{cmdCloseSheetForce},
+                \\Closes the currently selected sheet, discardign unsaved changes.
+            },
+            .rename_sheet => .{
+                .{ cmdRenameSheetCurrent, cmdRenameSheet },
+                \\Rename the given or current sheet.
+            },
+            .set => .{
+                .{ cmdSetTrue, cmdSet },
+                \\Set a property.
+            },
+            .unset => .{
+                .{cmdUnset},
+                \\Unset a property.
+            },
+        };
+
+        comptime var max_params = 0;
+        comptime var min_params = std.math.maxInt(u32);
+        comptime var variadic = false;
+        comptime for (funcs) |func| {
+            const info = @typeInfo(@TypeOf(func)).@"fn";
+            if (info.params[info.params.len - 1].type.? == ExpressionArg)
+                variadic = true;
+
+            if (info.params.len - 1 > max_params) max_params = info.params.len - 1;
+            if (info.params.len - 1 < min_params) min_params = info.params.len - 1;
+        };
+
+        var argv: [max_params][]const u8 = undefined;
+        var argc: usize = 0;
+
+        for (&argv) |*p| {
+            p.* = iter.next() orelse break;
+            if (std.mem.eql(u8, p.*, "-h")) {
+                // Got a -h flag, print help and exit
+                try setCommandUsage(zc, name, description, funcs);
+                return;
+            }
+            argc += 1;
+        }
+
+        zc.status.msg.clearRetainingCapacity();
+        zc.status.cmd.clearRetainingCapacity();
+        zc.status.usage.clearRetainingCapacity();
+
+        if (!variadic and iter.peek() != null) {
+            try zc.status.msg.appendSlice(zc.allocator, "Too many arguments");
+            try setCommandError(
+                zc,
+                iter.index,
+                iter.string.len - iter.index,
+                name,
+                iter.string,
+                description,
+                funcs,
+            );
+            return;
+        }
+        if (argc < min_params) {
+            try zc.status.msg.appendSlice(zc.allocator, "Not enough arguments");
+            try setCommandError(zc, 0, 0, name, iter.string, description, funcs);
+            return;
+        }
+
+        inline for (funcs) |func| @"continue": {
+            const parameters = @typeInfo(@TypeOf(func)).@"fn".params;
+
+            // Equivalent to `continue`, which doesn't work here due to zig/#9524.
+            if (parameters.len - 1 != argc) break :@"continue";
+
+            // This function has the same number of arguments as we passed on the command line.
+            // Proceed to parse the command line, populating the function arguments, and call
+            // the function.
+            var dest_args: std.meta.ArgsTuple(@TypeOf(func)) = undefined;
+            dest_args[0] = zc;
+
+            inline for (argv[0 .. parameters.len - 1], 1..) |arg, i| {
+                dest_args[i] = parseArg(@TypeOf(dest_args[i]), zc, arg, iter.string) catch |err| {
+                    try setCommandError(zc, arg.ptr - iter.string.ptr, arg.len, name, iter.string, description, funcs);
+                    return err;
+                };
+            }
+
+            const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
+            switch (@typeInfo(ReturnType)) {
+                .error_union => |eu| {
+                    const res = try @call(.auto, func, dest_args);
+                    if (eu.payload == ArgumentIndex) switch (res) {
+                        .valid => {},
+                        ArgumentIndex.from(0) => {},
+                        else => |arg_index| {
+                            const arg = argv[@intFromEnum(arg_index) - 1];
+                            const offset = arg.ptr - iter.string.ptr;
+                            try setCommandError(
+                                zc,
+                                offset,
+                                arg.len,
+                                name,
+                                iter.string,
+                                description,
+                                funcs,
+                            );
+                        },
+                    };
+                },
+                .void => @call(.auto, func, dest_args),
+                else => comptime unreachable,
+            }
+            return;
+        }
+
+        try zc.status.msg.appendSlice(zc.allocator, "Invalid argument count");
+        return error.InvalidArgCount;
+    }
+
+    fn setCommandUsage(zc: *ZC, name: []const u8, description: []const u8, funcs: anytype) !void {
+        zc.status.tag = .cmd_info;
+        zc.status.cmd_description = description;
+
+        var w: std.io.Writer.Allocating = .fromArrayList(zc.allocator, &zc.status.usage);
+        defer zc.status.usage = w.toArrayList();
+
+        inline for (funcs, 0..) |func, i| {
+            w.writer.print("  :{s}", .{name}) catch return error.OutOfMemory;
+            inline for (@typeInfo(@TypeOf(func)).@"fn".params[1..]) |p| {
+                const arg_type_name = switch (p.type.?) {
+                    []const u8 => "STRING",
+                    f64 => "NUMBER",
+                    else => p.type.?.type_name,
+                };
+                w.writer.print(" {s}", .{arg_type_name}) catch return error.OutOfMemory;
+            }
+            if (i < funcs.len - 1)
+                w.writer.writeByte('\n') catch return error.OutOfMemory;
+        }
+    }
+
+    fn setCommandError(
+        zc: *ZC,
+        err_offset: usize,
+        err_size: usize,
+        name: []const u8,
+        command: []const u8,
+        description: []const u8,
+        funcs: anytype,
+    ) !void {
+        const s = &zc.status;
+
+        s.tag = .cmd_err;
+        s.cmd.appendSlice(zc.allocator, command) catch {};
+        s.cmd_description = description;
+        s.err_offset = err_offset;
+        s.err_size = err_size;
+
+        var w: std.io.Writer.Allocating = .fromArrayList(zc.allocator, &s.usage);
+        defer s.usage = w.toArrayList();
+
+        inline for (funcs, 0..) |func, i| {
+            w.writer.print("  :{s}", .{name}) catch {};
+            inline for (@typeInfo(@TypeOf(func)).@"fn".params[1..]) |p| {
+                const arg_type_name = switch (p.type.?) {
+                    []const u8 => "STRING",
+                    f64 => "NUMBER",
+                    else => p.type.?.type_name,
+                };
+                w.writer.print(" {s}", .{arg_type_name}) catch {};
+            }
+            if (i < funcs.len - 1)
+                w.writer.writeByte('\n') catch {};
+        }
+    }
+
+    fn parseArg(T: type, zc: *ZC, arg: []const u8, command: []const u8) !T {
+        switch (T) {
+            []const u8 => return arg,
+            f64 => return std.fmt.parseFloat(f64, arg) catch |err| {
+                try zc.status.msg.appendSlice(zc.allocator, "Invalid number");
+                return err;
+            },
+            ExpressionArg => {
+                var off = arg.ptr - command.ptr;
+                while (off > 0 and command[off] != ' ') off -= 1;
+                const expr_str = command[off..];
+
+                var diagnostics: Parser.Diagnostics = .{};
+                const expr = ast.parseFromExpressionDiag(
+                    zc.currentSheet(),
+                    expr_str,
+                    &diagnostics,
+                ) catch |err| switch (err) {
+                    error.UnexpectedToken,
+                    error.InvalidCellAddress,
+                    error.InvalidBuiltin,
+                    => {
+                        try zc.status.msg.print(zc.allocator, "{f}", .{diagnostics});
+                        return err;
+                    },
+                    error.OutOfMemory => return error.OutOfMemory,
+                };
+                return .{ .str = expr_str, .root = expr };
+            },
+            else => return try .init(zc, arg),
+        }
+    }
+
+    // Command functions which can error due to invalid usage should return `!ArgumentIndex`.
+    // These functions should return the 1-based index of the invalid argument, or 0 if no specific
+    // argument is invalid. If the function succeeded, they should return `.valid`. If the function
+    // failed in a way unrelated to the usage of the function, they should set a status message
+    // manually and return an error.
+    //
+    // Functions that don't need to display usage information on error can return `void` or `!void`
+    // as appropriate and set an error message manually if required.
+
+    fn cmdSave(zc: *ZC) void {
+        zc.writeFile(null) catch |err| {
+            zc.setStatusMessage(.warn, "Could not write file: {s}", .{@errorName(err)});
+            return;
+        };
+        zc.currentSheet().has_changes = false;
+    }
+
+    fn cmdSavePath(zc: *ZC, path: PathArg) void {
+        // TODO: Check if already exists
+        zc.writeFile(path.bytes) catch |err| {
+            zc.setStatusMessage(.warn, "Could not write file: {s}", .{@errorName(err)});
+            return;
+        };
+        zc.currentSheet().has_changes = false;
+    }
+
+    fn cmdSaveBinary(zc: *ZC, path: PathArg) !void {
+        const file = std.fs.cwd().createFile(path.bytes, .{}) catch |err| {
+            zc.setStatusMessage(.warn, "Could not write binary file: {s}", .{
+                @errorName(err),
+            });
+            return;
+        };
+        defer file.close();
+
+        try zc.currentSheet().serialize(file);
+    }
+
+    fn cmdLoadBinary(zc: *ZC, path: PathArg) Oom!void {
+        zc.loadCmdBinary(path.bytes) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            else => {
+                try zc.status.msg.print(zc.allocator, "Could not open file: {t}", .{err});
+                return;
+            },
+        };
+    }
+
+    fn cmdLoad(zc: *ZC, path: PathArg) Oom!void {
+        zc.loadCmd(path.bytes) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            else => {
+                try zc.status.msg.print(zc.allocator, "Could not open file: {t}", .{err});
+                return;
+            },
+        };
+    }
+
+    fn cmdLoadNoPath(zc: *ZC) Oom!void {
+        const new_sheet = try zc.openSheet();
+        zc.setCurrentSheet(new_sheet);
+    }
+
+    fn cmdQuit(zc: *ZC) void {
+        for (zc.sheets.values()) |*sheet| {
+            if (sheet.has_changes) {
+                zc.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
+                break;
+            }
+        } else {
+            zc.running = false;
+        }
+    }
+
+    fn cmdQuitForce(zc: *ZC) void {
+        zc.running = false;
+    }
+
+    fn cmdFill(zc: *ZC, r: RangeOrPointArg, n: NumberArg("initial_number")) Oom!void {
+        // No increment was provided, so all cells can share the same expression
+        try zc.currentSheet().bulkSetCellExpr(r.range, "", .invalid, .{
+            .value = .{ .number = n.value },
+            .tag = .number,
+        });
+        zc.currentSheet().queued_cells.items.len = 0;
+        zc.currentSheet().endUndoGroup();
+    }
+
+    fn cmdFillIncrement(
+        zc: *ZC,
+        r: RangeOrPointArg,
+        initial: NumberArg("initial_number"),
+        increment: NumberArg("increment"),
+    ) Oom!void {
+        try zc.currentSheet().insertIncrementingCellRange(r.range, initial.value, increment.value, .{});
+        zc.currentSheet().endUndoGroup();
+    }
+
+    fn cmdFillExpr(zc: *ZC, r: RangeOrPointArg, expr: ExpressionArg) Oom!void {
+        try zc.currentSheet().bulkSetCellExpr(r.range, expr.str, expr.root, .{});
+        zc.currentSheet().endUndoGroup();
+    }
+
+    fn cmdUndoCount(zc: *ZC, count: IntegerArg(u32, "count")) Oom!void {
+        for (0..count.value) |_| try zc.undo();
+    }
+
+    fn cmdRedoCount(zc: *ZC, count: IntegerArg(u32, "count")) Oom!void {
+        for (0..count.value) |_| try zc.redo();
+    }
+
+    fn cmdUndoOne(zc: *ZC) Oom!void {
+        try zc.undo();
+    }
+
+    fn cmdRedoOne(zc: *ZC) Oom!void {
+        try zc.redo();
+    }
+
+    fn cmdDeleteCursor(zc: *ZC) Oom!void {
+        try zc.deleteCellRange(zc.anyCursorRange());
+    }
+
+    fn cmdDelete(zc: *ZC, r: RangeOrPointArg) Oom!void {
+        try zc.deleteCellRange(r.range);
+    }
+
+    fn cmdDeleteColumns(zc: *ZC, c: ColumnRangeArg) Oom!void {
+        try zc.currentSheet().deleteColOrRowRange(c.start, c.end, .{}, .col);
+        zc.currentSheet().endUndoGroup();
+    }
+
+    fn cmdDeleteColumnsCursor(zc: *ZC) Oom!void {
+        const r = zc.anyCursorRange();
+        try zc.currentSheet().deleteColOrRowRange(r.tl.x, r.br.x, .{}, .col);
+        zc.currentSheet().endUndoGroup();
+    }
+
+    fn cmdDeleteRows(zc: *ZC, c: RowRangeArg) Oom!void {
+        try zc.currentSheet().deleteColOrRowRange(c.start, c.end, .{}, .row);
+        zc.currentSheet().endUndoGroup();
+    }
+
+    fn cmdDeleteRowsCursor(zc: *ZC) Oom!void {
+        const r = zc.anyCursorRange();
+        try zc.currentSheet().deleteColOrRowRange(r.tl.x, r.br.x, .{}, .row);
+        zc.currentSheet().endUndoGroup();
+    }
+
+    fn cmdInsertColumnsCursor(zc: *ZC) Oom!void {
+        try cmdInsertColumns(zc, .{ .value = zc.cursor.x }, .{ .value = 1 });
+    }
+
+    fn cmdInsertColumnsCount(zc: *ZC, count: IntegerArg(u32, "count")) Oom!void {
+        try cmdInsertColumns(zc, .{ .value = zc.cursor.x }, count);
+    }
+
+    fn cmdInsertColumns(zc: *ZC, start: ColumnArg, count: IntegerArg(u32, "count")) Oom!void {
+        if (count.value == 0) return;
+        zc.currentSheet().insertColumns(start.value, count.value, .{}) catch |err| switch (err) {
+            error.Overflow => {
+                zc.setStatusMessage(.err, "Columns would overflow", .{});
+                return;
+            },
+            error.OutOfMemory => |e| return e,
+        };
+        zc.currentSheet().endUndoGroup();
+    }
+
+    fn cmdInsertRowsCursor(zc: *ZC) Oom!void {
+        try cmdInsertRows(zc, .{ .value = zc.cursor.y }, .{ .value = 1 });
+    }
+
+    fn cmdInsertRowsCount(zc: *ZC, count: IntegerArg(u32, "count")) Oom!void {
+        try cmdInsertRows(zc, .{ .value = zc.cursor.y }, count);
+    }
+
+    fn cmdInsertRows(zc: *ZC, start: IntegerArg(u32, "row"), count: IntegerArg(u32, "count")) Oom!void {
+        if (count.value == 0) return;
+        zc.currentSheet().insertRows(start.value, count.value, .{}) catch |err| switch (err) {
+            error.Overflow => {
+                zc.setStatusMessage(.err, "Rows would overflow", .{});
+                return;
+            },
+            error.OutOfMemory => |e| return e,
+        };
+        zc.currentSheet().endUndoGroup();
+    }
+
+    fn cmdTextAlign(
+        zc: *ZC,
+        r: RangeOrPointArg,
+        alignment: ArgEnum(Sheet.TextAttrs.Alignment, "left|right|center"),
+    ) Oom!void {
+        try zc.setTextAlignment(r.range, alignment.value);
+    }
+
+    fn cmdTextAlignCursor(
+        zc: *ZC,
+        alignment: ArgEnum(Sheet.TextAttrs.Alignment, "left|right|center"),
+    ) Oom!void {
+        try zc.setTextAlignment(zc.anyCursorRange(), alignment.value);
+    }
+
+    fn cmdYankCursor(zc: *ZC) void {
+        zc.yank = zc.anyCursorRange();
+    }
+
+    fn cmdYank(zc: *ZC, r: RangeOrPointArg) void {
+        zc.yank = r.range;
+    }
+
+    fn cmdPutCursor(zc: *ZC) Oom!void {
+        try zc.put(zc.anyCursorRange(), .no_adjust);
+    }
+
+    fn cmdPut(zc: *ZC, r: RangeOrPointArg) Oom!void {
+        try zc.put(r.range, .no_adjust);
+    }
+
+    fn cmdPutAdjustCursor(zc: *ZC) Oom!void {
+        try zc.put(zc.anyCursorRange(), .adjust);
+    }
+
+    fn cmdPutAdjust(zc: *ZC, r: RangeOrPointArg) Oom!void {
+        try zc.put(r.range, .adjust);
+    }
+
+    fn cmdGoto(zc: *ZC, r: RangeOrPointArg) void {
+        if (r.range.area() == 1) {
+            zc.setCursor(r.range.tl);
+        } else {
+            zc.setMode(.visual);
+            zc.anchor = r.range.tl;
+            zc.setCursor(r.range.br);
+        }
+    }
+
+    fn cmdCloseSheet(zc: *ZC) Oom!void {
+        if (zc.currentSheet().has_changes) {
+            zc.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
+        } else {
+            try zc.closeSheet(zc.current_sheet);
+        }
+    }
+
+    fn cmdCloseSheetForce(zc: *ZC) Oom!void {
+        try zc.closeSheet(zc.current_sheet);
+    }
+
+    fn cmdRenameSheet(
+        zc: *ZC,
+        target: StringArg("old_name"),
+        new_name: StringArg("new_name"),
+    ) !ArgumentIndex {
+        const index = zc.sheets.getIndex(target.bytes) orelse {
+            try zc.status.msg.print(zc.allocator, "Sheet '{s}' does not exist", .{target.bytes});
+            return .from(1);
+        };
+        zc.renameSheet(index, new_name.bytes) catch |err| switch (err) {
+            error.InvalidSheetName => {
+                try zc.status.msg.appendSlice(zc.allocator, "Sheet name must not be empty");
+                return .from(2);
+            },
+            error.SheetAlreadyExists => {
+                try zc.status.msg.print(zc.allocator, "Sheet '{s}' already exists", .{new_name.bytes});
+                return .from(2);
+            },
+            error.OutOfMemory => |e| return e,
+        };
+        return .valid;
+    }
+
+    fn cmdRenameSheetCurrent(zc: *ZC, new_name: StringArg("new_name")) !ArgumentIndex {
+        const index = zc.current_sheet;
+        zc.renameSheet(index, new_name.bytes) catch |err| switch (err) {
+            error.InvalidSheetName => {
+                try zc.status.msg.appendSlice(zc.allocator, "Sheet name must not be empty");
+                return .from(1);
+            },
+            error.SheetAlreadyExists => {
+                try zc.status.msg.print(zc.allocator, "Sheet '{s}' already exists", .{new_name.bytes});
+                return .from(1);
+            },
+            error.OutOfMemory => |e| return e,
+        };
+        return .valid;
+    }
+
+    fn cmdSet(zc: *ZC, property: ArgEnum(SetProperty, "property"), value: []const u8) !void {
+        switch (property.value) {
+            .theme => try zc.setTheme(value),
+            .truecolor => if (std.ascii.eqlIgnoreCase(value, "true")) {
+                zc.ui.term.terminfo.queryTrueColour();
+            } else if (std.ascii.eqlIgnoreCase(value, "false")) {
+                zc.ui.term.terminfo.truecolour = .none;
+            },
+        }
+    }
+
+    // TODO: Make the enum here be a subset containing only boolean properties
+    fn cmdSetTrue(zc: *ZC, property: ArgEnum(SetProperty, "property")) !void {
+        switch (property.value) {
+            .truecolor => zc.ui.term.terminfo.queryTrueColour(),
+            else => {
+                // TODO: Make sure this is reported correctly
+                return error.InvalidProperty;
+            },
+        }
+    }
+
+    fn cmdUnset(zc: *ZC, property: ArgEnum(SetProperty, "property")) !void {
+        // TODO: Check if the property is actually set before unsetting it.
+        switch (property.value) {
+            .theme => try zc.setDefaultTheme(),
+            .truecolor => {
+                zc.ui.term.terminfo.truecolour = .none;
+            },
+        }
+    }
+
+    const PathArg = struct {
+        bytes: []const u8,
+
+        const type_name = "filepath";
+
+        fn init(_: *ZC, str: []const u8) !PathArg {
+            return .{ .bytes = str };
+        }
+    };
+
+    const RangeOrPointArg = struct {
+        range: Rect,
+
+        const type_name = "range";
+
+        fn init(zc: *ZC, arg: []const u8) !RangeOrPointArg {
+            errdefer zc.status.msg.appendSlice(zc.allocator, "Invalid range") catch {};
+            return .{ .range = try parseRangeOrPoint(arg) };
+        }
+    };
+
+    const ExpressionArg = struct {
+        str: []const u8,
+        root: ast.Index,
+
+        const type_name = "expression";
+    };
+
+    const ColumnRangeArg = struct {
+        start: u32,
+        end: u32,
+
+        const type_name = "column_range";
+
+        fn init(zc: *ZC, arg: []const u8) !ColumnRangeArg {
+            errdefer zc.status.msg.appendSlice(zc.allocator, "Invalid column address") catch {};
+            var sep = std.mem.tokenizeScalar(u8, arg, ':');
+            const first = sep.next().?;
+            const first_col = try Position.columnFromAddress(first);
+            if (sep.next()) |second| {
+                const second_col = try Position.columnFromAddress(second);
+                return if (first_col <= second_col)
+                    .{ .start = first_col, .end = second_col }
+                else
+                    .{ .start = second_col, .end = first_col };
+            }
+
+            return .{ .start = first_col, .end = first_col };
+        }
+    };
+
+    const RowRangeArg = struct {
+        start: u32,
+        end: u32,
+
+        const type_name = "row_range";
+
+        fn init(zc: *ZC, arg: []const u8) !RowRangeArg {
+            errdefer zc.status.msg.appendSlice(zc.allocator, "Invalid row address") catch {};
+            var sep = std.mem.tokenizeScalar(u8, arg, ':');
+            const first = sep.next().?;
+            const first_row = try std.fmt.parseInt(u32, first, 0);
+            if (sep.next()) |second| {
+                const second_row = try std.fmt.parseInt(u32, second, 0);
+                return if (first_row <= second_row)
+                    .{ .start = first_row, .end = second_row }
+                else
+                    .{ .start = second_row, .end = first_row };
+            }
+
+            return .{ .start = first_row, .end = first_row };
+        }
+    };
+
+    const ColumnArg = struct {
+        value: u32,
+
+        const type_name = "column";
+
+        fn init(zc: *ZC, arg: []const u8) !ColumnArg {
+            errdefer zc.status.msg.appendSlice(zc.allocator, "Invalid column") catch {};
+            return .{ .value = try Position.columnFromAddress(arg) };
+        }
+    };
+
+    fn NumberArg(name: []const u8) type {
+        return struct {
+            value: f64,
+
+            pub const type_name = name;
+
+            pub fn init(zc: *ZC, str: []const u8) !NumberArg(name) {
+                errdefer zc.status.msg.appendSlice(zc.allocator, "Invalid number") catch {};
+                return .{ .value = try std.fmt.parseFloat(f64, str) };
+            }
+        };
+    }
+
+    fn IntegerArg(T: type, name: []const u8) type {
+        return struct {
+            value: T,
+
+            pub const type_name = name;
+
+            pub fn init(zc: *ZC, str: []const u8) !IntegerArg(T, name) {
+                errdefer zc.status.msg.appendSlice(zc.allocator, "Invalid integer") catch {};
+                return .{ .value = try std.fmt.parseInt(T, str, 0) };
+            }
+        };
+    }
+
+    fn StringArg(name: []const u8) type {
+        return struct {
+            bytes: []const u8,
+
+            pub const type_name = name;
+
+            pub fn init(_: *ZC, str: []const u8) !StringArg(name) {
+                return .{ .bytes = str };
+            }
+        };
+    }
+
+    fn ArgEnum(E: type, name: []const u8) type {
+        return struct {
+            value: E,
+
+            pub const type_name = name;
+
+            pub fn init(zc: *ZC, str: []const u8) !ArgEnum(E, name) {
+                errdefer zc.status.msg.appendSlice(zc.allocator, "Invalid option") catch {};
+                return .{
+                    .value = std.meta.stringToEnum(E, str) orelse return error.InvalidValue,
+                };
+            }
+        };
+    }
+};
 
 const DebugCmd = enum {
     expect_eql_number,
@@ -1623,836 +2533,20 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
     }
 }
 
-const CmdPathArg = struct {
-    bytes: []const u8,
-
-    const type_name = "filepath";
-
-    fn init(_: *ZC, str: []const u8) !CmdPathArg {
-        return .{ .bytes = str };
-    }
-};
-
-const CmdRangeOrPointArg = struct {
-    range: Rect,
-
-    const type_name = "range";
-
-    fn init(zc: *ZC, arg: []const u8) !CmdRangeOrPointArg {
-        errdefer zc.status.msg.appendSlice(zc.allocator, "Invalid range") catch {};
-        return .{ .range = try parseRangeOrPoint(arg) };
-    }
-};
-
-const CmdExpressionArg = struct {
-    str: []const u8,
-    root: ast.Index,
-
-    const type_name = "expression";
-};
-
-const CmdColumnRangeArg = struct {
-    start: u32,
-    end: u32,
-
-    const type_name = "column_range";
-
-    fn init(zc: *ZC, arg: []const u8) !CmdColumnRangeArg {
-        errdefer zc.status.msg.appendSlice(zc.allocator, "Invalid column address") catch {};
-        var sep = std.mem.tokenizeScalar(u8, arg, ':');
-        const first = sep.next().?;
-        const first_col = try Position.columnFromAddress(first);
-        if (sep.next()) |second| {
-            const second_col = try Position.columnFromAddress(second);
-            return if (first_col <= second_col)
-                .{ .start = first_col, .end = second_col }
-            else
-                .{ .start = second_col, .end = first_col };
-        }
-
-        return .{ .start = first_col, .end = first_col };
-    }
-};
-
-const CmdRowRangeArg = struct {
-    start: u32,
-    end: u32,
-
-    const type_name = "row_range";
-
-    fn init(zc: *ZC, arg: []const u8) !CmdRowRangeArg {
-        errdefer zc.status.msg.appendSlice(zc.allocator, "Invalid row address") catch {};
-        var sep = std.mem.tokenizeScalar(u8, arg, ':');
-        const first = sep.next().?;
-        const first_row = try std.fmt.parseInt(u32, first, 0);
-        if (sep.next()) |second| {
-            const second_row = try std.fmt.parseInt(u32, second, 0);
-            return if (first_row <= second_row)
-                .{ .start = first_row, .end = second_row }
-            else
-                .{ .start = second_row, .end = first_row };
-        }
-
-        return .{ .start = first_row, .end = first_row };
-    }
-};
-
-const CmdColumnArg = struct {
-    value: u32,
-
-    const type_name = "column";
-
-    fn init(zc: *ZC, arg: []const u8) !CmdColumnArg {
-        errdefer zc.status.msg.appendSlice(zc.allocator, "Invalid column") catch {};
-        return .{ .value = try Position.columnFromAddress(arg) };
-    }
-};
-
-fn CmdNumberArg(name: []const u8) type {
-    return struct {
-        value: f64,
-
-        pub const type_name = name;
-
-        pub fn init(zc: *ZC, str: []const u8) !CmdNumberArg(name) {
-            errdefer zc.status.msg.appendSlice(zc.allocator, "Invalid number") catch {};
-            return .{ .value = try std.fmt.parseFloat(f64, str) };
-        }
-    };
-}
-
-fn CmdIntegerArg(T: type, name: []const u8) type {
-    return struct {
-        value: T,
-
-        pub const type_name = name;
-
-        pub fn init(zc: *ZC, str: []const u8) !CmdIntegerArg(T, name) {
-            errdefer zc.status.msg.appendSlice(zc.allocator, "Invalid integer") catch {};
-            return .{ .value = try std.fmt.parseInt(T, str, 0) };
-        }
-    };
-}
-
-fn CmdStringArg(name: []const u8) type {
-    return struct {
-        bytes: []const u8,
-
-        pub const type_name = name;
-
-        pub fn init(_: *ZC, str: []const u8) !CmdStringArg(name) {
-            return .{ .bytes = str };
-        }
-    };
-}
-
-fn CmdArgEnum(E: type, name: []const u8) type {
-    return struct {
-        value: E,
-
-        pub const type_name = name;
-
-        pub fn init(zc: *ZC, str: []const u8) !CmdArgEnum(E, name) {
-            errdefer zc.status.msg.appendSlice(zc.allocator, "Invalid option") catch {};
-            return .{
-                .value = std.meta.stringToEnum(E, str) orelse return error.InvalidValue,
-            };
-        }
-    };
-}
-
-const cmd = struct {
-    const ArgumentIndex = enum(u8) {
-        valid = std.math.maxInt(u8),
-        _,
-
-        fn from(n: u8) ArgumentIndex {
-            return @enumFromInt(n);
-        }
-    };
-
-    fn dispatch(
-        zc: *ZC,
-        iter: *utils.WordIterator,
-        comptime tag: Cmd,
-        name: []const u8,
-    ) !void {
-        const funcs, const description = switch (tag) {
-            .save, .save_force => .{
-                .{ cmdSave, cmdSavePath },
-                \\Save to the given filepath, or to the sheet's filepath if not specified.
-            },
-            .quit => .{
-                .{cmdQuit},
-                "Quit the program only if there are no unsaved changes. Use :q! to discard unsaved changes.",
-            },
-            .quit_force => .{
-                .{cmdQuitForce},
-                "Quit the program, discarding any unsaved changes.",
-            },
-            .fill => .{
-                .{ cmdFill, cmdFillIncrement },
-                \\Fills the given range with value, incrementing each cell.
-                \\Increment is applied left to right, top to bottom.
-                \\The increment defaults to 1 if not specified.
-                \\
-                \\Example:
-                \\  :fill b1:d12 30 0.2
-            },
-            .fill_expr => .{
-                .{cmdFillExpr},
-                \\Fills the given range with an expression.
-                \\
-                \\Example:
-                \\  :fill-expr a0:c3 1 / 2 + 3
-            },
-            .binary_save => .{
-                .{cmdSaveBinary},
-                \\Save to the given filepath in a binary format. This format
-                \\is significantly faster to save/load.
-            },
-            .binary_load, .binary_load_force => .{
-                .{cmdLoadBinary},
-                \\Load from the given filepath in a binary format.
-                \\Significantly faster to load than a normal file.
-                \\
-                \\ **WARNING**
-                \\Binary files are not validated beyond a simple magic number
-                \\and version check. Binary files are loaded directly into the
-                \\internal state of the program without modification. It is
-                \\conceivable that a malicious file could contain an invalid
-                \\state that causes undefined behaviour. Only open binary
-                \\files you trust.
-            },
-            .load, .load_force => .{
-                .{ cmdLoadNoPath, cmdLoad },
-                \\Creates a new sheet with the given filepath. If the filepath
-                \\exists it will load attempt to load the file into the new sheet.
-            },
-            .undo => .{
-                .{ cmdUndoOne, cmdUndoCount },
-                \\Undo 1 or count times.
-            },
-            .redo => .{
-                .{ cmdRedoOne, cmdRedoCount },
-                \\Redo 1 or count times.
-            },
-            .delete => .{
-                .{ cmdDeleteCursor, cmdDelete },
-                \\Delete range or the range underneath the cursor if not specified.
-            },
-            .delete_columns => .{
-                .{ cmdDeleteColumnsCursor, cmdDeleteColumns },
-                \\Delete the given columns, or the columns under the cursor
-                \\if no arguments are given. The column range is specified
-                \\like a cell range but with the row numbers omitted.
-                \\
-                \\Examples:
-                \\  :delete-cols
-                \\  :delete-cols A
-                \\  :delete-cols C:F
-            },
-            .delete_rows => .{
-                .{ cmdDeleteRowsCursor, cmdDeleteRows },
-                \\Delete the given rows, or the rows under the cursor if
-                \\no arguments are given. The row range is specified like
-                \\a cell range but with the column letters omitted.
-                \\
-                \\Examples:
-                \\  :delete-rows
-                \\  :delete-rows 3
-                \\  :delete-rows 9:15
-            },
-            .insert_columns => .{
-                .{ cmdInsertColumnsCursor, cmdInsertColumnsCount, cmdInsertColumns },
-                \\Insert columns into the sheet. The two argument variant
-                \\inserts N columns at column START. The one argument variant
-                \\inserts N columns at the cursor, and the zero argument
-                \\variant inserts 1 column at the cursor.
-            },
-            .insert_rows => .{
-                .{ cmdInsertRowsCursor, cmdInsertRowsCount, cmdInsertRows },
-                \\Insert rows into the sheet. The two argument variant
-                \\inserts N rows at row START. The one argument variant
-                \\inserts N rows at the cursor, and the zero argument
-                \\variant inserts 1 row at the cursor.
-            },
-            .set_text_align => .{
-                .{ cmdTextAlignCursor, cmdTextAlign },
-                \\Set the alignment of the text in the specified cells or
-                \\under the cursor if not specified. Only cells with a text
-                \\value can have be aligned.
-            },
-            .goto => .{
-                .{cmdGoto},
-                \\Moves the cursor to the given cell or range. If a range is
-                \\given the mode changes to visual and the range is selected.
-            },
-            .put => .{
-                .{ cmdPutCursor, cmdPut },
-                \\Pastes the current contents of the range held by the yank
-                \\buffer at the given position or at the cursor. Expressions
-                \\are copied literally, with no modification. If the range
-                \\to copy to is larger than the source range, then the source
-                \\range is tiled over the destination range. The full source
-                \\range is always pasted, regardless of whether it overflows
-                \\the destination range or not.
-            },
-            .put_adjust => .{
-                .{ cmdPutAdjustCursor, cmdPutAdjust },
-                \\Same as `:put`, but automatically adjusts cell references
-                \\based on the new position.
-            },
-            .yank => .{
-                .{ cmdYankCursor, cmdYank },
-                \\Copies the given range or the cursor range to the yank buffer.
-            },
-            .close_sheet => .{
-                .{cmdCloseSheet},
-                \\Closes the currently selected sheet
-            },
-            .close_sheet_force => .{
-                .{cmdCloseSheetForce},
-                \\Closes the currently selected sheet, discardign unsaved changes.
-            },
-            .rename_sheet => .{
-                .{ cmdRenameSheetCurrent, cmdRenameSheet },
-                \\Rename the given or current sheet.
-            },
-            .set => .{
-                .{ cmdSetTrue, cmdSet },
-                \\Set a property.
-            },
-            .unset => .{
-                .{cmdUnset},
-                \\Unset a property.
-            },
-        };
-
-        comptime var max_params = 0;
-        comptime var min_params = std.math.maxInt(u32);
-        comptime var variadic = false;
-        comptime for (funcs) |func| {
-            const info = @typeInfo(@TypeOf(func)).@"fn";
-            if (info.params[info.params.len - 1].type.? == CmdExpressionArg)
-                variadic = true;
-
-            if (info.params.len - 1 > max_params) max_params = info.params.len - 1;
-            if (info.params.len - 1 < min_params) min_params = info.params.len - 1;
-        };
-
-        var argv: [max_params][]const u8 = undefined;
-        var argc: usize = 0;
-
-        for (&argv) |*p| {
-            p.* = iter.next() orelse break;
-            if (std.mem.eql(u8, p.*, "-h")) {
-                // Got a -h flag, print help and exit
-                try setCommandUsage(zc, name, description, funcs);
-                return;
-            }
-            argc += 1;
-        }
-
-        zc.status.msg.clearRetainingCapacity();
-        zc.status.cmd.clearRetainingCapacity();
-        zc.status.usage.clearRetainingCapacity();
-
-        if (!variadic and iter.peek() != null) {
-            try zc.status.msg.appendSlice(zc.allocator, "Too many arguments");
-            try setCommandError(
-                zc,
-                iter.index,
-                iter.string.len - iter.index,
-                name,
-                iter.string,
-                description,
-                funcs,
-            );
-            return;
-        }
-        if (argc < min_params) {
-            try zc.status.msg.appendSlice(zc.allocator, "Not enough arguments");
-            try setCommandError(zc, 0, 0, name, iter.string, description, funcs);
-            return;
-        }
-
-        inline for (funcs) |func| @"continue": {
-            const parameters = @typeInfo(@TypeOf(func)).@"fn".params;
-
-            // Equivalent to `continue`, which doesn't work here due to zig/#9524.
-            if (parameters.len - 1 != argc) break :@"continue";
-
-            // This function has the same number of arguments as we passed on the command line.
-            // Proceed to parse the command line, populating the function arguments, and call
-            // the function.
-            var dest_args: std.meta.ArgsTuple(@TypeOf(func)) = undefined;
-            dest_args[0] = zc;
-
-            inline for (argv[0 .. parameters.len - 1], 1..) |arg, i| {
-                dest_args[i] = parseArg(@TypeOf(dest_args[i]), zc, arg, iter.string) catch |err| {
-                    try setCommandError(zc, arg.ptr - iter.string.ptr, arg.len, name, iter.string, description, funcs);
-                    return err;
-                };
-            }
-
-            const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
-            switch (@typeInfo(ReturnType)) {
-                .error_union => |eu| {
-                    const res = try @call(.auto, func, dest_args);
-                    if (eu.payload == ArgumentIndex) switch (res) {
-                        .valid => {},
-                        ArgumentIndex.from(0) => {},
-                        else => |arg_index| {
-                            const arg = argv[@intFromEnum(arg_index) - 1];
-                            const offset = arg.ptr - iter.string.ptr;
-                            try setCommandError(
-                                zc,
-                                offset,
-                                arg.len,
-                                name,
-                                iter.string,
-                                description,
-                                funcs,
-                            );
-                        },
-                    };
-                },
-                .void => @call(.auto, func, dest_args),
-                else => comptime unreachable,
-            }
-            return;
-        }
-
-        try zc.status.msg.appendSlice(zc.allocator, "Invalid argument count");
-        return error.InvalidArgCount;
-    }
-
-    fn setCommandUsage(zc: *ZC, name: []const u8, description: []const u8, funcs: anytype) !void {
-        zc.status.tag = .cmd_info;
-        zc.status.cmd_description = description;
-
-        var w: std.io.Writer.Allocating = .fromArrayList(zc.allocator, &zc.status.usage);
-        defer zc.status.usage = w.toArrayList();
-
-        inline for (funcs, 0..) |func, i| {
-            w.writer.print("  :{s}", .{name}) catch {};
-            inline for (@typeInfo(@TypeOf(func)).@"fn".params[1..]) |p| {
-                const arg_type_name = switch (p.type.?) {
-                    []const u8 => "STRING",
-                    f64 => "NUMBER",
-                    else => p.type.?.type_name,
-                };
-                w.writer.print(" {s}", .{arg_type_name}) catch {};
-            }
-            if (i < funcs.len - 1)
-                w.writer.writeByte('\n') catch {};
-        }
-    }
-
-    fn setCommandError(
-        zc: *ZC,
-        err_offset: usize,
-        err_size: usize,
-        name: []const u8,
-        command: []const u8,
-        description: []const u8,
-        funcs: anytype,
-    ) !void {
-        const s = &zc.status;
-
-        s.tag = .cmd_err;
-        s.cmd.appendSlice(zc.allocator, command) catch {};
-        s.cmd_description = description;
-        s.err_offset = err_offset;
-        s.err_size = err_size;
-
-        var w: std.io.Writer.Allocating = .fromArrayList(zc.allocator, &s.usage);
-        defer s.usage = w.toArrayList();
-
-        inline for (funcs, 0..) |func, i| {
-            w.writer.print("  :{s}", .{name}) catch {};
-            inline for (@typeInfo(@TypeOf(func)).@"fn".params[1..]) |p| {
-                const arg_type_name = switch (p.type.?) {
-                    []const u8 => "STRING",
-                    f64 => "NUMBER",
-                    else => p.type.?.type_name,
-                };
-                w.writer.print(" {s}", .{arg_type_name}) catch {};
-            }
-            if (i < funcs.len - 1)
-                w.writer.writeByte('\n') catch {};
-        }
-    }
-
-    fn parseArg(T: type, zc: *ZC, arg: []const u8, command: []const u8) !T {
-        switch (T) {
-            []const u8 => return arg,
-            f64 => return std.fmt.parseFloat(f64, arg) catch |err| {
-                try zc.status.msg.appendSlice(zc.allocator, "Invalid number");
-                return err;
-            },
-            CmdExpressionArg => {
-                var off = arg.ptr - command.ptr;
-                while (off > 0 and command[off] != ' ') off -= 1;
-                const expr_str = command[off..];
-
-                var diagnostics: Parser.Diagnostics = .{};
-                const expr = ast.parseFromExpressionDiag(
-                    zc.currentSheet(),
-                    expr_str,
-                    &diagnostics,
-                ) catch |err| switch (err) {
-                    error.UnexpectedToken,
-                    error.InvalidCellAddress,
-                    error.InvalidBuiltin,
-                    => {
-                        try zc.status.msg.print(zc.allocator, "{f}", .{diagnostics});
-                        return err;
-                    },
-                    error.OutOfMemory => return error.OutOfMemory,
-                };
-                return .{ .str = expr_str, .root = expr };
-            },
-            else => return try .init(zc, arg),
-        }
-    }
-
-    // Command functions which can error due to invalid usage should return `!ArgumentIndex`.
-    // These functions should return the 1-based index of the invalid argument, or 0 if no specific
-    // argument is invalid. If the function succeeded, they should return `.valid`. If the function
-    // failed in a way unrelated to the usage of the function, they should set a status message
-    // manually and return an error.
-    //
-    // Functions that don't need to display usage information on error can return `void` or `!void`
-    // as appropriate and set an error message manually if required.
-
-    fn cmdSave(zc: *ZC) void {
-        zc.writeFile(null) catch |err| {
-            zc.setStatusMessage(.warn, "Could not write file: {s}", .{@errorName(err)});
-            return;
-        };
-        zc.currentSheet().has_changes = false;
-    }
-
-    fn cmdSavePath(zc: *ZC, path: CmdPathArg) void {
-        // TODO: Check if already exists
-        zc.writeFile(path.bytes) catch |err| {
-            zc.setStatusMessage(.warn, "Could not write file: {s}", .{@errorName(err)});
-            return;
-        };
-        zc.currentSheet().has_changes = false;
-    }
-
-    fn cmdSaveBinary(zc: *ZC, path: CmdPathArg) !void {
-        const file = std.fs.cwd().createFile(path.bytes, .{}) catch |err| {
-            zc.setStatusMessage(.warn, "Could not write binary file: {s}", .{
-                @errorName(err),
-            });
-            return;
-        };
-        defer file.close();
-
-        try zc.currentSheet().serialize(file);
-    }
-
-    fn cmdLoadBinary(zc: *ZC, path: CmdPathArg) Oom!void {
-        zc.loadCmdBinary(path.bytes) catch |err| switch (err) {
-            error.OutOfMemory => |e| return e,
-            else => {
-                try zc.status.msg.print(zc.allocator, "Could not open file: {t}", .{err});
-                return;
-            },
-        };
-    }
-
-    fn cmdLoad(zc: *ZC, path: CmdPathArg) Oom!void {
-        zc.loadCmd(path.bytes) catch |err| switch (err) {
-            error.OutOfMemory => |e| return e,
-            else => {
-                try zc.status.msg.print(zc.allocator, "Could not open file: {t}", .{err});
-                return;
-            },
-        };
-    }
-
-    fn cmdLoadNoPath(zc: *ZC) Oom!void {
-        const new_sheet = try zc.openSheet();
-        zc.setCurrentSheet(new_sheet);
-    }
-
-    fn cmdQuit(zc: *ZC) void {
-        for (zc.sheets.values()) |*sheet| {
-            if (sheet.has_changes) {
-                zc.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
-                break;
-            }
-        } else {
-            zc.running = false;
-        }
-    }
-
-    fn cmdQuitForce(zc: *ZC) void {
-        zc.running = false;
-    }
-
-    fn cmdFill(zc: *ZC, r: CmdRangeOrPointArg, n: CmdNumberArg("initial_number")) Oom!void {
-        // No increment was provided, so all cells can share the same expression
-        try zc.currentSheet().bulkSetCellExpr(r.range, "", .invalid, .{
-            .value = .{ .number = n.value },
-            .tag = .number,
-        });
-        zc.currentSheet().queued_cells.items.len = 0;
-        zc.currentSheet().endUndoGroup();
-    }
-
-    fn cmdFillIncrement(
-        zc: *ZC,
-        r: CmdRangeOrPointArg,
-        initial: CmdNumberArg("initial_number"),
-        increment: CmdNumberArg("increment"),
-    ) Oom!void {
-        try zc.currentSheet().insertIncrementingCellRange(r.range, initial.value, increment.value, .{});
-        zc.currentSheet().endUndoGroup();
-    }
-
-    fn cmdFillExpr(zc: *ZC, r: CmdRangeOrPointArg, expr: CmdExpressionArg) Oom!void {
-        try zc.currentSheet().bulkSetCellExpr(r.range, expr.str, expr.root, .{});
-        zc.currentSheet().endUndoGroup();
-    }
-
-    fn cmdUndoCount(zc: *ZC, count: CmdIntegerArg(u32, "count")) Oom!void {
-        for (0..count.value) |_| try zc.undo();
-    }
-
-    fn cmdRedoCount(zc: *ZC, count: CmdIntegerArg(u32, "count")) Oom!void {
-        for (0..count.value) |_| try zc.redo();
-    }
-
-    fn cmdUndoOne(zc: *ZC) Oom!void {
-        try zc.undo();
-    }
-
-    fn cmdRedoOne(zc: *ZC) Oom!void {
-        try zc.redo();
-    }
-
-    fn cmdDeleteCursor(zc: *ZC) Oom!void {
-        try zc.deleteCellRange(zc.anyCursorRange());
-    }
-
-    fn cmdDelete(zc: *ZC, r: CmdRangeOrPointArg) Oom!void {
-        try zc.deleteCellRange(r.range);
-    }
-
-    fn cmdDeleteColumns(zc: *ZC, c: CmdColumnRangeArg) Oom!void {
-        try zc.currentSheet().deleteColOrRowRange(c.start, c.end, .{}, .col);
-        zc.currentSheet().endUndoGroup();
-    }
-
-    fn cmdDeleteColumnsCursor(zc: *ZC) Oom!void {
-        const r = zc.anyCursorRange();
-        try zc.currentSheet().deleteColOrRowRange(r.tl.x, r.br.x, .{}, .col);
-        zc.currentSheet().endUndoGroup();
-    }
-
-    fn cmdDeleteRows(zc: *ZC, c: CmdRowRangeArg) Oom!void {
-        try zc.currentSheet().deleteColOrRowRange(c.start, c.end, .{}, .row);
-        zc.currentSheet().endUndoGroup();
-    }
-
-    fn cmdDeleteRowsCursor(zc: *ZC) Oom!void {
-        const r = zc.anyCursorRange();
-        try zc.currentSheet().deleteColOrRowRange(r.tl.x, r.br.x, .{}, .row);
-        zc.currentSheet().endUndoGroup();
-    }
-
-    fn cmdInsertColumnsCursor(zc: *ZC) Oom!void {
-        try cmdInsertColumns(zc, .{ .value = zc.cursor.x }, .{ .value = 1 });
-    }
-
-    fn cmdInsertColumnsCount(zc: *ZC, count: CmdIntegerArg(u32, "count")) Oom!void {
-        try cmdInsertColumns(zc, .{ .value = zc.cursor.x }, count);
-    }
-
-    fn cmdInsertColumns(zc: *ZC, start: CmdColumnArg, count: CmdIntegerArg(u32, "count")) Oom!void {
-        if (count.value == 0) return;
-        zc.currentSheet().insertColumns(start.value, count.value, .{}) catch |err| switch (err) {
-            error.Overflow => {
-                zc.setStatusMessage(.err, "Columns would overflow", .{});
-                return;
-            },
-            error.OutOfMemory => |e| return e,
-        };
-        zc.currentSheet().endUndoGroup();
-    }
-
-    fn cmdInsertRowsCursor(zc: *ZC) Oom!void {
-        try cmdInsertRows(zc, .{ .value = zc.cursor.y }, .{ .value = 1 });
-    }
-
-    fn cmdInsertRowsCount(zc: *ZC, count: CmdIntegerArg(u32, "count")) Oom!void {
-        try cmdInsertRows(zc, .{ .value = zc.cursor.y }, count);
-    }
-
-    fn cmdInsertRows(zc: *ZC, start: CmdIntegerArg(u32, "row"), count: CmdIntegerArg(u32, "count")) Oom!void {
-        if (count.value == 0) return;
-        zc.currentSheet().insertRows(start.value, count.value, .{}) catch |err| switch (err) {
-            error.Overflow => {
-                zc.setStatusMessage(.err, "Rows would overflow", .{});
-                return;
-            },
-            error.OutOfMemory => |e| return e,
-        };
-        zc.currentSheet().endUndoGroup();
-    }
-
-    fn cmdTextAlign(
-        zc: *ZC,
-        r: CmdRangeOrPointArg,
-        alignment: CmdArgEnum(Sheet.TextAttrs.Alignment, "left|right|center"),
-    ) Oom!void {
-        try zc.setTextAlignment(r.range, alignment.value);
-    }
-
-    fn cmdTextAlignCursor(
-        zc: *ZC,
-        alignment: CmdArgEnum(Sheet.TextAttrs.Alignment, "left|right|center"),
-    ) Oom!void {
-        try zc.setTextAlignment(zc.anyCursorRange(), alignment.value);
-    }
-
-    fn cmdYankCursor(zc: *ZC) void {
-        zc.yank = zc.anyCursorRange();
-    }
-
-    fn cmdYank(zc: *ZC, r: CmdRangeOrPointArg) void {
-        zc.yank = r.range;
-    }
-
-    fn cmdPutCursor(zc: *ZC) Oom!void {
-        try zc.put(zc.anyCursorRange(), .no_adjust);
-    }
-
-    fn cmdPut(zc: *ZC, r: CmdRangeOrPointArg) Oom!void {
-        try zc.put(r.range, .no_adjust);
-    }
-
-    fn cmdPutAdjustCursor(zc: *ZC) Oom!void {
-        try zc.put(zc.anyCursorRange(), .adjust);
-    }
-
-    fn cmdPutAdjust(zc: *ZC, r: CmdRangeOrPointArg) Oom!void {
-        try zc.put(r.range, .adjust);
-    }
-
-    fn cmdGoto(zc: *ZC, r: CmdRangeOrPointArg) void {
-        if (r.range.area() == 1) {
-            zc.setCursor(r.range.tl);
-        } else {
-            zc.setMode(.visual);
-            zc.anchor = r.range.tl;
-            zc.setCursor(r.range.br);
-        }
-    }
-
-    fn cmdCloseSheet(zc: *ZC) Oom!void {
-        if (zc.currentSheet().has_changes) {
-            zc.setStatusMessage(.warn, "No write since last change (add ! to override)", .{});
-        } else {
-            try zc.closeSheet(zc.current_sheet);
-        }
-    }
-
-    fn cmdCloseSheetForce(zc: *ZC) Oom!void {
-        try zc.closeSheet(zc.current_sheet);
-    }
-
-    fn cmdRenameSheet(
-        zc: *ZC,
-        target: CmdStringArg("old_name"),
-        new_name: CmdStringArg("new_name"),
-    ) !ArgumentIndex {
-        const index = zc.sheets.getIndex(target.bytes) orelse {
-            try zc.status.msg.print(zc.allocator, "Sheet '{s}' does not exist", .{target.bytes});
-            return .from(1);
-        };
-        zc.renameSheet(index, new_name.bytes) catch |err| switch (err) {
-            error.InvalidSheetName => {
-                try zc.status.msg.appendSlice(zc.allocator, "Sheet name must not be empty");
-                return .from(2);
-            },
-            error.SheetAlreadyExists => {
-                try zc.status.msg.print(zc.allocator, "Sheet '{s}' already exists", .{new_name.bytes});
-                return .from(2);
-            },
-            error.OutOfMemory => |e| return e,
-        };
-        return .valid;
-    }
-
-    fn cmdRenameSheetCurrent(zc: *ZC, new_name: CmdStringArg("new_name")) !ArgumentIndex {
-        const index = zc.current_sheet;
-        zc.renameSheet(index, new_name.bytes) catch |err| switch (err) {
-            error.InvalidSheetName => {
-                try zc.status.msg.appendSlice(zc.allocator, "Sheet name must not be empty");
-                return .from(1);
-            },
-            error.SheetAlreadyExists => {
-                try zc.status.msg.print(zc.allocator, "Sheet '{s}' already exists", .{new_name.bytes});
-                return .from(1);
-            },
-            error.OutOfMemory => |e| return e,
-        };
-        return .valid;
-    }
-
-    fn cmdSet(zc: *ZC, property: CmdArgEnum(SetProperty, "property"), value: []const u8) !void {
-        switch (property.value) {
-            .theme => try zc.setTheme(value),
-            .truecolor => if (std.ascii.eqlIgnoreCase(value, "true")) {
-                zc.ui.term.terminfo.queryTrueColour();
-            } else if (std.ascii.eqlIgnoreCase(value, "false")) {
-                zc.ui.term.terminfo.truecolour = .none;
-            },
-        }
-    }
-
-    // TODO: Make the enum here be a subset containing only boolean properties
-    fn cmdSetTrue(zc: *ZC, property: CmdArgEnum(SetProperty, "property")) !void {
-        switch (property.value) {
-            .truecolor => zc.ui.term.terminfo.queryTrueColour(),
-            else => {
-                // TODO: Make sure this is reported correctly
-                return error.InvalidProperty;
-            },
-        }
-    }
-
-    fn cmdUnset(zc: *ZC, property: CmdArgEnum(SetProperty, "property")) !void {
-        // TODO: Check if the property is actually set before unsetting it.
-        switch (property.value) {
-            .theme => try zc.setDefaultTheme(),
-            .truecolor => {
-                zc.ui.term.terminfo.truecolour = .none;
-            },
-        }
-    }
-};
-
 pub fn runCommand(zc: *ZC, str: []const u8) !void {
     var iter = utils.wordIterator(str);
     const cmd_str = iter.next() orelse return error.InvalidCommand;
     assert(cmd_str.len > 0);
 
-    const cmd_tag = cmds.get(cmd_str) orelse {
+    std.log.info("Running command '{s}'", .{str});
+    const cmd_tag = Command.map.get(cmd_str) orelse {
         if (@import("builtin").mode != .Debug) return error.InvalidCommand;
 
         return zc.runDebugCommand(cmd_str, &iter);
     };
 
     switch (cmd_tag) {
-        inline else => |t| cmd.dispatch(zc, &iter, t, cmd_str) catch {},
+        inline else => |t| try Command.dispatch(zc, &iter, t, cmd_str),
     }
 }
 
@@ -2570,8 +2664,6 @@ fn closeSheet(zc: *ZC, index: usize) !void {
     } else if (zc.current_sheet == index) {
         zc.prevSheet();
     }
-
-    zc.setStatusMessage(.info, "Closed '{s}'", .{name});
 }
 
 fn renameSheet(zc: *ZC, index: usize, new_name: []const u8) !void {
