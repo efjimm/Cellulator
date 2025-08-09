@@ -63,183 +63,41 @@ A help dialogue for commands can be displayed by passing a `-h` flag to the comm
 the argument list. Passing the `-h` flag will only display the help dialogue and will not run the
 command.
 
+Currently implemented commands are:
+
 ```
 :w
-:w PATH
-```
-
-Save to the given filepath, or to the sheet's filepath if not specified.
-
-```
 :e
-:e PATH
-```
-
-Creates a new sheet with the given filepath. If the filepath exists it will load
-attempt to load the file into the new sheet.
-
-```
-:q{!}
-```
-
-Quit the program. Will not continue if there are unsaved changes, unless ! is specified.
-
-```
-:fill RANGE VALUE
-:fill RANGE VALUE INCREMENT
-```
-
-Fills the given range with value, incrementing by increment each cell. Increment is applied left to
-right, top to bottom. Example: `:fill b1:d12 30 0.2`
-
-```
-:fill-expr RANGE EXPR...
-```
-
-Fills the given range with an expression. Example: `:fill-expr a0:c3 1 / 2 + 3`
-
-```
-:bw PATH
-```
-
-Save to the given filepath in a binary format. This format is significantly faster to save/load.
-Filepath must be specified.
-
-```
-:be PATH
-```
-
-Load from the given filepath in a binary format. Significantly faster to load than a normal file.
-
-**Binary files are not validated beyond a simple magic number and version check. Binary files are
-loaded directly into the internal state of the program without modification. It is conceivable that
-a malicious file could contain an invalid state that causes undefined behaviour. Only open binary
-files you trust.**
-
-```
-:text-align left|right|center
-:text-align CELL left|right|center
-:text-align RANGE left|right|center
-```
-
-Set the alignment of the text in the specified cells or under the cursor if not specified. Only
-cells with a text value can have be aligned.
-
-
-```
+:q
+:q!
+:fill
+:fill-expr
+:bw
+:be
 :undo
-:undo N
-```
-
-Undos N or 1 times.
-
-```
 :redo
-:redo N
-```
-
-Redos N or 1 times.
-
-```
-:go CELL
-:go RANGE
-```
-
-Moves the cursor to the given cell or range. If a range is given the mode changes to visual and the
-range is selected.
-
-```
 :delete
-:delete CELL
-:delete RANGE
-```
-
-Delete the given cell or all cells in the given range. If no arguments are supplied the cells
-underneath the cursor are deleted.
-
-```
 :delete-cols
-:delete-cols COLUMN_RANGE
-```
-
-Delete the given columns, or the columns under the cursor if no arguments are given. The column
-range is specified like a cell range but with the row numbers omitted, e.g. `:delete-cols C:AA`
-
-```
 :delete-rows
-:delete-rows ROW_RANGE
-```
-
-Delete the given rows, or the rows under the cursor if no arguments are given. The row range is
-specified like a cell range but with the column letters omitted, e.g. `:delete-rows 9:15`
-
-```
 :insert-cols
-:insert-cols N
-:insert-cols START N
-```
-
-Insert columns into the sheet. The two argument variant inserts N columns at column START. The one
-argument variant inserts N columns at the cursor, and the zero argument variant inserts 1 column at
-the cursor.
-
-```
+:insert-rows
+:text-align
+:set
+:unset
 :yank
-:yank RANGE
-```
-
-Copies the given range or the cursor range to the yank buffer.
-
-```
 :put
-:put RANGE_OR_CELL
 :p
-:p RANGE_OR_CELL
-```
-
-Pastes the current contents of the range held by the yank buffer at the given position or at the
-cursor. Expressions are copied literally, with no modification. If the range to copy to is larger
-than the source range, then the source range is tiled over the destination range. The full source
-range is always pasted, regardless of whether it overflows the destination range or not.
-
-```
 :put-adjust
-:put-adjust RANGE_OR_CELL
 :pa
-:pa RANGE_OR_CELL
-```
-
-Same as `:put`, but automatically adjusts cell references based on the new position.
-
-```
 :sheet-close
 :sheet-close!
 :sc
 :sc!
+:sheet-rename
+:go
 ```
 
-Closes the currently selected sheet. The ! version force closes the sheet even if it has unsaved
-changes.
-
-```
-:sheet-rename NEW_NAME
-:sheet-rename TARGET_SHEET NEW_NAME
-```
-
-Renames the given sheet or the current sheet.
-
-```
-:set PROPERTY
-:set PROPERTY VALUE
-```
-
-Sets a configuration property to a given value or to true if omitted. Currently supported properties are `theme` and `truecolor`.
-
-```
-:unset PROPERTY
-```
-
-Unsets a configuration property.
+Type the command name followed by `-h` to see usage information for each command.
 
 ## Expressions
 
