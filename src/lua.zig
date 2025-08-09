@@ -283,10 +283,20 @@ const metatables = .{
             const expr_str = state.checkString(-1);
             const pos = checkCellAddress(state, -2);
 
-            zc.setCellString(pos, expr_str, .{ .emit_event = false }) catch |err| switch (err) {
-                error.InvalidCellAddress => unreachable,
-                error.UnexpectedToken => state.argError(2, "Unexpected token"),
-                error.InvalidBuiltin => state.argError(2, "Invalid builtin"),
+            var diag: @import("Parser.zig").Diagnostics = .{};
+            zc.setCellString(pos, expr_str, &diag, .{ .emit_event = false }) catch |err| switch (err) {
+                error.InvalidCellAddress,
+                error.UnexpectedToken,
+                error.InvalidBuiltin,
+                => {
+                    var buf: [1024]u8 = undefined;
+                    var w: std.io.Writer = .fixed(&buf);
+                    diag.format(&w) catch {};
+                    w.writeByte(0) catch {
+                        buf[buf.len - 1] = 0;
+                    };
+                    state.argError(2, w.buffer[0 .. w.end - 1 :0]);
+                },
                 error.OutOfMemory => return 0, // TODO: Make sure this is handled properly
             };
             return 0;

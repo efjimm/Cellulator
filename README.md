@@ -59,6 +59,10 @@ Commands can be entered via placing a colon character as the first character of 
 Pressing ':' in normal mode will do this automatically. What follows is a list of currently
 implemented commands. Values surrounded in {} are optional.
 
+A help dialogue for commands can be displayed by passing a `-h` flag to the command anywhere in
+the argument list. Passing the `-h` flag will only display the help dialogue and will not run the
+command.
+
 ```
 :w
 :w PATH

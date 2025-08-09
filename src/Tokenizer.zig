@@ -27,7 +27,7 @@ pub fn collectTokens(
     allocator: std.mem.Allocator,
     r: *std.io.Reader,
     pre_alloc: u32,
-) !std.MultiArrayList(Token) {
+) error{ ReadFailed, OutOfMemory }!std.MultiArrayList(Token) {
     var tokenizer: Tokenizer = .init(r);
     var list: std.MultiArrayList(Token) = .empty;
     errdefer list.deinit(allocator);

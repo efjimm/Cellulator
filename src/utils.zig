@@ -208,12 +208,17 @@ pub const WordIterator = struct {
         };
     }
 
+    pub fn peek(self: *WordIterator) ?[]const u8 {
+        var temp = self.*;
+        return temp.next();
+    }
+
     pub fn next(self: *WordIterator) ?[]const u8 {
         if (self.index >= self.string.len)
             return null;
 
         const str = std.mem.trimLeft(u8, self.string[self.index..], &std.ascii.whitespace);
-        self.index = @intFromPtr(str.ptr) - @intFromPtr(self.string.ptr);
+        self.index = str.ptr - self.string.ptr;
 
         if (str.len == 0)
             return null;
@@ -236,7 +241,12 @@ pub const WordIterator = struct {
 
         var quote_state: QuoteState = .none;
         var quote_index: usize = 0;
-        var possible_comment_start = false;
+
+        if (std.mem.startsWith(u8, str, "--")) {
+            // We got a comment, nothing else can come after
+            self.index = self.string.len;
+            return null;
+        }
 
         const end_index = for (str, 0..) |c, i| {
             if (std.ascii.isWhitespace(c)) {
@@ -244,13 +254,6 @@ pub const WordIterator = struct {
                     break i;
 
                 quote_index = i;
-            }
-
-            if (c == '-') {
-                if (possible_comment_start) break i - 1;
-                possible_comment_start = true;
-            } else {
-                possible_comment_start = false;
             }
 
             const new_quote_state = QuoteState.fromChar(c);
@@ -294,26 +297,8 @@ pub fn trimMatchingQuotes(string: []const u8) []const u8 {
     return str;
 }
 
-/// Given a list, sets the length to `new_length` and moves each old element to a new index
-/// calculated from the function `ctx.newIndex`. Sets every other index to `empty_value`.
-pub fn padList(
-    comptime T: type,
-    list: anytype,
-    empty_value: T,
-    new_length: usize,
-    ctx: anytype,
-) void {
-    const old_len = list.items.len;
-    var i = old_len;
-    assert(new_length >= old_len);
-    list.items.len = new_length;
-    @memset(list.items[old_len..], empty_value);
-    while (i > 0) {
-        i -= 1;
-        const value = list.items[i];
-        const new_index = ctx.newIndex(value);
-        assert(new_index >= i);
-        list.items[i] = empty_value;
-        list.items[new_index] = value;
-    }
+test "WordIterator comment" {
+    var iter = wordIterator("this -- is epic");
+    try std.testing.expectEqualStrings("this", iter.next().?);
+    try std.testing.expectEqual(null, iter.next());
 }

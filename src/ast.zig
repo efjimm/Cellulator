@@ -210,6 +210,14 @@ pub fn initTokens(
 }
 
 pub fn parseFromExpression(sheet: *Sheet, source: []const u8) ParseError!Index {
+    return parseFromExpressionDiag(sheet, source, null);
+}
+
+pub fn parseFromExpressionDiag(
+    sheet: *Sheet,
+    source: []const u8,
+    diag: ?*Parser.Diagnostics,
+) ParseError!Index {
     var reader: std.io.Reader = .fixed(source);
     var tokens = Tokenizer.collectTokens(
         sheet.allocator,
@@ -217,7 +225,7 @@ pub fn parseFromExpression(sheet: *Sheet, source: []const u8) ParseError!Index {
         @intCast(source.len / 2),
     ) catch |err| switch (err) {
         error.ReadFailed => unreachable,
-        else => |e| return e,
+        error.OutOfMemory => |e| return e,
     };
 
     defer tokens.deinit(sheet.allocator);
@@ -227,7 +235,7 @@ pub fn parseFromExpression(sheet: *Sheet, source: []const u8) ParseError!Index {
         source,
         tokens.items(.tag),
         tokens.items(.start),
-        .{ .nodes = sheet.ast_nodes.toMultiArrayList() },
+        .{ .nodes = sheet.ast_nodes.toMultiArrayList(), .diagnostics = diag },
     );
 
     const old_len = sheet.ast_nodes.len;

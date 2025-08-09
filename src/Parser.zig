@@ -22,14 +22,50 @@ nodes: NodeList,
 
 allocator: Allocator,
 
-err_info: ErrorInfo = .none,
+diagnostics: ?*Diagnostics = null,
 
-pub const ErrorInfo = union(enum) {
-    none,
-    expected_token: Token.Tag,
-    expected_string: []const u8,
-    invalid_builtin: []const u8,
-    invalid_cell_address: []const u8,
+pub const Diagnostics = struct {
+    payload: Payload = .none,
+    actual: Token.Tag = .eof,
+    prev: Token.Tag = .eof,
+
+    const Payload = union(enum) {
+        none,
+        expected_token: Token.Tag,
+        expected_string: []const u8,
+        invalid_builtin: []const u8,
+        invalid_cell_address: []const u8,
+    };
+
+    pub fn format(info: *const Diagnostics, writer: *std.io.Writer) !void {
+        switch (info.payload) {
+            .none => {},
+            .expected_token => |token| {
+                if (info.prev != .eof) {
+                    try writer.print("expected {f} after {f}, found {f}", .{
+                        token, info.prev, info.actual,
+                    });
+                } else {
+                    try writer.print("expected {f}, found {f}", .{ token, info.actual });
+                }
+            },
+            .expected_string => |str| {
+                if (info.prev != .eof) {
+                    try writer.print("expected {s} after {f}, found {f}", .{
+                        str, info.prev, info.actual,
+                    });
+                } else {
+                    try writer.print("expected {s}, found {f}", .{ str, info.actual });
+                }
+            },
+            .invalid_builtin => |str| {
+                try writer.print("invalid builtin function '{s}'", .{str});
+            },
+            .invalid_cell_address => |str| {
+                try writer.print("invalid cell address '{s}'", .{str});
+            },
+        }
+    }
 };
 
 const Node = @import("ast.zig").Node;
@@ -82,6 +118,7 @@ pub const ParseError = error{
 
 const InitOptions = struct {
     nodes: NodeList = .{},
+    diagnostics: ?*Diagnostics = null,
 };
 
 pub fn init(
@@ -99,6 +136,7 @@ pub fn init(
         .strings_len = 0,
         .tok_i = 0,
         .src = src,
+        .diagnostics = options.diagnostics,
     };
 }
 
@@ -411,47 +449,13 @@ pub fn expectToken(parser: *Parser, expected_tag: Token.Tag) !void {
     parser.tok_i += 1;
 }
 
-fn setError(parser: *Parser, err: ParseError, info: ErrorInfo) ParseError {
-    parser.err_info = info;
+fn setError(parser: *Parser, err: ParseError, info: Diagnostics.Payload) ParseError {
+    if (parser.diagnostics) |p| p.* = .{
+        .payload = info,
+        .actual = parser.token_tags[parser.tok_i],
+        .prev = if (parser.tok_i > 0) parser.token_tags[parser.tok_i - 1] else .eof,
+    };
     return err;
-}
-
-pub fn fmtError(parser: *const Parser) std.fmt.Formatter(*const Parser, formatError) {
-    return .{ .data = parser };
-}
-
-pub fn formatError(parser: *const Parser, writer: *std.io.Writer) !void {
-    const actual = parser.token_tags[parser.tok_i];
-
-    switch (parser.err_info) {
-        .none => {},
-        .expected_token => |token| {
-            if (parser.tok_i > 0) {
-                const prev = parser.token_tags[parser.tok_i - 1];
-                try writer.print("expected {f} after {f}, found {f}", .{
-                    token, prev, actual,
-                });
-            } else {
-                try writer.print("expected {f}, found {f}", .{ token, actual });
-            }
-        },
-        .expected_string => |str| {
-            if (parser.tok_i > 0) {
-                const prev = parser.token_tags[parser.tok_i - 1];
-                try writer.print("expected {s} after {f}, found {f}", .{
-                    str, prev, actual,
-                });
-            } else {
-                try writer.print("expected {s}, found {f}", .{ str, actual });
-            }
-        },
-        .invalid_builtin => |str| {
-            try writer.print("invalid builtin function '{s}'", .{str});
-        },
-        .invalid_cell_address => |str| {
-            try writer.print("invalid cell address '{s}'", .{str});
-        },
-    }
 }
 
 fn fmtTags(tags: []const Token.Tag) std.fmt.Formatter([]const Token.Tag, formatTags) {

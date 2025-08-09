@@ -26,7 +26,7 @@ const utils = @import("utils.zig");
 
 pub const status_line = 0;
 pub const input_line = 1;
-pub const col_heading_line = 2;
+pub const col_heading_line = cell_view_line - 1;
 pub const cell_view_line = 3;
 
 term: Term,
@@ -51,6 +51,9 @@ pub const default_theme: Theme = .{
     .status_info = .init(.magenta, .none, .none),
     .status_warn = .init(.yellow, .none, .none),
     .status_err = .init(.red, .none, .none),
+    .status_info_text = .init(.none, .none, .none),
+    .status_warn_text = .init(.none, .none, .none),
+    .status_err_text = .init(.none, .none, .none),
     .filepath = .init(.green, .none, .none),
     .cursor_pos = .init(.none, .none, .none),
     .mode_indicator = .init(.none, .none, .none),
@@ -91,6 +94,13 @@ pub const default_theme: Theme = .{
 
     .cli_completion_selected = .init(.black, .blue, .none),
     .cli_completion_unselected = .init(.none, .bright_black, .none),
+
+    .cmd_err_string = .init(.red, .bright_black, .none),
+    .cmd_err_message = .init(.none, .bright_black, .none),
+    .cmd_err_cmd = .init(.none, .bright_black, .none),
+    .cmd_err_indicator = .init(.green, .bright_black, .none),
+    .cmd_err_usage = .init(.none, .bright_black, .none),
+    .cmd_err_desc = .init(.green, .bright_black, .none),
 };
 
 pub const UiElement = enum {
@@ -98,6 +108,9 @@ pub const UiElement = enum {
     status_info,
     status_warn,
     status_err,
+    status_info_text,
+    status_warn_text,
+    status_err_text,
 
     filepath,
     cursor_pos,
@@ -139,6 +152,13 @@ pub const UiElement = enum {
 
     cli_completion_selected,
     cli_completion_unselected,
+
+    cmd_err_string,
+    cmd_err_message,
+    cmd_err_cmd,
+    cmd_err_indicator,
+    cmd_err_usage,
+    cmd_err_desc,
 };
 
 const UpdateFlags = packed struct {
@@ -871,27 +891,121 @@ fn renderCommandLine(tui: *Tui, wr: *Screen.Writer) !void {
         } else {
             try tui.writeToken(.eof, right[last_start - left.len ..], wr);
         }
-    } else if (zc.status_message.len > 0) {
-        switch (zc.status_message_type) {
-            .info => {
-                try tui.setStyle(.status_info, wr);
-                try writer.writeAll("Info: ");
-            },
-            .warn => {
-                try tui.setStyle(.status_warn, wr);
-                try writer.writeAll("Warning: ");
-            },
-            .err => {
-                try tui.setStyle(.status_err, wr);
-                try writer.writeAll("Error: ");
-            },
-        }
-        try tui.setStyle(.command_line, wr);
-        try writer.writeAll(zc.status_message.slice());
-    }
 
-    try tui.setStyle(.command_line, wr);
-    try wr.clearToEol();
+        try tui.setStyle(.command_line, wr);
+        try wr.clearToEol();
+        // } else if (zc.status_message.len > 0) {
+        //     switch (zc.status_message_type) {
+        //         .info => {
+        //             try tui.setStyle(.status_info, wr);
+        //             try writer.writeAll("Info: ");
+        //             try tui.setStyle(.status_info_text, wr);
+        //         },
+        //         .warn => {
+        //             try tui.setStyle(.status_warn, wr);
+        //             try writer.writeAll("Warning: ");
+        //             try tui.setStyle(.status_warn_text, wr);
+        //         },
+        //         .err => {
+        //             try tui.setStyle(.status_err, wr);
+        //             try writer.writeAll("Error: ");
+        //             try tui.setStyle(.status_err_text, wr);
+        //         },
+        //     }
+        //     try writer.writeAll(zc.status_message.slice());
+        //     try wr.clearToEol();
+        // } else if (zc.status.msg.items.len > 0) {
+    } else switch (zc.status.tag) {
+        .none => {
+            try wr.clearToEol();
+        },
+        inline .info, .warn, .err => |tag| {
+            switch (tag) {
+                .info => {
+                    try tui.setStyle(.status_info, wr);
+                    try writer.writeAll("Info: ");
+                    try tui.setStyle(.status_info_text, wr);
+                },
+                .warn => {
+                    try tui.setStyle(.status_warn, wr);
+                    try writer.writeAll("Warning: ");
+                    try tui.setStyle(.status_warn_text, wr);
+                },
+                .err => {
+                    try tui.setStyle(.status_err, wr);
+                    try writer.writeAll("Error: ");
+                    try tui.setStyle(.status_err_text, wr);
+                },
+                else => comptime unreachable,
+            }
+            try writer.writeAll(zc.status.msg.items);
+            try wr.clearToEol();
+        },
+        .cmd_info => {
+            const usage = zc.status.usage.items;
+            const desc = zc.status.cmd_description;
+
+            // Top border
+            var d2 = [_][]const u8{"─"};
+            try tui.setStyle(.cmd_err_message, wr);
+            try wr.interface.writeSplatAll(&d2, tui.term.width);
+
+            try tui.setStyle(.cmd_err_usage, wr);
+            try writer.print("Usage:\n{s}", .{usage});
+            if (desc.len > 0) {
+                try writer.writeAll("\n\n");
+                try tui.setStyle(.cmd_err_desc, wr);
+                try writer.print("{s}", .{desc});
+            }
+
+            try tui.setStyle(.cmd_err_message, wr);
+            try writer.writeAll("\n\nPress escape to dismiss");
+            try wr.clearToEol();
+
+            // Bottom border
+            var d = [_][]const u8{ "\n", "─" };
+            try wr.interface.writeSplatAll(&d, tui.term.width);
+        },
+        .cmd_err => {
+            const err = zc.status.msg.items;
+            const cmd = zc.status.cmd.items;
+            const usage = zc.status.usage.items;
+            const desc = zc.status.cmd_description;
+
+            // Top border
+            var d2 = [_][]const u8{"─"};
+            try tui.setStyle(.cmd_err_message, wr);
+            try wr.interface.writeSplatAll(&d2, tui.term.width);
+
+            try tui.setStyle(.cmd_err_string, wr);
+            try writer.writeAll("Error: ");
+            try tui.setStyle(.cmd_err_message, wr);
+            try writer.print("{s}\n", .{err});
+            try tui.setStyle(.cmd_err_cmd, wr);
+            try writer.print(":{s}\n", .{cmd});
+
+            try tui.setStyle(.cmd_err_indicator, wr);
+            try writer.splatByteAll(' ', zc.status.err_offset);
+            try writer.writeAll(" ^");
+            try writer.splatByteAll('~', zc.status.err_size -| 1);
+
+            try tui.setStyle(.cmd_err_usage, wr);
+            try writer.print("\nUsage:\n{s}", .{usage});
+            if (desc.len > 0) {
+                try writer.writeAll("\n\n");
+                try tui.setStyle(.cmd_err_desc, wr);
+                try writer.print("{s}", .{desc});
+            }
+
+            try tui.setStyle(.cmd_err_message, wr);
+            try writer.writeAll("\n\nPress escape to dismiss");
+            try wr.clearToEol();
+
+            // Bottom border
+            var d = [_][]const u8{ "\n", "─" };
+            try wr.interface.writeSplatAll(&d, tui.term.width);
+        },
+    }
 }
 
 fn renderColumnHeadings(tui: *Tui, wr: *Screen.Writer) !void {

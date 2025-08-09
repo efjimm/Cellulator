@@ -2,7 +2,11 @@ This is a schizo document that contains basically every idea I thought should be
 working on cellulator. It's completely unorganised and some parts are very outdated. I thought it
 might be an interesting read so I committed it. The stuff at the top is probably newer.
 
-- Fix no status messages for invalid command
+- Completions for commands
+- Support generic flags in commands and change :put-adjust to be :put -a    :put --adjust
+
+- Fix deleting backwards with empty CLI
+- Fix :delete command on deleting empty cell
 
 - Per-sheet cursor
 - Fix cli text not scrolling when it goes off screen
@@ -11,6 +15,9 @@ might be an interesting read so I committed it. The stuff at the top is probably
     - Better visuals
 
 - Performance: Store cached cell values separately from ASTs
+- Make string concat evaluation not shitty
+- Filtering rows/columns
+- Sorting rows/columns
 - OOM resistance
   - Should not crash
   - Basic functionality should still work

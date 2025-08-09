@@ -1987,7 +1987,6 @@ pub fn bulkInsertContiguousCells(
 ) void {
     const cells = sheet.cell_tree.sliceToEnd(cells_start.int());
     assert(cells.len > 0);
-    assert(sheet.cell_buffer.capacity - sheet.cell_buffer.items.len >= cells.len + 1);
 
     for (cells.points(), cells.values(), 0..) |*p, *cell, i| {
         const handle = cells.handle(i);
@@ -2046,7 +2045,8 @@ pub fn bulkSetCellExpr(
     try sheet.ensureUnusedStringsCapacity(source.len);
     if (need_cell_eval)
         try sheet.ensureUnusedCellQueueCapacity(1);
-    try sheet.ensureExpressionDependentsCapacity(expr);
+    if (expr.isValid())
+        try sheet.ensureExpressionDependentsCapacity(expr);
     try sheet.ensureUnusedColumnCapacity(width);
     try sheet.ensureUnusedUndoCapacity(2);
     try sheet.ensureUnusedCellBufferCapacity(area + 1);
@@ -2062,7 +2062,8 @@ pub fn bulkSetCellExpr(
 
     _ = sheet.deleteCellRangeAssumeCapacity(range, opts.undo_opts);
 
-    sheet.dupeExprStrings(source, expr);
+    if (expr.isValid())
+        sheet.dupeExprStrings(source, expr);
 
     const new_cells = sheet.cell_tree.addMany(area);
 
