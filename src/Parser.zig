@@ -59,7 +59,7 @@ pub const Diagnostics = struct {
                 }
             },
             .invalid_builtin => |str| {
-                try writer.print("invalid builtin function '{s}'", .{str});
+                try writer.print("invalid builtin '{s}'", .{str});
             },
             .invalid_cell_address => |str| {
                 try writer.print("invalid cell address '{s}'", .{str});
@@ -93,6 +93,25 @@ pub const Builtin = extern struct {
         min,
         upper,
         lower,
+        sqrt,
+        round,
+        floor,
+        ceil,
+        len,
+        count,
+        count_all,
+        log,
+        pi,
+        e,
+        width,
+        height,
+
+        pub fn format(tag: Tag, w: *std.io.Writer) !void {
+            switch (tag) {
+                .count_all => try w.writeAll("countAll"),
+                else => try w.writeAll(@tagName(tag)),
+            }
+        }
     };
 
     comptime {
@@ -108,6 +127,18 @@ const builtins = std.StaticStringMap(Builtin.Tag).initComptime(.{
     .{ "min", .min },
     .{ "upper", .upper },
     .{ "lower", .lower },
+    .{ "sqrt", .sqrt },
+    .{ "round", .round },
+    .{ "floor", .floor },
+    .{ "ceil", .ceil },
+    .{ "len", .len },
+    .{ "count", .count },
+    .{ "countAll", .count_all },
+    .{ "log", .log },
+    .{ "pi", .pi },
+    .{ "e", .e },
+    .{ "width", .width },
+    .{ "height", .height },
 });
 
 pub const ParseError = error{
@@ -304,7 +335,7 @@ fn parsePrimaryExpr(parser: *Parser) !Index {
             try parser.expectToken(.rparen);
             return ret;
         },
-        .builtin => parser.parseFunction(),
+        .builtin => parser.parseBuiltin(),
         inline .single_string_literal_start,
         .double_string_literal_start,
         => |tag| parser.parseStringLiteral(tag),
@@ -328,28 +359,58 @@ fn parseRange(parser: *Parser) !Index {
 }
 
 /// Builtin <- builtin '(' ArgList? ')'
-fn parseFunction(parser: *Parser) !Index {
+fn parseBuiltin(parser: *Parser) !Index {
     const start = try parser.expectTokenGet(.builtin);
-    const end = try parser.expectTokenGet(.lparen);
+    const end = parser.token_starts[parser.tok_i];
 
-    const identifier = parser.src[start + 1 .. end];
+    const identifier = std.mem.trimRight(u8, parser.src[start + 1 .. end], &std.ascii.whitespace);
     const builtin = builtins.get(identifier) orelse return parser.setError(
         error.InvalidBuiltin,
         .{ .invalid_builtin = identifier },
     );
 
-    const args_start = switch (builtin) {
+    const args_start = sw: switch (builtin) {
+        // These builtins aren't even functions!
+        .pi, .e => {
+            return parser.addNode(.init(.builtin, .{
+                .tag = builtin,
+                .first_arg = @enumFromInt(0),
+            }));
+        },
+        .width,
+        .height,
+        => {
+            try parser.expectToken(.lparen);
+            break :sw try parser.parseRange();
+        },
         // These builtins take only one argument
         .upper,
         .lower,
-        => try parser.parseExpression(),
+        .sqrt,
+        .round,
+        .floor,
+        .ceil,
+        .len,
+        => {
+            try parser.expectToken(.lparen);
+            break :sw try parser.parseExpression();
+        },
         // These builtins require at least one argument
         .sum,
         .max,
         .prod,
         .avg,
         .min,
-        => try parser.parseArgList(),
+        .count,
+        .count_all,
+        => {
+            try parser.expectToken(.lparen);
+            break :sw try parser.parseArgList();
+        },
+        .log => {
+            try parser.expectToken(.lparen);
+            break :sw try parser.parseArgsN(2);
+        },
     };
     try parser.expectToken(.rparen);
 
@@ -365,6 +426,18 @@ fn parseArgList(parser: *Parser) !Index {
     const start = try parser.parseExpression();
 
     while (parser.eatToken(.comma)) |_| {
+        _ = try parser.parseExpression();
+    }
+
+    return start;
+}
+
+/// Parses an argument list with exactly `n` arguments.
+fn parseArgsN(parser: *Parser, n: usize) !Index {
+    const start = try parser.parseExpression();
+
+    for (0..n - 1) |_| {
+        try parser.expectToken(.comma);
         _ = try parser.parseExpression();
     }
 
@@ -395,7 +468,10 @@ fn parseNumber(parser: *Parser) !Index {
 fn parseCellName(parser: *Parser) !Index {
     switch (parser.token_tags[parser.tok_i]) {
         .rel_rel, .rel_abs, .abs_rel, .abs_abs => {},
-        else => return error.UnexpectedToken,
+        else => return parser.setError(
+            error.UnexpectedToken,
+            .{ .expected_token = .rel_rel },
+        ),
     }
     const start = parser.token_starts[parser.tok_i];
     parser.tok_i += 1;

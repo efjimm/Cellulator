@@ -441,7 +441,11 @@ pub fn printFromNode(
 
         .builtin => |b| {
             switch (b.tag) {
-                inline else => |tag| try writer.print("@{s}(", .{@tagName(tag)}),
+                .pi, .e => {
+                    try writer.print("@{f}", .{b.tag});
+                    return;
+                },
+                inline else => |tag| try writer.print("@{f}(", .{tag}),
             }
             var iter = argIteratorForwards(nodes, index.sub(b.first_arg), index);
             if (iter.next()) |arg_index| {
@@ -584,7 +588,10 @@ pub fn leftMostChild(
         .invalidated_range,
         .pow,
         => |b| leftMostChild(nodes, index.sub(b.lhs)),
-        .builtin => |b| leftMostChild(nodes, index.sub(b.first_arg)),
+        .builtin => |b| if (b.first_arg.int() != 0)
+            leftMostChild(nodes, index.sub(b.first_arg))
+        else
+            index,
         .minus, .plus => leftMostChild(nodes, index.subN(1)),
     };
 }
@@ -739,6 +746,18 @@ pub fn EvalContext(comptime Context: type) type {
                     .min => .{ .number = try self.evalMin(index.sub(b.first_arg), index) },
                     .upper => .{ .string = try self.evalUpper(index.sub(b.first_arg)) },
                     .lower => .{ .string = try self.evalLower(index.sub(b.first_arg)) },
+                    .sqrt => .{ .number = try self.evalSqrt(index.subN(1)) },
+                    .round => .{ .number = try self.evalRound(index.subN(1)) },
+                    .floor => .{ .number = try self.evalFloor(index.subN(1)) },
+                    .ceil => .{ .number = try self.evalCeil(index.subN(1)) },
+                    .len => .{ .number = try self.evalStringLen(index.subN(1)) },
+                    .count => .{ .number = try self.evalCount(index.sub(b.first_arg), index) },
+                    .count_all => .{ .number = try self.evalCount(index.sub(b.first_arg), index) },
+                    .log => .{ .number = try self.evalLog(index.sub(b.first_arg), index.subN(1)) },
+                    .pi => .{ .number = std.math.pi },
+                    .e => .{ .number = std.math.e },
+                    .width => .{ .number = try self.evalWidth(index.subN(1)) },
+                    .height => .{ .number = try self.evalHeight(index.subN(1)) },
                 },
 
                 .concat => |op| {
@@ -1007,6 +1026,138 @@ pub fn EvalContext(comptime Context: type) type {
             }
 
             return min;
+        }
+
+        fn evalSqrt(self: *const @This(), arg: Index) !f64 {
+            const res = try self.eval(arg);
+            const n = try res.toNumberOrNull() orelse 0;
+            if (n < 0) return error.NotEvaluable;
+            return std.math.sqrt(n);
+        }
+
+        fn evalRound(self: *const @This(), arg: Index) !f64 {
+            const res = try self.eval(arg);
+            const n = try res.toNumberOrNull() orelse 0;
+            return std.math.round(n);
+        }
+
+        fn evalFloor(self: *const @This(), arg: Index) !f64 {
+            const res = try self.eval(arg);
+            const n = try res.toNumberOrNull() orelse 0;
+            return @floor(n);
+        }
+
+        fn evalCeil(self: *const @This(), arg: Index) !f64 {
+            const res = try self.eval(arg);
+            const n = try res.toNumberOrNull() orelse 0;
+            return @ceil(n);
+        }
+
+        fn evalStringLen(self: *const @This(), arg: Index) !f64 {
+            const res = try self.eval(arg);
+            const str = switch (res) {
+                .none => return 0,
+                .number => |n| {
+                    // TODO: This should account for the current precision of the cell
+                    return @floatFromInt(std.fmt.count("{d}", .{n}));
+                },
+                .string => |str| str,
+                .cell_string => |i| i.sheet.string_values.items(i.list_index),
+            };
+
+            const zg = @import("zg");
+            var iter = zg.graphemes.iterator(str);
+            var count: usize = 0;
+            while (iter.next()) |_| count += 1;
+            return @floatFromInt(count);
+        }
+
+        fn evalCount(self: *const @This(), start: Index, end: Index) !f64 {
+            var iter = argIterator(self.nodes, start, end);
+            var total: f64 = 0;
+            while (iter.next()) |i| switch (self.nodes.items(.tag)[i.n]) {
+                .range => total += self.countRange(i, .numbers),
+                else => {
+                    const res = self.eval(i) catch continue;
+                    if (res != .none) {
+                        _ = res.toNumberOrNull() catch continue;
+                        total += 1;
+                    }
+                },
+            };
+
+            return total;
+        }
+
+        fn evalCountAll(self: *const @This(), start: Index, end: Index) !f64 {
+            var iter = argIterator(self.nodes, start, end);
+            var total: f64 = 0;
+            while (iter.next()) |i| switch (self.nodes.items(.tag)[i.n]) {
+                .range => total += self.countRange(i, .all),
+                else => {
+                    const res = self.eval(i) catch continue;
+                    if (res != .none) total += 1;
+                },
+            };
+
+            return total;
+        }
+
+        fn countRange(
+            self: *const @This(),
+            range_arg: Index,
+            comptime count_type: enum { all, numbers },
+        ) f64 {
+            assert(self.nodes.items(.tag)[range_arg.n] == .range);
+            const lhs, const rhs = self.nodes.items(.data)[range_arg.n].range.resolve(range_arg);
+            const r = self.toPosRange(lhs, rhs);
+            const CountContext = struct {
+                count: u64,
+                eval: *const EvalContext(Context),
+
+                pub fn func(ctx: *@This(), cell: Sheet.Cell.Handle) !void {
+                    _ = try ctx.eval.context.evalCellByHandle(cell);
+
+                    switch (count_type) {
+                        .all => ctx.count += 1,
+                        .numbers => {
+                            if (ctx.eval.sheet.getCellFromHandle(cell).value_tag == .number) {
+                                ctx.count += 1;
+                            }
+                        },
+                    }
+                }
+            };
+
+            var ctx: CountContext = .{ .count = 0, .eval = self };
+            self.sheet.cell_tree.traverse(&r.tl.array(), &r.br.array(), &ctx) catch unreachable;
+            return @floatFromInt(ctx.count);
+        }
+
+        fn evalLog(self: *const @This(), arg: Index, base_arg: Index) !f64 {
+            const base_result = try self.eval(base_arg);
+            const n_result = try self.eval(arg);
+            const base = try base_result.toNumber(10);
+            const n = try n_result.toNumber(0);
+            if (base <= 0 or base == 1 or n <= 0)
+                return error.NotEvaluable;
+            return std.math.log(f64, base, n);
+        }
+
+        fn evalWidth(self: *const @This(), arg: Index) !f64 {
+            if (self.nodes.items(.tag)[arg.n] != .range)
+                return error.NotEvaluable;
+            const lhs, const rhs = self.nodes.items(.data)[arg.n].range.resolve(arg);
+            const p = self.toPosRange(lhs, rhs);
+            return @floatFromInt(p.width2());
+        }
+
+        fn evalHeight(self: *const @This(), arg: Index) !f64 {
+            if (self.nodes.items(.tag)[arg.n] != .range)
+                return error.NotEvaluable;
+            const lhs, const rhs = self.nodes.items(.data)[arg.n].range.resolve(arg);
+            const p = self.toPosRange(lhs, rhs);
+            return @floatFromInt(p.height2());
         }
     };
 }

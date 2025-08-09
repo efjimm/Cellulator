@@ -2,6 +2,19 @@ This is a schizo document that contains basically every idea I thought should be
 working on cellulator. It's completely unorganised and some parts are very outdated. I thought it
 might be an interesting read so I committed it. The stuff at the top is probably newer.
 
+- Tests for all builtins and operators
+- Boolean operators and functions
+- Conditional operators
+- Text manipulation
+  - substitute
+  - indexOf
+- Arbitrary expressions over ranges of cells
+- User defined functions
+- Arbitrary identifiers
+
+- Allow setting a style for individual cells/ranges
+- Format strings for cells
+
 - Support generic flags in commands
   - change :put-adjust to be :put -a    :put --adjust
 
@@ -62,7 +75,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
 - Allow providing a custom format function for displaying cells
   - Would be exposed via the UI's Lua API, and differ depending on UI backend
   - Doesn't need to be fast, as the number of cells on screen is small
-  - Web UI could have the function return HTML or CSS
 
 - Allow defining custom undo types in Lua
 

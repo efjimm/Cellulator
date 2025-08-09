@@ -101,7 +101,7 @@ Type the command name followed by `-h` to see usage information for each command
 
 ## Expressions
 
-Expressions consist of number/string literals, cell references, cell ranges, builtin functions,
+Expressions consist of number/string literals, cell references, cell ranges, builtins,
 and operators. They can be used on the right-hand side of the `=` in a `let` statement.
 
 ### Number literals
@@ -176,26 +176,48 @@ operands to strings. Converting a number to a string never fails outside of OOM 
     - `'1: ' # A0`
     - `A0 # B0`
 
-### Builtin Functions
+### Builtins
 
-Builtin functions perform specific operations on a number of arguments. Builtins are used in the
-format `@builtin_name(argument_1, argument_2, argument_3, ...)`. Different builtins take and
-return different types and numbers of arguments.
+There are two types of builtins: functions and constants. Builtin functions are used in the
+format `@builtin_name(argument_1, argument_2, argument_3, ...)`. Different builtin functions take
+and return different types and numbers of arguments. Builtin constants are used in the format
+`@builtin_name`.
 
-The following builtins take an arbitrary number of arguments and coerce them to numbers. They may
-also take ranges as arguments.
+The following builtin functions take an arbitrary number of arguments and coerce them to numbers.
+They may also take ranges as arguments.
 
 - `@sum` Returns the sum of its arguments
 - `@prod` Returns the product of its arguments
 - `@avg` Returns the average of its arguments.
 - `@min` Returns the smallest argument.
 - `@max` Returns the largest argument.
+- `@count` Returns the count of number variables.
+- `@countAll` Returns the count of any type of variable.
+
+The following builtin functions take one argument and coerce it to a number:
+
+- `@sqrt` Returns the square root of the given number.
+- `@round` Rounds the given number to the nearest integer. If two integers are equally close, rounds away from zero.
+- `@floor` Returns the largest integral value not greater than the given number.
+- `@ceil` Returns the smallest integral value not less than the given number.
+- `@log(base, x)` Returns the logarithm of x for the provided base.
 
 The following builtins take one argument and coerce it to a string. They may *not* take a range
 as an argument.
 
 - `@upper` Returns the ASCII uppercase version of its argument as a string.
 - `@lower` Returns the ASCII lowercase version of its argument as a string.
+- `@len` Returns the number of grapheme clusters in the given string.
+
+The following builtins are constants and do not take any arguments or parentheses:
+
+- `@pi` Archimede's constant (n).
+- `@e` Euler's number (e).
+
+The following builtins take a single range as an argument:
+
+- `@width` Returns the width of the given range.
+- `@height` Returns the heigh of the given range.
 
 ## Keybinds
 
@@ -271,7 +293,7 @@ will repeat the following motion that many times. This does not currently work f
 ### Command Insert Mode
 
 - `Esc` Enter command normal mode
-- `Return`, `C-m`, `C-j` Submit the current text as a command
+- `Return`, `C-m`, `C-j` Submit current command or completion
 - `Backspace`, `Del` Delete the character before the cursor and move backwards one
 - `C-p`, `Up` Previous command
 - `C-n`, `Down` Next command
@@ -285,6 +307,8 @@ will repeat the following motion that many times. This does not currently work f
 - `C-v` Enter visual select mode
 - `C-p`, `<Up>` History prev
 - `C-n`, `<Down>` History next
+- `<Tab>` Next completion
+- `<S-<Tab>>` Previous completion
 
 ### Command Normal Mode
 
@@ -421,50 +445,4 @@ return {
 }
 ```
 
-
-The currently available elements are:
-
-```
-status_line,
-status_info,
-status_warn,
-status_err,
-
-filepath,
-cursor_pos,
-mode_indicator,
-count,
-command_line,
-
-column_heading_unselected,
-column_heading_selected,
-row_heading_unselected,
-row_heading_selected,
-
-cell_number_unselected,
-cell_number_selected,
-cell_text_unselected,
-cell_text_selected,
-cell_error_unselected,
-cell_error_selected,
-cell_blank_unselected,
-cell_blank_selected,
-
-sheet_selected,
-sheet_unselected,
-
-token_number,
-token_let,
-token_builtin,
-token_whitespace,
-token_operator,
-token_cell_address,
-token_parentheses,
-token_single_quoted_string,
-token_double_quoted_string,
-
-completion_background,
-completion_title,
-completion_keys,
-completion_description,
-```
+See `src/Tui.zig` for a list of valid element names.
