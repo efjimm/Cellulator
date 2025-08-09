@@ -1870,7 +1870,6 @@ fn ensureUnusedCellBufferCapacity(sheet: *Sheet, n: usize) !void {
     try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, n);
 }
 
-// TODO: This could be done without allocating by walking the ph-tree and removing as we go.
 /// Deletes a cell range, pushing a `.bulk_cell_insert` undo. Asserts that `undo_cell_buffer` and the
 /// respective undo stack has enough capacity.
 fn deleteCellRangeAssumeCapacity(sheet: *Sheet, range: Rect, opts: UndoOpts) u32 {
@@ -2229,6 +2228,8 @@ pub fn deleteCellRange(sheet: *Sheet, r: Rect, opts: UndoOpts) Allocator.Error!v
     try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, area);
     try sheet.ensureUnusedCellQueueCapacity(area);
     const n = sheet.deleteCellRangeAssumeCapacity(r, opts);
+    // TODO: Use an index type for this
+    if (n == std.math.maxInt(u32)) return;
     for (sheet.cell_buffer.items[n .. sheet.cell_buffer.items.len - 1]) |cell| {
         sheet.queued_cells.appendAssumeCapacity(.{ cell, 1 });
     }

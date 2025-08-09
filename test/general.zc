@@ -99,6 +99,7 @@ let B5 = 10
 :expect-eql-number A5 5
 :expect-eql-number B5 10
 
+:delete zzz100
 :delete A5
 
 :expect-non-extant A5
