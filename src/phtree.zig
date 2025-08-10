@@ -971,7 +971,7 @@ pub fn PhTree(
         }
 
         pub fn traverse(
-            tree: *@This(),
+            tree: *const @This(),
             min: *const Point,
             max: *const Point,
             ctx: anytype,
@@ -1145,7 +1145,7 @@ pub fn PhTree(
         }
 
         fn traverseNodeWindow(
-            tree: *@This(),
+            tree: *const @This(),
             handle: Node.Handle,
             min: *const Point,
             max: *const Point,

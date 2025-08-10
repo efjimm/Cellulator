@@ -2,6 +2,10 @@ This is a schizo document that contains basically every idea I thought should be
 working on cellulator. It's completely unorganised and some parts are very outdated. I thought it
 might be an interesting read so I committed it. The stuff at the top is probably newer.
 
+- Implement basically everything mentioned in sc-im's help page
+  - Filter rows
+  - Freeze rows/columns
+
 - Tests for all builtins and operators
 - Boolean operators and functions
 - Conditional operators
@@ -49,12 +53,8 @@ might be an interesting read so I committed it. The stuff at the top is probably
 - Multithreading
   - Nvidia paper for building radix trees in parallel
     - http://research.nvidia.com/sites/default/files/publications/karras2012hpg_paper.pdf
-- Handle commands better
-  - Usage text
-  - Command descriptions
-  - Standard way of signifying if parameters are required and what type they should be
-  - Automatically check validity of entered commands against a declared structure
-  - Allow registering new commands from lua
+
+- Allow registering new commands from lua
 
 - Command mode
   - Undos and redos
@@ -117,7 +117,7 @@ might be an interesting read so I committed it. The stuff at the top is probably
     - Input
 
 - Undo/redo for command mode
-- Detailed error reporting in parser
+- Even more detailed error reporting in parser
 
 - Rebinding keys
 

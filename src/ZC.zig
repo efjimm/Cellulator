@@ -1350,10 +1350,6 @@ fn doVisualMode(zc: *ZC, action: Action) Oom!void {
 fn parseCommand(zc: *ZC, str: []const u8) !void {
     if (str.len == 0) return;
 
-    // TODO: Unify command and assignment parsing and handling
-    //       One issue is that AST nodes get appended to the underlying sheet's ast_nodes list,
-    //       which is useless for anything other than assignments. I suppose we could append them
-    //       no matter what and decrement ast_nodes.len if it's not an assignment?
     if (str[0] == ':')
         return zc.runCommand(str[1..]);
 

@@ -778,8 +778,6 @@ pub fn interpretSource(sheet: *Sheet, reader: *std.io.Reader) !void {
 
         for (assignments.items, 0..) |assignment, i| {
             const pos = assignment.pos;
-            // TODO: Remove this
-            _ = sheet.createColumnAssumeCapacity(pos.x);
 
             new_cells.set(i, .{
                 .parent = .invalid,
@@ -939,7 +937,6 @@ pub fn loadCsv(sheet: *Sheet, r: *std.io.Reader) !void {
 
         for (assignments.items, 0..) |assignment, i| {
             const pos = assignment.pos;
-            _ = sheet.createColumnAssumeCapacity(pos.x);
 
             new_cells.set(i, .{
                 .parent = .invalid,
@@ -1731,10 +1728,13 @@ pub fn incWidth(
     n: u16,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    if (sheet.getColumnHandle(column_index)) |handle| {
-        const col = sheet.cols.getValue(handle);
-        try sheet.setColWidth(handle, column_index, col.width +| n, opts);
-    }
+    if (!sheet.columnIsPopulated(column_index)) return;
+    try sheet.ensureUnusedUndoCapacity(1);
+
+    const res = try sheet.cols.getOrPut(sheet.allocator, &.{column_index});
+    if (!res.found_existing) res.value_ptr.* = .{};
+
+    try sheet.setColWidth(res.handle, column_index, res.value_ptr.width +| n, opts);
 }
 
 pub fn decWidth(
@@ -1743,11 +1743,13 @@ pub fn decWidth(
     n: u16,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    if (sheet.getColumnHandle(column_index)) |handle| {
-        const col = sheet.cols.getValue(handle);
-        const new_width = @max(col.width -| n, 1);
-        try sheet.setColWidth(handle, column_index, new_width, opts);
-    }
+    if (!sheet.columnIsPopulated(column_index)) return;
+    try sheet.ensureUnusedUndoCapacity(1);
+
+    const res = try sheet.cols.getOrPut(sheet.allocator, &.{column_index});
+    if (!res.found_existing) res.value_ptr.* = .{};
+
+    try sheet.setColWidth(res.handle, column_index, res.value_ptr.width -| n, opts);
 }
 
 pub fn setPrecision(
@@ -1774,7 +1776,7 @@ pub fn setColPrecision(
     const old_precision = col.precision;
     col.precision = precision;
     try sheet.pushUndo(.init(.set_column_precision, .{
-        .col = index,
+        .col = index, // TODO: Store handle instead of index?
         .precision = old_precision,
     }), opts);
 }
@@ -1785,10 +1787,13 @@ pub fn incPrecision(
     n: u8,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    if (sheet.getColumnHandle(column_index)) |handle| {
-        const col = sheet.cols.getValue(handle);
-        try sheet.setColPrecision(handle, column_index, col.precision +| n, opts);
-    }
+    if (!sheet.columnIsPopulated(column_index)) return;
+    try sheet.ensureUnusedUndoCapacity(1);
+
+    const res = try sheet.cols.getOrPut(sheet.allocator, &.{column_index});
+    if (!res.found_existing) res.value_ptr.* = .{};
+
+    try sheet.setColPrecision(res.handle, column_index, res.value_ptr.precision +| n, opts);
 }
 
 pub fn decPrecision(
@@ -1797,10 +1802,42 @@ pub fn decPrecision(
     n: u8,
     opts: UndoOpts,
 ) Allocator.Error!void {
-    if (sheet.getColumnHandle(column_index)) |handle| {
-        const col = sheet.cols.getValue(handle);
-        try sheet.setColPrecision(handle, column_index, col.precision -| n, opts);
+    if (!sheet.columnIsPopulated(column_index)) return;
+    try sheet.ensureUnusedUndoCapacity(1);
+
+    const res = try sheet.cols.getOrPut(sheet.allocator, &.{column_index});
+    if (!res.found_existing) res.value_ptr.* = .{};
+
+    try sheet.setColPrecision(res.handle, column_index, res.value_ptr.precision -| n, opts);
+}
+
+const ExistsContext = struct {
+    found: bool = false,
+
+    pub fn func(ctx: *@This(), _: Cell.Handle) !void {
+        ctx.found = true;
+        return error.Finished;
     }
+};
+
+pub fn columnIsPopulated(sheet: *const Sheet, col: Position.Int) bool {
+    var ctx: ExistsContext = .{};
+    sheet.cell_tree.traverse(
+        &.{ col, 0 },
+        &.{ col, std.math.maxInt(Position.Int) },
+        &ctx,
+    ) catch {};
+    return ctx.found;
+}
+
+pub fn rowIsPopulated(sheet: *const Sheet, row: Position.Int) bool {
+    var ctx: ExistsContext = .{};
+    sheet.cell_tree.traverse(
+        &.{ 0, row },
+        &.{ std.math.maxInt(Position.Int), row },
+        &ctx,
+    ) catch {};
+    return ctx.found;
 }
 
 pub fn needsUpdate(sheet: *const Sheet) bool {
@@ -1935,8 +1972,6 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
             .data = .{ .number = start + incr * f },
         });
     }
-
-    sheet.createColumnRangeAssumeCapacity(range);
 
     const cells_start = sheet.bulkCreateCellRange(range);
     sheet.queued_cells.appendAssumeCapacity(.{ cells_start, area });
@@ -2092,8 +2127,6 @@ pub fn bulkSetCellExpr(
         sheet.queued_cells.appendAssumeCapacity(.{ new_cells.handle(0), area });
     }
 
-    sheet.createColumnRangeAssumeCapacity(range);
-
     const cell: Cell = .{
         .value = opts.value,
         .value_tag = opts.tag,
@@ -2144,7 +2177,6 @@ pub fn setCell(
     try sheet.ensureUnusedCellQueueCapacity(1);
     try sheet.ensureExpressionDependentsCapacity(expr_root);
     try sheet.ensureUnusedUndoCapacity(1);
-    _ = try sheet.createColumn(pos.x);
     errdefer comptime unreachable;
 
     sheet.dupeExprStrings(source, expr_root);
@@ -2642,9 +2674,6 @@ pub fn insertColsOrRows(
             p[0] += n;
             _ = sheet.cols.insertAssumeCapacity(p, handle);
         }
-
-        for (index..index + n) |i|
-            _ = sheet.createColumnAssumeCapacity(@intCast(i));
     }
 
     // Remove affected cells
@@ -2688,7 +2717,7 @@ pub fn insertColsOrRows(
     // Adjust all affected position/range references in cell expressions
     const tags = sheet.ast_nodes.items(.tag);
     const data = sheet.ast_nodes.items(.data);
-    var i: u32 = @intCast(sheet.ast_nodes.len);
+    var i = sheet.ast_nodes.len;
     while (i > 0) {
         i -= 1;
         switch (tags[i]) {
@@ -2931,10 +2960,9 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) ast.EvalError!ast.Ev
             try sheet.queueDependents(sheet.rectFromCellHandle(handle));
 
             // Evaluate
-            const res = ast.eval(
+            const res = ast.evaluate(
                 sheet.ast_nodes,
                 cell.expr_root,
-                pos,
                 sheet,
                 sheet.strings_buf.items,
                 sheet,
@@ -3033,15 +3061,6 @@ fn setRowOrColumn(
         entry.set(new_node);
     }
     return &entry.node.?.key;
-}
-
-pub fn createColumn(sheet: *Sheet, index: PosInt) !Column.Handle {
-    const res = try sheet.cols.getOrPut(sheet.allocator, &.{index});
-    if (!res.found_existing) {
-        log.debug("Created column {}", .{index});
-        res.value_ptr.* = .{};
-    }
-    return res.handle;
 }
 
 pub fn createColumnAssumeCapacity(sheet: *Sheet, index: PosInt) Column.Handle {
