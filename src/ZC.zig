@@ -2692,22 +2692,25 @@ fn setTheme(
     const ui_name = zc.ui_interface.getUiName();
     const extension = zc.ui_interface.getThemeFileExtension();
 
-    var name_buf: std.BoundedArray(u8, std.fs.max_name_bytes) = .{};
-    name_buf.writer().print("{s}{s}", .{ theme_name, extension }) catch
-        return error.NameTooLong;
+    const dir, const subpath = if (std.posix.getenv("XDG_CONFIG_HOME")) |path|
+        .{ path, "cellulator" }
+    else if (std.posix.getenv("HOME")) |path|
+        .{ path, ".config/cellulator" }
+    else
+        return error.CouldNotDeterminePath;
 
-    const file_name = name_buf.constSlice();
+    var buf: [4096]u8 = undefined;
+    var path: std.ArrayListUnmanaged(u8) = .initBuffer(&buf);
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    var fba: std.heap.FixedBufferAllocator = .init(&buf);
-    const path = std.fs.path.joinZ(fba.allocator(), &.{
-        "/home/evan/.config/cellulator",
-        "themes",
+    path.printBounded("{s}/{s}/themes/{s}/{s}{s}\x00", .{
+        dir,
+        subpath,
         ui_name,
-        file_name,
+        theme_name,
+        extension,
     }) catch return error.NameTooLong;
 
-    try zc.ui_interface.applyTheme(path);
+    try zc.ui_interface.applyTheme(path.items[0 .. path.items.len - 1 :0]);
 }
 
 fn put(zc: *ZC, dest: Rect, comptime adjust: Sheet.Adjust) !void {
@@ -2970,15 +2973,15 @@ fn widthNeededForColumn(
         &results,
     );
 
-    var buf: std.BoundedArray(u8, 512) = .{};
-    const writer = buf.writer();
+    var buf: [512]u8 = undefined;
+    var writer: std.io.Writer = .fixed(&buf);
     for (results.items) |handle| {
         const cell = sheet.getCellFromHandle(handle);
         switch (cell.value_tag) {
             .err => {},
             .number => {
                 const n = cell.value.number;
-                buf.len = 0;
+                writer.end = 0;
                 writer.print("{d:.[1]}", .{ n, precision }) catch unreachable;
                 // Numbers are all ASCII, so 1 byte = 1 column
                 const len: u16 = @intCast(buf.len);

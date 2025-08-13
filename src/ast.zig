@@ -94,6 +94,7 @@ pub const Node = extern struct {
 
     pub const Tagged = blk: {
         var t = @typeInfo(Payload);
+        t.@"union".layout = .auto;
         t.@"union".tag_type = Tag;
         break :blk @Type(t);
     };
@@ -489,26 +490,30 @@ pub const ArgIteratorForwards = struct {
     end: Index,
     index: Index,
     backwards_iter: ArgIterator,
-    buffer: std.BoundedArray(Index, 32) = .{},
+    buffer: [32]Index = undefined,
+    i: usize = 0,
 
     pub fn next(iter: *ArgIteratorForwards) ?Index {
         if (iter.index.n >= iter.end.n) return null;
         const ret = iter.index;
 
-        if (iter.buffer.len == 0) {
+        if (iter.i == 0) {
             const first_item = iter.backwards_iter.next() orelse {
                 iter.index = iter.end;
                 return ret;
             };
 
-            iter.buffer.appendAssumeCapacity(first_item);
+            iter.buffer[0] = first_item;
+            iter.i = 1;
 
-            for (1..iter.buffer.capacity()) |_| {
+            for (iter.buffer[1..]) |*d| {
                 const item = iter.backwards_iter.next() orelse break;
-                iter.buffer.appendAssumeCapacity(item);
+                d.* = item;
+                iter.i += 1;
             }
         }
-        iter.index = iter.buffer.pop().?;
+        iter.index = iter.buffer[iter.i - 1];
+        iter.i -= 1;
 
         return ret;
     }

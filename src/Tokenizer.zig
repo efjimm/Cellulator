@@ -151,7 +151,8 @@ pub fn next(t: *Tokenizer) !Token {
     var start = t.pos;
     var tag = Token.Tag.unknown;
 
-    var kw_buf: std.BoundedArray(u8, 64) = .{};
+    var keyword_buf: [64]u8 = undefined;
+    var kw_buf: std.ArrayListUnmanaged(u8) = .initBuffer(&keyword_buf);
 
     state: switch (t.state) {
         .start => switch (try t.byte()) {
@@ -185,7 +186,7 @@ pub fn next(t: *Tokenizer) !Token {
             },
             'a'...'z', 'A'...'Z' => |c| {
                 tag = .rel_rel;
-                kw_buf.append(c) catch {};
+                kw_buf.appendBounded(c) catch {};
                 continue :state .word;
             },
             '@' => {
@@ -288,7 +289,7 @@ pub fn next(t: *Tokenizer) !Token {
             t.toss(1);
             switch (try t.byte()) {
                 'a'...'z', 'A'...'Z' => |c| {
-                    kw_buf.append(c) catch {};
+                    kw_buf.appendBounded(c) catch {};
                     continue :state .word;
                 },
                 '0'...'9', '_' => { // TODO: Should we accept _ here?
@@ -302,7 +303,7 @@ pub fn next(t: *Tokenizer) !Token {
                     continue :state .cell_address;
                 },
                 else => {
-                    const str = kw_buf.constSlice();
+                    const str = kw_buf.items;
                     tag = keywords.get(str) orelse .column_name;
                 },
             }

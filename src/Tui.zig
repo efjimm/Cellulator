@@ -759,7 +759,7 @@ fn renderStatus(tui: *Tui, wr: *Screen.Writer) !void {
     try tui.setStyle(.status_line, wr);
     try writer.writeByte(']');
 
-    const path = sheet.filepath.constSlice();
+    const path = sheet.filepath.items;
     if (path.len > 0) {
         try tui.setStyle(.filepath, wr);
         try writer.print(" {s}", .{path});

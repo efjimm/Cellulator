@@ -2,6 +2,27 @@ This is a schizo document that contains basically every idea I thought should be
 working on cellulator. It's completely unorganised and some parts are very outdated. I thought it
 might be an interesting read so I committed it. The stuff at the top is probably newer.
 
+# TODO
+
+## Statements and Commands
+
+### General
+
+- Unify statement and command parsing
+- Implement boolean operators and functions
+- Implement anonymous functions
+- Implement conditional functions, conditional ranges
+  - A conditional range is a range that associated with a predicate
+    - The predicate is an anonymous function that filters cells from that range
+    - Operations on that range will only use cells within the range satisfying the predicate
+- Implement filtering rows
+
+### Tertiary
+
+- Command for freezing rows / columns
+
+# OLD TODO
+
 - Implement basically everything mentioned in sc-im's help page
   - Filter rows
   - Freeze rows/columns

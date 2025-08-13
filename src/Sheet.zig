@@ -56,7 +56,7 @@ cell_buffer: std.ArrayListUnmanaged(Cell.Handle) = .empty,
 
 search_buffer: std.ArrayListUnmanaged(Dependents.Entry.Handle),
 
-filepath: std.BoundedArray(u8, std.fs.max_path_bytes),
+filepath: std.ArrayListUnmanaged(u8),
 
 /// Used for temporary allocations
 arena: std.heap.ArenaAllocator,
@@ -271,9 +271,9 @@ pub const Undo = extern struct {
 
 pub const UndoType = enum { undo, redo };
 
-pub fn init(allocator: Allocator) !Sheet {
+pub fn init(gpa: Allocator) !Sheet {
     var sheet: Sheet = .{
-        .allocator = allocator,
+        .allocator = gpa,
         .has_changes = false,
 
         .queued_cells = .empty,
@@ -291,17 +291,19 @@ pub fn init(allocator: Allocator) !Sheet {
 
         .search_buffer = .empty,
 
-        .arena = .init(allocator),
-        .filepath = .{},
+        .arena = .init(gpa),
+        .filepath = .empty,
 
         .text_attrs = .empty,
 
         .lua_point_trees = .empty,
     };
 
-    try sheet.undos.ensureTotalCapacity(allocator, 1);
-    errdefer sheet.undos.deinit(allocator);
-    try sheet.redos.ensureTotalCapacity(allocator, 1);
+    try sheet.undos.ensureTotalCapacity(gpa, 1);
+    errdefer sheet.undos.deinit(gpa);
+    try sheet.redos.ensureTotalCapacity(gpa, 1);
+    errdefer sheet.redos.deinit(gpa);
+    try sheet.filepath.ensureTotalCapacityPrecise(gpa, std.fs.max_path_bytes);
 
     return sheet;
 }
@@ -310,6 +312,7 @@ pub fn deinit(sheet: *Sheet) void {
     sheet.strings_buf.deinit(sheet.allocator);
     sheet.search_buffer.deinit(sheet.allocator);
     sheet.lua_point_trees.deinit(sheet.allocator);
+    sheet.filepath.deinit(sheet.allocator);
 
     sheet.clearUndos(.undo);
     sheet.clearUndos(.redo);
@@ -967,7 +970,7 @@ pub fn writeFile(
         filepath: ?[]const u8 = null,
     },
 ) !void {
-    const filepath = opts.filepath orelse sheet.filepath.slice();
+    const filepath = opts.filepath orelse sheet.filepath.items;
     if (filepath.len == 0)
         return error.EmptyFileName;
 
@@ -2879,8 +2882,9 @@ fn markDirty(
     }
 }
 
+// TODO: This is dumb
 pub fn getFilePath(sheet: *const Sheet) []const u8 {
-    return sheet.filepath.constSlice();
+    return sheet.filepath.items;
 }
 
 // TODO: Allow for renaming sheets.
@@ -2893,7 +2897,7 @@ pub fn getName(sheet: *const Sheet) []const u8 {
 }
 
 pub fn setFilePath(sheet: *Sheet, filepath: []const u8) void {
-    sheet.filepath.len = 0;
+    sheet.filepath.clearRetainingCapacity();
     sheet.filepath.appendSliceAssumeCapacity(filepath);
 }
 
