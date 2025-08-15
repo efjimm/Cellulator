@@ -2957,68 +2957,97 @@ pub inline fn cursorDecWidth(zc: *ZC) Oom!void {
 
 fn widthNeededForColumn(
     zc: *ZC,
-    sheet: *Sheet,
+    sheet: *const Sheet,
     column_index: Position.Int,
     precision: u8,
     max_width: u16,
 ) !u16 {
-    var width: u16 = Sheet.Column.default_width;
+    const Context = struct {
+        width: u16,
+        max_width: u16,
+        precision: u8,
+        sheet: *const Sheet,
+        zc: *ZC,
 
-    var results: std.ArrayList(Sheet.Cell.Handle) = .init(sheet.allocator);
-    defer results.deinit();
+        pub fn func(ctx: *@This(), handle: Sheet.Cell.Handle) !void {
+            const cell = ctx.sheet.getCellFromHandle(handle);
+            switch (cell.value_tag) {
+                .err => {},
+                .number => {
+                    var buf: [512]u8 = undefined;
+                    var writer: std.io.Writer = .fixed(&buf);
+                    const n = cell.value.number;
+                    writer.end = 0;
+                    writer.print("{d:.[1]}", .{ n, ctx.precision }) catch unreachable;
+                    // Numbers are all ASCII, so 1 byte = 1 column
+                    const len: u16 = @intCast(writer.end);
+                    if (len > ctx.width) {
+                        ctx.width = len;
+                        if (ctx.width >= ctx.max_width) return error.Stopped;
+                    }
+                },
+                .string => {
+                    const str = ctx.sheet.cellStringValue(cell);
+                    const w: u16 = @intCast(ctx.zc.ui_interface.stringWidth(str, .{
+                        .max_width = ctx.zc.ui.term.width,
+                    }).width); // TODO: Make all widths u32
+                    if (w > ctx.width) {
+                        ctx.width = w;
+                        if (ctx.width >= ctx.max_width) return error.Stopped;
+                    }
+                },
+            }
+        }
+    };
 
-    try sheet.cell_tree.queryWindow(
+    var ctx: Context = .{
+        .width = Sheet.Column.default_width,
+        .max_width = max_width,
+        .precision = precision,
+        .sheet = sheet,
+        .zc = zc,
+    };
+
+    sheet.cell_tree.traverse(
         &.{ column_index, 0 },
         &.{ column_index, std.math.maxInt(u32) },
-        &results,
-    );
-
-    var buf: [512]u8 = undefined;
-    var writer: std.io.Writer = .fixed(&buf);
-    for (results.items) |handle| {
-        const cell = sheet.getCellFromHandle(handle);
-        switch (cell.value_tag) {
-            .err => {},
-            .number => {
-                const n = cell.value.number;
-                writer.end = 0;
-                writer.print("{d:.[1]}", .{ n, precision }) catch unreachable;
-                // Numbers are all ASCII, so 1 byte = 1 column
-                const len: u16 = @intCast(buf.len);
-                if (len > width) {
-                    width = len;
-                    if (width >= max_width) return width;
-                }
-            },
-            .string => {
-                const str = sheet.cellStringValue(cell);
-                const w: u16 = @intCast(zc.ui_interface.stringWidth(str, .{
-                    .max_width = zc.ui.term.width,
-                }).width); // TODO: Make all widths u32
-                if (w > width) {
-                    width = w;
-                    if (width >= max_width) return width;
-                }
-            },
-        }
-    }
-
-    return width;
+        &ctx,
+    ) catch return max_width;
+    return ctx.width;
 }
 
 pub fn expandWidthAtCursor(zc: *ZC) Oom!void {
-    const handle = zc.currentSheet().getColumnHandle(zc.cursor.x) orelse return;
-    const col = zc.currentSheet().cols.getValue(handle);
+    const sheet = zc.currentSheet();
+    if (!sheet.columnIsPopulated(zc.cursor.x)) return;
+    try sheet.ensureUnusedUndoCapacity(1);
+
+    const res = try sheet.cols.getOrPut(sheet.allocator, &.{zc.cursor.x});
+    if (!res.found_existing) res.value_ptr.* = .{};
+
+    const handle = sheet.getColumnHandle(zc.cursor.x) orelse return;
+    const col = sheet.cols.getValue(handle);
 
     const max_width = zc.ui.term.width - zc.leftReservedColumns();
     const width_needed = try zc.widthNeededForColumn(
-        zc.currentSheet(),
+        sheet,
         zc.cursor.x,
         col.precision,
         max_width,
     );
-    try zc.currentSheet().setColWidth(handle, zc.cursor.x, width_needed, .{});
-    zc.currentSheet().endUndoGroup();
+
+    std.log.debug("Width needed for {f}: {d}", .{
+        Position.fmtColumnAddress(zc.cursor.x),
+        width_needed,
+    });
+
+    const old_width = col.width;
+    col.width = width_needed;
+    sheet.pushUndo(.init(.set_column_width, .{
+        .col = zc.cursor.x,
+        .width = old_width,
+    }), .{}) catch unreachable;
+
+    sheet.endUndoGroup();
     zc.clampScreenToCursorX();
 }
 
