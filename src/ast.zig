@@ -47,6 +47,8 @@ pub fn isSingle(tag: Node.Tag) bool {
         .div,
         .mod,
         .pow,
+        .logical_and,
+        .logical_or,
         => false,
     };
 }
@@ -78,6 +80,8 @@ pub const Node = extern struct {
         div: BinaryOperator,
         mod: BinaryOperator,
         pow: BinaryOperator,
+        logical_and: BinaryOperator,
+        logical_or: BinaryOperator,
         builtin: Builtin,
         range: BinaryOperator,
         invalidated_pos: Position,
@@ -319,12 +323,35 @@ pub fn printFromNode(
                 try writer.writeByte(')');
             }
         },
+        .logical_or => |b| {
+            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
+            try writer.writeAll(" or ");
+            const rhs = nodes.get(index.sub(b.rhs).n);
+            try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
+        },
+        .logical_and => |b| {
+            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
+            try writer.writeAll(" and ");
+            const rhs = nodes.get(index.sub(b.rhs).n);
+            switch (rhs.tag) {
+                .logical_or => {
+                    try writer.writeByte('(');
+                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
+                    try writer.writeByte(')');
+                },
+                else => {
+                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
+                },
+            }
+        },
         .add => |b| {
             try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
             try writer.writeAll(" + ");
             const rhs = nodes.get(index.sub(b.rhs).n);
             switch (rhs.tag) {
-                .sub => {
+                // If the right-hand side is lower precedence and non-commutative then we need to
+                // wrap it in parentheses.
+                .sub, .logical_and, .logical_or => {
                     try writer.writeByte('(');
                     try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
                     try writer.writeByte(')');
@@ -340,7 +367,9 @@ pub fn printFromNode(
 
             const rhs = nodes.get(index.sub(b.rhs).n);
             switch (rhs.tag) {
-                .add, .sub => {
+                // If the right-hand side is lower precedence and non-commutative then we need to
+                // wrap it in parentheses.
+                .add, .sub, .logical_and, .logical_or => {
                     try writer.writeByte('(');
                     try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
                     try writer.writeByte(')');
@@ -592,6 +621,8 @@ pub fn leftMostChild(
         .range,
         .invalidated_range,
         .pow,
+        .logical_and,
+        .logical_or,
         => |b| leftMostChild(nodes, index.sub(b.lhs)),
         .builtin => |b| if (b.first_arg.int() != 0)
             leftMostChild(nodes, index.sub(b.first_arg))
@@ -741,6 +772,27 @@ pub fn EvalContext(comptime Context: type) type {
 
                     return .{
                         .number = std.math.pow(f64, try lhs.toNumber(0), try rhs.toNumber(0)),
+                    };
+                },
+                // and/or have the same semantics as Lua's and/or operators.
+                .logical_and => |op| {
+                    const lhs = try eval.evaluate(index.sub(op.lhs));
+                    const rhs = try eval.evaluate(index.sub(op.rhs));
+                    const l = try lhs.toNumber(0);
+                    const r = try rhs.toNumber(0);
+
+                    return .{
+                        .number = if (l != 0 and r != 0) r else 0,
+                    };
+                },
+                .logical_or => |op| {
+                    const lhs = try eval.evaluate(index.sub(op.lhs));
+                    const rhs = try eval.evaluate(index.sub(op.rhs));
+                    const l = try lhs.toNumber(0);
+                    const r = try rhs.toNumber(0);
+
+                    return .{
+                        .number = if (l != 0) l else r,
                     };
                 },
 

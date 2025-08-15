@@ -227,7 +227,43 @@ pub fn parseAssignment(parser: *Parser) ParseError!Index {
 
 /// Expression <- AddExpr
 pub fn parseExpression(parser: *Parser) ParseError!Index {
-    return parser.parseAddExpr();
+    return parser.parseOrExpr();
+}
+
+/// OrExpr <- AndExpr ('or' AndExpr)*
+fn parseOrExpr(parser: *Parser) !Index {
+    var index = try parser.parseAndExpr();
+
+    while (parser.eatToken(.keyword_or)) |_| {
+        const rhs = try parser.parseAndExpr();
+        const len: u32 = @intCast(parser.nodes.len);
+        const op = BinaryOperator{
+            .lhs = @enumFromInt(len - index.n),
+            .rhs = @enumFromInt(len - rhs.n),
+        };
+
+        index = try parser.addNode(.init(.logical_or, op));
+    }
+
+    return index;
+}
+
+/// AndExpr <- AddExpr ('and' AddExpr)*
+fn parseAndExpr(parser: *Parser) !Index {
+    var index = try parser.parseAddExpr();
+
+    while (parser.eatToken(.keyword_and)) |_| {
+        const rhs = try parser.parseAddExpr();
+        const len: u32 = @intCast(parser.nodes.len);
+        const op = BinaryOperator{
+            .lhs = @enumFromInt(len - index.n),
+            .rhs = @enumFromInt(len - rhs.n),
+        };
+
+        index = try parser.addNode(.init(.logical_and, op));
+    }
+
+    return index;
 }
 
 /// AddExpr <- MulExpr (('+' / '-' / '#') MulExpr)*
@@ -305,7 +341,7 @@ fn parseUnaryExpr(parser: *Parser) !Index {
     };
 }
 
-/// PowExpr <- PrimaryExpr ('^' PrimaryExpr)*
+/// PowExpr <- UnaryExpr ('^' UnaryExpr)*
 fn parsePowExpr(parser: *Parser) !Index {
     var index = try parser.parseUnaryExpr();
 
@@ -324,7 +360,7 @@ fn parsePowExpr(parser: *Parser) !Index {
     return index;
 }
 
-/// PrimaryExpr <- Number / Range / StsringLiteral / Builtin / '(' Expression ')'
+/// PrimaryExpr <- Number / Range / StringLiteral / Builtin / '(' Expression ')'
 fn parsePrimaryExpr(parser: *Parser) !Index {
     return switch (parser.token_tags[parser.tok_i]) {
         .number => parser.parseNumber(),
@@ -749,6 +785,19 @@ test "Node contents" {
             }),
             .init(.concat, .{ .lhs = .from(2), .rhs = .from(1) }),
             .init(.assignment, .fromValidAddress("crxp65535")),
+        },
+    );
+
+    try testNodes(
+        "let a0 = 1 and 2",
+        &.{
+            .init(.number, 1.0),
+            .init(.number, 2.0),
+            .init(.logical_and, .{
+                .lhs = .from(2),
+                .rhs = .from(1),
+            }),
+            .init(.assignment, .fromValidAddress("a0")),
         },
     );
 }

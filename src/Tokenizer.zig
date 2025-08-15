@@ -77,6 +77,8 @@ pub const Token = struct {
         double_string_literal_end,
 
         keyword_let,
+        keyword_and,
+        keyword_or,
 
         eof,
         unknown,
@@ -106,6 +108,8 @@ pub const Token = struct {
                 .double_string_literal_start = "'\"'",
                 .double_string_literal_end = "'\"'",
                 .keyword_let = "'let'",
+                .keyword_and = "and",
+                .keyword_or = "or",
                 .eof = "eof",
                 .caret = "^",
                 .unknown = "",
@@ -119,6 +123,8 @@ pub const Token = struct {
 
 const keywords = std.StaticStringMap(Token.Tag).initComptime(.{
     .{ "let", .keyword_let },
+    .{ "and", .keyword_and },
+    .{ "or", .keyword_or },
 });
 
 pub fn init(reader: *std.io.Reader) Tokenizer {
@@ -395,6 +401,10 @@ test "Tokens" {
         .{ "$a1", .{ .abs_rel, .eof } },
         .{ "$a$1", .{ .abs_abs, .eof } },
         .{ "a$1", .{ .rel_abs, .eof } },
+        .{ "and or", .{ .keyword_and, .keyword_or, .eof } },
+        .{ "1 and 2", .{ .number, .keyword_and, .number, .eof } },
+        .{ "1 or 2", .{ .number, .keyword_or, .number, .eof } },
+        .{ "let a0 = 1 or 2", .{ .keyword_let, .rel_rel, .equals_sign, .number, .keyword_or, .number, .eof } },
     };
 
     inline for (data) |d| {

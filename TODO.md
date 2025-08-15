@@ -8,7 +8,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 ### General
 
-- Unify statement and command parsing
 - Implement boolean operators and functions
 - Implement anonymous functions
 - Implement conditional functions, conditional ranges

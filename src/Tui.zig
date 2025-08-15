@@ -79,7 +79,7 @@ pub const default_theme: Theme = .{
 
     .token_number = .init(.green, .none, .none),
     .token_builtin = .init(.red, .none, .none),
-    .token_let = .init(.yellow, .none, .none),
+    .token_keyword = .init(.yellow, .none, .none),
     .token_whitespace = .init(.none, .none, .none),
     .token_operator = .init(.magenta, .none, .none),
     .token_cell_address = .init(.cyan, .none, .{ .bold = true }),
@@ -136,7 +136,7 @@ pub const UiElement = enum {
     sheet_unselected,
 
     token_number,
-    token_let,
+    token_keyword,
     token_builtin,
     token_whitespace,
     token_operator,
@@ -777,7 +777,10 @@ fn tokenStyle(tag: Token.Tag) UiElement {
     return switch (tag) {
         .builtin => .token_builtin,
         .number => .token_number,
-        .keyword_let => .token_let,
+        .keyword_let,
+        .keyword_and,
+        .keyword_or,
+        => .token_keyword,
         .eof => .token_builtin,
         .plus,
         .minus,
