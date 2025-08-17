@@ -126,21 +126,58 @@ pub const Node = extern struct {
         }
     }
 
+    pub fn isCommutative(tag: Tag) bool {
+        return switch (tag) {
+            .number,
+            .column,
+            .abs_abs,
+            .abs_rel,
+            .rel_abs,
+            .rel_rel,
+            .builtin,
+            .range,
+            .invalidated_pos,
+            .invalidated_range,
+            .string_literal,
+            .assignment,
+            .not,
+            .plus,
+            .minus,
+            => true,
+            .add => true,
+            .sub => false,
+            .mul => true,
+            .div => false,
+            .mod => false,
+            .pow => false,
+            .concat => false,
+            .less_than => false,
+            .greater_than => false,
+            .equals => false,
+            .greater_equals => false,
+            .less_equals => false,
+            .not_equals => false,
+            .logical_and => false,
+            .logical_or => false,
+        };
+    }
+
     pub fn precedence(tag: Tag) i8 {
         return switch (tag) {
             // These aren't operators
-            .number => 0,
-            .column => 0,
-            .abs_abs => 0,
-            .abs_rel => 0,
-            .rel_abs => 0,
-            .rel_rel => 0,
-            .builtin => 0,
-            .range => 0,
-            .invalidated_pos => 0,
-            .invalidated_range => 0,
-            .string_literal => 0,
-            .assignment => 0,
+            .number,
+            .column,
+            .abs_abs,
+            .abs_rel,
+            .rel_abs,
+            .rel_rel,
+            .builtin,
+            .range,
+            .invalidated_pos,
+            .invalidated_range,
+            .string_literal,
+            .assignment,
+            => 127,
 
             // Actual operators
             .minus => 2,
@@ -376,186 +413,50 @@ pub fn printFromNode(
                 try writer.writeByte(')');
             }
         },
-        // TODO: Move more binary operators into this branch
-        inline .greater_than, .less_than, .greater_equals, .less_equals => |b, t| {
+        inline .greater_than,
+        .less_than,
+        .greater_equals,
+        .less_equals,
+        .equals,
+        .not_equals,
+        .logical_or,
+        .logical_and,
+        .sub,
+        .mul,
+        .pow,
+        .div,
+        .mod,
+        .add,
+        => |b, t| {
             const str = switch (t) {
                 .greater_than => ">",
                 .less_than => "<",
                 .greater_equals => ">=",
                 .less_equals => "<=",
+                .equals => "==",
+                .not_equals => "!=",
+                .logical_or => "or",
+                .logical_and => "and",
+                .add => "+",
+                .sub => "-",
+                .mul => "*",
+                .pow => "^",
+                .div => "/",
+                .mod => "%",
                 else => comptime unreachable,
             };
 
             try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
             try writer.writeAll(" " ++ str ++ " ");
             const rhs = nodes.get(index.sub(b.rhs).n);
-            if (Node.precedence(rhs.tag) < comptime Node.precedence(t)) {
+            const prec = comptime Node.precedence(t);
+            const rprec = Node.precedence(rhs.tag);
+            if (rprec < prec or rprec == prec and (!Node.isCommutative(t) or !Node.isCommutative(rhs.tag))) {
                 try writer.writeByte('(');
                 try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
                 try writer.writeByte(')');
             } else {
                 try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-            }
-        },
-        .equals => |b| {
-            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
-            try writer.writeAll(" == ");
-            const rhs = nodes.get(index.sub(b.rhs).n);
-            if (Node.precedence(rhs.tag) < comptime Node.precedence(.equals)) {
-                try writer.writeByte('(');
-                try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-                try writer.writeByte(')');
-            } else {
-                try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-            }
-        },
-        .not_equals => |b| {
-            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
-            try writer.writeAll(" != ");
-            const rhs = nodes.get(index.sub(b.rhs).n);
-            if (Node.precedence(rhs.tag) < comptime Node.precedence(.not_equals)) {
-                try writer.writeByte('(');
-                try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-                try writer.writeByte(')');
-            } else {
-                try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-            }
-        },
-        .logical_or => |b| {
-            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
-            try writer.writeAll(" or ");
-            const rhs = nodes.get(index.sub(b.rhs).n);
-            try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-        },
-        .logical_and => |b| {
-            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
-            try writer.writeAll(" and ");
-            const rhs = nodes.get(index.sub(b.rhs).n);
-            if (Node.precedence(rhs.tag) < comptime Node.precedence(.logical_and)) {
-                try writer.writeByte('(');
-                try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-                try writer.writeByte(')');
-            } else {
-                try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-            }
-        },
-        .add => |b| {
-            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
-            try writer.writeAll(" + ");
-            const rhs = nodes.get(index.sub(b.rhs).n);
-            switch (rhs.tag) {
-                // If the right-hand side is lower precedence and non-commutative then we need to
-                // wrap it in parentheses.
-                .sub, .logical_and, .logical_or => {
-                    try writer.writeByte('(');
-                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-                    try writer.writeByte(')');
-                },
-                else => {
-                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-                },
-            }
-        },
-        .sub => |b| {
-            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
-            try writer.writeAll(" - ");
-
-            const rhs = nodes.get(index.sub(b.rhs).n);
-            switch (rhs.tag) {
-                // If the right-hand side is lower precedence and non-commutative then we need to
-                // wrap it in parentheses.
-                .add, .sub, .logical_and, .logical_or => {
-                    try writer.writeByte('(');
-                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-                    try writer.writeByte(')');
-                },
-                else => {
-                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-                },
-            }
-        },
-        .mul => |b| {
-            const lhs = nodes.get(index.sub(b.lhs).n);
-            switch (lhs.tag) {
-                .add, .sub => {
-                    try writer.writeByte('(');
-                    try printFromNode(nodes, index.sub(b.lhs), lhs, writer, strings);
-                    try writer.writeByte(')');
-                },
-                else => try printFromNode(nodes, index.sub(b.lhs), lhs, writer, strings),
-            }
-            try writer.writeAll(" * ");
-            const rhs = nodes.get(index.sub(b.rhs).n);
-            switch (rhs.tag) {
-                .add, .sub, .div, .mod => {
-                    try writer.writeByte('(');
-                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-                    try writer.writeByte(')');
-                },
-                else => try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings),
-            }
-        },
-        .pow => |b| {
-            const lhs = nodes.get(index.sub(b.lhs).n);
-            switch (lhs.tag) {
-                .add, .sub => {
-                    try writer.writeByte('(');
-                    try printFromNode(nodes, index.sub(b.lhs), lhs, writer, strings);
-                    try writer.writeByte(')');
-                },
-                else => try printFromNode(nodes, index.sub(b.lhs), lhs, writer, strings),
-            }
-            try writer.writeAll("^");
-            const rhs = nodes.get(index.sub(b.rhs).n);
-            switch (rhs.tag) {
-                .add, .sub, .mul, .div, .mod => {
-                    try writer.writeByte('(');
-                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-                    try writer.writeByte(')');
-                },
-                else => try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings),
-            }
-        },
-        .div => |b| {
-            const lhs = nodes.get(index.sub(b.lhs).n);
-            switch (lhs.tag) {
-                .add, .sub => {
-                    try writer.writeByte('(');
-                    try printFromNode(nodes, index.sub(b.lhs), lhs, writer, strings);
-                    try writer.writeByte(')');
-                },
-                else => try printFromNode(nodes, index.sub(b.lhs), lhs, writer, strings),
-            }
-            try writer.writeAll(" / ");
-            const rhs = nodes.get(index.sub(b.rhs).n);
-            switch (rhs.tag) {
-                .add, .sub, .mul, .div, .mod => {
-                    try writer.writeByte('(');
-                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-                    try writer.writeByte(')');
-                },
-                else => try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings),
-            }
-        },
-        .mod => |b| {
-            const lhs = nodes.get(index.sub(b.lhs).n);
-            switch (lhs.tag) {
-                .add, .sub => {
-                    try writer.writeByte('(');
-                    try printFromNode(nodes, index.sub(b.lhs), lhs, writer, strings);
-                    try writer.writeByte(')');
-                },
-                else => try printFromNode(nodes, index.sub(b.lhs), lhs, writer, strings),
-            }
-            try writer.writeAll(" % ");
-            const rhs = nodes.get(index.sub(b.rhs).n);
-            switch (rhs.tag) {
-                .add, .sub, .mul, .div, .mod => {
-                    try writer.writeByte('(');
-                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-                    try writer.writeByte(')');
-                },
-                else => try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings),
             }
         },
         .range, .invalidated_range => |b| {
@@ -1664,6 +1565,20 @@ test "Print" {
         .{ "@max(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)", "@max(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)" },
     };
 
+    const data2 = .{
+        "0 and 0",
+        "0 and 1",
+        "1 and 1",
+        "1 and 1",
+        "1 and 3 + 1",
+        "1 and (2 or 3)",
+
+        "0 or 0",
+        "0 or 1",
+        "1 or 1",
+        "1 or 1",
+    };
+
     var sheet = try Sheet.init(t.allocator);
     defer sheet.deinit();
 
@@ -1675,5 +1590,14 @@ test "Print" {
         var fixed: std.io.Writer = .fixed(&buf);
         try print(sheet.ast_nodes, expr_root, expr, &fixed);
         try t.expectEqualStrings(expected, fixed.buffered());
+    }
+
+    inline for (data2) |expr| {
+        const expr_root = try parseFromExpression(&sheet, expr);
+
+        var buf: [4096]u8 = undefined;
+        var fixed: std.io.Writer = .fixed(&buf);
+        try print(sheet.ast_nodes, expr_root, expr, &fixed);
+        try t.expectEqualStrings(expr, fixed.buffered());
     }
 }
