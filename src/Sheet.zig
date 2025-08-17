@@ -1972,26 +1972,23 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
         });
     }
 
-    const cells_start = sheet.bulkCreateCellRange(range);
-    sheet.queued_cells.appendAssumeCapacity(.{ cells_start, area });
-    for (0..area) |i| {
-        const handle: Cell.Handle = .from(@intCast(i + cells_start.int()));
+    const new_cells = sheet.bulkCreateCellRange(range);
+    assert(new_cells.len == area);
+
+    sheet.queued_cells.appendAssumeCapacity(.{ new_cells.handle(0), area });
+    for (new_cells.values(), 0..area) |*value, i| {
         const expr: ast.Index = .from(@intCast(i + ast_start));
-        sheet.cell_tree.getValue(handle).* = .{
-            .state = .enqueued,
-            .expr_root = expr,
-        };
+        value.* = .{ .state = .enqueued, .expr_root = expr };
     }
 
-    sheet.bulkInsertContiguousCells(cells_start, opts);
+    sheet.bulkInsertContiguousCells(new_cells.handle(0), opts);
 }
 
-// TODO: Make this return a cell slice
 /// Creates a new cell handle for every cell in `range`. Only sets the point field of each handle.
 /// Only allocates memory for the cell tree.
 ///
 /// Asserts that the `area.range() <= std.math.maxInt(usize)`
-pub fn bulkCreateCellRange(sheet: *Sheet, range: Rect) Cell.Handle {
+pub fn bulkCreateCellRange(sheet: *Sheet, range: Rect) CellTree.Slice {
     const area: usize = @intCast(range.area());
     const new_cells = sheet.cell_tree.addMany(area);
 
@@ -2008,7 +2005,7 @@ pub fn bulkCreateCellRange(sheet: *Sheet, range: Rect) Cell.Handle {
         }
     }
 
-    return new_cells.handle(0);
+    return new_cells;
 }
 
 /// Inserts all the cells from `cells_start` to `sheet.cell_tree.entries.len` into the cell tree.
@@ -2801,9 +2798,9 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
 
     for (sheet.queued_cells.items) |data| {
         const cell_start, const len = data;
-        for (cell_start.int()..cell_start.int() + len) |i| {
-            const handle: Cell.Handle = .from(@intCast(i));
-            try sheet.markDirty(handle, &dirty_cells);
+        const cells = sheet.cell_tree.slice(cell_start.int(), len);
+        for (0..cells.len) |i| {
+            try sheet.markDirty(cells.handle(i), &dirty_cells);
         }
     }
 
@@ -2815,9 +2812,9 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
     // All dirty cells are reachable from the cells in queued_cells
     while (sheet.queued_cells.pop()) |data| {
         const handle_start, const len = data;
-        for (handle_start.int()..handle_start.int() + len) |i| {
-            const handle: Cell.Handle = .from(@intCast(i));
-            _ = sheet.evalCellByHandle(handle) catch |err| switch (err) {
+        const cells = sheet.cell_tree.slice(handle_start.int(), len);
+        for (0..cells.len) |i| {
+            _ = sheet.evalCellByHandle(cells.handle(i)) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.CyclicalReference => {
                     // const point = sheet.cell_tree.getPoint(handle).*;
