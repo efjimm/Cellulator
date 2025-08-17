@@ -6,19 +6,23 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 ## Statements and Commands
 
-### General
+- Allow certain commands in save files
+  - Setting text alignment, moving the cursor, etc.
 
-- Implement boolean operators and functions
+- Entering just an expression should print the value of the expression
+- Partial caching for expressions
 - Implement anonymous functions
 - Implement conditional functions, conditional ranges
   - A conditional range is a range that associated with a predicate
     - The predicate is an anonymous function that filters cells from that range
     - Operations on that range will only use cells within the range satisfying the predicate
 - Implement filtering rows
-
-### Tertiary
-
 - Command for freezing rows / columns
+
+## Miscellaneous
+
+- Rip out stupid slow test
+- Write better tests
 
 # OLD TODO
 

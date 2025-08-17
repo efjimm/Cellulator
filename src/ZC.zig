@@ -2367,6 +2367,7 @@ const DebugCmd = enum {
     expect_error,
     expect_expr,
     update_cell,
+    expect,
 };
 
 const debug_cmds: std.StaticStringMap(DebugCmd) = .initComptime(.{
@@ -2376,6 +2377,7 @@ const debug_cmds: std.StaticStringMap(DebugCmd) = .initComptime(.{
     .{ "expect-error", .expect_error },
     .{ "update-cell", .update_cell },
     .{ "expect-expr", .expect_expr },
+    .{ "expect", .expect },
 });
 
 const RunCommandError = error{
@@ -2464,6 +2466,16 @@ fn argAsNumber(zc: *ZC, arg: []const u8) !f64 {
 fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !void {
     const cmd_tag = debug_cmds.get(cmd_str) orelse return error.InvalidCommand;
     switch (cmd_tag) {
+        .expect => {
+            const sheet = zc.currentSheet();
+            const expression_string = iter.string[iter.index..];
+            const root = try ast.parseFromExpression(sheet, expression_string);
+            const res = try ast.evaluate(sheet.ast_nodes, root, sheet, expression_string, sheet);
+            defer if (res == .string) sheet.allocator.free(res.string);
+            if (!res.boolean()) {
+                return error.UnexpectedResult;
+            }
+        },
         .expect_eql_number => {
             const arg1 = iter.next() orelse return error.InvalidSyntax;
             const arg2 = iter.next() orelse return error.InvalidSyntax;

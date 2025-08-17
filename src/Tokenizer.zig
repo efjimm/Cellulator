@@ -60,11 +60,18 @@ pub const Token = struct {
         colon,
         hash,
         caret,
+        greater_than,
+        less_than,
+        greater_equals,
+        less_equals,
+        double_equals,
+        exclamation_equals,
+        exclamation,
 
         lparen,
         rparen,
 
-        column_name,
+        identifier,
         rel_rel,
         rel_abs,
         abs_rel,
@@ -87,6 +94,13 @@ pub const Token = struct {
             const strings = comptime std.EnumArray(Tag, []const u8).init(.{
                 .number = "number",
                 .equals_sign = "'='",
+                .double_equals = "==",
+                .greater_than = ">",
+                .less_than = "<",
+                .greater_equals = ">=",
+                .less_equals = "<=",
+                .exclamation = "!",
+                .exclamation_equals = "!=",
                 .plus = "'+'",
                 .minus = "'-'",
                 .asterisk = "'*'",
@@ -97,7 +111,7 @@ pub const Token = struct {
                 .hash = "'#'",
                 .lparen = "'('",
                 .rparen = "')'",
-                .column_name = "column name",
+                .identifier = "identifier",
                 .rel_rel = "cell address",
                 .rel_abs = "cell address",
                 .abs_rel = "cell address",
@@ -178,8 +192,50 @@ pub fn next(t: *Tokenizer) !Token {
                 }
             },
             '=' => {
-                tag = .equals_sign;
                 t.toss(1);
+                switch (try (t.byte())) {
+                    '=' => {
+                        t.toss(1);
+                        tag = .double_equals;
+                    },
+                    else => {
+                        tag = .equals_sign;
+                    },
+                }
+            },
+            '!' => {
+                t.toss(1);
+                switch (try t.byte()) {
+                    '=' => {
+                        t.toss(1);
+                        tag = .exclamation_equals;
+                    },
+                    else => tag = .exclamation,
+                }
+            },
+            '>' => {
+                t.toss(1);
+                switch (try (t.byte())) {
+                    '=' => {
+                        t.toss(1);
+                        tag = .greater_equals;
+                    },
+                    else => {
+                        tag = .greater_than;
+                    },
+                }
+            },
+            '<' => {
+                t.toss(1);
+                switch (try (t.byte())) {
+                    '=' => {
+                        t.toss(1);
+                        tag = .less_equals;
+                    },
+                    else => {
+                        tag = .less_than;
+                    },
+                }
             },
             ' ', '\t', '\r', '\n' => {
                 start += 1;
@@ -310,7 +366,7 @@ pub fn next(t: *Tokenizer) !Token {
                 },
                 else => {
                     const str = kw_buf.items;
-                    tag = keywords.get(str) orelse .column_name;
+                    tag = keywords.get(str) orelse .identifier;
                 },
             }
         },
@@ -389,14 +445,14 @@ test "Tokens" {
         .{ "'what'", .{ .single_string_literal_start, .single_string_literal_end, .eof } },
         .{ "\"what\"", .{ .double_string_literal_start, .double_string_literal_end, .eof } },
         .{ "'what", .{ .single_string_literal_start, .unknown, .eof } },
-        .{ "what'", .{ .column_name, .single_string_literal_start, .eof } },
+        .{ "what'", .{ .identifier, .single_string_literal_start, .eof } },
         .{ "123", .{ .number, .eof } },
         .{ "123.123", .{ .number, .eof } },
         .{ "123.123.123", .{ .number, .number, .eof } },
         .{ "123_123_123", .{ .number, .eof } },
         .{ "=+-*/%,:#", .{ .equals_sign, .plus, .minus, .asterisk, .forward_slash, .percent, .comma, .colon, .hash, .eof } },
-        .{ "() aaaaaa a0", .{ .lparen, .rparen, .column_name, .rel_rel } },
-        .{ "let a = 3", .{ .keyword_let, .column_name, .equals_sign, .number, .eof } },
+        .{ "() aaaaaa a0", .{ .lparen, .rparen, .identifier, .rel_rel } },
+        .{ "let a = 3", .{ .keyword_let, .identifier, .equals_sign, .number, .eof } },
         .{ "@max(34, 100 + 45, @min(3, 1))", .{ .builtin, .lparen, .number, .comma, .number, .plus, .number, .comma, .builtin, .lparen, .number, .comma, .number, .rparen, .rparen, .eof } },
         .{ "$a1", .{ .abs_rel, .eof } },
         .{ "$a$1", .{ .abs_abs, .eof } },
@@ -405,6 +461,7 @@ test "Tokens" {
         .{ "1 and 2", .{ .number, .keyword_and, .number, .eof } },
         .{ "1 or 2", .{ .number, .keyword_or, .number, .eof } },
         .{ "let a0 = 1 or 2", .{ .keyword_let, .rel_rel, .equals_sign, .number, .keyword_or, .number, .eof } },
+        .{ "1 > 3 and 5 != 2", .{ .number, .greater_than, .number, .keyword_and, .number, .exclamation_equals, .number, .eof } },
     };
 
     inline for (data) |d| {

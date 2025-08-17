@@ -36,9 +36,10 @@ pub fn isSingle(tag: Node.Tag) bool {
         .builtin,
         .invalidated_pos,
         .invalidated_range,
-        => true,
         .minus,
         .plus,
+        .not,
+        => true,
         .assignment,
         .concat,
         .add,
@@ -49,6 +50,12 @@ pub fn isSingle(tag: Node.Tag) bool {
         .pow,
         .logical_and,
         .logical_or,
+        .greater_than,
+        .less_than,
+        .greater_equals,
+        .less_equals,
+        .equals,
+        .not_equals,
         => false,
     };
 }
@@ -72,6 +79,7 @@ pub const Node = extern struct {
         rel_rel: Position,
         minus: void,
         plus: void,
+        not: void,
         assignment: Position,
         concat: BinaryOperator,
         add: BinaryOperator,
@@ -80,6 +88,12 @@ pub const Node = extern struct {
         div: BinaryOperator,
         mod: BinaryOperator,
         pow: BinaryOperator,
+        greater_than: BinaryOperator,
+        less_than: BinaryOperator,
+        greater_equals: BinaryOperator,
+        less_equals: BinaryOperator,
+        equals: BinaryOperator,
+        not_equals: BinaryOperator,
         logical_and: BinaryOperator,
         logical_or: BinaryOperator,
         builtin: Builtin,
@@ -110,6 +124,44 @@ pub const Node = extern struct {
                 return @unionInit(Tagged, field, @field(n.data, field));
             },
         }
+    }
+
+    pub fn precedence(tag: Tag) i8 {
+        return switch (tag) {
+            // These aren't operators
+            .number => 0,
+            .column => 0,
+            .abs_abs => 0,
+            .abs_rel => 0,
+            .rel_abs => 0,
+            .rel_rel => 0,
+            .builtin => 0,
+            .range => 0,
+            .invalidated_pos => 0,
+            .invalidated_range => 0,
+            .string_literal => 0,
+            .assignment => 0,
+
+            // Actual operators
+            .minus => 2,
+            .plus => 2,
+            .not => 2,
+            .mul => 1,
+            .div => 1,
+            .mod => 1,
+            .pow => 1,
+            .concat => 0,
+            .add => 0,
+            .sub => 0,
+            .less_than => -1,
+            .greater_than => -1,
+            .equals => -1,
+            .greater_equals => -1,
+            .less_equals => -1,
+            .not_equals => -1,
+            .logical_and => -2,
+            .logical_or => -3,
+        };
     }
 };
 
@@ -304,13 +356,14 @@ pub fn printFromNode(
             try writer.print("let {f} = ", .{pos});
             try printFromIndex(nodes, .from(index.n - 1), writer, strings);
         },
-        inline .plus, .minus => |_, t| {
+        inline .plus, .minus, .not => |_, t| {
             const n = index.subN(1);
             const rhs = nodes.get(n.n);
 
             const byte = switch (t) {
                 .plus => '+',
                 .minus => '-',
+                .not => '!',
                 else => comptime unreachable,
             };
 
@@ -323,6 +376,51 @@ pub fn printFromNode(
                 try writer.writeByte(')');
             }
         },
+        // TODO: Move more binary operators into this branch
+        inline .greater_than, .less_than, .greater_equals, .less_equals => |b, t| {
+            const str = switch (t) {
+                .greater_than => ">",
+                .less_than => "<",
+                .greater_equals => ">=",
+                .less_equals => "<=",
+                else => comptime unreachable,
+            };
+
+            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
+            try writer.writeAll(" " ++ str ++ " ");
+            const rhs = nodes.get(index.sub(b.rhs).n);
+            if (Node.precedence(rhs.tag) < comptime Node.precedence(t)) {
+                try writer.writeByte('(');
+                try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
+                try writer.writeByte(')');
+            } else {
+                try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
+            }
+        },
+        .equals => |b| {
+            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
+            try writer.writeAll(" == ");
+            const rhs = nodes.get(index.sub(b.rhs).n);
+            if (Node.precedence(rhs.tag) < comptime Node.precedence(.equals)) {
+                try writer.writeByte('(');
+                try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
+                try writer.writeByte(')');
+            } else {
+                try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
+            }
+        },
+        .not_equals => |b| {
+            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
+            try writer.writeAll(" != ");
+            const rhs = nodes.get(index.sub(b.rhs).n);
+            if (Node.precedence(rhs.tag) < comptime Node.precedence(.not_equals)) {
+                try writer.writeByte('(');
+                try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
+                try writer.writeByte(')');
+            } else {
+                try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
+            }
+        },
         .logical_or => |b| {
             try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
             try writer.writeAll(" or ");
@@ -333,15 +431,12 @@ pub fn printFromNode(
             try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
             try writer.writeAll(" and ");
             const rhs = nodes.get(index.sub(b.rhs).n);
-            switch (rhs.tag) {
-                .logical_or => {
-                    try writer.writeByte('(');
-                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-                    try writer.writeByte(')');
-                },
-                else => {
-                    try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
-                },
+            if (Node.precedence(rhs.tag) < comptime Node.precedence(.logical_and)) {
+                try writer.writeByte('(');
+                try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
+                try writer.writeByte(')');
+            } else {
+                try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
             }
         },
         .add => |b| {
@@ -623,12 +718,18 @@ pub fn leftMostChild(
         .pow,
         .logical_and,
         .logical_or,
+        .greater_than,
+        .less_than,
+        .greater_equals,
+        .less_equals,
+        .equals,
+        .not_equals,
         => |b| leftMostChild(nodes, index.sub(b.lhs)),
         .builtin => |b| if (b.first_arg.int() != 0)
             leftMostChild(nodes, index.sub(b.first_arg))
         else
             index,
-        .minus, .plus => leftMostChild(nodes, index.subN(1)),
+        .minus, .plus, .not => leftMostChild(nodes, index.subN(1)),
     };
 }
 
@@ -676,6 +777,15 @@ pub const EvalResult = union(enum) {
                 try w.writeAll(str);
             },
         }
+    }
+
+    pub fn boolean(res: EvalResult) bool {
+        return switch (res) {
+            .none => false,
+            .number => |n| n != 0,
+            .string => true,
+            .cell_string => true,
+        };
     }
 };
 
@@ -734,66 +844,67 @@ pub fn EvalContext(comptime Context: type) type {
                     const rhs = try eval.evaluate(index.subN(1));
                     return .{ .number = @abs(try rhs.toNumber(0)) };
                 },
-                .add => |op| {
+                .not => {
+                    const rhs = try eval.evaluate(index.subN(1));
+                    return .{ .number = @floatFromInt(@intFromBool(!rhs.boolean())) };
+                },
+                inline .add, .sub, .mul, .div, .mod, .pow => |op, t| {
                     const lhs = try eval.evaluate(index.sub(op.lhs));
                     const rhs = try eval.evaluate(index.sub(op.rhs));
-
-                    return .{ .number = try lhs.toNumber(0) + try rhs.toNumber(0) };
-                },
-                .sub => |op| {
-                    const rhs = try eval.evaluate(index.sub(op.rhs));
-                    const lhs = try eval.evaluate(index.sub(op.lhs));
-
-                    return .{ .number = try lhs.toNumber(0) - try rhs.toNumber(0) };
-                },
-                .mul => |op| {
-                    const rhs = try eval.evaluate(index.sub(op.lhs));
-                    const lhs = try eval.evaluate(index.sub(op.rhs));
-                    return .{ .number = try lhs.toNumber(0) * try rhs.toNumber(0) };
-                },
-                .div => |op| {
-                    const lhs = try eval.evaluate(index.sub(op.lhs));
-                    const rhs = try eval.evaluate(index.sub(op.rhs));
-
-                    const rhs_number = try rhs.toNumberOrNull() orelse return error.DivideByZero;
-                    if (rhs_number == 0) return error.DivideByZero;
-
-                    return .{ .number = try lhs.toNumber(0) / rhs_number };
-                },
-                .mod => |op| {
-                    const lhs = try eval.evaluate(index.sub(op.lhs));
-                    const rhs = try eval.evaluate(index.sub(op.rhs));
-
-                    return .{ .number = @rem(try lhs.toNumber(0), try rhs.toNumber(0)) };
-                },
-                .pow => |op| {
-                    const lhs = try eval.evaluate(index.sub(op.lhs));
-                    const rhs = try eval.evaluate(index.sub(op.rhs));
-
-                    return .{
-                        .number = std.math.pow(f64, try lhs.toNumber(0), try rhs.toNumber(0)),
-                    };
+                    const l = try lhs.toNumber(0);
+                    const r = try rhs.toNumber(0);
+                    return .{ .number = switch (t) {
+                        .add => l + r,
+                        .sub => l - r,
+                        .mul => l * r,
+                        .div => {
+                            if (r == 0) return error.DivideByZero;
+                            return .{ .number = l / r };
+                        },
+                        .mod => {
+                            if (r <= 0) return error.DivideByZero;
+                            return .{ .number = @rem(l, r) };
+                        },
+                        .pow => std.math.pow(f64, l, r),
+                        else => comptime unreachable,
+                    } };
                 },
                 // and/or have the same semantics as Lua's and/or operators.
                 .logical_and => |op| {
                     const lhs = try eval.evaluate(index.sub(op.lhs));
                     const rhs = try eval.evaluate(index.sub(op.rhs));
-                    const l = try lhs.toNumber(0);
-                    const r = try rhs.toNumber(0);
-
-                    return .{
-                        .number = if (l != 0 and r != 0) r else 0,
-                    };
+                    if (lhs.boolean()) return rhs;
+                    return .{ .number = 0 };
                 },
                 .logical_or => |op| {
                     const lhs = try eval.evaluate(index.sub(op.lhs));
                     const rhs = try eval.evaluate(index.sub(op.rhs));
+                    if (lhs.boolean()) return lhs;
+                    return rhs;
+                },
+                // Boolean operators
+                inline .greater_than,
+                .less_than,
+                .equals,
+                .not_equals,
+                .greater_equals,
+                .less_equals,
+                => |op, t| {
+                    const lhs = try eval.evaluate(index.sub(op.lhs));
+                    const rhs = try eval.evaluate(index.sub(op.rhs));
                     const l = try lhs.toNumber(0);
                     const r = try rhs.toNumber(0);
-
-                    return .{
-                        .number = if (l != 0) l else r,
+                    const n = switch (t) {
+                        .greater_equals => l >= r,
+                        .less_equals => l <= r,
+                        .greater_than => l > r,
+                        .less_than => l < r,
+                        .equals => l == r,
+                        .not_equals => l != r,
+                        else => comptime unreachable,
                     };
+
+                    return .{ .number = @floatFromInt(@intFromBool(n)) };
                 },
 
                 .builtin => |b| switch (b.tag) {
@@ -1207,6 +1318,14 @@ pub const DynamicEvalResult = union(enum) {
     none,
     number: f64,
     string: [:0]const u8,
+
+    pub fn boolean(res: DynamicEvalResult) bool {
+        return switch (res) {
+            .none => false,
+            .number => |n| n != 0,
+            .string => true,
+        };
+    }
 };
 
 /// Dynamically typed evaluation of expressions.

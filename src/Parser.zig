@@ -248,12 +248,12 @@ fn parseOrExpr(parser: *Parser) !Index {
     return index;
 }
 
-/// AndExpr <- AddExpr ('and' AddExpr)*
+/// AndExpr <- EqualityExpr ('and' EqualityExpr)*
 fn parseAndExpr(parser: *Parser) !Index {
-    var index = try parser.parseAddExpr();
+    var index = try parser.parseEqualityExpr();
 
     while (parser.eatToken(.keyword_and)) |_| {
-        const rhs = try parser.parseAddExpr();
+        const rhs = try parser.parseEqualityExpr();
         const len: u32 = @intCast(parser.nodes.len);
         const op = BinaryOperator{
             .lhs = @enumFromInt(len - index.n),
@@ -262,6 +262,44 @@ fn parseAndExpr(parser: *Parser) !Index {
 
         index = try parser.addNode(.init(.logical_and, op));
     }
+
+    return index;
+}
+
+/// EqualityExpr <- AddExpr (('==' / '!=' / '<' / '>') AddExpr)*
+fn parseEqualityExpr(parser: *Parser) !Index {
+    var index = try parser.parseAddExpr();
+
+    while (true) switch (parser.token_tags[parser.tok_i]) {
+        inline .double_equals,
+        .exclamation_equals,
+        .greater_than,
+        .less_than,
+        .greater_equals,
+        .less_equals,
+        => |tag| {
+            parser.tok_i += 1;
+            const rhs = try parser.parseAddExpr();
+            const len: u32 = @intCast(parser.nodes.len);
+            const op = BinaryOperator{
+                .lhs = @enumFromInt(len - index.n),
+                .rhs = @enumFromInt(len - rhs.n),
+            };
+
+            const node_tag: Node.Tag = switch (tag) {
+                .double_equals => .equals,
+                .exclamation_equals => .not_equals,
+                .greater_than => .greater_than,
+                .less_than => .less_than,
+                .greater_equals => .greater_equals,
+                .less_equals => .less_equals,
+                else => comptime unreachable,
+            };
+
+            index = try parser.addNode(.init(node_tag, op));
+        },
+        else => break,
+    };
 
     return index;
 }
@@ -326,16 +364,16 @@ fn parseMulExpr(parser: *Parser) !Index {
 
 fn parseUnaryExpr(parser: *Parser) !Index {
     return switch (parser.token_tags[parser.tok_i]) {
-        .minus => {
+        inline .minus, .plus, .exclamation => |t| {
+            const tag: Node.Tag = switch (t) {
+                .minus => .minus,
+                .plus => .plus,
+                .exclamation => .not,
+                else => comptime unreachable,
+            };
             parser.tok_i += 1;
-            _ = try parser.parsePrimaryExpr();
-            const ret = try parser.addNode(.init(.minus, {}));
-            return ret;
-        },
-        .plus => {
-            parser.tok_i += 1;
-            _ = try parser.parsePrimaryExpr();
-            return parser.addNode(.init(.plus, {}));
+            _ = try parser.parseUnaryExpr();
+            return parser.addNode(.init(tag, {}));
         },
         else => parser.parsePrimaryExpr(),
     };
@@ -680,9 +718,7 @@ test "parser" {
     try testParseError("let a0 = (5", error.UnexpectedToken);
     try testParseError("let a0 = 5)", error.UnexpectedToken);
     try testParseError("let a0 = 5 + ", error.UnexpectedToken);
-    try testParseError("let a0 = ++ 5", error.UnexpectedToken);
     try testParseError("let a0 = 5 - ", error.UnexpectedToken);
-    try testParseError("let a0 = -- 5", error.UnexpectedToken);
 
     try testParseError("let", error.UnexpectedToken);
     try testParseError("let a0", error.UnexpectedToken);

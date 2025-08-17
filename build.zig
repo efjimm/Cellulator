@@ -142,6 +142,7 @@ fn configureTests(
         "test/unary-plus-minus.zc",
         "test/csv.zc",
         "test/absolute-cell-references.zc",
+        "test/logic.zc",
     });
     opts.addOption(bool, "fast_tests", fast_tests);
 

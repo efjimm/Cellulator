@@ -427,7 +427,7 @@ pub fn rectFromCellHandle(sheet: *Sheet, handle: Cell.Handle) Rect {
     return .initSinglePos(pos);
 }
 
-pub fn getCellFromHandle(sheet: *Sheet, handle: Cell.Handle) *Cell {
+pub fn getCellFromHandle(sheet: *const Sheet, handle: Cell.Handle) *Cell {
     return sheet.cell_tree.getValue(handle);
 }
 
@@ -1960,10 +1960,6 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
     try sheet.ensureUnusedColumnCapacity(range.width());
     errdefer comptime unreachable;
 
-    // These cells don't have any dependencies or strings that need to be stored.
-
-    // Delete existing cells
-
     _ = sheet.deleteCellRangeAssumeCapacity(range, opts);
 
     const ast_start = sheet.ast_nodes.len;
@@ -1990,6 +1986,7 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
     sheet.bulkInsertContiguousCells(cells_start, opts);
 }
 
+// TODO: Make this return a cell slice
 /// Creates a new cell handle for every cell in `range`. Only sets the point field of each handle.
 /// Only allocates memory for the cell tree.
 ///
@@ -2901,7 +2898,7 @@ pub fn setFilePath(sheet: *Sheet, filepath: []const u8) void {
     sheet.filepath.appendSliceAssumeCapacity(filepath);
 }
 
-pub fn cellStringValue(sheet: *Sheet, cell: *const Cell) []const u8 {
+pub fn cellStringValue(sheet: *const Sheet, cell: *const Cell) []const u8 {
     assert(cell.value_tag == .string);
     return sheet.string_values.items(cell.value.string);
 }
@@ -2963,7 +2960,6 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) ast.EvalError!ast.Ev
             // dependents.
             try sheet.queueDependents(sheet.rectFromCellHandle(handle));
 
-            // Evaluate
             const res = ast.evaluate(
                 sheet.ast_nodes,
                 cell.expr_root,

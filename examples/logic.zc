@@ -1,0 +1,5 @@
+let A0=1
+let A1=A0 < B0 and "less" or A0 > B0 and "more" or "equal"
+let B0=2
+let B1=B0 < A0 and "less" or B0 > A0 and "more" or "equal"
+let C1=A0 < B0 and "A0 < B0" or A0 > B0 and "A0 > B0" or "A0 == B0"

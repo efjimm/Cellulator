@@ -1,0 +1,52 @@
+let a0 = 1
+let b0 = 2
+
+let a1 = a0 < b0
+let b1 = a0 > b0
+let c1 = a0 == b0
+let d1 = a0 < b0 and 'less' or a0 > b0 and 'more' or 'equal'
+
+:expect-eql-number a0 1
+:expect-eql-number b0 2
+:expect a0 < b0
+:expect !(a0 == b0)
+:expect !(a0 > b0)
+:expect a1
+:expect !b1
+:expect !c1
+:expect a1 and !b1 and !c1
+:expect a1 or b1 or c1
+:expect-eql-string d1 'less'
+
+let a0 = 2
+
+:expect a0 == b0
+:expect !(a0 < b0)
+:expect !(a0 > b0)
+:expect !a1
+:expect !b1
+:expect c1
+:expect !a1 and !b1 and c1
+:expect a1 or b1 or c1
+:expect-eql-string d1 'equal'
+
+let a0 = 3
+
+:expect a0 > b0
+:expect !(a0 == b0)
+:expect !(a0 < b0)
+:expect !a1
+:expect b1
+:expect !c1
+:expect !a1 and b1 and !c1
+:expect a1 or b1 or c1
+:expect-eql-string d1 'more'
+
+:expect !0 != 0
+:expect !1 == 0
+:expect !10 == 0
+:expect (!'string') == 0
+:expect !'' == 0
+
+:expect ''
+:expect !!''

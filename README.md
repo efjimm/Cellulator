@@ -150,6 +150,12 @@ Examples:
 - `A0:A0` (Contains 1 cell)
 - `D6:E3` (Contains 8 cells)
 
+### Truthiness
+
+Cellulator has logical and equality operators but does not have a boolean data type. Instead, values
+have truthiness. An empty cell or the number zero is interpreted as false, and anything else is
+interpreted as true.
+
 ### Numeric Operators
 
 The following is a list of all operators that return number values. They try to convert non-number
@@ -164,6 +170,25 @@ InvalidCoercion error.
 - `/` Division
 - `%` Modulo division (remainder)
 - `(` and `)` Grouping operators
+
+The following operators return 0 for false and 1 for true:
+
+- `>` Greater than
+- `<` Less than
+- `>=` Greater than or equal to
+- `<=` Less than or equal to
+- `==` Equal
+- `!=` Not equal
+
+### Logical Operators
+
+- `and` Returns it's first operand if it is false, otherwise returns it's second operand.
+- `or` Returns it's first argument if not false, otherwise returns it's second operand.
+- `!` Logical not. Returns either 0 or 1 depending on the truthiness of it's operand.
+
+Note that due to the `and`/`or` operators returning their arguments instead of a true/false value
+they can be used like conditionals. For example, `A0 > B0 and "Greater" or "Not greater"` will
+evaluate to `"Greater"` when A0 > B0 and "Not greater" otherwise.
 
 ### String Operators
 
