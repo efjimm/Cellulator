@@ -315,7 +315,7 @@ const metatables = .{
         pub fn command(state: *Lua) callconv(.c) c_int {
             const zc = state.checkUserdata(*ZC, 1, "zc").*;
             const cmd_str = state.checkString(2);
-            zc.runCommand(cmd_str) catch {};
+            zc.runCommand(cmd_str, ZC.Command.map) catch {};
             state.setTop(0);
             return 0;
         }

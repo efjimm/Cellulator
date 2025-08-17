@@ -4,10 +4,15 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 # TODO
 
-## Statements and Commands
+- Cellulator as an interpreter
+  - Treat each  line as a command
+  - Different from loading files
+    - File loads are specialised and have lots of limitations to improve load speed.
+  - REPL
+    - Essentially just the command line without the UI
+    - We have vim keybindings!
 
-- Allow certain commands in save files
-  - Setting text alignment, moving the cursor, etc.
+## Statements and Commands
 
 - Entering just an expression should print the value of the expression
 - Partial caching for expressions

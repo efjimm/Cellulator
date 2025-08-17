@@ -696,10 +696,9 @@ fn resetArena(sheet: *Sheet) void {
     _ = sheet.arena.reset(.{ .retain_with_limit = arena_retain_size });
 }
 
-// TODO: Make this function work for non-empty sheets
 // Optimized for bulk loading
-pub fn interpretSource(sheet: *Sheet, reader: *std.io.Reader) !void {
-    assert(reader.buffer.len > 0);
+pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
+    assert(r.buffer.len > 0);
     errdefer sheet.clearRetainingCapacity();
 
     const arena = sheet.arena.allocator();
@@ -709,14 +708,14 @@ pub fn interpretSource(sheet: *Sheet, reader: *std.io.Reader) !void {
     var tokens: std.MultiArrayList(Tokenizer.Token) = .empty;
 
     while (true) {
-        reader.fill(reader.buffer.len) catch |err| switch (err) {
-            error.EndOfStream => if (reader.bufferedLen() == 0) break,
+        r.fill(r.buffer.len) catch |err| switch (err) {
+            error.EndOfStream => if (r.bufferedLen() == 0) break,
             else => |e| return e,
         };
-        const bytes = reader.buffered();
+        const bytes = r.buffered();
         const end = std.mem.lastIndexOfScalar(u8, bytes, '\n') orelse bytes.len;
         const src = bytes[0..end];
-        reader.toss(@min(end + 1, bytes.len));
+        r.toss(@min(end + 1, bytes.len));
 
         assignments.clearRetainingCapacity();
         tokens.clearRetainingCapacity();
@@ -798,37 +797,7 @@ pub fn interpretSource(sheet: *Sheet, reader: *std.io.Reader) !void {
     }
 }
 
-pub fn loadFile(sheet: *Sheet, filepath: []const u8) !void {
-    const file = std.fs.cwd().openFile(filepath, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            sheet.setFilePath(filepath);
-            sheet.has_changes = false;
-            return;
-        },
-        else => return err,
-    };
-    defer file.close();
-
-    sheet.setFilePath(filepath);
-    defer sheet.has_changes = false;
-
-    log.debug("Loading file {s}", .{filepath});
-
-    sheet.clearRetainingCapacity();
-
-    const arena = sheet.arena.allocator();
-    const buf = try arena.alloc(u8, 1 << 18);
-
-    var reader = file.reader(buf);
-    if (std.mem.endsWith(u8, filepath, ".csv")) {
-        try sheet.loadCsv(&reader.interface);
-    } else {
-        try sheet.interpretSource(&reader.interface);
-    }
-}
-
-// TODO: This is a very naive unoptimized implementation becasu I was tired when I wrote ti.
-//       `interpretSource` is heavily optimized.
+// TODO: Optimize this.
 pub fn loadCsv(sheet: *Sheet, r: *std.io.Reader) !void {
     errdefer sheet.clearRetainingCapacity();
 
