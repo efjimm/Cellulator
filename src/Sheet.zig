@@ -976,9 +976,10 @@ pub fn writeCsv(sheet: *Sheet, writer: *std.io.Writer) !void {
     const arena = sheet.arena.allocator();
     defer sheet.resetArena();
 
-    const cap = sheet.cell_tree.entries.len - sheet.cell_tree.freelist_count_entries;
-    var handles: std.ArrayList(Cell.Handle) = try .initCapacity(arena, cap);
-    try sheet.cell_tree.queryWindow(&@splat(0), &@splat(std.math.maxInt(u32)), &handles);
+    const cap = sheet.cell_tree.entries.len - sheet.cell_tree.freelist_entries_count;
+    var handles: std.ArrayList(Cell.Handle) = .empty;
+    try handles.ensureTotalCapacityPrecise(arena, cap);
+    try sheet.cell_tree.queryWindow(arena, &@splat(0), &@splat(std.math.maxInt(u32)), &handles);
 
     const Context = struct {
         tree: *const CellTree,
@@ -1887,10 +1888,14 @@ fn deleteCellRangeAssumeCapacity(sheet: *Sheet, range: Rect, opts: UndoOpts) u32
     assert(opts.undo_type == .undo or sheet.redos.capacity - sheet.redos.len > 0);
 
     const existing_cells: []const Cell.Handle, const deleted_index: u32 = blk: {
-        var buf = sheet.cell_buffer.toManaged(sheet.allocator);
-        defer sheet.cell_buffer = buf.moveToUnmanaged();
+        const buf = &sheet.cell_buffer;
         const start = buf.items.len;
-        sheet.cell_tree.queryWindow(&range.tl.array(), &range.br.array(), &buf) catch unreachable;
+        sheet.cell_tree.queryWindow(
+            sheet.allocator,
+            &range.tl.array(),
+            &range.br.array(),
+            buf,
+        ) catch unreachable;
 
         if (buf.items.len == start) {
             return std.math.maxInt(u32);
@@ -2270,13 +2275,13 @@ pub fn deleteColOrRowRange(
     defer sheet.resetArena();
 
     // List of cells that are affected
-    var cells: std.ArrayList(Cell.Handle) = .init(arena);
+    var cells: std.ArrayList(Cell.Handle) = .empty;
     // List of dependency ranges that need to be updated
-    var deps: std.ArrayList(Dependents.Entry.Handle) = .init(arena);
+    var deps: std.ArrayList(Dependents.Entry.Handle) = .empty;
     // List of dependency ranges whose depending cells will need to be re-calculated
-    var intersecting_deps: std.ArrayList(Dependents.Entry.Handle) = .init(arena);
+    var intersecting_deps: std.ArrayList(Dependents.Entry.Handle) = .empty;
     // List of columns whose position needs to be adjusted
-    var cols: std.ArrayList(Column.Handle) = .init(arena);
+    var cols: std.ArrayList(Column.Handle) = .empty;
 
     const max = std.math.maxInt(u32);
 
@@ -2285,11 +2290,11 @@ pub fn deleteColOrRowRange(
         .col => .{ .{ start, 0 }, .{ start, max } },
     };
 
-    try sheet.cell_tree.queryWindow(&tl_point, &.{ max, max }, &cells);
-    try sheet.dependents.queryWindowRect(tl_point, .{ max, max }, &deps);
-    try sheet.dependents.queryWindowRect(tl_point, br_point, &intersecting_deps);
+    try sheet.cell_tree.queryWindow(arena, &tl_point, &.{ max, max }, &cells);
+    try sheet.dependents.queryWindowRect(arena, tl_point, .{ max, max }, &deps);
+    try sheet.dependents.queryWindowRect(arena, tl_point, br_point, &intersecting_deps);
     if (axis == .col)
-        try sheet.cols.queryWindow(&.{start}, &.{max}, &cols);
+        try sheet.cols.queryWindow(arena, &.{start}, &.{max}, &cols);
 
     const index = switch (axis) {
         .col => 0,
@@ -2310,7 +2315,7 @@ pub fn deleteColOrRowRange(
         }
 
         for (deps.items) |handle| {
-            assert(handle != sheet.dependents.freelist_head_entries);
+            assert(handle != sheet.dependents.freelist_entries_head);
             const p = sheet.dependents.getPoint(handle).*;
             const needs_resize_or_delete = !(p[index] > end or (p[index] < start and p[index + 2] > end));
             undo_count += @intFromBool(needs_resize_or_delete);
@@ -2570,9 +2575,9 @@ pub fn insertColsOrRows(
     const arena = sheet.arena.allocator();
     defer sheet.resetArena();
 
-    var cells: std.ArrayList(Cell.Handle) = .init(arena);
-    var deps: std.ArrayList(Dependents.Entry.Handle) = .init(arena);
-    var cols: std.ArrayList(Column.Handle) = .init(arena);
+    var cells: std.ArrayList(Cell.Handle) = .empty;
+    var deps: std.ArrayList(Dependents.Entry.Handle) = .empty;
+    var cols: std.ArrayList(Column.Handle) = .empty;
 
     const f = switch (axis) {
         .col => "x",
@@ -2620,10 +2625,10 @@ pub fn insertColsOrRows(
         .row => .{ 0, index },
     };
 
-    try sheet.cell_tree.queryWindow(&top_left, &.{ max, max }, &cells);
-    try sheet.dependents.queryWindowRect(top_left, .{ max, max }, &deps);
+    try sheet.cell_tree.queryWindow(arena, &top_left, &.{ max, max }, &cells);
+    try sheet.dependents.queryWindowRect(arena, top_left, .{ max, max }, &deps);
     if (axis == .col)
-        try sheet.cols.queryWindow(&.{index}, &.{max}, &cols);
+        try sheet.cols.queryWindow(arena, &.{index}, &.{max}, &cols);
     errdefer comptime unreachable;
 
     // Create new columns
@@ -2762,19 +2767,20 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
 
     // log.debug("Marking dirty cells", .{});
 
-    var dirty_cells: std.ArrayList(Cell.Handle) = .init(sheet.arena.allocator());
+    var dirty_cells: std.ArrayList(Cell.Handle) = .empty;
+    const arena = sheet.arena.allocator();
     defer sheet.resetArena();
 
     for (sheet.queued_cells.items) |data| {
         const cell_start, const len = data;
         const cells = sheet.cell_tree.slice(cell_start.int(), len);
         for (0..cells.len) |i| {
-            try sheet.markDirty(cells.handle(i), &dirty_cells);
+            try sheet.markDirty(arena, cells.handle(i), &dirty_cells);
         }
     }
 
     while (dirty_cells.pop()) |cell| {
-        try sheet.markDirty(cell, &dirty_cells);
+        try sheet.markDirty(arena, cell, &dirty_cells);
     }
     // log.debug("Finished marking", .{});
 
@@ -2816,19 +2822,19 @@ pub fn enqueueUpdate(
 /// overflow on large sheets.
 fn markDirty(
     sheet: *Sheet,
+    gpa: std.mem.Allocator,
     handle: Cell.Handle,
     dirty_cells: *std.ArrayList(Cell.Handle),
 ) Allocator.Error!void {
     sheet.search_buffer.clearRetainingCapacity();
 
-    var list = sheet.search_buffer.toManaged(sheet.allocator);
-    defer sheet.search_buffer = list.moveToUnmanaged();
-
+    const list = &sheet.search_buffer;
     const pos = sheet.posFromCellHandle(handle);
     try sheet.dependents.queryWindowRect(
+        sheet.allocator,
         pos.array(),
         pos.array(),
-        &list,
+        list,
     );
 
     for (list.items) |dependent_handle| {
@@ -2839,7 +2845,7 @@ fn markDirty(
             const c = sheet.getCellFromHandle(h);
             if (c.state != .dirty) {
                 c.state = .dirty;
-                try dirty_cells.append(h);
+                try dirty_cells.append(gpa, h);
             }
         }
     }
@@ -2885,13 +2891,13 @@ pub fn setCellError(sheet: *Sheet, cell: *Cell) void {
 /// Queues the dependents of `ref` for update.
 fn queueDependents(sheet: *Sheet, rect: Rect) Allocator.Error!void {
     sheet.search_buffer.clearRetainingCapacity();
-    var list = sheet.search_buffer.toManaged(sheet.allocator);
-    defer sheet.search_buffer = list.moveToUnmanaged();
 
+    const list = &sheet.search_buffer;
     try sheet.dependents.queryWindowRect(
+        sheet.allocator,
         rect.tl.array(),
         rect.br.array(),
-        &list,
+        list,
     );
 
     for (list.items) |dependent_handle| {
@@ -3079,8 +3085,9 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Rect, comptime adjust: Adjust
     const tile_y = std.math.divCeil(u64, real_dest.height2(), src.height2()) catch unreachable;
     const tile_count = tile_x * tile_y;
 
-    var cells: std.ArrayList(Cell.Handle) = try .initCapacity(arena, 128);
-    try sheet.cell_tree.queryWindow(&src.tl.array(), &src.br.array(), &cells);
+    var cells: std.ArrayList(Cell.Handle) = .empty;
+    try cells.ensureTotalCapacity(arena, 128);
+    try sheet.cell_tree.queryWindow(arena, &src.tl.array(), &src.br.array(), &cells);
 
     if (cells.items.len == 0) return;
 
@@ -3876,9 +3883,9 @@ pub fn expectRangeNonExtant(sheet: *Sheet, address: []const u8) !void {
     var sfa = std.heap.stackFallback(4096, sheet.allocator);
     const a = sfa.get();
 
-    var results: std.ArrayList(Cell.Handle) = .init(a);
-    try sheet.cell_tree.queryWindow(&r.tl.array(), &r.br.array(), &results);
-    defer results.deinit();
+    var results: std.ArrayList(Cell.Handle) = .empty;
+    defer results.deinit(a);
+    try sheet.cell_tree.queryWindow(a, &r.tl.array(), &r.br.array(), &results);
 
     if (results.items.len != 0) {
         var buf: [4096]u8 = undefined;
@@ -4271,7 +4278,7 @@ test "save csv" {
         \\
         \\,,,10
     ;
-    try std.testing.expectEqualStrings(expected1, aw.getWritten());
+    try std.testing.expectEqualStrings(expected1, aw.written());
 }
 
 test "load csv" {

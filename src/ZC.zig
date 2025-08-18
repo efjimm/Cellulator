@@ -425,7 +425,7 @@ pub fn completionQuery(zc: *ZC) ?struct { type: QueryType, offset: usize, len: u
 
 pub fn inputSentinelSlice(zc: *ZC) Oom![:0]u8 {
     zc.input_buf.writer.writeByte(0) catch return error.OutOfMemory;
-    const buffered = zc.input_buf.getWritten();
+    const buffered = zc.input_buf.written();
     const ret = buffered[0 .. buffered.len - 1 :0];
     zc.input_buf.writer.end -= 1;
     return ret;

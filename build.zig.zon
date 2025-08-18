@@ -13,12 +13,12 @@
             .hash = "zlua-0.1.0-hGRpC9ssBQBIej-WCkH8q-YamkRq7duEm_EiUu6YEtCQ",
         },
         .zg = .{
-            .url = "git+https://github.com/efjimm/zg?ref=master#1aa43bdef430ba20d402743d6fde2cfbc66f2de2",
-            .hash = "zg-0.14.0-oGqU3F5FtgIg5jdX1sneoFVzNAM0rLoLTamCYWxDTHDr",
+            .url = "git+https://github.com/efjimm/zg?ref=master#f1dccb29a8341988c62a63ae54f7087f3ff5c02e",
+            .hash = "zg-0.14.0-oGqU3PpBtgKIH7ZhvMX93YIdYSNLdMX4ta4cgnLREAY0",
         },
         .shovel = .{
-            .url = "git+https://github.com/efjimm/shovel?ref=master#d726bb73c76a7afe0b7b45ea16e066295a23f658",
-            .hash = "shovel-0.1.0-WAlYzGI2BwBlpgQwqaSoZzwRLp1EkqS_jCKPj2kvXidf",
+            .url = "git+https://github.com/efjimm/shovel?ref=master#ddc5687ef97d1516d5174067a5d05a30651cecf7",
+            .hash = "shovel-0.1.0-WAlYzFs2BwCjO05sIHT4BheJdg7s9AnsK9VpUNnCBOZL",
         },
     },
 }

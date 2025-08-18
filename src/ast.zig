@@ -906,23 +906,27 @@ pub fn EvalContext(comptime Context: type) type {
             return .initPos(eval.data[lhs.n].rel_rel, eval.data[rhs.n].rel_rel);
         }
 
+        const SumContext = struct {
+            total: f64 = 0,
+            eval: *const EvalContext(Context),
+
+            pub fn func(ctx: *SumContext, handle: Sheet.Cell.Handle) !void {
+                const res = try ctx.eval.context.evalCellByHandle(handle);
+                ctx.total += try res.toNumber(0);
+            }
+        };
+
         fn sumRange(eval: *const @This(), lhs: Index, rhs: Index) !f64 {
             const range = eval.toPosRange(lhs, rhs);
 
-            var total: f64 = 0;
-            var results: std.ArrayList(Sheet.Cell.Handle) = .init(eval.arena);
-            defer results.deinit();
-            try eval.sheet.cell_tree.queryWindow(
+            var ctx: SumContext = .{ .eval = eval };
+            try eval.sheet.cell_tree.traverse(
                 &.{ range.tl.x, range.tl.y },
                 &.{ range.br.x, range.br.y },
-                &results,
+                &ctx,
             );
-            for (results.items) |handle| {
-                const res = try eval.context.evalCellByHandle(handle);
-                total += try res.toNumber(0);
-            }
 
-            return total;
+            return ctx.total;
         }
 
         fn evalProd(eval: *const @This(), start: Index, end: Index) !f64 {
@@ -944,24 +948,26 @@ pub fn EvalContext(comptime Context: type) type {
             return total;
         }
 
+        const ProdContext = struct {
+            total: f64,
+            eval: *const EvalContext(Context),
+
+            pub fn func(ctx: *ProdContext, h: Sheet.Cell.Handle) !void {
+                const res = try ctx.eval.context.evalCellByHandle(h);
+                ctx.total *= try res.toNumber(1);
+            }
+        };
+
         fn prodRange(eval: *const @This(), lhs: Index, rhs: Index) !f64 {
             const range = eval.toPosRange(lhs, rhs);
 
-            var total: f64 = 1;
-            var results: std.ArrayList(Sheet.Cell.Handle) = .init(eval.arena);
-            defer results.deinit();
-            try eval.sheet.cell_tree.queryWindow(
+            var ctx: ProdContext = .{ .eval = eval, .total = 1 };
+            try eval.sheet.cell_tree.traverse(
                 &.{ range.tl.x, range.tl.y },
                 &.{ range.br.x, range.br.y },
-                &results,
+                &ctx,
             );
-
-            for (results.items) |handle| {
-                const res = try eval.context.evalCellByHandle(handle);
-                total *= try res.toNumber(1);
-            }
-
-            return total;
+            return ctx.total;
         }
 
         // TODO: This function assumes that ranges do not overlap?
@@ -1018,24 +1024,29 @@ pub fn EvalContext(comptime Context: type) type {
             return max orelse 0;
         }
 
+        const MaxContext = struct {
+            max: ?f64 = null,
+            eval: *const EvalContext(Context),
+
+            pub fn func(ctx: *MaxContext, h: Sheet.Cell.Handle) !void {
+                const res = try ctx.eval.context.evalCellByHandle(h);
+                if (try res.toNumberOrNull()) |n| {
+                    if (ctx.max == null or n > ctx.max.?) ctx.max = n;
+                }
+            }
+        };
+
         fn maxRange(eval: *const @This(), lhs: Index, rhs: Index) !?f64 {
             const range = eval.toPosRange(lhs, rhs);
 
-            var max: ?f64 = null;
-            var results: std.ArrayList(Sheet.Cell.Handle) = .init(eval.arena);
-            defer results.deinit();
-            try eval.sheet.cell_tree.queryWindow(
+            var ctx: MaxContext = .{ .eval = eval };
+            try eval.sheet.cell_tree.traverse(
                 &.{ range.tl.x, range.tl.y },
                 &.{ range.br.x, range.br.y },
-                &results,
+                &ctx,
             );
-            for (results.items) |handle| {
-                const res = try eval.context.evalCellByHandle(handle);
-                const n = try res.toNumberOrNull() orelse continue;
-                if (max == null or n > max.?) max = n;
-            }
 
-            return max;
+            return ctx.max;
         }
 
         fn evalMin(eval: *const @This(), start: Index, end: Index) !f64 {
@@ -1061,24 +1072,29 @@ pub fn EvalContext(comptime Context: type) type {
             return min orelse 0;
         }
 
+        const MinContext = struct {
+            min: ?f64 = null,
+            eval: *const EvalContext(Context),
+
+            pub fn func(ctx: *MinContext, h: Sheet.Cell.Handle) !void {
+                const res = try ctx.eval.context.evalCellByHandle(h);
+                if (try res.toNumberOrNull()) |n| {
+                    if (ctx.min == null or n < ctx.min.?) ctx.min = n;
+                }
+            }
+        };
+
         fn minRange(eval: *const @This(), lhs: Index, rhs: Index) !?f64 {
             const range = eval.toPosRange(lhs, rhs);
 
-            var min: ?f64 = null;
-            var results: std.ArrayList(Sheet.Cell.Handle) = .init(eval.arena);
-            defer results.deinit();
-            try eval.sheet.cell_tree.queryWindow(
+            var ctx: MinContext = .{ .eval = eval };
+            try eval.sheet.cell_tree.traverse(
                 &.{ range.tl.x, range.tl.y },
                 &.{ range.br.x, range.br.y },
-                &results,
+                &ctx,
             );
-            for (results.items) |handle| {
-                const res = try eval.context.evalCellByHandle(handle);
-                const n = try res.toNumberOrNull() orelse continue;
-                if (min == null or n < min.?) min = n;
-            }
 
-            return min;
+            return ctx.min;
         }
 
         fn evalSqrt(eval: *const @This(), arg: Index) !f64 {

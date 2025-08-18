@@ -25,10 +25,10 @@ pub fn PhTree(
 
         root: NodeOrEntry,
 
-        freelist_head_entries: Entry.Handle,
-        freelist_count_entries: Entry.Handle.Int,
-        freelist_head_nodes: Node.Handle,
-        freelist_count_nodes: Node.Handle.Int,
+        freelist_entries_head: Entry.Handle,
+        freelist_entries_count: Entry.Handle.Int,
+        freelist_nodes_head: Node.Handle,
+        freelist_nodes_count: Node.Handle.Int,
 
         /// Prevents a mismatch between requested allocation size and actual allocation size.
         /// We always allocate more than the requested alloc size for performance reasons, so this
@@ -129,10 +129,10 @@ pub fn PhTree(
 
             .root = .invalid,
 
-            .freelist_head_entries = .invalid,
-            .freelist_count_entries = 0,
-            .freelist_head_nodes = .invalid,
-            .freelist_count_nodes = 0,
+            .freelist_entries_head = .invalid,
+            .freelist_entries_count = 0,
+            .freelist_nodes_head = .invalid,
+            .freelist_nodes_count = 0,
             .requested_entries_alloc = 0,
             .requested_nodes_alloc = 0,
         };
@@ -243,10 +243,10 @@ pub fn PhTree(
 
             tree.root = .invalid;
 
-            tree.freelist_head_nodes = .invalid;
-            tree.freelist_count_nodes = 0;
-            tree.freelist_head_entries = .invalid;
-            tree.freelist_count_entries = 0;
+            tree.freelist_nodes_head = .invalid;
+            tree.freelist_nodes_count = 0;
+            tree.freelist_entries_head = .invalid;
+            tree.freelist_entries_count = 0;
         }
 
         /// Create a value and return a handle to it. Does not insert the value into the tree.
@@ -267,11 +267,15 @@ pub fn PhTree(
         }
 
         pub fn createValueAssumeCapacity(tree: *@This(), p: *const Point, value: V) Entry.Handle {
-            if (tree.freelist_head_entries != .invalid) {
-                assert(tree.freelist_count_entries > 0);
-                const ret = tree.freelist_head_entries;
-                tree.freelist_head_entries = .fromUnchecked(tree.entryItem(ret, .parent).int());
-                tree.freelist_count_entries -= 1;
+            if (tree.freelist_entries_head != .invalid) {
+                assert(tree.freelist_entries_count > 0);
+                const ret = tree.freelist_entries_head;
+
+                tree.freelist_entries_head = .fromUnchecked(tree.entryItem(ret, .parent).int());
+                tree.freelist_entries_count -= 1;
+
+                if (tree.freelist_entries_head == .invalid)
+                    assert(tree.freelist_entries_count == 0);
 
                 tree.entries.set(ret.int(), .{
                     .point = p.*,
@@ -279,10 +283,10 @@ pub fn PhTree(
                     .value = value,
                 });
 
-                assert(tree.root != .entry or tree.root.entry != ret);
-                assert(tree.freelist_head_entries != ret);
-                assert(tree.freelist_head_entries == .invalid or
-                    tree.freelist_head_entries.int() < tree.entries.len);
+                if (tree.root == .entry) assert(tree.root.entry != ret);
+                assert(tree.freelist_entries_head == .invalid or
+                    tree.freelist_entries_head.int() < tree.entries.len);
+                assertEntryNotInFreelist(tree, ret);
                 return ret;
             }
 
@@ -297,7 +301,16 @@ pub fn PhTree(
             });
 
             assert(tree.root != .entry or tree.root.entry != handle);
+            assertEntryNotInFreelist(tree, handle);
             return handle;
+        }
+
+        fn assertEntryNotInFreelist(tree: *@This(), h: Entry.Handle) void {
+            if (!runtime_safety) return;
+            var n = tree.freelist_entries_head;
+            while (n != .invalid) : (n = .fromUnchecked(tree.entryItem(n, .parent).int())) {
+                assert(n != h);
+            }
         }
 
         pub fn destroyValue(tree: *@This(), handle: Entry.Handle) void {
@@ -309,11 +322,11 @@ pub fn PhTree(
             } else {
                 tree.entries.set(handle.int(), .{
                     .point = @splat(0),
-                    .parent = .fromUnchecked(tree.freelist_head_entries.int()),
+                    .parent = .fromUnchecked(tree.freelist_entries_head.int()),
                     .value = undefined,
                 });
-                tree.freelist_head_entries = handle;
-                tree.freelist_count_entries += 1;
+                tree.freelist_entries_head = handle;
+                tree.freelist_entries_count += 1;
             }
         }
 
@@ -521,7 +534,7 @@ pub fn PhTree(
         }
 
         fn createBranchNode(tree: *@This(), allocator: Allocator) Allocator.Error!Node.Handle {
-            if (tree.freelist_head_nodes == .invalid) {
+            if (tree.freelist_nodes_head == .invalid) {
                 var m = tree.nodes.toMultiArrayList();
                 defer tree.nodes = m.slice();
 
@@ -534,13 +547,13 @@ pub fn PhTree(
         }
 
         fn createBranchNodeAssumeCapacity(tree: *@This()) Node.Handle {
-            if (tree.freelist_head_nodes != .invalid) {
-                const ret = tree.freelist_head_nodes;
-                tree.freelist_head_nodes = tree.branchItem(ret, .parent).*;
-                tree.freelist_count_nodes -= 1;
+            if (tree.freelist_nodes_head != .invalid) {
+                const ret = tree.freelist_nodes_head;
+                tree.freelist_nodes_head = tree.branchItem(ret, .parent).*;
+                tree.freelist_nodes_count -= 1;
 
-                assert(tree.freelist_head_nodes == .invalid or
-                    tree.freelist_head_nodes.int() < tree.nodes.len);
+                assert(tree.freelist_nodes_head == .invalid or
+                    tree.freelist_nodes_head.int() < tree.nodes.len);
                 assert(ret != .invalid);
                 return ret;
             }
@@ -557,9 +570,9 @@ pub fn PhTree(
                 tree.nodes.len -= 1;
             } else {
                 tree.nodes.set(branch.int(), undefined);
-                tree.branchItem(branch, .parent).* = tree.freelist_head_nodes;
-                tree.freelist_head_nodes = branch;
-                tree.freelist_count_nodes += 1;
+                tree.branchItem(branch, .parent).* = tree.freelist_nodes_head;
+                tree.freelist_nodes_head = branch;
+                tree.freelist_nodes_count += 1;
             }
         }
 
@@ -622,7 +635,7 @@ pub fn PhTree(
 
         fn insertEmpty(tree: *@This(), kv: Entry.Handle) void {
             assert(tree.root == .invalid);
-            assert(kv != tree.freelist_head_entries);
+            assert(kv != tree.freelist_entries_head);
 
             tree.entryItem(kv, .parent).* = .invalid;
             tree.root = .init(kv);
@@ -992,19 +1005,21 @@ pub fn PhTree(
         /// Appends all key/value pairs whose key falls between `min` and `max`.
         pub fn queryWindow(
             tree: *@This(),
+            gpa: std.mem.Allocator,
             min: *const Point,
             max: *const Point,
             results: *std.ArrayList(Entry.Handle),
         ) Allocator.Error!void {
             const Context = struct {
+                gpa: std.mem.Allocator,
                 results: *std.ArrayList(Entry.Handle),
 
                 pub fn func(ctx: @This(), h: Entry.Handle) !void {
-                    try ctx.results.append(h);
+                    try ctx.results.append(ctx.gpa, h);
                 }
             };
 
-            try tree.traverse(min, max, Context{ .results = results });
+            try tree.traverse(min, max, Context{ .results = results, .gpa = gpa });
         }
 
         /// Appends all key/value pairs whose key intersects the rectangle of `min` and `max`.
@@ -1012,6 +1027,7 @@ pub fn PhTree(
         /// e.g. { top_left_x, top_left_y, bottom_right_x, bottom_right_y }.
         pub fn queryWindowRect(
             tree: *@This(),
+            gpa: std.mem.Allocator,
             min: [2]u32,
             max: [2]u32,
             results: *std.ArrayList(Entry.Handle),
@@ -1021,6 +1037,7 @@ pub fn PhTree(
             }
 
             return tree.queryWindow(
+                gpa,
                 &.{ 0, 0, min[0], min[1] },
                 &.{ max[0], max[1], std.math.maxInt(u32), std.math.maxInt(u32) },
                 results,
@@ -1067,8 +1084,8 @@ pub fn PhTree(
                     .node => |handle| handle.int(),
                 },
                 .root_tag = @enumFromInt(@intFromEnum(tree.root)),
-                .free = tree.freelist_head_nodes,
-                .free_count = tree.freelist_count_nodes,
+                .free = tree.freelist_nodes_head,
+                .free_count = tree.freelist_nodes_count,
             };
         }
 
@@ -1091,8 +1108,8 @@ pub fn PhTree(
                 .entry => .init(Entry.Handle.from(header.root)),
                 .node => .init(Node.Handle.from(header.root)),
             };
-            tree.freelist_head_nodes = header.free;
-            tree.freelist_count_nodes = header.free_count;
+            tree.freelist_nodes_head = header.free;
+            tree.freelist_nodes_count = header.free_count;
 
             if (runtime_safety) {
                 tree.requested_entries_alloc = tree.entries.capacity;
@@ -1194,13 +1211,13 @@ pub fn PhTree(
             }
 
             if (tree.root == .invalid and tree.nodes.len > 0) {
-                if (tree.freelist_head_nodes == .invalid) return false;
-                if (tree.freelist_count_nodes == 0) return false;
+                if (tree.freelist_nodes_head == .invalid) return false;
+                if (tree.freelist_nodes_count == 0) return false;
             }
 
             if (tree.root == .invalid and tree.entries.len > 0) {
-                if (tree.freelist_head_entries == .invalid) return false;
-                if (tree.freelist_count_entries == 0) return false;
+                if (tree.freelist_entries_head == .invalid) return false;
+                if (tree.freelist_entries_count == 0) return false;
             }
 
             var iter = tree.iterator();
@@ -1302,12 +1319,12 @@ test "phtree iterator" {
 }
 
 test "phtree query" {
-    const a = std.testing.allocator;
+    const gpa = std.testing.allocator;
     const Tree = PhTree(void, 1, u32);
     var tree: Tree = .empty;
-    defer tree.deinit(a);
+    defer tree.deinit(gpa);
 
-    try tree.ensureUnusedCapacity(a, 1000);
+    try tree.ensureUnusedCapacity(gpa, 1000);
 
     for (0..1000) |i| {
         const res = tree.getOrPutAssumeCapacity(&.{@intCast(i)});
@@ -1322,14 +1339,14 @@ test "phtree query" {
         .{ 2, 3 },
     };
 
-    var results: std.ArrayList(Tree.Entry.Handle) = .init(a);
-    defer results.deinit();
+    var results: std.ArrayList(Tree.Entry.Handle) = .empty;
+    defer results.deinit(gpa);
 
     for (ranges) |range| {
         results.clearRetainingCapacity();
 
         const min, const max = range;
-        try tree.queryWindow(&.{min}, &.{max}, &results);
+        try tree.queryWindow(gpa, &.{min}, &.{max}, &results);
         try std.testing.expectEqual(max - min + 1, results.items.len);
         for (results.items, min..) |item, i| {
             const p = tree.entryItem(item, .point);
