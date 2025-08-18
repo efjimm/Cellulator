@@ -1383,7 +1383,26 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
             error.InvalidCellAddress,
             error.InvalidBuiltin,
             => {
-                zc.setStatusMessage(.err, "{f}", .{diagnostics});
+                defer nodes.len = old_len;
+                const root = parser.parseExpression() catch |e2| switch (e2) {
+                    error.UnexpectedToken,
+                    error.InvalidCellAddress,
+                    error.InvalidBuiltin,
+                    => {
+                        zc.setStatusMessage(.err, "{f}", .{diagnostics});
+                        return;
+                    },
+                    else => |e| return e,
+                };
+
+                const sheet = zc.currentSheet();
+                const res = try ast.evaluate(parser.nodes.slice(), root, sheet, str, sheet);
+                const fmt = ast.fmtAst(parser.nodes.slice(), root, str);
+                switch (res) {
+                    .none => zc.setStatusMessage(.info, "{f} = ()", .{fmt}),
+                    .number => |n| zc.setStatusMessage(.info, "{f} = {d}", .{ fmt, n }),
+                    .string => |s| zc.setStatusMessage(.info, "{f} = {s}", .{ fmt, s }),
+                }
                 return;
             },
             else => |e| return e,
@@ -2747,7 +2766,6 @@ fn nextSheet(zc: *ZC) void {
 }
 
 fn openSheet(zc: *ZC) !usize {
-    // TODO: Could we use an adapter for the default sheet names to avoid allocating memory?
     try zc.sheets.ensureUnusedCapacity(zc.allocator, 1);
     const new_sheet_name = try std.fmt.allocPrint(zc.allocator, "Sheet{d}", .{
         zc.max_sheet_n,

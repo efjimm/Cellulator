@@ -14,7 +14,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 ## Statements and Commands
 
-- Entering just an expression should print the value of the expression
 - Partial caching for expressions
 - Implement anonymous functions
 - Implement conditional functions, conditional ranges
