@@ -18,7 +18,7 @@ const PhTree = @import("phtree.zig").PhTree;
 
 const Sheet = @This();
 
-allocator: Allocator,
+gpa: Allocator,
 
 /// True if there have been any changes since the last save
 has_changes: bool,
@@ -273,7 +273,7 @@ pub const UndoType = enum { undo, redo };
 
 pub fn init(gpa: Allocator) !Sheet {
     var sheet: Sheet = .{
-        .allocator = gpa,
+        .gpa = gpa,
         .has_changes = false,
 
         .queued_cells = .empty,
@@ -309,26 +309,26 @@ pub fn init(gpa: Allocator) !Sheet {
 }
 
 pub fn deinit(sheet: *Sheet) void {
-    sheet.strings_buf.deinit(sheet.allocator);
-    sheet.search_buffer.deinit(sheet.allocator);
-    sheet.lua_point_trees.deinit(sheet.allocator);
-    sheet.filepath.deinit(sheet.allocator);
+    sheet.strings_buf.deinit(sheet.gpa);
+    sheet.search_buffer.deinit(sheet.gpa);
+    sheet.lua_point_trees.deinit(sheet.gpa);
+    sheet.filepath.deinit(sheet.gpa);
 
     sheet.clearUndos(.undo);
     sheet.clearUndos(.redo);
-    sheet.dependents.deinit(sheet.allocator);
-    sheet.cell_tree.deinit(sheet.allocator);
+    sheet.dependents.deinit(sheet.gpa);
+    sheet.cell_tree.deinit(sheet.gpa);
 
-    sheet.queued_cells.deinit(sheet.allocator);
-    sheet.undos.deinit(sheet.allocator);
-    sheet.redos.deinit(sheet.allocator);
+    sheet.queued_cells.deinit(sheet.gpa);
+    sheet.undos.deinit(sheet.gpa);
+    sheet.redos.deinit(sheet.gpa);
 
-    sheet.cols.deinit(sheet.allocator);
-    sheet.ast_nodes.deinit(sheet.allocator);
-    sheet.string_values.deinit(sheet.allocator);
-    sheet.deps.deinit(sheet.allocator);
-    sheet.cell_buffer.deinit(sheet.allocator);
-    sheet.text_attrs.deinit(sheet.allocator);
+    sheet.cols.deinit(sheet.gpa);
+    sheet.ast_nodes.deinit(sheet.gpa);
+    sheet.string_values.deinit(sheet.gpa);
+    sheet.deps.deinit(sheet.gpa);
+    sheet.cell_buffer.deinit(sheet.gpa);
+    sheet.text_attrs.deinit(sheet.gpa);
     sheet.arena.deinit();
 }
 
@@ -375,7 +375,7 @@ pub fn setTextAlignment(
     cell: Cell.Handle,
     new_alignment: TextAttrs.Alignment,
 ) !void {
-    const res = try sheet.text_attrs.getOrPut(sheet.allocator, sheet.cell_tree.getPoint(cell));
+    const res = try sheet.text_attrs.getOrPut(sheet.gpa, sheet.cell_tree.getPoint(cell));
     if (!res.found_existing)
         res.value_ptr.* = .default;
     res.value_ptr.alignment = new_alignment;
@@ -394,7 +394,7 @@ fn createDep(sheet: *Sheet, dep: Dep) !DepIndex {
     }
 
     const ret: DepIndex = .from(@intCast(sheet.deps.items.len));
-    try sheet.deps.append(sheet.allocator, dep);
+    try sheet.deps.append(sheet.gpa, dep);
     return ret;
 }
 
@@ -753,9 +753,9 @@ pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
         };
 
         try sheet.ensureUnusedCellCapacity(assignments.items.len);
-        try sheet.dependents.ensureUnusedCapacity(sheet.allocator, dependent_count);
-        try sheet.deps.ensureUnusedCapacity(sheet.allocator, dependent_count);
-        try sheet.undos.ensureUnusedCapacity(sheet.allocator, 2); // + 1 for sentinel
+        try sheet.dependents.ensureUnusedCapacity(sheet.gpa, dependent_count);
+        try sheet.deps.ensureUnusedCapacity(sheet.gpa, dependent_count);
+        try sheet.undos.ensureUnusedCapacity(sheet.gpa, 2); // + 1 for sentinel
 
         try sheet.ensureUnusedStringsCapacity(total_strings_len);
         try sheet.ensureUnusedColumnCapacity(col_count);
@@ -851,7 +851,7 @@ pub fn loadCsv(sheet: *Sheet, r: *std.io.Reader) !void {
                 } else |_| {
                     const root: ast.Index = .from(@intCast(sheet.ast_nodes.len));
                     var m = sheet.ast_nodes.toMultiArrayList();
-                    try m.append(sheet.allocator, .{
+                    try m.append(sheet.gpa, .{
                         .tag = .string_literal,
                         .data = .{
                             .string_literal = .{
@@ -1129,8 +1129,8 @@ fn ensureExpressionDependentsCapacity(sheet: *Sheet, expr_root: ast.Index) Alloc
         }
     }
 
-    try sheet.dependents.ensureUnusedCapacity(sheet.allocator, dependent_count);
-    try sheet.deps.ensureUnusedCapacity(sheet.allocator, dependent_count);
+    try sheet.dependents.ensureUnusedCapacity(sheet.gpa, dependent_count);
+    try sheet.deps.ensureUnusedCapacity(sheet.gpa, dependent_count);
 }
 
 /// Removes `cell` as a dependent of all cells in `rect`
@@ -1388,8 +1388,8 @@ fn endRedoGroup(sheet: *Sheet) void {
 }
 
 pub fn ensureUnusedUndoCapacity(sheet: *Sheet, n: u32) Allocator.Error!void {
-    try sheet.undos.ensureUnusedCapacity(sheet.allocator, n + 1);
-    try sheet.redos.ensureUnusedCapacity(sheet.allocator, n + 1);
+    try sheet.undos.ensureUnusedCapacity(sheet.gpa, n + 1);
+    try sheet.redos.ensureUnusedCapacity(sheet.gpa, n + 1);
 }
 
 pub fn pushUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
@@ -1427,7 +1427,7 @@ pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
         .insert_cell => {
             const handle = u.payload.insert_cell;
             const p = sheet.cell_tree.getPoint(handle).*;
-            _ = try sheet.cell_tree.insert(sheet.allocator, &p, handle);
+            _ = try sheet.cell_tree.insert(sheet.gpa, &p, handle);
             try sheet.enqueueUpdate(handle);
         },
         .set_column_width => {
@@ -1475,7 +1475,7 @@ pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
         .insert_dep => {
             const handle = u.payload.insert_dep;
             const p = sheet.dependents.getPoint(handle).*;
-            _ = try sheet.dependents.insert(sheet.allocator, &p, handle);
+            _ = try sheet.dependents.insert(sheet.gpa, &p, handle);
             var n = sheet.dependents.getValue(handle).*;
             while (n.isValid()) : (n = sheet.deps.items[n.n].next) {
                 const cell = sheet.deps.items[n.n].handle;
@@ -1704,7 +1704,7 @@ pub fn incWidth(
     if (!sheet.columnIsPopulated(column_index)) return;
     try sheet.ensureUnusedUndoCapacity(1);
 
-    const res = try sheet.cols.getOrPut(sheet.allocator, &.{column_index});
+    const res = try sheet.cols.getOrPut(sheet.gpa, &.{column_index});
     if (!res.found_existing) res.value_ptr.* = .{};
 
     try sheet.setColWidth(res.handle, column_index, res.value_ptr.width +| n, opts);
@@ -1719,7 +1719,7 @@ pub fn decWidth(
     if (!sheet.columnIsPopulated(column_index)) return;
     try sheet.ensureUnusedUndoCapacity(1);
 
-    const res = try sheet.cols.getOrPut(sheet.allocator, &.{column_index});
+    const res = try sheet.cols.getOrPut(sheet.gpa, &.{column_index});
     if (!res.found_existing) res.value_ptr.* = .{};
 
     try sheet.setColWidth(res.handle, column_index, res.value_ptr.width -| n, opts);
@@ -1763,7 +1763,7 @@ pub fn incPrecision(
     if (!sheet.columnIsPopulated(column_index)) return;
     try sheet.ensureUnusedUndoCapacity(1);
 
-    const res = try sheet.cols.getOrPut(sheet.allocator, &.{column_index});
+    const res = try sheet.cols.getOrPut(sheet.gpa, &.{column_index});
     if (!res.found_existing) res.value_ptr.* = .{};
 
     try sheet.setColPrecision(res.handle, column_index, res.value_ptr.precision +| n, opts);
@@ -1778,7 +1778,7 @@ pub fn decPrecision(
     if (!sheet.columnIsPopulated(column_index)) return;
     try sheet.ensureUnusedUndoCapacity(1);
 
-    const res = try sheet.cols.getOrPut(sheet.allocator, &.{column_index});
+    const res = try sheet.cols.getOrPut(sheet.gpa, &.{column_index});
     if (!res.found_existing) res.value_ptr.* = .{};
 
     try sheet.setColPrecision(res.handle, column_index, res.value_ptr.precision -| n, opts);
@@ -1854,30 +1854,30 @@ fn dupeAstStrings(
 }
 
 fn ensureUnusedCellCapacity(sheet: *Sheet, n: usize) !void {
-    try sheet.cell_tree.ensureUnusedCapacity(sheet.allocator, n);
+    try sheet.cell_tree.ensureUnusedCapacity(sheet.gpa, n);
 }
 
 fn ensureUnusedStringsCapacity(sheet: *Sheet, n: usize) !void {
-    try sheet.strings_buf.ensureUnusedCapacity(sheet.allocator, n);
+    try sheet.strings_buf.ensureUnusedCapacity(sheet.gpa, n);
 }
 
 fn ensureUnusedCellQueueCapacity(sheet: *Sheet, n: usize) !void {
-    try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, n);
+    try sheet.queued_cells.ensureUnusedCapacity(sheet.gpa, n);
 }
 
 fn ensureUnusedColumnCapacity(sheet: *Sheet, n: u32) !void {
-    try sheet.cols.ensureUnusedCapacity(sheet.allocator, n);
+    try sheet.cols.ensureUnusedCapacity(sheet.gpa, n);
 }
 
 fn ensureUnusedAstNodeCapacity(sheet: *Sheet, n: usize) !void {
     var m = sheet.ast_nodes.toMultiArrayList();
     defer sheet.ast_nodes = m.slice();
 
-    try m.ensureUnusedCapacity(sheet.allocator, n);
+    try m.ensureUnusedCapacity(sheet.gpa, n);
 }
 
 fn ensureUnusedCellBufferCapacity(sheet: *Sheet, n: usize) !void {
-    try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, n);
+    try sheet.cell_buffer.ensureUnusedCapacity(sheet.gpa, n);
 }
 
 /// Deletes a cell range, pushing a `.bulk_cell_insert` undo. Asserts that `undo_cell_buffer` and the
@@ -1891,7 +1891,7 @@ fn deleteCellRangeAssumeCapacity(sheet: *Sheet, range: Rect, opts: UndoOpts) u32
         const buf = &sheet.cell_buffer;
         const start = buf.items.len;
         sheet.cell_tree.queryWindow(
-            sheet.allocator,
+            sheet.gpa,
             &range.tl.array(),
             &range.br.array(),
             buf,
@@ -2062,7 +2062,7 @@ pub fn bulkSetCellExpr(
         while (iter.next()) |_| ref_count += 1;
         break :blk ref_count;
     };
-    try sheet.deps.ensureUnusedCapacity(sheet.allocator, area * ref_count);
+    try sheet.deps.ensureUnusedCapacity(sheet.gpa, area * ref_count);
     errdefer comptime unreachable;
 
     _ = sheet.deleteCellRangeAssumeCapacity(range, opts.undo_opts);
@@ -2228,7 +2228,7 @@ pub fn deleteCellRange(sheet: *Sheet, r: Rect, opts: UndoOpts) Allocator.Error!v
     const area: usize = std.math.cast(usize, r.area() +| 1) orelse
         return error.OutOfMemory;
     try sheet.ensureUnusedUndoCapacity(1);
-    try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, area);
+    try sheet.cell_buffer.ensureUnusedCapacity(sheet.gpa, area);
     try sheet.ensureUnusedCellQueueCapacity(area);
     const n = sheet.deleteCellRangeAssumeCapacity(r, opts);
     // TODO: Use an index type for this
@@ -2361,7 +2361,7 @@ pub fn deleteColOrRowRange(
         }
     }
 
-    try sheet.queued_cells.ensureUnusedCapacity(sheet.allocator, queue_count + cells.items.len);
+    try sheet.queued_cells.ensureUnusedCapacity(sheet.gpa, queue_count + cells.items.len);
     try sheet.ensureUnusedUndoCapacity(undo_count);
     errdefer comptime unreachable;
 
@@ -2616,7 +2616,7 @@ pub fn insertColsOrRows(
 
     try sheet.ensureUnusedUndoCapacity(undo_count);
     if (axis == .col)
-        try sheet.cols.ensureUnusedCapacity(sheet.allocator, n);
+        try sheet.cols.ensureUnusedCapacity(sheet.gpa, n);
 
     const max = std.math.maxInt(u32);
 
@@ -2813,7 +2813,7 @@ pub fn enqueueUpdate(
     sheet: *Sheet,
     handle: Cell.Handle,
 ) Allocator.Error!void {
-    try sheet.queued_cells.append(sheet.allocator, .{ handle, 1 });
+    try sheet.queued_cells.append(sheet.gpa, .{ handle, 1 });
     sheet.getCellFromHandle(handle).state = .enqueued;
 }
 
@@ -2831,7 +2831,7 @@ fn markDirty(
     const list = &sheet.search_buffer;
     const pos = sheet.posFromCellHandle(handle);
     try sheet.dependents.queryWindowRect(
-        sheet.allocator,
+        sheet.gpa,
         pos.array(),
         pos.array(),
         list,
@@ -2894,7 +2894,7 @@ fn queueDependents(sheet: *Sheet, rect: Rect) Allocator.Error!void {
 
     const list = &sheet.search_buffer;
     try sheet.dependents.queryWindowRect(
-        sheet.allocator,
+        sheet.gpa,
         rect.tl.array(),
         rect.br.array(),
         list,
@@ -2908,7 +2908,7 @@ fn queueDependents(sheet: *Sheet, rect: Rect) Allocator.Error!void {
             const cell = sheet.getCellFromHandle(handle);
             if (cell.state == .dirty) {
                 cell.state = .enqueued;
-                try sheet.queued_cells.append(sheet.allocator, .{ handle, 1 });
+                try sheet.queued_cells.append(sheet.gpa, .{ handle, 1 });
             }
         }
     }
@@ -2950,12 +2950,14 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) ast.EvalError!ast.Ev
                 .none => cell.setValue(.number, 0),
                 .number => |n| cell.setValue(.number, n),
                 .string => |str| {
-                    defer sheet.allocator.free(str);
-                    const list = try sheet.string_values.createList(sheet.allocator);
-                    errdefer sheet.string_values.destroyList(list);
-                    try sheet.string_values.ensureUnusedCapacity(sheet.allocator, list, @intCast(str.len));
+                    const bytes = str.bytes();
+                    defer if (str == .slice) sheet.gpa.free(bytes);
 
-                    sheet.string_values.appendSliceAssumeCapacity(list, str);
+                    const list = try sheet.string_values.createList(sheet.gpa);
+                    errdefer sheet.string_values.destroyList(list);
+                    try sheet.string_values.ensureUnusedCapacity(sheet.gpa, list, @intCast(bytes.len));
+
+                    sheet.string_values.appendSliceAssumeCapacity(list, bytes);
                     cell.setValue(.string, list);
                 },
             }
@@ -2965,10 +2967,14 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) ast.EvalError!ast.Ev
 
     return switch (cell.value_tag) {
         .number => .{ .number = cell.value.number },
-        .string => .{ .cell_string = .{
-            .sheet = sheet,
-            .list_index = cell.value.string,
-        } },
+        .string => .{
+            .string = .{
+                .cell = .{
+                    .sheet = sheet,
+                    .list_index = cell.value.string,
+                },
+            },
+        },
         .err => cell.value.err.getError(),
     };
 }
@@ -3095,7 +3101,7 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Rect, comptime adjust: Adjust
         return error.OutOfMemory;
 
     try sheet.ensureUnusedUndoCapacity(2);
-    try sheet.cell_buffer.ensureUnusedCapacity(sheet.allocator, cell_count);
+    try sheet.cell_buffer.ensureUnusedCapacity(sheet.gpa, cell_count);
 
     var total_asts_len: usize = 0;
     var total_deps: u32 = 0;
@@ -3107,10 +3113,10 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Rect, comptime adjust: Adjust
     }
 
     try sheet.ensureUnusedCellCapacity(cell_count - 1);
-    try sheet.deps.ensureUnusedCapacity(sheet.allocator, total_deps);
+    try sheet.deps.ensureUnusedCapacity(sheet.gpa, total_deps);
     try sheet.ensureUnusedCellQueueCapacity(cell_count - 1);
     if (adjust == .adjust) {
-        try sheet.dependents.ensureUnusedCapacity(sheet.allocator, cell_count - 1);
+        try sheet.dependents.ensureUnusedCapacity(sheet.gpa, cell_count - 1);
         try sheet.ensureUnusedAstNodeCapacity(@intCast(total_asts_len * tile_count));
     }
     errdefer comptime unreachable;
@@ -3880,7 +3886,7 @@ pub fn expectRangeNonExtant(sheet: *Sheet, address: []const u8) !void {
         try .fromAddress(br),
     );
 
-    var sfa = std.heap.stackFallback(4096, sheet.allocator);
+    var sfa = std.heap.stackFallback(4096, sheet.gpa);
     const a = sfa.get();
 
     var results: std.ArrayList(Cell.Handle) = .empty;

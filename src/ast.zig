@@ -285,7 +285,7 @@ pub fn initTokens(
     token_starts: []const u32,
 ) ParseError!Parser {
     var parser: Parser = .init(
-        sheet.allocator,
+        sheet.gpa,
         source,
         token_tags,
         token_starts,
@@ -314,7 +314,7 @@ pub fn parseFromExpressionDiag(
 ) ParseError!Index {
     var reader: std.io.Reader = .fixed(source);
     var tokens = Tokenizer.collectTokens(
-        sheet.allocator,
+        sheet.gpa,
         &reader,
         @intCast(source.len / 2),
     ) catch |err| switch (err) {
@@ -322,10 +322,10 @@ pub fn parseFromExpressionDiag(
         error.OutOfMemory => |e| return e,
     };
 
-    defer tokens.deinit(sheet.allocator);
+    defer tokens.deinit(sheet.gpa);
 
     var parser: Parser = .init(
-        sheet.allocator,
+        sheet.gpa,
         source,
         tokens.items(.tag),
         tokens.items(.start),
@@ -637,10 +637,19 @@ pub fn leftMostChild(
 pub const EvalResult = union(enum) {
     none,
     number: f64,
-    string: []const u8,
-    cell_string: struct {
-        sheet: *Sheet,
-        list_index: @FieldType(Sheet, "string_values").List.Index,
+    string: union(enum) {
+        slice: []const u8,
+        cell: struct {
+            sheet: *Sheet,
+            list_index: @FieldType(Sheet, "string_values").List.Index,
+        },
+
+        pub fn bytes(self: @This()) []const u8 {
+            return switch (self) {
+                .slice => |s| s,
+                .cell => |s| s.sheet.string_values.items(s.list_index),
+            };
+        }
     },
 
     /// Attempts to coerce `res` to an integer.
@@ -648,11 +657,7 @@ pub const EvalResult = union(enum) {
         return switch (res) {
             .none => none_value,
             .number => |n| n,
-            .string => |str| std.fmt.parseFloat(f64, str) catch error.InvalidCoercion,
-            .cell_string => |i| {
-                const str = i.sheet.string_values.items(i.list_index);
-                return std.fmt.parseFloat(f64, str) catch error.InvalidCoercion;
-            },
+            .string => |str| std.fmt.parseFloat(f64, str.bytes()) catch error.InvalidCoercion,
         };
     }
 
@@ -660,11 +665,7 @@ pub const EvalResult = union(enum) {
         return switch (res) {
             .none => null,
             .number => |n| n,
-            .string => |str| std.fmt.parseFloat(f64, str) catch error.InvalidCoercion,
-            .cell_string => |i| {
-                const str = i.sheet.string_values.items(i.list_index);
-                return std.fmt.parseFloat(f64, str) catch error.InvalidCoercion;
-            },
+            .string => |str| std.fmt.parseFloat(f64, str.bytes()) catch error.InvalidCoercion,
         };
     }
 
@@ -672,11 +673,7 @@ pub const EvalResult = union(enum) {
         switch (res) {
             .none => {},
             .number => |n| try w.print("{d}", .{n}),
-            .string => |str| try w.writeAll(str),
-            .cell_string => |i| {
-                const str = i.sheet.string_values.items(i.list_index);
-                try w.writeAll(str);
-            },
+            .string => |str| try w.writeAll(str.bytes()),
         }
     }
 
@@ -685,7 +682,6 @@ pub const EvalResult = union(enum) {
             .none => false,
             .number => |n| n != 0,
             .string => true,
-            .cell_string => true,
         };
     }
 };
@@ -814,8 +810,8 @@ pub fn EvalContext(comptime Context: type) type {
                     .avg => .{ .number = try eval.evalAvg(index.sub(b.first_arg), index) },
                     .max => .{ .number = try eval.evalMax(index.sub(b.first_arg), index) },
                     .min => .{ .number = try eval.evalMin(index.sub(b.first_arg), index) },
-                    .upper => .{ .string = try eval.evalUpper(index.sub(b.first_arg)) },
-                    .lower => .{ .string = try eval.evalLower(index.sub(b.first_arg)) },
+                    .upper => .{ .string = .{ .slice = try eval.evalUpper(index.sub(b.first_arg)) } },
+                    .lower => .{ .string = .{ .slice = try eval.evalLower(index.sub(b.first_arg)) } },
                     .sqrt => .{ .number = try eval.evalSqrt(index.subN(1)) },
                     .round => .{ .number = try eval.evalRound(index.subN(1)) },
                     .floor => .{ .number = try eval.evalFloor(index.subN(1)) },
@@ -833,16 +829,10 @@ pub fn EvalContext(comptime Context: type) type {
                 .concat => |op| {
                     const lhs = try eval.evaluate(index.sub(op.lhs));
                     const rhs = try eval.evaluate(index.sub(op.rhs));
-
-                    const len = std.fmt.count("{f}{f}", .{ lhs, rhs });
-                    const buf = try eval.arena.alloc(u8, len);
-                    var w: std.io.Writer = .fixed(buf);
-                    w.print("{f}{f}", .{ lhs, rhs }) catch unreachable;
-                    assert(w.end == w.buffer.len);
-
-                    return .{ .string = w.buffered() };
+                    const slice = try std.fmt.allocPrint(eval.arena, "{f}{f}", .{ lhs, rhs });
+                    return .{ .string = .{ .slice = slice } };
                 },
-                .string_literal => |str| .{ .string = eval.strings[str.start..str.end] },
+                .string_literal => |str| .{ .string = .{ .slice = eval.strings[str.start..str.end] } },
                 .column,
                 .invalidated_pos,
                 .range,
@@ -1124,21 +1114,20 @@ pub fn EvalContext(comptime Context: type) type {
 
         fn evalStringLen(eval: *const @This(), arg: Index) !f64 {
             const res = try eval.evaluate(arg);
-            const str = switch (res) {
+            switch (res) {
                 .none => return 0,
                 .number => |n| {
                     // TODO: This should account for the current precision of the cell
                     return @floatFromInt(std.fmt.count("{d}", .{n}));
                 },
-                .string => |str| str,
-                .cell_string => |i| i.sheet.string_values.items(i.list_index),
-            };
-
-            const zg = @import("zg");
-            var iter = zg.graphemes.iterator(str);
-            var count: usize = 0;
-            while (iter.next()) |_| count += 1;
-            return @floatFromInt(count);
+                .string => |str| {
+                    const zg = @import("zg");
+                    var iter = zg.graphemes.iterator(str.bytes());
+                    var count: usize = 0;
+                    while (iter.next()) |_| count += 1;
+                    return @floatFromInt(count);
+                },
+            }
         }
 
         fn evalCount(eval: *const @This(), start: Index, end: Index) !f64 {
@@ -1257,8 +1246,8 @@ pub fn evaluate(
     /// Instance of a type which has the method `evalCell`,
     /// which evaluates the cell at the given position.
     context: anytype,
-) !DynamicEvalResult {
-    var arena: std.heap.ArenaAllocator = .init(sheet.allocator);
+) !EvalResult {
+    var arena: std.heap.ArenaAllocator = .init(sheet.gpa);
     defer arena.deinit();
 
     const ctx: EvalContext(@TypeOf(context)) = .{
@@ -1277,10 +1266,7 @@ pub fn evaluate(
     return switch (res) {
         .none => .none,
         .number => |n| .{ .number = n },
-        .string => |str| .{ .string = try sheet.allocator.dupeZ(u8, str) },
-        .cell_string => |i| .{
-            .string = try sheet.allocator.dupeZ(u8, i.sheet.string_values.items(i.list_index)),
-        },
+        .string => |str| .{ .string = .{ .slice = try sheet.gpa.dupe(u8, str.bytes()) } },
     };
 }
 

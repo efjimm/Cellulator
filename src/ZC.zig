@@ -1401,7 +1401,7 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
                 switch (res) {
                     .none => zc.setStatusMessage(.info, "{f} = ()", .{fmt}),
                     .number => |n| zc.setStatusMessage(.info, "{f} = {d}", .{ fmt, n }),
-                    .string => |s| zc.setStatusMessage(.info, "{f} = {s}", .{ fmt, s }),
+                    .string => |s| zc.setStatusMessage(.info, "{f} = {s}", .{ fmt, s.bytes() }),
                 }
                 return;
             },
@@ -2501,7 +2501,7 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
             const expression_string = iter.string[iter.index..];
             const root = try ast.parseFromExpression(sheet, expression_string);
             const res = try ast.evaluate(sheet.ast_nodes, root, sheet, expression_string, sheet);
-            defer if (res == .string) sheet.allocator.free(res.string);
+            defer if (res == .string and res.string == .slice) sheet.gpa.free(res.string.slice);
             if (!res.boolean()) {
                 return error.UnexpectedResult;
             }
@@ -2598,11 +2598,11 @@ fn resetArena(zc: *ZC) void {
 fn setTextAlignment(zc: *ZC, r: Rect, alignment: Sheet.TextAttrs.Alignment) Oom!void {
     const sheet = zc.currentSheet();
     const n = std.math.cast(usize, r.area()) orelse return error.OutOfMemory;
-    try sheet.text_attrs.ensureUnusedCapacity(sheet.allocator, n);
+    try sheet.text_attrs.ensureUnusedCapacity(sheet.gpa, n);
 
     var iter = r.iterator();
     while (iter.next()) |pos| {
-        const res = try sheet.text_attrs.getOrPut(sheet.allocator, &.{ pos.x, pos.y });
+        const res = try sheet.text_attrs.getOrPut(sheet.gpa, &.{ pos.x, pos.y });
         if (!res.found_existing)
             res.value_ptr.* = .default;
         res.value_ptr.alignment = alignment;
@@ -2620,7 +2620,7 @@ pub fn loadCmdBinary(zc: *ZC, filepath: []const u8) !void {
     errdefer comptime unreachable;
 
     const sheet = &zc.sheets.values()[new_sheet];
-    sheet.deserialize(sheet.allocator, file) catch |err| {
+    sheet.deserialize(sheet.gpa, file) catch |err| {
         zc.setStatusMessage(.err, "Could not open file: {s}", .{@errorName(err)});
         zc.closeSheet(new_sheet) catch unreachable;
         return;
@@ -3154,7 +3154,7 @@ pub fn expandWidthAtCursor(zc: *ZC) Oom!void {
     if (!sheet.columnIsPopulated(zc.cursor.x)) return;
     try sheet.ensureUnusedUndoCapacity(1);
 
-    const res = try sheet.cols.getOrPut(sheet.allocator, &.{zc.cursor.x});
+    const res = try sheet.cols.getOrPut(sheet.gpa, &.{zc.cursor.x});
     if (!res.found_existing) res.value_ptr.* = .{};
 
     const handle = sheet.getColumnHandle(zc.cursor.x) orelse return;

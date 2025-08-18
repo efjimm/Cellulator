@@ -15,6 +15,7 @@ might be an interesting read so I committed it. The stuff at the top is probably
 ## Statements and Commands
 
 - Partial caching for expressions
+- Make cell positions and ranges an actual value that can be returned from expressions.
 - Implement anonymous functions
 - Implement conditional functions, conditional ranges
   - A conditional range is a range that associated with a predicate
