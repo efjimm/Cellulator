@@ -1121,7 +1121,7 @@ fn renderCursor(tui: *Tui, wr: *Screen.Writer) !void {
             .x = @intCast(start),
             .y = @intCast(start_y),
             .width = @intCast(width),
-            .height = @intCast(end_y - start_y + 1),
+            .height = @intCast(@min(std.math.maxInt(u16), end_y - start_y + 1)),
         }),
         tui.styles.get(.cell_number_selected),
     );

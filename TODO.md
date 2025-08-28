@@ -29,6 +29,9 @@ might be an interesting read so I committed it. The stuff at the top is probably
 - Rip out stupid slow test
 - Write better tests
 
+- Reset count when changing modes
+- Move cursor back to start position after interactively inserting range in command line
+
 # OLD TODO
 
 - Implement basically everything mentioned in sc-im's help page
