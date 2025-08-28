@@ -1865,7 +1865,7 @@ fn ensureUnusedCellQueueCapacity(sheet: *Sheet, n: usize) !void {
     try sheet.queued_cells.ensureUnusedCapacity(sheet.gpa, n);
 }
 
-fn ensureUnusedColumnCapacity(sheet: *Sheet, n: u32) !void {
+fn ensureUnusedColumnCapacity(sheet: *Sheet, n: usize) !void {
     try sheet.cols.ensureUnusedCapacity(sheet.gpa, n);
 }
 
@@ -1925,13 +1925,17 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
         @branchHint(.cold);
         return error.OutOfMemory;
     };
+    const width = std.math.cast(usize, range.width2()) orelse {
+        @branchHint(.cold);
+        return error.OutOfMemory;
+    };
     try sheet.ensureUnusedCellCapacity(area);
     try sheet.ensureUnusedAstNodeCapacity(area);
     // One for deleting existing cells, one for inserting new cells
     try sheet.ensureUnusedUndoCapacity(2);
     try sheet.ensureUnusedCellQueueCapacity(1);
     try sheet.ensureUnusedCellBufferCapacity(area + 1); // Can't overflow, we'll OOM before that
-    try sheet.ensureUnusedColumnCapacity(range.width());
+    try sheet.ensureUnusedColumnCapacity(width);
     errdefer comptime unreachable;
 
     _ = sheet.deleteCellRangeAssumeCapacity(range, opts);
@@ -2043,9 +2047,14 @@ pub fn bulkSetCellExpr(
 ) !void {
     const need_cell_eval = opts.tag == .err;
     // Pre-allocate memory
-    const area = std.math.cast(usize, range.area()) orelse
+    const area = std.math.cast(usize, range.area()) orelse {
+        @branchHint(.cold);
         return error.OutOfMemory;
-    const width = range.width();
+    };
+    const width = std.math.cast(usize, range.width2()) orelse {
+        @branchHint(.cold);
+        return error.OutOfMemory;
+    };
     try sheet.ensureUnusedCellCapacity(area);
     try sheet.ensureUnusedStringsCapacity(source.len);
     if (need_cell_eval)

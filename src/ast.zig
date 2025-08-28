@@ -964,7 +964,7 @@ pub fn EvalContext(comptime Context: type) type {
         fn evalAvg(eval: *const @This(), start: Index, end: Index) !f64 {
             var iter = argIterator(eval.nodes, start, end);
             var total: f64 = 0;
-            var total_items: Position.HashInt = 0;
+            var total_items: u65 = 0;
 
             while (iter.next()) |i| switch (eval.tags[i.n]) {
                 .range => {
@@ -972,21 +972,17 @@ pub fn EvalContext(comptime Context: type) type {
                     const lhs = i.sub(r.lhs);
                     const rhs = i.sub(r.rhs);
                     total += try eval.sumRange(lhs, rhs);
-
-                    const rect: Rect = .initPos(
-                        eval.data[lhs.n].rel_rel,
-                        eval.data[rhs.n].rel_rel,
-                    );
-
-                    total_items += rect.area();
+                    total_items += eval.countRange(i, .numbers);
                 },
                 .invalidated_range => return error.NotEvaluable,
                 else => {
                     const res = try eval.evaluate(i);
-                    total += try res.toNumber(0);
+                    total += try res.toNumberOrNull() orelse continue;
                     total_items += 1;
                 },
             };
+
+            if (total_items == 0) return 0;
 
             return total / @as(f64, @floatFromInt(total_items));
         }
@@ -1134,7 +1130,7 @@ pub fn EvalContext(comptime Context: type) type {
             var iter = argIterator(eval.nodes, start, end);
             var total: f64 = 0;
             while (iter.next()) |i| switch (eval.tags[i.n]) {
-                .range => total += eval.countRange(i, .numbers),
+                .range => total += @floatFromInt(eval.countRange(i, .numbers)),
                 else => {
                     const res = eval.evaluate(i) catch continue;
                     if (res != .none) {
@@ -1165,7 +1161,7 @@ pub fn EvalContext(comptime Context: type) type {
             eval: *const @This(),
             range_arg: Index,
             comptime count_type: enum { all, numbers },
-        ) f64 {
+        ) u65 {
             assert(eval.tags[range_arg.n] == .range);
             const lhs, const rhs = eval.data[range_arg.n].range.resolve(range_arg);
             const r = eval.toPosRange(lhs, rhs);
@@ -1189,7 +1185,7 @@ pub fn EvalContext(comptime Context: type) type {
 
             var ctx: CountContext = .{ .count = 0, .eval = eval };
             eval.sheet.cell_tree.traverse(&r.tl.array(), &r.br.array(), &ctx) catch unreachable;
-            return @floatFromInt(ctx.count);
+            return ctx.count;
         }
 
         fn evalLog(eval: *const @This(), arg: Index, base_arg: Index) !f64 {

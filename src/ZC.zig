@@ -596,7 +596,7 @@ fn handleInput(zc: *ZC) !void {
                         => zc.doCommandMode(action, bytes) catch |err| switch (err) {
                             error.InvalidCommand => zc.setStatusMessage(.err, "Invalid command", .{}),
                             error.InvalidSyntax => zc.setStatusMessage(.err, "Invalid syntax", .{}),
-                            else => std.log.err("Error: {s}", .{@errorName(err)}),
+                            else => zc.setStatusMessage(.err, "{t}", .{err}),
                         },
                     };
 

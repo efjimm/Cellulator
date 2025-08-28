@@ -348,9 +348,8 @@ pub const Position = packed struct {
             return r.br.y - r.tl.y;
         }
 
-        // TODO: Vet all usages of this function
-        pub fn area(r: Rect) HashInt {
-            return @as(HashInt, r.width()) * r.height();
+        pub fn area(r: Rect) u65 {
+            return @as(u65, r.width2()) * r.height2();
         }
 
         pub const Iterator = struct {

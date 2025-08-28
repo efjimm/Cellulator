@@ -330,8 +330,12 @@ pub fn PhTree(
             }
         }
 
-        pub fn ensureUnusedCapacity(tree: *@This(), allocator: Allocator, n: Node.Handle.Int) Allocator.Error!void {
-            const count = std.math.mul(Node.Handle.Int, n, 2) catch return error.OutOfMemory;
+        pub fn ensureUnusedCapacity(
+            tree: *@This(),
+            allocator: Allocator,
+            n: usize,
+        ) Allocator.Error!void {
+            const count = std.math.mul(usize, n, 2) catch return error.OutOfMemory;
             if (tree.nodes.len + count > tree.nodes.capacity) {
                 var m = tree.nodes.toMultiArrayList();
                 try m.setCapacity(allocator, m.len * 2 + count);

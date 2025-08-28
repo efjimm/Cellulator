@@ -143,6 +143,7 @@ fn configureTests(
         "test/csv.zc",
         "test/absolute-cell-references.zc",
         "test/logic.zc",
+        "test/average.zc",
     });
     opts.addOption(bool, "fast_tests", fast_tests);
 
