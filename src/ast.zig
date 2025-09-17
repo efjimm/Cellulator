@@ -1,6 +1,8 @@
 //! Basic expression parser. Does not attempt error recovery and returns immediately on fatal
 //! errors. Contains a `MultiArrayList` of `Node`s that is sorted in reverse topological order.
 
+// TODO: Proper error messages
+
 const std = @import("std");
 const Position = @import("Position.zig").Position;
 const Sheet = @import("Sheet.zig");
@@ -26,19 +28,21 @@ pub const String = extern struct {
 pub fn isSingle(tag: Node.Tag) bool {
     return switch (tag) {
         .number,
-        .column,
         .rel_rel,
         .abs_abs,
         .abs_rel,
         .rel_abs,
         .string_literal,
         .range,
+        .dynamic_range,
         .builtin,
         .invalidated_pos,
         .invalidated_range,
         .minus,
         .plus,
         .not,
+        .reference,
+        .dereference,
         => true,
         .assignment,
         .concat,
@@ -72,7 +76,6 @@ pub const Node = extern struct {
 
     pub const Payload = extern union {
         number: f64,
-        column: PosInt,
         abs_abs: Position,
         abs_rel: Position,
         rel_abs: Position,
@@ -97,10 +100,19 @@ pub const Node = extern struct {
         logical_and: BinaryOperator,
         logical_or: BinaryOperator,
         builtin: Builtin,
+
+        /// The colon operator with two static arguments.
+        /// Cell value accesses through this range are non-volatile.
         range: BinaryOperator,
+        /// The colon operator with one or more dynamic arguments.
+        /// Cell value accesses through this range are volatile.
+        dynamic_range: BinaryOperator,
+
         invalidated_pos: Position,
         invalidated_range: BinaryOperator,
         string_literal: String,
+        reference: void,
+        dereference: void,
     };
 
     pub fn init(comptime tag: Tag, data: @FieldType(Payload, @tagName(tag))) Node {
@@ -129,13 +141,13 @@ pub const Node = extern struct {
     pub fn isCommutative(tag: Tag) bool {
         return switch (tag) {
             .number,
-            .column,
             .abs_abs,
             .abs_rel,
             .rel_abs,
             .rel_rel,
             .builtin,
             .range,
+            .dynamic_range,
             .invalidated_pos,
             .invalidated_range,
             .string_literal,
@@ -143,6 +155,8 @@ pub const Node = extern struct {
             .not,
             .plus,
             .minus,
+            .reference,
+            .dereference,
             => true,
             .add => true,
             .sub => false,
@@ -166,13 +180,13 @@ pub const Node = extern struct {
         return switch (tag) {
             // These aren't operators
             .number,
-            .column,
             .abs_abs,
             .abs_rel,
             .rel_abs,
             .rel_rel,
             .builtin,
             .range,
+            .dynamic_range,
             .invalidated_pos,
             .invalidated_range,
             .string_literal,
@@ -180,6 +194,8 @@ pub const Node = extern struct {
             => 127,
 
             // Actual operators
+            .reference => 3,
+            .dereference => 3,
             .minus => 2,
             .plus => 2,
             .not => 2,
@@ -303,7 +319,7 @@ pub fn initTokens(
     return parser;
 }
 
-pub fn parseFromExpression(sheet: *Sheet, source: []const u8) ParseError!Index {
+pub fn parseFromExpression(sheet: *Sheet, source: []const u8) ParseError!Sheet.Expression {
     return parseFromExpressionDiag(sheet, source, null);
 }
 
@@ -311,7 +327,7 @@ pub fn parseFromExpressionDiag(
     sheet: *Sheet,
     source: []const u8,
     diag: ?*Parser.Diagnostics,
-) ParseError!Index {
+) ParseError!Sheet.Expression {
     var reader: std.io.Reader = .fixed(source);
     var tokens = Tokenizer.collectTokens(
         sheet.gpa,
@@ -338,10 +354,14 @@ pub fn parseFromExpressionDiag(
     defer sheet.ast_nodes = parser.nodes.slice();
     errdefer sheet.ast_nodes.len = old_len;
 
-    _ = try parser.parseExpression();
+    _ = try parser.parseExpression(.value);
     _ = try parser.expectToken(.eof);
 
-    return .from(@intCast(parser.nodes.len - 1));
+    return .{
+        .root = .from(@intCast(parser.nodes.len - 1)),
+        .source = source,
+        .is_volatile = parser.is_volatile,
+    };
 }
 
 pub inline fn printFromIndex(
@@ -368,7 +388,6 @@ pub fn printFromNode(
     // non-commutative operators with the same precedence need to be surrounded by parentheses.
     switch (node.get()) {
         .number => |n| try writer.print("{d}", .{n}),
-        .column => |col| try writer.print("{f}", .{Position.fmtColumnAddress(col)}),
         .rel_rel => |pos| try writer.print("{f}", .{pos}),
         .rel_abs => |pos| try writer.print("{f}${d}", .{
             Position.fmtColumnAddress(pos.x), pos.y,
@@ -393,7 +412,7 @@ pub fn printFromNode(
             try writer.print("let {f} = ", .{pos});
             try printFromIndex(nodes, .from(index.n - 1), writer, strings);
         },
-        inline .plus, .minus, .not => |_, t| {
+        inline .plus, .minus, .not, .reference, .dereference => |_, t| {
             const n = index.subN(1);
             const rhs = nodes.get(n.n);
 
@@ -401,6 +420,8 @@ pub fn printFromNode(
                 .plus => '+',
                 .minus => '-',
                 .not => '!',
+                .reference => '&',
+                .dereference => '*',
                 else => comptime unreachable,
             };
 
@@ -459,7 +480,7 @@ pub fn printFromNode(
                 try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
             }
         },
-        .range, .invalidated_range => |b| {
+        .range, .invalidated_range, .dynamic_range => |b| {
             try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
             try writer.writeByte(':');
             try printFromIndex(nodes, index.sub(b.rhs), writer, strings);
@@ -599,7 +620,6 @@ pub fn leftMostChild(
         // leaf nodes
         .string_literal,
         .number,
-        .column,
         .invalidated_pos,
         .rel_rel,
         .rel_abs,
@@ -615,6 +635,7 @@ pub fn leftMostChild(
         .div,
         .mod,
         .range,
+        .dynamic_range,
         .invalidated_range,
         .pow,
         .logical_and,
@@ -630,9 +651,37 @@ pub fn leftMostChild(
             leftMostChild(nodes, index.sub(b.first_arg))
         else
             index,
-        .minus, .plus, .not => leftMostChild(nodes, index.subN(1)),
+        .minus,
+        .plus,
+        .not,
+        .reference,
+        .dereference,
+        => leftMostChild(nodes, index.subN(1)),
     };
 }
+
+/// Specifies the requested result type of an expression.
+///
+/// This is used to avoid intermediate 'magic' types that don't get used except for casting
+/// purposes. For example, a cell literal (`A0`, `D10`) evaluates to the value of the cell it
+/// references. However, it can also automatically coerce to a cell reference if the context in
+/// which it is used requires a cell reference. Passing the requested result type to eval allows
+/// cell literals to return a different type based on the context, either a number/string/none value
+/// or a reference.
+///
+/// Without result types, it wouldn't be possible to have the same semantics for cell literals
+/// without an intermediate type. If it evaluates to a value, we lose the information required
+/// to cast it to a reference. If it evaluates to a reference, we can't tell the difference
+/// between an explicit reference and an implicit one, which is an issue for contexts where values
+/// and references are both valid. An intermediate type could be used to solve this, but the
+/// calling code would immediately cast it to a value or reference based on the context, and the
+/// intermediate type would be a dead branch in every part of the code handling results.
+///
+/// TODO: Investigate more possible uses of result types.
+pub const ResultType = enum {
+    any,
+    reference,
+};
 
 pub const EvalResult = union(enum) {
     none,
@@ -651,37 +700,30 @@ pub const EvalResult = union(enum) {
             };
         }
     },
+    ref: union(enum) {
+        cell: Position,
+        range: Rect,
 
-    /// Attempts to coerce `res` to an integer.
-    fn toNumber(res: EvalResult, none_value: f64) !f64 {
-        return switch (res) {
-            .none => none_value,
-            .number => |n| n,
-            .string => |str| std.fmt.parseFloat(f64, str.bytes()) catch error.InvalidCoercion,
-        };
-    }
-
-    fn toNumberOrNull(res: EvalResult) !?f64 {
-        return switch (res) {
-            .none => null,
-            .number => |n| n,
-            .string => |str| std.fmt.parseFloat(f64, str.bytes()) catch error.InvalidCoercion,
-        };
-    }
-
-    pub fn format(res: EvalResult, w: *std.io.Writer) !void {
-        switch (res) {
-            .none => {},
-            .number => |n| try w.print("{d}", .{n}),
-            .string => |str| try w.writeAll(str.bytes()),
+        pub fn format(ref: @This(), w: *std.io.Writer) !void {
+            switch (ref) {
+                inline else => |f| try f.format(w),
+            }
         }
-    }
 
-    pub fn boolean(res: EvalResult) bool {
+        pub fn toRange(ref: @This()) Rect {
+            return switch (ref) {
+                .cell => |p| .initSinglePos(p),
+                .range => |r| r,
+            };
+        }
+    },
+
+    pub fn boolean(res: EvalResult, _: *const Sheet) bool {
         return switch (res) {
             .none => false,
             .number => |n| n != 0,
             .string => true,
+            .ref => true,
         };
     }
 };
@@ -725,31 +767,87 @@ pub fn EvalContext(comptime Context: type) type {
             break :blk E || ret_info.error_union.error_set;
         };
 
-        fn evaluate(eval: *const @This(), index: Index) Error!EvalResult {
+        fn toNumber(eval: *const @This(), res: EvalResult, none_value: f64) !f64 {
+            return try eval.toNumberOrNull(res) orelse none_value;
+        }
+
+        fn toNumberOrNull(_: *const @This(), res: EvalResult) !?f64 {
+            return switch (res) {
+                .none => null,
+                .number => |n| n,
+                .string => |str| std.fmt.parseFloat(f64, str.bytes()) catch error.InvalidCoercion,
+                .ref => error.InvalidCoercion,
+            };
+        }
+
+        /// Coerces `res` to a number, dereferencing one level of reference if required.
+        fn toNumberDeref(eval: *const @This(), res: EvalResult) !?f64 {
+            return switch (res) {
+                .none => null,
+                .number => |n| n,
+                .string => |str| std.fmt.parseFloat(f64, str.bytes()) catch error.InvalidCoercion,
+                .ref => |ref| switch (ref) {
+                    .cell => |pos| {
+                        const r2 = try eval.context.evalCellByPos(pos);
+                        return eval.toNumberOrNull(r2);
+                    },
+                    .range => error.InvalidCoercion,
+                },
+            };
+        }
+
+        // TODO: Make this iterative instead of recursive.
+        fn evaluate(
+            eval: *const @This(),
+            index: Index,
+            result_type: ResultType,
+        ) Error!EvalResult {
             const node = eval.nodes.get(index.n);
 
             return switch (node.get()) {
                 .number => |n| .{ .number = n },
-                .rel_rel, .abs_abs, .abs_rel, .rel_abs => |pos| {
-                    return eval.context.evalCellByPos(pos);
+                .rel_rel, .rel_abs, .abs_rel, .abs_abs => |pos| {
+                    return switch (result_type) {
+                        .any => eval.context.evalCellByPos(pos),
+                        .reference => .{ .ref = .{ .cell = pos } },
+                    };
                 },
                 .minus => {
-                    const rhs = try eval.evaluate(index.subN(1));
-                    return .{ .number = -(try rhs.toNumber(0)) };
+                    const rhs = try eval.evaluate(index.subN(1), .any);
+                    return .{ .number = -(try eval.toNumber(rhs, 0)) };
                 },
                 .plus => {
-                    const rhs = try eval.evaluate(index.subN(1));
-                    return .{ .number = @abs(try rhs.toNumber(0)) };
+                    const rhs = try eval.evaluate(index.subN(1), .any);
+                    return .{ .number = @abs(try eval.toNumber(rhs, 0)) };
                 },
                 .not => {
-                    const rhs = try eval.evaluate(index.subN(1));
-                    return .{ .number = @floatFromInt(@intFromBool(!rhs.boolean())) };
+                    const rhs = try eval.evaluate(index.subN(1), .any);
+                    return .{ .number = @floatFromInt(@intFromBool(!rhs.boolean(eval.sheet))) };
+                },
+                .reference => {
+                    const arg_index = index.subN(1);
+                    const arg_tag = eval.tags[arg_index.n];
+                    switch (arg_tag) {
+                        .rel_rel, .abs_abs, .abs_rel, .rel_abs => {},
+                        else => return error.NotEvaluable,
+                    }
+                    const pos = eval.data[arg_index.n].rel_rel;
+                    return .{ .ref = .{ .cell = pos } };
+                },
+                .dereference => {
+                    const arg_index = index.subN(1);
+                    const arg = try eval.evaluate(arg_index, .reference);
+                    if (arg != .ref or arg.ref != .cell)
+                        return error.NotEvaluable;
+
+                    const pos = arg.ref.cell;
+                    return try eval.context.evalCellByPos(pos);
                 },
                 inline .add, .sub, .mul, .div, .mod, .pow => |op, t| {
-                    const lhs = try eval.evaluate(index.sub(op.lhs));
-                    const rhs = try eval.evaluate(index.sub(op.rhs));
-                    const l = try lhs.toNumber(0);
-                    const r = try rhs.toNumber(0);
+                    const lhs = try eval.evaluate(index.sub(op.lhs), .any);
+                    const rhs = try eval.evaluate(index.sub(op.rhs), .any);
+                    const l = try eval.toNumber(lhs, 0);
+                    const r = try eval.toNumber(rhs, 0);
                     return .{ .number = switch (t) {
                         .add => l + r,
                         .sub => l - r,
@@ -768,29 +866,52 @@ pub fn EvalContext(comptime Context: type) type {
                 },
                 // and/or have the same semantics as Lua's and/or operators.
                 .logical_and => |op| {
-                    const lhs = try eval.evaluate(index.sub(op.lhs));
-                    const rhs = try eval.evaluate(index.sub(op.rhs));
-                    if (lhs.boolean()) return rhs;
+                    const lhs = try eval.evaluate(index.sub(op.lhs), .any);
+                    const rhs = try eval.evaluate(index.sub(op.rhs), .any);
+                    if (lhs.boolean(eval.sheet)) return rhs;
                     return .{ .number = 0 };
                 },
                 .logical_or => |op| {
-                    const lhs = try eval.evaluate(index.sub(op.lhs));
-                    const rhs = try eval.evaluate(index.sub(op.rhs));
-                    if (lhs.boolean()) return lhs;
+                    const lhs = try eval.evaluate(index.sub(op.lhs), .any);
+                    const rhs = try eval.evaluate(index.sub(op.rhs), .any);
+                    if (lhs.boolean(eval.sheet)) return lhs;
                     return rhs;
                 },
-                // Boolean operators
+                inline .equals, .not_equals => |op, tag| {
+                    const lhs = try eval.evaluate(index.sub(op.lhs), .any);
+                    const rhs = try eval.evaluate(index.sub(op.rhs), .any);
+                    const false_value = @intFromBool(tag != .equals);
+                    if (@as(std.meta.Tag(EvalResult), lhs) != rhs)
+                        return .{ .number = false_value };
+
+                    const n = switch (lhs) {
+                        .none => true,
+                        .number => |n| n == rhs.number,
+                        .string => std.mem.eql(u8, lhs.string.bytes(), rhs.string.bytes()),
+                        .ref => blk: {
+                            const Tag = std.meta.Tag(@FieldType(EvalResult, "ref"));
+                            if (@as(Tag, lhs.ref) != rhs.ref) return .{ .number = false_value };
+                            break :blk Rect.eql(lhs.ref.toRange(), rhs.ref.toRange());
+                        },
+                    };
+
+                    const b = switch (tag) {
+                        .equals => n,
+                        .not_equals => !n,
+                        else => comptime unreachable,
+                    };
+
+                    return .{ .number = @floatFromInt(@intFromBool(b)) };
+                },
                 inline .greater_than,
                 .less_than,
-                .equals,
-                .not_equals,
                 .greater_equals,
                 .less_equals,
                 => |op, t| {
-                    const lhs = try eval.evaluate(index.sub(op.lhs));
-                    const rhs = try eval.evaluate(index.sub(op.rhs));
-                    const l = try lhs.toNumber(0);
-                    const r = try rhs.toNumber(0);
+                    const lhs = try eval.evaluate(index.sub(op.lhs), .any);
+                    const rhs = try eval.evaluate(index.sub(op.rhs), .any);
+                    const l = try eval.toNumber(lhs, 0);
+                    const r = try eval.toNumber(rhs, 0);
                     const n = switch (t) {
                         .greater_equals => l >= r,
                         .less_equals => l <= r,
@@ -817,8 +938,8 @@ pub fn EvalContext(comptime Context: type) type {
                     .floor => .{ .number = try eval.evalFloor(index.subN(1)) },
                     .ceil => .{ .number = try eval.evalCeil(index.subN(1)) },
                     .len => .{ .number = try eval.evalStringLen(index.subN(1)) },
-                    .count => .{ .number = try eval.evalCount(index.sub(b.first_arg), index) },
-                    .count_all => .{ .number = try eval.evalCount(index.sub(b.first_arg), index) },
+                    .count => .{ .number = try eval.evalCount(.numbers, index.sub(b.first_arg), index) },
+                    .count_all => .{ .number = try eval.evalCount(.all, index.sub(b.first_arg), index) },
                     .log => .{ .number = try eval.evalLog(index.sub(b.first_arg), index.subN(1)) },
                     .pi => .{ .number = std.math.pi },
                     .e => .{ .number = std.math.e },
@@ -827,52 +948,94 @@ pub fn EvalContext(comptime Context: type) type {
                 },
 
                 .concat => |op| {
-                    const lhs = try eval.evaluate(index.sub(op.lhs));
-                    const rhs = try eval.evaluate(index.sub(op.rhs));
-                    const slice = try std.fmt.allocPrint(eval.arena, "{f}{f}", .{ lhs, rhs });
-                    return .{ .string = .{ .slice = slice } };
+                    const lhs = try eval.evaluate(index.sub(op.lhs), .any);
+                    const rhs = try eval.evaluate(index.sub(op.rhs), .any);
+                    var aw: std.io.Writer.Allocating = .init(eval.arena);
+                    eval.formatString(lhs, &aw.writer) catch |err| switch (err) {
+                        error.WriteFailed => return error.OutOfMemory,
+                        else => |e| return e,
+                    };
+                    eval.formatString(rhs, &aw.writer) catch |err| switch (err) {
+                        error.WriteFailed => return error.OutOfMemory,
+                        else => |e| return e,
+                    };
+                    return .{ .string = .{ .slice = try aw.toOwnedSlice() } };
+                },
+                .range, .dynamic_range => |op| {
+                    const lhs = try eval.evaluate(index.sub(op.lhs), .reference);
+                    const rhs = try eval.evaluate(index.sub(op.rhs), .reference);
+                    const invalid_args = (lhs != .ref or lhs.ref != .cell) or
+                        (rhs != .ref or rhs.ref != .cell);
+
+                    if (invalid_args)
+                        return error.NotEvaluable;
+
+                    return .{ .ref = .{ .range = .initNormalizePos(lhs.ref.cell, rhs.ref.cell) } };
                 },
                 .string_literal => |str| .{ .string = .{ .slice = eval.strings[str.start..str.end] } },
-                .column,
                 .invalidated_pos,
-                .range,
                 .invalidated_range,
                 .assignment,
                 => error.NotEvaluable,
             };
         }
 
-        fn evalUpper(eval: *const @This(), arg: Index) ![]const u8 {
-            const evaled_arg = try eval.evaluate(arg);
-            const str = try std.fmt.allocPrint(eval.arena, "{f}", .{evaled_arg});
-            for (str) |*c| c.* = std.ascii.toUpper(c.*);
-            return str;
+        fn formatStringAlloc(eval: *const @This(), res: EvalResult) ![]u8 {
+            var aw: std.io.Writer.Allocating = .init(eval.arena);
+            eval.formatString(res, &aw.writer) catch |err| switch (err) {
+                error.WriteFailed => return error.OutOfMemory,
+                else => |e| return e,
+            };
+            return aw.toOwnedSlice();
         }
 
-        fn evalLower(eval: *const @This(), arg: Index) ![]const u8 {
-            const evaled_arg = try eval.evaluate(arg);
-            const str = try std.fmt.allocPrint(eval.arena, "{f}", .{evaled_arg});
-            for (str) |*c| c.* = std.ascii.toLower(c.*);
-            return str;
+        fn formatString(_: *const @This(), res: EvalResult, w: *std.io.Writer) !void {
+            switch (res) {
+                .none => {},
+                .number => |n| try w.print("{d}", .{n}),
+                .string => |str| try w.writeAll(str.bytes()),
+                .ref => |r| try r.format(w),
+            }
         }
 
-        fn evalSum(eval: *const @This(), start: Index, end: Index) !f64 {
-            var iter = argIterator(eval.nodes, start, end);
-            var total: f64 = 0;
+        fn mapArgsNumber(eval: *const @This(), start: Index, end: Index, ctx: anytype) !void {
+            const MapContext = struct {
+                eval: *const EvalContext(Context),
+                outer_ctx: @TypeOf(ctx),
 
-            while (iter.next()) |i| switch (eval.tags[i.n]) {
-                .range => {
-                    const lhs, const rhs = eval.data[i.n].range.resolve(i);
-                    total += try eval.sumRange(lhs, rhs);
-                },
-                .invalidated_range => return error.NotEvaluable,
-                else => {
-                    const res = try eval.evaluate(i);
-                    total += try res.toNumber(0);
-                },
+                pub fn func(inner_ctx: @This(), cell: Sheet.Cell.Handle) !void {
+                    const res = try inner_ctx.eval.context.evalCellByHandle(cell);
+                    const number = try inner_ctx.eval.toNumberOrNull(res);
+                    try inner_ctx.outer_ctx.func(number);
+                }
             };
 
-            return total;
+            var iter = argIterator(eval.nodes, start, end);
+
+            while (iter.next()) |i| {
+                const res = try eval.evaluate(i, .reference);
+                switch (res) {
+                    .ref => |r| switch (r) {
+                        .cell => |pos| {
+                            const res2 = try eval.context.evalCellByPos(pos);
+                            const number = try eval.toNumberOrNull(res2);
+                            try ctx.func(number);
+                        },
+                        .range => |range| {
+                            var map_ctx: MapContext = .{ .eval = eval, .outer_ctx = ctx };
+                            try eval.sheet.cell_tree.traverse(
+                                &.{ range.tl.x, range.tl.y },
+                                &.{ range.br.x, range.br.y },
+                                &map_ctx,
+                            );
+                        },
+                    },
+                    else => {
+                        const n = try eval.toNumberOrNull(res);
+                        try ctx.func(n);
+                    },
+                }
+            }
         }
 
         /// Converts an ast range to a position range.
@@ -896,220 +1059,123 @@ pub fn EvalContext(comptime Context: type) type {
             return .initPos(eval.data[lhs.n].rel_rel, eval.data[rhs.n].rel_rel);
         }
 
-        const SumContext = struct {
-            total: f64 = 0,
-            eval: *const EvalContext(Context),
+        fn evalUpper(eval: *const @This(), arg: Index) ![]const u8 {
+            const evaled_arg = try eval.evaluate(arg, .any);
+            const str = try eval.formatStringAlloc(evaled_arg);
+            for (str) |*c| c.* = std.ascii.toUpper(c.*);
+            return str;
+        }
 
-            pub fn func(ctx: *SumContext, handle: Sheet.Cell.Handle) !void {
-                const res = try ctx.eval.context.evalCellByHandle(handle);
-                ctx.total += try res.toNumber(0);
+        fn evalLower(eval: *const @This(), arg: Index) ![]const u8 {
+            const evaled_arg = try eval.evaluate(arg, .any);
+            const str = try eval.formatStringAlloc(evaled_arg);
+            for (str) |*c| c.* = std.ascii.toLower(c.*);
+            return str;
+        }
+
+        const ProdContext = struct {
+            total: f64 = 1,
+
+            fn func(ctx: *@This(), n: ?f64) !void {
+                ctx.total *= n orelse 1;
             }
         };
 
-        fn sumRange(eval: *const @This(), lhs: Index, rhs: Index) !f64 {
-            const range = eval.toPosRange(lhs, rhs);
+        const SumContext = struct {
+            total: f64 = 0,
 
-            var ctx: SumContext = .{ .eval = eval };
-            try eval.sheet.cell_tree.traverse(
-                &.{ range.tl.x, range.tl.y },
-                &.{ range.br.x, range.br.y },
-                &ctx,
-            );
+            fn func(ctx: *@This(), n: ?f64) !void {
+                ctx.total += n orelse 0;
+            }
+        };
 
+        const AvgContext = struct {
+            total: f64 = 0,
+            total_items: u65 = 0,
+
+            fn func(ctx: *@This(), n: ?f64) !void {
+                ctx.total += n orelse return;
+                ctx.total_items += 1;
+            }
+        };
+
+        const MaxContext = struct {
+            max: ?f64 = null,
+
+            fn func(ctx: *@This(), n: ?f64) !void {
+                if (ctx.max == null or ctx.max.? < n orelse 0)
+                    ctx.max = n orelse 0;
+            }
+        };
+
+        const MinContext = struct {
+            min: ?f64 = null,
+
+            fn func(ctx: *@This(), n: ?f64) !void {
+                if (ctx.min == null or ctx.min.? > n orelse 0)
+                    ctx.min = n orelse 0;
+            }
+        };
+
+        fn evalSum(eval: *const @This(), start: Index, end: Index) !f64 {
+            var ctx: SumContext = .{};
+            try eval.mapArgsNumber(start, end, &ctx);
             return ctx.total;
         }
 
         fn evalProd(eval: *const @This(), start: Index, end: Index) !f64 {
-            var iter = argIterator(eval.nodes, start, end);
-            var total: f64 = 1;
-
-            while (iter.next()) |i| switch (eval.tags[i.n]) {
-                .range => {
-                    const r = eval.data[i.n].range;
-                    total *= try eval.prodRange(i.sub(r.lhs), i.sub(r.rhs));
-                },
-                .invalidated_range => return error.NotEvaluable,
-                else => {
-                    const res = try eval.evaluate(i);
-                    total *= try res.toNumber(0);
-                },
-            };
-
-            return total;
-        }
-
-        const ProdContext = struct {
-            total: f64,
-            eval: *const EvalContext(Context),
-
-            pub fn func(ctx: *ProdContext, h: Sheet.Cell.Handle) !void {
-                const res = try ctx.eval.context.evalCellByHandle(h);
-                ctx.total *= try res.toNumber(1);
-            }
-        };
-
-        fn prodRange(eval: *const @This(), lhs: Index, rhs: Index) !f64 {
-            const range = eval.toPosRange(lhs, rhs);
-
-            var ctx: ProdContext = .{ .eval = eval, .total = 1 };
-            try eval.sheet.cell_tree.traverse(
-                &.{ range.tl.x, range.tl.y },
-                &.{ range.br.x, range.br.y },
-                &ctx,
-            );
+            var ctx: ProdContext = .{};
+            try eval.mapArgsNumber(start, end, &ctx);
             return ctx.total;
         }
 
         // TODO: This function assumes that ranges do not overlap?
         fn evalAvg(eval: *const @This(), start: Index, end: Index) !f64 {
-            var iter = argIterator(eval.nodes, start, end);
-            var total: f64 = 0;
-            var total_items: u65 = 0;
-
-            while (iter.next()) |i| switch (eval.tags[i.n]) {
-                .range => {
-                    const r = eval.data[i.n].range;
-                    const lhs = i.sub(r.lhs);
-                    const rhs = i.sub(r.rhs);
-                    total += try eval.sumRange(lhs, rhs);
-                    total_items += eval.countRange(i, .numbers);
-                },
-                .invalidated_range => return error.NotEvaluable,
-                else => {
-                    const res = try eval.evaluate(i);
-                    total += try res.toNumberOrNull() orelse continue;
-                    total_items += 1;
-                },
-            };
-
-            if (total_items == 0) return 0;
-
-            return total / @as(f64, @floatFromInt(total_items));
+            var ctx: AvgContext = .{};
+            try eval.mapArgsNumber(start, end, &ctx);
+            if (ctx.total_items == 0) return 0;
+            return ctx.total / @as(f64, @floatFromInt(ctx.total_items));
         }
 
         fn evalMax(eval: *const @This(), start: Index, end: Index) !f64 {
-            var iter = argIterator(eval.nodes, start, end);
-            var max: ?f64 = null;
-
-            while (iter.next()) |i| {
-                const m = switch (eval.tags[i.n]) {
-                    .range => blk: {
-                        const lhs, const rhs = eval.data[i.n].range.resolve(i);
-                        break :blk try eval.maxRange(lhs, rhs);
-                    },
-                    .invalidated_range => return error.NotEvaluable,
-                    else => blk: {
-                        const res = try eval.evaluate(i);
-                        break :blk try res.toNumberOrNull();
-                    },
-                } orelse continue;
-
-                if (max == null or m > max.?) max = m;
-            }
-
-            return max orelse 0;
-        }
-
-        const MaxContext = struct {
-            max: ?f64 = null,
-            eval: *const EvalContext(Context),
-
-            pub fn func(ctx: *MaxContext, h: Sheet.Cell.Handle) !void {
-                const res = try ctx.eval.context.evalCellByHandle(h);
-                if (try res.toNumberOrNull()) |n| {
-                    if (ctx.max == null or n > ctx.max.?) ctx.max = n;
-                }
-            }
-        };
-
-        fn maxRange(eval: *const @This(), lhs: Index, rhs: Index) !?f64 {
-            const range = eval.toPosRange(lhs, rhs);
-
-            var ctx: MaxContext = .{ .eval = eval };
-            try eval.sheet.cell_tree.traverse(
-                &.{ range.tl.x, range.tl.y },
-                &.{ range.br.x, range.br.y },
-                &ctx,
-            );
-
-            return ctx.max;
+            var ctx: MaxContext = .{};
+            try eval.mapArgsNumber(start, end, &ctx);
+            return ctx.max orelse 0;
         }
 
         fn evalMin(eval: *const @This(), start: Index, end: Index) !f64 {
-            var iter = argIterator(eval.nodes, start, end);
-            var min: ?f64 = null;
-
-            while (iter.next()) |i| {
-                const m = switch (eval.tags[i.n]) {
-                    .range => blk: {
-                        const lhs, const rhs = eval.data[i.n].range.resolve(i);
-                        break :blk try eval.minRange(lhs, rhs);
-                    },
-                    .invalidated_range => return error.NotEvaluable,
-                    else => blk: {
-                        const res = try eval.evaluate(i);
-                        break :blk try res.toNumberOrNull();
-                    },
-                } orelse continue;
-
-                if (min == null or m < min.?) min = m;
-            }
-
-            return min orelse 0;
-        }
-
-        const MinContext = struct {
-            min: ?f64 = null,
-            eval: *const EvalContext(Context),
-
-            pub fn func(ctx: *MinContext, h: Sheet.Cell.Handle) !void {
-                const res = try ctx.eval.context.evalCellByHandle(h);
-                if (try res.toNumberOrNull()) |n| {
-                    if (ctx.min == null or n < ctx.min.?) ctx.min = n;
-                }
-            }
-        };
-
-        fn minRange(eval: *const @This(), lhs: Index, rhs: Index) !?f64 {
-            const range = eval.toPosRange(lhs, rhs);
-
-            var ctx: MinContext = .{ .eval = eval };
-            try eval.sheet.cell_tree.traverse(
-                &.{ range.tl.x, range.tl.y },
-                &.{ range.br.x, range.br.y },
-                &ctx,
-            );
-
-            return ctx.min;
+            var ctx: MinContext = .{};
+            try eval.mapArgsNumber(start, end, &ctx);
+            return ctx.min orelse 0;
         }
 
         fn evalSqrt(eval: *const @This(), arg: Index) !f64 {
-            const res = try eval.evaluate(arg);
-            const n = try res.toNumberOrNull() orelse 0;
+            const res = try eval.evaluate(arg, .reference);
+            const n = try eval.toNumberDeref(res) orelse 0;
             if (n < 0) return error.NotEvaluable;
             return std.math.sqrt(n);
         }
 
         fn evalRound(eval: *const @This(), arg: Index) !f64 {
-            const res = try eval.evaluate(arg);
-            const n = try res.toNumberOrNull() orelse 0;
+            const res = try eval.evaluate(arg, .reference);
+            const n = try eval.toNumberDeref(res) orelse 0;
             return std.math.round(n);
         }
 
         fn evalFloor(eval: *const @This(), arg: Index) !f64 {
-            const res = try eval.evaluate(arg);
-            const n = try res.toNumberOrNull() orelse 0;
+            const res = try eval.evaluate(arg, .reference);
+            const n = try eval.toNumberDeref(res) orelse 0;
             return @floor(n);
         }
 
         fn evalCeil(eval: *const @This(), arg: Index) !f64 {
-            const res = try eval.evaluate(arg);
-            const n = try res.toNumberOrNull() orelse 0;
+            const res = try eval.evaluate(arg, .reference);
+            const n = try eval.toNumberDeref(res) orelse 0;
             return @ceil(n);
         }
 
         fn evalStringLen(eval: *const @This(), arg: Index) !f64 {
-            const res = try eval.evaluate(arg);
+            const res = try eval.evaluate(arg, .any);
             switch (res) {
                 .none => return 0,
                 .number => |n| {
@@ -1123,112 +1189,89 @@ pub fn EvalContext(comptime Context: type) type {
                     while (iter.next()) |_| count += 1;
                     return @floatFromInt(count);
                 },
+                .ref => |r| switch (r) {
+                    inline else => |value| return @floatFromInt(std.fmt.count("{f}", .{value})),
+                },
             }
         }
 
-        fn evalCount(eval: *const @This(), start: Index, end: Index) !f64 {
-            var iter = argIterator(eval.nodes, start, end);
-            var total: f64 = 0;
-            while (iter.next()) |i| switch (eval.tags[i.n]) {
-                .range => total += @floatFromInt(eval.countRange(i, .numbers)),
-                else => {
-                    const res = eval.evaluate(i) catch continue;
-                    if (res != .none) {
-                        _ = res.toNumberOrNull() catch continue;
-                        total += 1;
-                    }
-                },
-            };
-
-            return total;
-        }
-
-        fn evalCountAll(eval: *const @This(), start: Index, end: Index) !f64 {
-            var iter = argIterator(eval.nodes, start, end);
-            var total: f64 = 0;
-            while (iter.next()) |i| switch (eval.tags[i.n]) {
-                .range => total += eval.countRange(i, .all),
-                else => {
-                    const res = eval.evaluate(i) catch continue;
-                    if (res != .none) total += 1;
-                },
-            };
-
-            return total;
-        }
-
-        fn countRange(
+        fn evalCount(
             eval: *const @This(),
-            range_arg: Index,
-            comptime count_type: enum { all, numbers },
-        ) u65 {
-            assert(eval.tags[range_arg.n] == .range);
-            const lhs, const rhs = eval.data[range_arg.n].range.resolve(range_arg);
-            const r = eval.toPosRange(lhs, rhs);
+            comptime operation: enum { all, numbers },
+            start: Index,
+            end: Index,
+        ) !f64 {
             const CountContext = struct {
-                count: u64,
+                count: u65,
                 eval: *const EvalContext(Context),
 
                 pub fn func(ctx: *@This(), cell: Sheet.Cell.Handle) !void {
-                    _ = try ctx.eval.context.evalCellByHandle(cell);
+                    const res = try ctx.eval.context.evalCellByHandle(cell);
 
-                    switch (count_type) {
+                    switch (operation) {
                         .all => ctx.count += 1,
-                        .numbers => {
-                            if (ctx.eval.sheet.getCellFromHandle(cell).value_tag == .number) {
-                                ctx.count += 1;
-                            }
+                        .numbers => if (res == .number) {
+                            ctx.count += 1;
                         },
                     }
                 }
             };
 
-            var ctx: CountContext = .{ .count = 0, .eval = eval };
-            eval.sheet.cell_tree.traverse(&r.tl.array(), &r.br.array(), &ctx) catch unreachable;
-            return ctx.count;
+            var iter = argIterator(eval.nodes, start, end);
+            var total: u65 = 0;
+            while (iter.next()) |i| {
+                const res = eval.evaluate(i, .any) catch continue;
+                switch (res) {
+                    .none => {},
+                    inline .number, .string => |_, tag| {
+                        switch (operation) {
+                            .all => total += 1,
+                            .numbers => if (tag == .number) {
+                                total += 1;
+                            },
+                        }
+                    },
+                    .ref => |r| {
+                        const range = r.toRange();
+                        var ctx: CountContext = .{ .count = 0, .eval = eval };
+                        try eval.sheet.cell_tree.traverse(
+                            &range.tl.array(),
+                            &range.br.array(),
+                            &ctx,
+                        );
+                        total += ctx.count;
+                    },
+                }
+            }
+
+            return @floatFromInt(total);
         }
 
         fn evalLog(eval: *const @This(), arg: Index, base_arg: Index) !f64 {
-            const base_result = try eval.evaluate(base_arg);
-            const n_result = try eval.evaluate(arg);
-            const base = try base_result.toNumber(10);
-            const n = try n_result.toNumber(0);
+            const base_result = try eval.evaluate(base_arg, .any);
+            const n_result = try eval.evaluate(arg, .any);
+            const base = try eval.toNumber(base_result, 10);
+            const n = try eval.toNumber(n_result, 0);
             if (base <= 0 or base == 1 or n <= 0)
                 return error.NotEvaluable;
             return std.math.log(f64, base, n);
         }
 
         fn evalWidth(eval: *const @This(), arg: Index) !f64 {
-            if (eval.tags[arg.n] != .range)
-                return error.NotEvaluable;
-            const lhs, const rhs = eval.data[arg.n].range.resolve(arg);
-            const p = eval.toPosRange(lhs, rhs);
-            return @floatFromInt(p.width2());
+            const res = try eval.evaluate(arg, .any);
+            if (res != .ref) return error.NotEvaluable;
+            const range = res.ref.toRange();
+            return @floatFromInt(range.width2());
         }
 
         fn evalHeight(eval: *const @This(), arg: Index) !f64 {
-            if (eval.tags[arg.n] != .range)
-                return error.NotEvaluable;
-            const lhs, const rhs = eval.data[arg.n].range.resolve(arg);
-            const p = eval.toPosRange(lhs, rhs);
-            return @floatFromInt(p.height2());
+            const res = try eval.evaluate(arg, .any);
+            if (res != .ref) return error.NotEvaluable;
+            const range = res.ref.toRange();
+            return @floatFromInt(range.height2());
         }
     };
 }
-
-pub const DynamicEvalResult = union(enum) {
-    none,
-    number: f64,
-    string: [:0]const u8,
-
-    pub fn boolean(res: DynamicEvalResult) bool {
-        return switch (res) {
-            .none => false,
-            .number => |n| n != 0,
-            .string => true,
-        };
-    }
-};
 
 /// Dynamically typed evaluation of expressions.
 pub fn evaluate(
@@ -1239,7 +1282,7 @@ pub fn evaluate(
     /// into this buffer. If the expression has no string literals then this
     /// argument can be left as "".
     strings: []const u8,
-    /// Instance of a type which has the method `evalCell`,
+    /// Instance of a type which has the method uevalCell`,
     /// which evaluates the cell at the given position.
     context: anytype,
 ) !EvalResult {
@@ -1257,12 +1300,195 @@ pub fn evaluate(
         .context = context,
     };
 
-    const res = try ctx.evaluate(root_node);
+    const res = try ctx.evaluate(root_node, .any);
 
     return switch (res) {
-        .none => .none,
-        .number => |n| .{ .number = n },
         .string => |str| .{ .string = .{ .slice = try sheet.gpa.dupe(u8, str.bytes()) } },
+        .none, .number, .ref => res,
+    };
+}
+
+const CountDependenciesContext = struct {
+    total: usize = 0,
+
+    pub fn func(ctx: *CountDependenciesContext, _: Rect) void {
+        ctx.total += 1;
+    }
+};
+
+pub fn countDependencies(nodes: NodeSlice, root: Index) usize {
+    var ctx: CountDependenciesContext = .{};
+    traverseDependencies(nodes, root, &ctx, CountDependenciesContext.func);
+    return ctx.total;
+}
+
+pub fn traverseDependencies(
+    nodes: NodeSlice,
+    root: Index,
+    ctx: anytype,
+    func: fn (@TypeOf(ctx), Rect) void,
+) void {
+    if (!root.isValid()) return;
+
+    var traverse: TraverseDependencies(@TypeOf(ctx), func) = .{
+        .nodes = nodes,
+        .user_ctx = ctx,
+    };
+    traverse.traverse(root, .value, .no_deref);
+}
+
+fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
+    return struct {
+        nodes: NodeSlice,
+        user_ctx: Context,
+
+        fn traverse(
+            self: *const @This(),
+            index: Index,
+            /// Whether the context treats a cell literal as a value or a reference. If treated as a value,
+            /// the cell literal will be added to the dependency graph.
+            ctx: Parser.ExpressionContext,
+            /// Whether the context will automatically dereference a reference. If a reference to a cell
+            /// literal is automatically dereferenced, it will be added to the dependency graph.
+            deref: enum { deref, no_deref },
+        ) void {
+            const nodes = self.nodes;
+            const node = nodes.get(index.n);
+
+            switch (node.get()) {
+                .assignment => {
+                    self.traverse(index.subN(1), ctx, .no_deref);
+                },
+                .number, .string_literal, .invalidated_pos, .invalidated_range => {},
+                .rel_rel, .rel_abs, .abs_rel, .abs_abs => |pos| switch (ctx) {
+                    .reference => switch (deref) {
+                        .deref => func(self.user_ctx, .initSinglePos(pos)),
+                        .no_deref => {},
+                    },
+                    .value => {
+                        func(self.user_ctx, .initSinglePos(pos));
+                    },
+                },
+                .range => |op| {
+                    const add_dependency = switch (ctx) {
+                        .reference => switch (deref) {
+                            .deref => true,
+                            .no_deref => false,
+                        },
+                        .value => false,
+                    };
+                    if (add_dependency) {
+                        const lhs, const rhs = op.args(index);
+                        const tags = nodes.items(.tag);
+                        const data = nodes.items(.data);
+                        const lhs_tag = tags[lhs.n];
+                        const rhs_tag = tags[rhs.n];
+                        const tl = switch (lhs_tag) {
+                            .reference => switch (tags[lhs.n - 1]) {
+                                .rel_rel, .rel_abs, .abs_rel, .abs_abs => data[lhs.n - 1].rel_rel,
+                                else => unreachable,
+                            },
+                            .rel_rel, .rel_abs, .abs_rel, .abs_abs => data[lhs.n].rel_rel,
+                            else => unreachable,
+                        };
+                        const br = switch (rhs_tag) {
+                            .reference => switch (tags[rhs.n - 1]) {
+                                .rel_rel, .rel_abs, .abs_rel, .abs_abs => data[rhs.n - 1].rel_rel,
+                                else => unreachable,
+                            },
+                            .rel_rel, .rel_abs, .abs_rel, .abs_abs => data[rhs.n].rel_rel,
+                            else => unreachable,
+                        };
+                        func(self.user_ctx, .initNormalizePos(tl, br));
+                    }
+                },
+                .dynamic_range => |op| {
+                    const lhs, const rhs = op.args(index);
+                    self.traverse(lhs, .reference, .no_deref);
+                    self.traverse(rhs, .reference, .no_deref);
+                },
+                .reference => switch (deref) {
+                    .deref => self.traverse(index.subN(1), .value, .no_deref),
+                    .no_deref => {},
+                },
+                .dereference => {
+                    self.traverse(index.subN(1), .reference, .deref);
+                },
+                .minus, .plus, .not => {
+                    self.traverse(index.subN(1), .value, .no_deref);
+                },
+                .add,
+                .sub,
+                .mul,
+                .div,
+                .mod,
+                .pow,
+                .logical_and,
+                .logical_or,
+                .equals,
+                .not_equals,
+                .greater_than,
+                .less_than,
+                .greater_equals,
+                .less_equals,
+                .concat,
+                => |op| {
+                    const lhs, const rhs = op.args(index);
+                    // const lhs_tag = nodes.items(.tag)[lhs.n];
+                    // const rhs_tag = nodes.items(.tag)[rhs.n];
+                    // if ()
+                    self.traverse(lhs, .value, .no_deref);
+                    self.traverse(rhs, .value, .no_deref);
+                },
+                .builtin => |b| switch (b.tag) {
+                    .pi,
+                    .e,
+                    => {},
+                    .sum,
+                    .prod,
+                    .avg,
+                    .max,
+                    .min,
+                    .count,
+                    .count_all,
+                    .log,
+                    => {
+                        var iter = argIterator(nodes, index.sub(b.first_arg), index);
+                        while (iter.next()) |i| {
+                            self.traverse(i, .reference, .deref);
+                        }
+                    },
+                    .upper,
+                    .lower,
+                    .sqrt,
+                    .round,
+                    .floor,
+                    .ceil,
+                    .len,
+                    => {
+                        self.traverse(index.sub(b.first_arg), .reference, .deref);
+                    },
+                    .width,
+                    .height,
+                    => {
+                        self.traverse(index.sub(b.first_arg), .value, .no_deref);
+                    },
+                },
+            }
+        }
+    };
+}
+
+/// Returns true if the given node is a cell literal or a reference to a cell literal.
+pub fn isDynamicReference(nodes: NodeSlice, index: Index) bool {
+    const tags = nodes.items(.tag);
+    return switch (tags[index.n]) {
+        .reference => switch (tags[index.n - 1]) {
+            .rel_rel, .rel_abs, .abs_rel, .abs_abs => false,
+            else => true,
+        },
+        .rel_rel, .rel_abs, .abs_rel, .abs_abs => false,
+        else => true,
     };
 }
 
@@ -1281,19 +1507,19 @@ test "Parse and Eval Expression" {
     const Error = EvalContext(void).Error || Parser.ParseError;
 
     const testExpr = struct {
-        fn func(expected: Error!f64, expr: []const u8) !void {
+        fn func(expected: Error!f64, src: []const u8) !void {
             var sheet = try Sheet.init(t.allocator);
             defer sheet.deinit();
 
-            const expr_root = parseFromExpression(&sheet, expr) catch |err| {
+            const expr = parseFromExpression(&sheet, src) catch |err| {
                 return if (err != expected) err else {};
             };
 
             const res = evaluate(
                 sheet.ast_nodes,
-                expr_root,
+                expr.root,
                 &sheet,
-                expr,
+                src,
                 Context{},
             ) catch |err| {
                 return if (err != expected) err else {};
@@ -1319,11 +1545,6 @@ test "Parse and Eval Expression" {
     try testExpr(5.5, "@avg(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)");
     try testExpr(5, "@max(3, 5, 100 - 100)");
 
-    // Cannot evaluate a range on its own
-    try testExpr(error.NotEvaluable, "a0:a0");
-    try testExpr(error.NotEvaluable, "a0:crxo65535");
-    try testExpr(error.NotEvaluable, "z10:xxx500");
-
     // Test NaN TODO: test for error.DivideByZero
     // var ast = try fromExpression(t.allocator, "0 / 0");
     // defer ast.deinit(t.allocator);
@@ -1334,21 +1555,21 @@ test "Parse and Eval Expression" {
 test "Functions on Ranges" {
     const t = std.testing;
     const Test = struct {
-        fn testSheetExpr(expected: f64, expr: []const u8) !void {
+        fn testSheetExpr(expected: f64, src: []const u8) !void {
             var sheet = try Sheet.init(t.allocator);
             defer sheet.deinit();
 
-            try sheet.setCell(try Position.fromAddress("A0"), "0", try parseFromExpression(&sheet, "0"), .{});
-            try sheet.setCell(try Position.fromAddress("B0"), "100", try parseFromExpression(&sheet, "100"), .{});
-            try sheet.setCell(try Position.fromAddress("A1"), "500", try parseFromExpression(&sheet, "500"), .{});
-            try sheet.setCell(try Position.fromAddress("B1"), "333.33", try parseFromExpression(&sheet, "333.33"), .{});
+            try sheet.setCell(try Position.fromAddress("A0"), try parseFromExpression(&sheet, "0"), .{});
+            try sheet.setCell(try Position.fromAddress("B0"), try parseFromExpression(&sheet, "100"), .{});
+            try sheet.setCell(try Position.fromAddress("A1"), try parseFromExpression(&sheet, "500"), .{});
+            try sheet.setCell(try Position.fromAddress("B1"), try parseFromExpression(&sheet, "333.33"), .{});
 
-            const expr_root = try parseFromExpression(&sheet, expr);
+            const expr = try parseFromExpression(&sheet, src);
 
             try sheet.update();
             const res = try evaluate(
                 sheet.ast_nodes,
-                expr_root,
+                expr.root,
                 &sheet,
                 "",
                 &sheet,
@@ -1581,21 +1802,21 @@ test "Print" {
     defer sheet.deinit();
 
     inline for (data) |d| {
-        const expr, const expected = d;
-        const expr_root = try parseFromExpression(&sheet, expr);
+        const src, const expected = d;
+        const expr = try parseFromExpression(&sheet, src);
 
         var buf: [4096]u8 = undefined;
         var fixed: std.io.Writer = .fixed(&buf);
-        try print(sheet.ast_nodes, expr_root, expr, &fixed);
+        try print(sheet.ast_nodes, expr.root, expr.source, &fixed);
         try t.expectEqualStrings(expected, fixed.buffered());
     }
 
-    inline for (data2) |expr| {
-        const expr_root = try parseFromExpression(&sheet, expr);
+    inline for (data2) |src| {
+        const expr = try parseFromExpression(&sheet, src);
 
         var buf: [4096]u8 = undefined;
         var fixed: std.io.Writer = .fixed(&buf);
-        try print(sheet.ast_nodes, expr_root, expr, &fixed);
-        try t.expectEqualStrings(expr, fixed.buffered());
+        try print(sheet.ast_nodes, expr.root, expr.source, &fixed);
+        try t.expectEqualStrings(src, fixed.buffered());
     }
 }

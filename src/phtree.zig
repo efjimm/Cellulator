@@ -9,6 +9,12 @@ const runtime_safety = switch (@import("builtin").mode) {
     .ReleaseFast, .ReleaseSmall => false,
 };
 
+pub const ExistsContext = struct {
+    pub fn func(_: ExistsContext, _: anytype) !void {
+        return error.FoundExisting;
+    }
+};
+
 /// See https://tzaeschke.github.io/phtree-site/
 pub fn PhTree(
     /// Value associated with each leaf node.

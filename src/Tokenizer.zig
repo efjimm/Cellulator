@@ -67,6 +67,7 @@ pub const Token = struct {
         double_equals,
         exclamation_equals,
         exclamation,
+        ampersand,
 
         lparen,
         rparen,
@@ -126,6 +127,7 @@ pub const Token = struct {
                 .keyword_or = "or",
                 .eof = "eof",
                 .caret = "^",
+                .ampersand = "&",
                 .unknown = "",
             });
 
@@ -190,6 +192,10 @@ pub fn next(t: *Tokenizer) !Token {
                     },
                     else => {},
                 }
+            },
+            '&' => {
+                tag = .ampersand;
+                t.toss(1);
             },
             '=' => {
                 t.toss(1);

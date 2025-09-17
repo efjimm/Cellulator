@@ -73,6 +73,11 @@ pub const default_theme: Theme = .{
     .cell_error_selected = .init(.black, .red, .none),
     .cell_blank_unselected = .init(.none, .none, .none),
     .cell_blank_selected = .init(.none, .blue, .none),
+    .cell_ref_unselected = .init(.cyan, .none, .none),
+    .cell_ref_selected = .init(.black, .cyan, .none),
+    .cell_range_unselected = .init(.cyan, .none, .none),
+    .cell_range_selected = .init(.black, .cyan, .none),
+    .cell_visual_selected = .init(.none, .blue, .none),
 
     .sheet_selected = .init(.black, .blue, .none),
     .sheet_unselected = .init(.none, .bright_black, .none),
@@ -131,6 +136,11 @@ pub const UiElement = enum {
     cell_error_selected,
     cell_blank_unselected,
     cell_blank_selected,
+    cell_ref_unselected,
+    cell_ref_selected,
+    cell_range_unselected,
+    cell_range_selected,
+    cell_visual_selected,
 
     sheet_selected,
     sheet_unselected,
@@ -750,6 +760,10 @@ fn renderStatus(tui: *Tui, wr: *Screen.Writer) !void {
         const tokens = try Tokenizer.collectTokens(arena, &reader, 128);
         const tags = tokens.items(.tag);
         const starts = tokens.items(.start);
+        if (cell.is_volatile) {
+            try tui.setStyle(.token_keyword, wr);
+            try writer.writeAll("volatile ");
+        }
         for (tags[0 .. tags.len - 1], starts[0 .. starts.len - 1], starts[1..]) |tag, start, end| {
             try tui.writeToken(tag, bytes[start..end], wr);
         }
@@ -1116,6 +1130,20 @@ fn renderCursor(tui: *Tui, wr: *Screen.Writer) !void {
     for (start_x..@min(tui.screen_data.widths.len, @as(u64, end_x) + 1)) |x|
         width += tui.screen_data.widths[x];
 
+    const style: UiElement = blk: {
+        if (zc.mode.isVisual())
+            break :blk .cell_visual_selected;
+
+        const cell = zc.currentSheet().getCellPtr(range.tl) orelse break :blk .cell_blank_selected;
+        break :blk switch (cell.value_tag) {
+            .number => .cell_number_selected,
+            .string => .cell_text_selected,
+            .err => .cell_error_selected,
+            .ref_cell => .cell_ref_selected,
+            .ref_range => .cell_range_selected,
+        };
+    };
+
     wr.styleRect(
         wr.s.clampedRect(.{
             .x = @intCast(start),
@@ -1123,15 +1151,8 @@ fn renderCursor(tui: *Tui, wr: *Screen.Writer) !void {
             .width = @intCast(width),
             .height = @intCast(@min(std.math.maxInt(u16), end_y - start_y + 1)),
         }),
-        tui.styles.get(.cell_number_selected),
+        tui.styles.get(style),
     );
-}
-
-fn isSelected(zc: *const ZC, pos: Position) bool {
-    return pos == zc.cursor or switch (zc.mode) {
-        .visual, .select => pos.intersects(zc.anchor, zc.cursor),
-        else => false,
-    };
 }
 
 fn divCeil(n: anytype, d: @TypeOf(n)) @TypeOf(n) {
@@ -1199,24 +1220,26 @@ fn SheetTreeContext(comptime field_name: []const u8) type {
     };
 }
 
-const C = struct {
-    value: Cell.Value,
-    tag: Tag,
-
-    const Tag = enum {
-        number,
-        string,
-        err,
-        blank,
-    };
-};
-
 const ScreenData = struct {
     widths: []const u16,
     precisions: []const u8,
     values: []const Cell.Value,
-    tags: []const C.Tag,
     attrs: []const Sheet.TextAttrs,
+    extra: []const Extra,
+
+    const Tag = enum(u3) {
+        blank,
+        number,
+        string,
+        err,
+        ref_cell,
+        ref_range,
+    };
+
+    const Extra = packed struct {
+        is_volatile: bool,
+        tag: Tag,
+    };
 };
 
 fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !ScreenData {
@@ -1227,12 +1250,12 @@ fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !ScreenData {
     const widths = try arena.alloc(u16, col_count);
     const precisions = try arena.alloc(u8, col_count);
     const values = try arena.alloc(Cell.Value, cell_count);
-    const tags = try arena.alloc(C.Tag, cell_count);
+    const extra = try arena.alloc(ScreenData.Extra, cell_count);
     const attrs = try arena.alloc(Sheet.TextAttrs, cell_count);
 
     @memset(widths, Column.default_width);
     @memset(precisions, 2);
-    @memset(tags, .blank);
+    @memset(extra, .{ .is_volatile = false, .tag = .blank });
     @memset(attrs, .default);
 
     const tl: *const [2]u32 = &.{ zc.screen_pos.x, zc.screen_pos.y };
@@ -1243,7 +1266,7 @@ fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !ScreenData {
 
     const CellContext = struct {
         values: []Cell.Value,
-        tags: []C.Tag,
+        extra: []ScreenData.Extra,
         sheet: *Sheet,
         zc: *ZC,
         col_count: u16,
@@ -1253,7 +1276,16 @@ fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !ScreenData {
             const x = p[0] - ctx.zc.screen_pos.x;
             const y = p[1] - ctx.zc.screen_pos.y;
             const cell = ctx.sheet.cell_tree.getValue(h).*;
-            ctx.tags[y * ctx.col_count + x] = @enumFromInt(@intFromEnum(cell.value_tag));
+            ctx.extra[y * ctx.col_count + x] = .{
+                .tag = switch (cell.value_tag) {
+                    .number => .number,
+                    .string => .string,
+                    .err => .err,
+                    .ref_cell => .ref_cell,
+                    .ref_range => .ref_range,
+                },
+                .is_volatile = cell.is_volatile,
+            };
             ctx.values[y * ctx.col_count + x] = cell.value;
         }
     };
@@ -1298,7 +1330,7 @@ fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !ScreenData {
 
     // sheet.cell_tree.queryWindow(tl, br, &cells) catch unreachable;
     sheet.cell_tree.traverse(tl, br, CellContext{
-        .tags = tags,
+        .extra = extra,
         .values = values,
         .sheet = sheet,
         .zc = zc,
@@ -1316,7 +1348,7 @@ fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !ScreenData {
         .widths = widths,
         .precisions = precisions,
         .values = values,
-        .tags = tags,
+        .extra = extra,
         .attrs = attrs,
     };
 }
@@ -1355,10 +1387,14 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
             const width = @min(data.widths[x], wr.rect.width -| w);
             if (width == 0) continue;
 
-            switch (data.tags[i]) {
+            var buf: [512]u8 = undefined;
+            switch (data.extra[i].tag) {
+                .blank => {
+                    try tui.setStyle(.cell_blank_unselected, wr);
+                    try wr.interface.splatByteAll(' ', width);
+                },
                 .number => {
                     try tui.setStyle(.cell_number_unselected, wr);
-                    var buf: [512]u8 = undefined;
                     var bw: std.io.Writer = .fixed(&buf);
                     bw.print("{d: >[1].[2]}", .{
                         data.values[i].number,
@@ -1391,9 +1427,30 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                     try tui.setStyle(.cell_error_unselected, wr);
                     try wr.interface.print("{s: >[1]}", .{ "ERROR", width });
                 },
-                .blank => {
-                    try tui.setStyle(.cell_blank_unselected, wr);
-                    try wr.interface.splatByteAll(' ', width);
+                .ref_cell => {
+                    try tui.setStyle(.cell_ref_unselected, wr);
+                    const slice = std.fmt.bufPrint(&buf, "{f}", .{data.values[i].ref_cell}) catch
+                        unreachable;
+                    try shovel.writeTruncating(
+                        slice,
+                        width,
+                        .right,
+                        tui.term.grapheme_clustering_mode,
+                        &wr.interface,
+                    );
+                },
+                .ref_range => {
+                    try tui.setStyle(.cell_range_unselected, wr);
+                    const range = sheet.cellValueRange(data.values[i].ref_range).*;
+
+                    const slice = std.fmt.bufPrint(&buf, "{f}", .{range}) catch unreachable;
+                    try shovel.writeTruncating(
+                        slice,
+                        width,
+                        .right,
+                        tui.term.grapheme_clustering_mode,
+                        &wr.interface,
+                    );
                 },
             }
             w += width;

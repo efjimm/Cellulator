@@ -280,22 +280,14 @@ pub const Position = packed struct {
         }
 
         pub fn overlapArea(r1: Rect, r2: Rect) u64 {
-            const dx = std.math.sub(
-                u64,
-                @min(r1.br.x, r2.br.x),
-                @max(r1.tl.x, r2.tl.x),
-            ) catch 0;
-            const dy = std.math.sub(
-                u64,
-                @min(r1.br.y, r2.br.y),
-                @max(r1.tl.y, r2.tl.y),
-            ) catch 0;
+            const dx = std.math.sub(u64, @min(r1.br.x, r2.br.x), @max(r1.tl.x, r2.tl.x)) catch 0;
+            const dy = std.math.sub(u64, @min(r1.br.y, r2.br.y), @max(r1.tl.y, r2.tl.y)) catch 0;
 
             return dx * dy;
         }
 
         pub fn format(range: Rect, writer: *std.io.Writer) !void {
-            try writer.print("[{f} -> {f}]", .{ range.tl, range.br });
+            try writer.print("{f}:{f}", .{ range.tl, range.br });
         }
 
         pub fn eql(r1: Rect, r2: Rect) bool {

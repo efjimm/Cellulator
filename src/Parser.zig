@@ -4,7 +4,6 @@ const Tokenizer = @import("Tokenizer.zig");
 const Token = Tokenizer.Token;
 
 const Allocator = std.mem.Allocator;
-const NodeList = std.MultiArrayList(Node);
 const assert = std.debug.assert;
 
 const Parser = @This();
@@ -18,11 +17,54 @@ strings_len: usize,
 
 src: []const u8,
 
-nodes: NodeList,
+nodes: std.MultiArrayList(Node),
+
+// TODO: When custom Lua functions are implemented, they could have volatile behaviour.
+//       It should be possible to explicitly mark a function as volatile. It should also be
+//       allowed for the volatility of a function to depend on it's arguments, e.g. a function
+//       that is passed a dynamic range only needs to be volatile if there is cell accesses through
+//       that range.
+//
+/// A volatile expression is always re-evaluated whenever anything in the sheet changes.
+/// Any expression that accesses cells dynamically is volatile.
+is_volatile: bool = false,
 
 allocator: Allocator,
 
 diagnostics: ?*Diagnostics = null,
+
+pub const Result = struct { Index, Type };
+
+pub const Type = packed struct {
+    none: bool = false,
+    num: bool = false,
+    str: bool = false,
+    cell_ref: bool = false,
+    range_ref: bool = false,
+
+    const any: Type = .{
+        .none = true,
+        .num = true,
+        .str = true,
+        .cell_ref = true,
+        .range_ref = true,
+    };
+
+    const number: Type = .{ .num = true };
+    const string: Type = .{ .str = true };
+    const cell: Type = .{ .cell_ref = true };
+    const range: Type = .{ .range_ref = true };
+
+    fn @"union"(a: Type, b: Type) Type {
+        var ret: Type = .{};
+        inline for (@typeInfo(Type).@"struct".fields) |f| {
+            @field(ret, f.name) = @field(a, f.name) or @field(b, f.name);
+        }
+        return ret;
+    }
+};
+
+pub const ExpressionContext = enum { value, reference };
 
 pub const Diagnostics = struct {
     payload: Payload = .none,
@@ -76,7 +118,7 @@ pub const BinaryOperator = extern struct {
     lhs: NegativeOffset,
     rhs: NegativeOffset,
 
-    pub fn resolve(b: BinaryOperator, from: Index) [2]Index {
+    pub fn args(b: BinaryOperator, from: Index) [2]Index {
         return .{ from.sub(b.lhs), from.sub(b.rhs) };
     }
 };
@@ -148,7 +190,7 @@ pub const ParseError = error{
 } || Allocator.Error;
 
 const InitOptions = struct {
-    nodes: NodeList = .{},
+    nodes: std.MultiArrayList(Node) = .{},
     diagnostics: ?*Diagnostics = null,
 };
 
@@ -171,6 +213,11 @@ pub fn init(
     };
 }
 
+pub fn root(parser: *const Parser) Index {
+    return .from(@intCast(parser.nodes.len - 1));
+}
+
+/// <- Statement / Expression
 pub fn parse(parser: *Parser) ParseError!void {
     _ = try parser.parseStatement();
     try parser.expectToken(.eof);
@@ -178,29 +225,16 @@ pub fn parse(parser: *Parser) ParseError!void {
 
 /// Statement <- 'let' Assignment
 pub fn parseStatement(parser: *Parser) ParseError!Index {
-    try parser.expectToken(.keyword_let);
-    return parser.parseAssignment();
-}
-
-fn parseStringLiteral(parser: *Parser, comptime expected_tag: Token.Tag) ParseError!Index {
-    const start = try parser.expectTokenGet(expected_tag);
-    const end_tag = switch (expected_tag) {
-        .single_string_literal_start => .single_string_literal_end,
-        .double_string_literal_start => .double_string_literal_end,
-        else => comptime unreachable,
-    };
-    const end = try parser.expectTokenGet(end_tag);
-
-    const len = end - start;
-    parser.strings_len += len;
-
-    // TODO: Handle escapes of quotes
-    return parser.addNode(
-        .init(.string_literal, .{
-            .start = start + 1,
-            .end = end,
-        }),
-    );
+    switch (parser.token_tags[parser.tok_i]) {
+        .keyword_let => {
+            parser.tok_i += 1;
+            return try parser.parseAssignment();
+        },
+        else => {
+            const index, _ = try parser.parseExpression(.value);
+            return index;
+        },
+    }
 }
 
 /// Assignment <- CellReference '=' Expression
@@ -220,22 +254,22 @@ pub fn parseAssignment(parser: *Parser) ParseError!Index {
     );
 
     try parser.expectToken(.equals_sign);
-    _ = try parser.parseExpression();
+    _ = try parser.parseExpression(.value);
 
     return parser.addNode(.init(.assignment, pos));
 }
 
-/// Expression <- AddExpr
-pub fn parseExpression(parser: *Parser) ParseError!Index {
-    return parser.parseOrExpr();
+/// Expression <- OrExpr
+pub fn parseExpression(parser: *Parser, ctx: ExpressionContext) ParseError!Result {
+    return try parser.parseOrExpr(ctx);
 }
 
 /// OrExpr <- AndExpr ('or' AndExpr)*
-fn parseOrExpr(parser: *Parser) !Index {
-    var index = try parser.parseAndExpr();
+fn parseOrExpr(parser: *Parser, ctx: ExpressionContext) !Result {
+    var index, var result_type = try parser.parseAndExpr(ctx);
 
     while (parser.eatToken(.keyword_or)) |_| {
-        const rhs = try parser.parseAndExpr();
+        const rhs, _ = try parser.parseAndExpr(ctx);
         const len: u32 = @intCast(parser.nodes.len);
         const op = BinaryOperator{
             .lhs = @enumFromInt(len - index.n),
@@ -243,17 +277,18 @@ fn parseOrExpr(parser: *Parser) !Index {
         };
 
         index = try parser.addNode(.init(.logical_or, op));
+        result_type = .number;
     }
 
-    return index;
+    return .{ index, result_type };
 }
 
 /// AndExpr <- EqualityExpr ('and' EqualityExpr)*
-fn parseAndExpr(parser: *Parser) !Index {
-    var index = try parser.parseEqualityExpr();
+fn parseAndExpr(parser: *Parser, ctx: ExpressionContext) !Result {
+    var index, var result_type = try parser.parseEqualityExpr(ctx);
 
     while (parser.eatToken(.keyword_and)) |_| {
-        const rhs = try parser.parseEqualityExpr();
+        const rhs, _ = try parser.parseEqualityExpr(ctx);
         const len: u32 = @intCast(parser.nodes.len);
         const op = BinaryOperator{
             .lhs = @enumFromInt(len - index.n),
@@ -261,14 +296,15 @@ fn parseAndExpr(parser: *Parser) !Index {
         };
 
         index = try parser.addNode(.init(.logical_and, op));
+        result_type = .number;
     }
 
-    return index;
+    return .{ index, result_type };
 }
 
 /// EqualityExpr <- AddExpr (('==' / '!=' / '<' / '>') AddExpr)*
-fn parseEqualityExpr(parser: *Parser) !Index {
-    var index = try parser.parseAddExpr();
+fn parseEqualityExpr(parser: *Parser, ctx: ExpressionContext) !Result {
+    var index, var result_type = try parser.parseAddExpr(ctx);
 
     while (true) switch (parser.token_tags[parser.tok_i]) {
         inline .double_equals,
@@ -279,7 +315,7 @@ fn parseEqualityExpr(parser: *Parser) !Index {
         .less_equals,
         => |tag| {
             parser.tok_i += 1;
-            const rhs = try parser.parseAddExpr();
+            const rhs, _ = try parser.parseAddExpr(ctx);
             const len: u32 = @intCast(parser.nodes.len);
             const op = BinaryOperator{
                 .lhs = @enumFromInt(len - index.n),
@@ -297,21 +333,22 @@ fn parseEqualityExpr(parser: *Parser) !Index {
             };
 
             index = try parser.addNode(.init(node_tag, op));
+            result_type = .number;
         },
         else => break,
     };
 
-    return index;
+    return .{ index, result_type };
 }
 
 /// AddExpr <- MulExpr (('+' / '-' / '#') MulExpr)*
-fn parseAddExpr(parser: *Parser) !Index {
-    var index = try parser.parseMulExpr();
+fn parseAddExpr(parser: *Parser, ctx: ExpressionContext) !Result {
+    var index, var result_type = try parser.parseMulExpr(ctx);
 
     while (true) switch (parser.token_tags[parser.tok_i]) {
         inline .plus, .minus, .hash => |tag| {
             parser.tok_i += 1;
-            const rhs = try parser.parseMulExpr();
+            const rhs, _ = try parser.parseMulExpr(ctx);
             const len: u32 = @intCast(parser.nodes.len);
             const op = BinaryOperator{
                 .lhs = @enumFromInt(len - index.n),
@@ -326,21 +363,26 @@ fn parseAddExpr(parser: *Parser) !Index {
             };
 
             index = try parser.addNode(node);
+            result_type = switch (tag) {
+                .plus, .minus => .number,
+                .hash => .string,
+                else => comptime unreachable,
+            };
         },
         else => break,
     };
 
-    return index;
+    return .{ index, result_type };
 }
 
 /// MulExpr <- PowExpr (('*' / '/' / '%') PowExpr)*
-fn parseMulExpr(parser: *Parser) !Index {
-    var index = try parser.parsePowExpr();
+fn parseMulExpr(parser: *Parser, ctx: ExpressionContext) !Result {
+    var index, var result_type = try parser.parsePowExpr(ctx);
 
     while (true) switch (parser.token_tags[parser.tok_i]) {
         inline .asterisk, .forward_slash, .percent => |tag| {
             parser.tok_i += 1;
-            const rhs = try parser.parsePowExpr();
+            const rhs, _ = try parser.parsePowExpr(ctx);
             const len: u32 = @intCast(parser.nodes.len);
             const op = BinaryOperator{
                 .lhs = @enumFromInt(len - index.n),
@@ -355,14 +397,36 @@ fn parseMulExpr(parser: *Parser) !Index {
             };
 
             index = try parser.addNode(node);
+            result_type = .number;
         },
         else => break,
     };
 
-    return index;
+    return .{ index, result_type };
 }
 
-fn parseUnaryExpr(parser: *Parser) !Index {
+/// PowExpr <- UnaryExpr ('^' UnaryExpr)*
+fn parsePowExpr(parser: *Parser, ctx: ExpressionContext) !Result {
+    var index, var result_type = try parser.parseUnaryExpr(ctx);
+
+    while (parser.eatToken(.caret)) |_| {
+        const rhs, _ = try parser.parseUnaryExpr(ctx);
+        const len: u32 = @intCast(parser.nodes.len);
+        const op: BinaryOperator = .{
+            .lhs = @enumFromInt(len - index.n),
+            .rhs = @enumFromInt(len - rhs.n),
+        };
+
+        const node: Node = .init(.pow, op);
+        index = try parser.addNode(node);
+        result_type = .number;
+    }
+
+    return .{ index, result_type };
+}
+
+/// UnaryExpr <- ('+' / '-' / '!')* RangeExpr
+fn parseUnaryExpr(parser: *Parser, ctx: ExpressionContext) !Result {
     return switch (parser.token_tags[parser.tok_i]) {
         inline .minus, .plus, .exclamation => |t| {
             const tag: Node.Tag = switch (t) {
@@ -372,68 +436,115 @@ fn parseUnaryExpr(parser: *Parser) !Index {
                 else => comptime unreachable,
             };
             parser.tok_i += 1;
-            _ = try parser.parseUnaryExpr();
-            return parser.addNode(.init(tag, {}));
+            _ = try parser.parseUnaryExpr(ctx);
+            const index = try parser.addNode(.init(tag, {}));
+            return .{ index, .number };
         },
-        else => parser.parsePrimaryExpr(),
+        else => try parser.parseRangeExpr(ctx),
     };
 }
 
-/// PowExpr <- UnaryExpr ('^' UnaryExpr)*
-fn parsePowExpr(parser: *Parser) !Index {
-    var index = try parser.parseUnaryExpr();
+/// RangeExpr <- ReferenceExpr (':' ReferenceExpr)?
+fn parseRangeExpr(parser: *Parser, ctx: ExpressionContext) !Result {
+    const lhs, const lhs_type = try parser.parseReferenceExpr(ctx);
 
-    while (parser.eatToken(.caret)) |_| {
-        const rhs = try parser.parseUnaryExpr();
-        const len: u32 = @intCast(parser.nodes.len);
-        const op: BinaryOperator = .{
-            .lhs = @enumFromInt(len - index.n),
-            .rhs = @enumFromInt(len - rhs.n),
-        };
+    _ = parser.eatToken(.colon) orelse return .{ lhs, lhs_type };
+    const rhs, _ = try parser.parseReferenceExpr(ctx);
 
-        const node: Node = .init(.pow, op);
-        index = try parser.addNode(node);
+    const len: u32 = @intCast(parser.nodes.len);
+    var node: Node = .init(.range, .{
+        .lhs = @enumFromInt(len - lhs.n),
+        .rhs = @enumFromInt(len - rhs.n),
+    });
+
+    assert(node.data.range.rhs.int() == 1);
+
+    // If either of the operands are anything other than a cell literal or a reference to a cell
+    // literal, then this expression must be marked volatile.
+    if (parser.isDynamicReference(lhs) or parser.isDynamicReference(rhs)) {
+        // TODO: remove dynamic range tag
+        node.tag = .dynamic_range;
     }
 
-    return index;
+    const index = try parser.addNode(node);
+    return .{ index, .range };
+}
+
+fn parseReferenceExpr(parser: *Parser, ctx: ExpressionContext) !Result {
+    return switch (parser.token_tags[parser.tok_i]) {
+        .ampersand => {
+            parser.tok_i += 1;
+            _ = try parser.parsePrimaryExpr(ctx);
+            const index = try parser.addNode(.init(.reference, {}));
+            return .{ index, .cell };
+        },
+        .asterisk => {
+            parser.tok_i += 1;
+            const operand, _ = try parser.parseReferenceExpr(ctx);
+
+            // Accessing the value of a cell dynamically requires volatile
+            if (parser.isDynamicReference(operand))
+                parser.is_volatile = true;
+
+            const index = try parser.addNode(.init(.dereference, {}));
+            return .{ index, .any };
+        },
+        else => try parser.parsePrimaryExpr(ctx),
+    };
+}
+
+/// Returns true if the given node is a cell literal or a reference to a cell literal.
+fn isDynamicReference(parser: *const Parser, index: Index) bool {
+    return @import("ast.zig").isDynamicReference(parser.nodes.slice(), index);
+}
+
+/// Returns true if the given node is a cell literal or a reference to a cell literal.
+fn isDynamicRange(parser: *const Parser, index: Index) bool {
+    const tags = parser.nodes.items(.tag);
+    return switch (tags[index.n]) {
+        .dynamic_range => true,
+        else => false,
+    };
+}
+
+/// Marks the expression as volatile if the given node could be a cell reference and is not a cell
+/// literal or a reference to a cell literal, or if the expression could be a cell range.
+fn volatileAccess(parser: *Parser, index: Index, result_type: Type) void {
+    parser.is_volatile =
+        parser.is_volatile or
+        result_type.range_ref and parser.isDynamicRange(index) or
+        result_type.cell_ref and parser.isDynamicReference(index);
+}
+
+/// Marks the expression as volatile if the given node could be a cell reference and is not a cell
+/// literal or a reference to a cell literal.
+fn volatileAccessSingle(parser: *Parser, index: Index, result_type: Type) void {
+    parser.is_volatile =
+        parser.is_volatile or
+        result_type.cell_ref and parser.isDynamicReference(index);
 }
 
 /// PrimaryExpr <- Number / Range / StringLiteral / Builtin / '(' Expression ')'
-fn parsePrimaryExpr(parser: *Parser) !Index {
+fn parsePrimaryExpr(parser: *Parser, ctx: ExpressionContext) !Result {
     return switch (parser.token_tags[parser.tok_i]) {
-        .number => parser.parseNumber(),
-        .rel_rel, .rel_abs, .abs_rel, .abs_abs => parser.parseRange(),
+        .number => try parser.parseNumber(),
+        .rel_rel, .rel_abs, .abs_rel, .abs_abs => try parser.parseCellName(ctx),
         .lparen => {
             try parser.expectToken(.lparen);
-            const ret = parser.parseExpression();
+            const ret = try parser.parseExpression(ctx);
             try parser.expectToken(.rparen);
             return ret;
         },
-        .builtin => parser.parseBuiltin(),
+        .builtin => try parser.parseBuiltin(),
         inline .single_string_literal_start,
         .double_string_literal_start,
-        => |tag| parser.parseStringLiteral(tag),
+        => |tag| try parser.parseStringLiteral(tag),
         else => parser.setError(error.UnexpectedToken, .{ .expected_string = "expression" }),
     };
 }
 
-/// Range <- CellReference (':' CellReference)?
-fn parseRange(parser: *Parser) !Index {
-    const lhs = try parser.parseCellName();
-
-    if (parser.eatToken(.colon) == null) return lhs;
-
-    const rhs = try parser.parseCellName();
-
-    const len: u32 = @intCast(parser.nodes.len);
-    return parser.addNode(.init(.range, .{
-        .lhs = @enumFromInt(len - lhs.n),
-        .rhs = @enumFromInt(len - rhs.n),
-    }));
-}
-
-/// Builtin <- builtin '(' ArgList? ')'
-fn parseBuiltin(parser: *Parser) !Index {
+/// Builtin <- builtin ('(' ArgList? ')')?
+fn parseBuiltin(parser: *Parser) !Result {
     const start = try parser.expectTokenGet(.builtin);
     const end = parser.token_starts[parser.tok_i];
 
@@ -443,23 +554,25 @@ fn parseBuiltin(parser: *Parser) !Index {
         .{ .invalid_builtin = identifier },
     );
 
-    const args_start = sw: switch (builtin) {
+    const args_start, const result_type: Type = sw: switch (builtin) {
         // These builtins aren't even functions!
         .pi, .e => {
-            return parser.addNode(.init(.builtin, .{
-                .tag = builtin,
-                .first_arg = @enumFromInt(0),
-            }));
+            const index = try parser.addNode(
+                .init(.builtin, .{
+                    .tag = builtin,
+                    .first_arg = @enumFromInt(0),
+                }),
+            );
+            return .{ index, .number };
         },
+        // These builtins take only one argument
         .width,
         .height,
         => {
             try parser.expectToken(.lparen);
-            break :sw try parser.parseRange();
+            const expr, _ = try parser.parseExpression(.value);
+            break :sw .{ expr, .number };
         },
-        // These builtins take only one argument
-        .upper,
-        .lower,
         .sqrt,
         .round,
         .floor,
@@ -467,7 +580,19 @@ fn parseBuiltin(parser: *Parser) !Index {
         .len,
         => {
             try parser.expectToken(.lparen);
-            break :sw try parser.parseExpression();
+            const expr, const result_type = try parser.parseExpression(.reference);
+            parser.volatileAccessSingle(expr, result_type);
+
+            break :sw .{ expr, .number };
+        },
+        .upper,
+        .lower,
+        => {
+            try parser.expectToken(.lparen);
+            const expr, const result_type = try parser.parseExpression(.reference);
+            parser.volatileAccessSingle(expr, result_type);
+
+            break :sw .{ expr, .string };
         },
         // These builtins require at least one argument
         .sum,
@@ -479,47 +604,54 @@ fn parseBuiltin(parser: *Parser) !Index {
         .count_all,
         => {
             try parser.expectToken(.lparen);
-            break :sw try parser.parseArgList();
+            const index = try parser.parseVarArgsAccess(.reference);
+            break :sw .{ index, .number };
         },
         .log => {
             try parser.expectToken(.lparen);
-            break :sw try parser.parseArgsN(2);
+            const index = try parser.parseArgsAccess(2, .reference);
+            break :sw .{ index, .number };
         },
     };
     try parser.expectToken(.rparen);
 
     const len: u32 = @intCast(parser.nodes.len);
-    return parser.addNode(.init(.builtin, .{
+    const index = try parser.addNode(.init(.builtin, .{
         .tag = builtin,
         .first_arg = @enumFromInt(len - args_start.n),
     }));
+    return .{ index, result_type };
 }
 
 /// ArgList <- Expression (',' Expression)*
-fn parseArgList(parser: *Parser) !Index {
-    const start = try parser.parseExpression();
+fn parseVarArgsAccess(parser: *Parser, ctx: ExpressionContext) !Index {
+    const start, var result_type = try parser.parseExpression(ctx);
+    parser.volatileAccess(start, result_type);
 
     while (parser.eatToken(.comma)) |_| {
-        _ = try parser.parseExpression();
+        const index, result_type = try parser.parseExpression(ctx);
+        parser.volatileAccess(index, result_type);
     }
 
     return start;
 }
 
 /// Parses an argument list with exactly `n` arguments.
-fn parseArgsN(parser: *Parser, n: usize) !Index {
-    const start = try parser.parseExpression();
+fn parseArgsAccess(parser: *Parser, n: usize, ctx: ExpressionContext) !Index {
+    const start, var result_type = try parser.parseExpression(ctx);
+    parser.volatileAccess(start, result_type);
 
     for (0..n - 1) |_| {
         try parser.expectToken(.comma);
-        _ = try parser.parseExpression();
+        const index, result_type = try parser.parseExpression(ctx);
+        parser.volatileAccess(index, result_type);
     }
 
     return start;
 }
 
 /// Number <- ('+' / '-')? ('0'-'9')+
-fn parseNumber(parser: *Parser) !Index {
+fn parseNumber(parser: *Parser) !Result {
     const is_positive = parser.eatToken(.minus) == null;
     if (is_positive) _ = parser.eatToken(.plus);
 
@@ -535,11 +667,35 @@ fn parseNumber(parser: *Parser) !Index {
         unreachable;
     };
 
-    return parser.addNode(.init(.number, if (is_positive) num else -num));
+    const index = try parser.addNode(.init(.number, if (is_positive) num else -num));
+    return .{ index, .number };
 }
 
+fn parseStringLiteral(parser: *Parser, comptime expected_tag: Token.Tag) ParseError!Result {
+    const start = try parser.expectTokenGet(expected_tag);
+    const end_tag = switch (expected_tag) {
+        .single_string_literal_start => .single_string_literal_end,
+        .double_string_literal_start => .double_string_literal_end,
+        else => comptime unreachable,
+    };
+    const end = try parser.expectTokenGet(end_tag);
+
+    const len = end - start;
+    parser.strings_len += len;
+
+    // TODO: Handle escapes of quotes
+    const index = try parser.addNode(
+        .init(.string_literal, .{
+            .start = start + 1,
+            .end = end,
+        }),
+    );
+    return .{ index, .string };
+}
+
+// TODO: Inidicate from caller if we're in a reference or value context and adjust result type
 /// CellReference <- ('a'-'z' / 'A'-'Z')+ ('0'-'9')+
-fn parseCellName(parser: *Parser) !Index {
+fn parseCellName(parser: *Parser, ctx: ExpressionContext) !Result {
     switch (parser.token_tags[parser.tok_i]) {
         .rel_rel, .rel_abs, .abs_rel, .abs_abs => {},
         else => return parser.setError(
@@ -566,7 +722,12 @@ fn parseCellName(parser: *Parser) !Index {
                 .rel_rel => .rel_rel,
             };
 
-            return parser.addNode(.init(tag, res.pos));
+            const index = try parser.addNode(.init(tag, res.pos));
+            const result_type: Type = switch (ctx) {
+                .value => .any,
+                .reference => .cell,
+            };
+            return .{ index, result_type };
         },
     }
 }
@@ -627,6 +788,7 @@ fn formatTags(tags: []const Token.Tag, writer: *std.io.Writer) !void {
 
 fn eatToken(parser: *Parser, expected_tag: Token.Tag) ?Token {
     if (parser.token_tags[parser.tok_i] == expected_tag) {
+        @branchHint(.likely);
         const ret: Token = .{
             .tag = parser.token_tags[parser.tok_i],
             .start = parser.token_starts[parser.tok_i],
@@ -836,4 +998,48 @@ test "Node contents" {
             .init(.assignment, .fromValidAddress("a0")),
         },
     );
+}
+
+fn testVolatile(expr: []const u8, volatility: bool) !void {
+    var r: std.io.Reader = .fixed(expr);
+    var tokens = try Tokenizer.collectTokens(std.testing.allocator, &r, @intCast(expr.len));
+    defer tokens.deinit(std.testing.allocator);
+    var p: Parser = .init(std.testing.allocator, expr, tokens.items(.tag), tokens.items(.start), .{});
+    defer p.nodes.deinit(std.testing.allocator);
+    try p.parse();
+    try std.testing.expectEqual(volatility, p.is_volatile);
+}
+
+test "Volatile expressions" {
+    try testVolatile("10", false);
+    try testVolatile("b0", false);
+    try testVolatile("&b0", false);
+    try testVolatile("b0:c0", false);
+    try testVolatile("b0:*c0", false);
+    try testVolatile("*b0:c0", false);
+    try testVolatile("*b0:*c0", false);
+    try testVolatile("**b0:c0", true);
+    try testVolatile("**b0", true);
+
+    // These builtins accept references and make accesses through them.
+    try testVolatile("@sqrt(a0)", false);
+    try testVolatile("@sqrt(*a0)", true);
+    try testVolatile("@sum(a0)", false);
+    try testVolatile("@sum(a0:d30, 1, 3 + 2 * 300 + @prod(a0:d3), zzz10)", false);
+    try testVolatile("@sum(a0:d1)", false);
+    try testVolatile("@sum(*a0:d1)", true);
+    try testVolatile("@sum(a0:*d1)", true);
+    try testVolatile("@sum(*a0:*d1)", true);
+
+    // These builtins accept references but don't make any accesses through them, and as such never
+    // need to be marked as volatile.
+    try testVolatile("@width(*a0)", false);
+    try testVolatile("@width(*a0:b0)", false);
+    try testVolatile("@width(a0:*b0)", false);
+    try testVolatile("@width(*a0:*b0)", false);
+
+    try testVolatile("@height(*a0)", false);
+    try testVolatile("@height(*a0:b0)", false);
+    try testVolatile("@height(a0:*b0)", false);
+    try testVolatile("@height(*a0:*b0)", false);
 }

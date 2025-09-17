@@ -99,3 +99,17 @@ let G1 = "Interim"
 :expect-eql-number A11 4
 :expect-eql-number C12 9
 
+-- Test volatile cells after load
+:e
+:expect-non-extant A0:ZZZZ1_000_000
+let a0 = **b0
+let b0 = &c0
+let c0 = 10
+:expect a0 == 10
+let c0 = 20
+:expect a0 == 20
+:w $BUILD_TEMP_DIR/indirect.zc
+:e $BUILD_TEMP_DIR/indirect.zc
+:expect a0 == 20
+let c0 = 40
+:expect a0 == 40

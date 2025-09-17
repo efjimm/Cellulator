@@ -5,17 +5,59 @@ might be an interesting read so I committed it. The stuff at the top is probably
 # TODO
 
 - Cellulator as an interpreter
-  - Treat each  line as a command
+  - Treat each line as a command
   - Different from loading files
     - File loads are specialised and have lots of limitations to improve load speed.
   - REPL
     - Essentially just the command line without the UI
     - We have vim keybindings!
 
+- Make string evaluation not complete SHIT
+
+- Dependencies not being removed after cell changes.
+- Throw nicer errors with new type tracking in parser
+- Make all index types enums
+- MultiArrayList.Slice wrapper that uses index types, like PhTree.Slice
+- Remove dynamic range ast node
+- Clean up handling of cell inserts
+  - Deduplicate common logic
+- Map expressions to cells
+  - Allows better sharing of expressions between cells
+  - Can store a list of volatile expressions instead of volatile cells
+- Fold keyword
+- Reduce size of Cell struct
+- Labels for cells
+- Custom functions implemented in Lua
+- Selct around blocks
+- Replace mode in cli
+- Commands not being respected when opening sheet
+
 ## Statements and Commands
 
+- Reduce operators instead of builtins
+  - |+, |-, ||
+
+- Lists of cells, e.g. `[1, a0, d10:g20]`
+  - Could be used with reduce operators
+
+- Cell references as values
+  - Explicit reference required, e.g. &A0
+    - Making references implicit would mean a0 + b0 wouldn't work, you'd have to deref them to get
+      their values. Operators could be made to implicitly deref their operands but that's annoying
+      for other reasons.
+    - Still supports reactive updates as expected
+    - Cell literals implicitly coerce to references in contexts that require references
+  - Ranges are always a reference, because dereferencing a range makes no sense.
+    - Similar to a slice in Zig
+    - Could be indexed and sliced
+  - Allow arbitrary expressions on the left side of the assignment operator
+
+- Row and column to cell ref
+- String to cell ref
+- Penis operator
+- Boolean type
+
 - Partial caching for expressions
-- Make cell positions and ranges an actual value that can be returned from expressions.
 - Implement anonymous functions
 - Implement conditional functions, conditional ranges
   - A conditional range is a range that associated with a predicate
@@ -61,7 +103,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
     - Better visuals
 
 - Performance: Store cached cell values separately from ASTs
-- Make string concat evaluation not shitty
 - Filtering rows/columns
 - Sorting rows/columns
 - OOM resistance

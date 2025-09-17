@@ -1,0 +1,82 @@
+let a0 = &b0
+:expect a0 == &b0
+:expect a0 != &a0
+:expect a0 != &c0
+:expect-expr a0 &b0
+
+let b0 = &b0
+:expect b0 == &b0
+:expect &b0 == b0
+:expect b0 == b0
+:expect a0 == b0
+:expect &a0 != b0
+:expect a0 == &b0
+:expect &a0 != &b0
+
+let a1 = a0:b0
+:expect a1 == a0:b0
+:expect a1 != a0:b1
+:expect a1 != a0:c0
+let b1 = a0:b0
+:expect a1 == b1
+:expect &a1 != b1
+:expect a1 != &b1
+:expect &a1 != &b1
+
+let a2 = &d10
+let b2 = &f20
+:expect a2 != b2
+let c2 = *a2:*b2
+:expect c2 == d10:f20
+:expect @sum(*c2) == 0
+
+:fill d13:f15 1
+:expect @sum(*c2) == 9
+let d12 = 1
+:expect @sum(*a2:*b2) == 10
+:expect @sum(*c2) == 10
+
+:expect @prod(*a2:*b2) == 1
+:expect @prod(*c2) == 1
+:expect @avg(*a2:*b2) == 1
+:expect @avg(*c2) == 1
+:expect @min(*a2:*b2) == 1
+:expect @min(*c2) == 1
+:expect @width(a2:b2) == 2
+:expect @height(a2:b2) == 1
+:expect @width(*a2:*b2) == 3
+:expect @height(*a2:*b2) == 11
+
+let a3 = c3:b3
+:expect @sum(*a3) == 0
+
+let b4 = &a0
+let a4 = @width(*b4:d0)
+:expect a4 == 4
+let b4 = &b0
+:expect-eql-number a4 3
+
+let a5 = **b5
+:expect-error a5
+let b5 = &c5
+:expect a5 == 0
+let c5 = 3
+:expect a5 == 3
+let c5 = d5
+:expect a5 == 0
+let d5 = 10
+:expect a5 == 10
+
+:fill-expr a6:b6 @sqrt(*c6)
+let c6 = &d6
+let d6 = 9
+:expect a6 == 3
+:expect b6 == 3
+let d6 = 25
+:expect a6 == 5
+:expect b6 == 5
+
+let a7 = @height(b7)
+:expect-error a7
+let b7 = a7:d10
+:expect a7 == 4

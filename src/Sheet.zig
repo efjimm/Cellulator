@@ -26,6 +26,8 @@ has_changes: bool,
 /// List of cells that need to be re-evaluated.
 queued_cells: std.ArrayListUnmanaged(struct { Cell.Handle, Cell.Handle.Int }),
 
+volatile_cells: std.ArrayListUnmanaged(struct { Cell.Handle, Cell.Handle.Int }),
+
 /// Stores the null terminated text of string literals. Cells contain an index into this buffer.
 strings_buf: std.ArrayListUnmanaged(u8),
 
@@ -64,6 +66,38 @@ arena: std.heap.ArenaAllocator,
 text_attrs: PhTree(TextAttrs, 2, Cell.Handle.Int),
 
 lua_point_trees: std.StringHashMapUnmanaged(LuaDataPointTree) = .empty,
+
+cell_value_ranges: std.ArrayList(Rect) = .{},
+
+needs_update: bool = true,
+
+pub const Expression = struct {
+    source: []const u8,
+    root: ast.Index,
+    is_volatile: bool,
+
+    pub const invalid: Expression = .{
+        .source = "",
+        .root = .invalid,
+        .is_volatile = false,
+    };
+};
+
+pub const RangeIndex = enum(u64) {
+    invalid = std.math.maxInt(u64),
+    _,
+};
+
+pub fn cellValueRange(sheet: *const Sheet, index: RangeIndex) *Rect {
+    const n: usize = @intCast(@intFromEnum(index));
+    return &sheet.cell_value_ranges.items[n];
+}
+
+pub fn pushCellValueRange(sheet: *Sheet, range: Rect) !RangeIndex {
+    const n: u64 = @intCast(sheet.cell_value_ranges.items.len);
+    try sheet.cell_value_ranges.append(sheet.gpa, range);
+    return @enumFromInt(n);
+}
 
 // TODO: Expose 1 and 4 dimensional trees to Lua
 
@@ -118,6 +152,7 @@ pub const UndoOpts = struct {
     clear_redos: bool = true,
 };
 
+// TODO: Reduce size of this struct
 pub const Cell = extern struct {
     /// Cached value of the cell
     value: Value = .{ .err = .fromError(error.NotEvaluable) },
@@ -131,7 +166,10 @@ pub const Cell = extern struct {
         dirty,
         enqueued,
         computing,
+        @"volatile",
     } = .up_to_date,
+
+    is_volatile: bool,
 
     /// Abstract syntax tree representing the expression in the cell.
     expr_root: ast.Index = .invalid,
@@ -146,6 +184,8 @@ pub const Cell = extern struct {
         number: f64,
         string: FlatListPool(u8).List.Index,
         err: Error,
+        ref_cell: Position,
+        ref_range: RangeIndex,
 
         pub const Tag = blk: {
             var t = @typeInfo(std.meta.FieldEnum(Value));
@@ -277,6 +317,7 @@ pub fn init(gpa: Allocator) !Sheet {
         .has_changes = false,
 
         .queued_cells = .empty,
+        .volatile_cells = .empty,
         .strings_buf = .empty,
 
         .undos = .empty,
@@ -313,6 +354,7 @@ pub fn deinit(sheet: *Sheet) void {
     sheet.search_buffer.deinit(sheet.gpa);
     sheet.lua_point_trees.deinit(sheet.gpa);
     sheet.filepath.deinit(sheet.gpa);
+    sheet.cell_value_ranges.deinit(sheet.gpa);
 
     sheet.clearUndos(.undo);
     sheet.clearUndos(.redo);
@@ -320,6 +362,7 @@ pub fn deinit(sheet: *Sheet) void {
     sheet.cell_tree.deinit(sheet.gpa);
 
     sheet.queued_cells.deinit(sheet.gpa);
+    sheet.volatile_cells.deinit(sheet.gpa);
     sheet.undos.deinit(sheet.gpa);
     sheet.redos.deinit(sheet.gpa);
 
@@ -464,6 +507,7 @@ const SerializeHeader = extern struct {
 };
 
 pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
+    // TODO: Add volatile cells
     assert(sheet.queued_cells.items.len == 0);
 
     const header: SerializeHeader = .{
@@ -550,6 +594,7 @@ pub fn deserialize(sheet: *Sheet, gpa: Allocator, file: std.fs.File) !void {
 
 pub fn clearRetainingCapacity(sheet: *Sheet) void {
     sheet.queued_cells.clearRetainingCapacity();
+    sheet.volatile_cells.clearRetainingCapacity();
 
     sheet.cell_tree.clearRetainingCapacity();
 
@@ -574,6 +619,7 @@ const CsvAssignment = struct {
 
 const Assignment = struct {
     root: ast.Index,
+    is_volatile: bool,
     pos: Position,
 };
 
@@ -669,6 +715,7 @@ fn bulkParse(
         assignments.appendAssumeCapacity(.{
             .pos = pos,
             .root = spliced_root,
+            .is_volatile = parser.is_volatile,
         });
     }
     if (assignments.items.len == 0) {
@@ -760,6 +807,11 @@ pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
         try sheet.ensureUnusedStringsCapacity(total_strings_len);
         try sheet.ensureUnusedColumnCapacity(col_count);
         try sheet.ensureUnusedCellQueueCapacity(1);
+        var total_volatile: usize = 0;
+        for (assignments.items) |assignment| {
+            if (assignment.is_volatile) total_volatile += 1;
+        }
+        try sheet.volatile_cells.ensureUnusedCapacity(sheet.gpa, total_volatile);
         errdefer comptime unreachable;
 
         sheet.dupeAstStrings(src, .from(ast_nodes_start), .from(@intCast(sheet.ast_nodes.len)));
@@ -787,10 +839,17 @@ pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
                 .value = .{
                     .expr_root = assignment.root,
                     .state = .enqueued,
+                    .is_volatile = assignment.is_volatile,
                 },
             });
 
             const handle = new_cells.handle(i);
+
+            if (assignment.is_volatile) {
+                // TODO: Sort cells by volatility first, so we can add all volatile cells with just
+                //       a single entry.
+                sheet.volatile_cells.appendAssumeCapacity(.{ handle, 1 });
+            }
             sheet.cell_tree.insertAssumeCapacityNoClobber(&pos.array(), handle);
             sheet.addCellAsDependentOfExprRanges(handle, assignment.root);
         }
@@ -918,6 +977,7 @@ pub fn loadCsv(sheet: *Sheet, r: *std.io.Reader) !void {
                     .state = if (!assignment.root.isValid()) .up_to_date else .enqueued,
                     .value = .{ .number = assignment.f },
                     .value_tag = .number,
+                    .is_volatile = false,
                 },
             });
 
@@ -959,6 +1019,7 @@ pub fn writeFile(
         sheet.setFilePath(path);
 }
 
+// TODO: This is dumb
 pub fn writeContents(sheet: *Sheet, writer: *std.io.Writer) !void {
     var iter = sheet.cell_tree.iterator();
     while (iter.next()) |handle| {
@@ -1006,18 +1067,7 @@ pub fn writeCsv(sheet: *Sheet, writer: *std.io.Writer) !void {
             try writer.splatByteAll(',', p[0] - last_col);
         }
         const cell = sheet.cell_tree.getValue(handle);
-        switch (cell.value_tag) {
-            .number => {
-                try writer.print("{d}", .{cell.value.number});
-            },
-            .string => {
-                const string = sheet.cellStringValue(cell);
-                try writer.writeAll(string);
-            },
-            .err => {
-                try writer.writeAll("ERROR");
-            },
-        }
+        try sheet.formatCell(cell, writer);
         last_line = p[1];
         last_col = p[0];
     }
@@ -1025,82 +1075,26 @@ pub fn writeCsv(sheet: *Sheet, writer: *std.io.Writer) !void {
     try writer.flush();
 }
 
-/// Iterator over the cells referenced by an expression, as ranges.
-/// Singular cell references are treated as a single-celled range.
-const ExprRangeIterator = struct {
-    sheet: *const Sheet,
-    i: ast.Index,
-    start: ast.Index,
-
-    fn init(sheet: *const Sheet, expr_root: ast.Index) ExprRangeIterator {
-        if (!expr_root.isValid()) {
-            return .{
-                .sheet = sheet,
-                .i = expr_root,
-                .start = expr_root,
-            };
-        }
-        return .{
-            .sheet = sheet,
-            .i = .from(expr_root.n + 1),
-            .start = ast.leftMostChild(sheet.ast_nodes, expr_root),
-        };
+pub fn formatCell(sheet: *const Sheet, cell: *const Cell, w: *std.io.Writer) !void {
+    switch (cell.value_tag) {
+        .number => {
+            try w.print("{d}", .{cell.value.number});
+        },
+        .string => {
+            const string = sheet.cellStringValue(cell);
+            try w.writeAll(string);
+        },
+        .err => {
+            try w.writeAll("ERROR");
+        },
+        .ref_cell => {
+            try w.print("&{f}", .{cell.value.ref_cell});
+        },
+        .ref_range => {
+            const range = sheet.cellValueRange(cell.value.ref_range);
+            try w.print("{f}:{f}", .{ range.tl, range.br });
+        },
     }
-
-    fn next(it: *ExprRangeIterator) ?Rect {
-        if (it.i == it.start) return null;
-
-        const data = it.sheet.ast_nodes.items(.data);
-
-        var iter = std.mem.reverseIterator(it.sheet.ast_nodes.items(.tag)[it.start.n..it.i.n]);
-        defer it.i = .from(@intCast(it.start.n + iter.index));
-
-        while (iter.next()) |tag| switch (tag) {
-            .rel_rel, .rel_abs, .abs_rel, .abs_abs => {
-                return .initSinglePos(data[it.start.n + iter.index].rel_rel);
-            },
-            .invalidated_range => {
-                _ = iter.next().?;
-                _ = iter.next().?;
-            },
-            .range => {
-                const r = data[it.start.n + iter.index].range;
-                const start: ast.Index = .from(@intCast(it.start.n + iter.index));
-                const lhs, const rhs = r.resolve(start);
-                const p1 = data[lhs.n].rel_rel;
-                const p2 = data[rhs.n].rel_rel;
-                _ = iter.next().?;
-                _ = iter.next().?;
-                return .{ .tl = p1, .br = p2 };
-            },
-            else => {},
-        };
-
-        return null;
-    }
-};
-
-fn addCellAsDependentOfRange(
-    sheet: *Sheet,
-    dependent: Cell.Handle,
-    range: Rect,
-) void {
-    log.debug("Adding {f} as a dependent of {f}", .{
-        sheet.rectFromCellHandle(dependent).tl,
-        range,
-    });
-
-    const res = sheet.dependents.getOrPutAssumeCapacity(&range.array());
-    const head_ptr = res.value_ptr;
-    if (!res.found_existing) {
-        head_ptr.* = .none;
-    }
-
-    const index = sheet.createDepAssumeCapacity(.{
-        .handle = dependent,
-        .next = head_ptr.*,
-    });
-    head_ptr.* = index;
 }
 
 fn addCellAsDependentOfExprRanges(
@@ -1108,74 +1102,89 @@ fn addCellAsDependentOfExprRanges(
     dependent: Cell.Handle,
     expr_root: ast.Index,
 ) void {
-    var iter: ExprRangeIterator = .init(sheet, expr_root);
-    while (iter.next()) |range| {
-        sheet.addCellAsDependentOfRange(dependent, range);
-    }
+    if (!expr_root.isValid()) return;
+    var ctx: AddDependenciesContext = .{
+        .sheet = sheet,
+        .dependent = dependent,
+    };
+    ast.traverseDependencies(sheet.ast_nodes, expr_root, &ctx, AddDependenciesContext.func);
 }
 
-// TODO: This overcounts
-fn ensureExpressionDependentsCapacity(sheet: *Sheet, expr_root: ast.Index) Allocator.Error!void {
-    const left = ast.leftMostChild(sheet.ast_nodes, expr_root);
-    var dependent_count: u32 = 0;
-    for (sheet.ast_nodes.items(.tag)[left.n .. expr_root.n + 1]) |tag| {
-        switch (tag) {
-            .rel_rel,
-            .abs_abs,
-            .rel_abs,
-            .abs_rel,
-            => dependent_count += 1,
-            else => {},
-        }
-    }
-
-    try sheet.dependents.ensureUnusedCapacity(sheet.gpa, dependent_count);
-    try sheet.deps.ensureUnusedCapacity(sheet.gpa, dependent_count);
-}
-
-/// Removes `cell` as a dependent of all cells in `rect`
-fn removeCellAsDependentOfRange(
+const AddDependenciesContext = struct {
     sheet: *Sheet,
     dependent: Cell.Handle,
-    range: Rect,
-    comptime destroy: bool,
-) void {
-    // log.debug("Removing {} as a dependent of {}", .{
-    //     sheet.rectFromCellHandle(dependent),
-    //     range,
-    // });
-    const p = range.array();
-    const head = sheet.dependents.find(&p) orelse return;
 
-    while (head.isValid() and sheet.deps.items[head.n].handle == dependent) {
-        const old_head = head.*;
-        head.* = sheet.deps.items[head.n].next;
-        sheet.destroyDep(old_head);
-    }
+    pub fn func(ctx: *AddDependenciesContext, range: Rect) void {
+        log.debug("Adding {f} as a dependent of {f}", .{
+            ctx.sheet.rectFromCellHandle(ctx.dependent).tl,
+            range,
+        });
 
-    if (!head.isValid()) {
-        if (sheet.dependents.remove(&p)) |kv_handle| {
-            if (destroy) sheet.dependents.destroyValue(kv_handle);
-        }
-        return;
-    }
-
-    var prev = head.*;
-    var index = sheet.deps.items[head.n].next;
-    while (index.isValid()) : (index = sheet.deps.items[index.n].next) {
-        if (sheet.deps.items[index.n].handle == dependent) {
-            sheet.deps.items[prev.n].next = sheet.deps.items[index.n].next;
-            sheet.destroyDep(index);
-            break;
+        const res = ctx.sheet.dependents.getOrPutAssumeCapacity(&range.array());
+        const head_ptr = res.value_ptr;
+        if (!res.found_existing) {
+            head_ptr.* = .none;
         }
 
-        prev = index;
+        const index = ctx.sheet.createDepAssumeCapacity(.{
+            .handle = ctx.dependent,
+            .next = head_ptr.*,
+        });
+        head_ptr.* = index;
     }
+};
 
-    if (!head.isValid()) {
-        if (sheet.dependents.remove(&p)) |kv_handle|
-            if (destroy) sheet.dependents.destroyValue(kv_handle);
+const RemoveDependenciesContext = struct {
+    sheet: *Sheet,
+    dependent: Cell.Handle,
+    destroy: bool,
+
+    pub fn func(ctx: *const RemoveDependenciesContext, range: Rect) void {
+        log.debug("Removing {f} as a dependent of {f}", .{
+            ctx.sheet.rectFromCellHandle(ctx.dependent),
+            range,
+        });
+        const sheet = ctx.sheet;
+        const dependent = ctx.dependent;
+        const p = range.array();
+        const head = sheet.dependents.find(&p) orelse return;
+
+        while (head.isValid() and sheet.deps.items[head.n].handle == dependent) {
+            const old_head = head.*;
+            head.* = sheet.deps.items[head.n].next;
+            sheet.destroyDep(old_head);
+        }
+
+        if (!head.isValid()) {
+            if (sheet.dependents.remove(&p)) |kv_handle| {
+                if (ctx.destroy) sheet.dependents.destroyValue(kv_handle);
+            }
+            return;
+        }
+
+        var prev = head.*;
+        var index = sheet.deps.items[head.n].next;
+        while (index.isValid()) : (index = sheet.deps.items[index.n].next) {
+            if (sheet.deps.items[index.n].handle == dependent) {
+                sheet.deps.items[prev.n].next = sheet.deps.items[index.n].next;
+                sheet.destroyDep(index);
+                break;
+            }
+
+            prev = index;
+        }
+
+        if (!head.isValid()) {
+            if (sheet.dependents.remove(&p)) |kv_handle|
+                if (ctx.destroy) sheet.dependents.destroyValue(kv_handle);
+        }
     }
+};
+
+fn ensureExpressionDependentsCapacity(sheet: *Sheet, root: ast.Index) Allocator.Error!void {
+    const dependent_count = ast.countDependencies(sheet.ast_nodes, root);
+    try sheet.dependents.ensureUnusedCapacity(sheet.gpa, dependent_count);
+    try sheet.deps.ensureUnusedCapacity(sheet.gpa, dependent_count);
 }
 
 fn removeCellAsDependentOfExpr(
@@ -1184,10 +1193,12 @@ fn removeCellAsDependentOfExpr(
     expr_root: ast.Index,
     comptime destroy: bool,
 ) void {
-    var iter = ExprRangeIterator.init(sheet, expr_root);
-    while (iter.next()) |range| {
-        sheet.removeCellAsDependentOfRange(dependent, range, destroy);
-    }
+    const ctx: RemoveDependenciesContext = .{
+        .sheet = sheet,
+        .dependent = dependent,
+        .destroy = destroy,
+    };
+    ast.traverseDependencies(sheet.ast_nodes, expr_root, &ctx, RemoveDependenciesContext.func);
 }
 
 pub fn firstCellInRow(sheet: *Sheet, row: Position.Int) ?Position {
@@ -1611,7 +1622,7 @@ fn updateRange(sheet: *Sheet, index: ast.Index, new_range: Rect, _: UndoOpts) !v
     assert(tag == .range or tag == .invalidated_range);
     try sheet.ensureUnusedUndoCapacity(1);
 
-    const l, const r = sheet.ast_nodes.items(.data)[index.n].range.resolve(index);
+    const l, const r = sheet.ast_nodes.items(.data)[index.n].range.args(index);
     sheet.ast_nodes.items(.data)[l.n].rel_rel = new_range.tl;
     sheet.ast_nodes.items(.data)[r.n].rel_rel = new_range.br;
 
@@ -1814,18 +1825,17 @@ pub fn rowIsPopulated(sheet: *const Sheet, row: Position.Int) bool {
 }
 
 pub fn needsUpdate(sheet: *const Sheet) bool {
-    return sheet.queued_cells.items.len > 0;
+    return sheet.needs_update or sheet.queued_cells.items.len > 0;
 }
 
 fn dupeExprStrings(
     sheet: *Sheet,
-    source: []const u8,
-    root_node: ast.Index,
+    expr: Expression,
 ) void {
     sheet.dupeAstStrings(
-        source,
-        ast.leftMostChild(sheet.ast_nodes, root_node),
-        .from(root_node.n + 1),
+        expr.source,
+        ast.leftMostChild(sheet.ast_nodes, expr.root),
+        .from(expr.root.n + 1),
     );
 }
 
@@ -1920,7 +1930,13 @@ fn deleteCellRangeAssumeCapacity(sheet: *Sheet, range: Rect, opts: UndoOpts) u32
     return deleted_index;
 }
 
-pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr: f64, opts: UndoOpts) !void {
+pub fn insertIncrementingCellRange(
+    sheet: *Sheet,
+    range: Rect,
+    start: f64,
+    incr: f64,
+    opts: UndoOpts,
+) !void {
     const area = std.math.cast(usize, range.area()) orelse {
         @branchHint(.cold);
         return error.OutOfMemory;
@@ -1937,6 +1953,7 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
     try sheet.ensureUnusedCellBufferCapacity(area + 1); // Can't overflow, we'll OOM before that
     try sheet.ensureUnusedColumnCapacity(width);
     errdefer comptime unreachable;
+    sheet.needs_update = true;
 
     _ = sheet.deleteCellRangeAssumeCapacity(range, opts);
 
@@ -1956,17 +1973,28 @@ pub fn insertIncrementingCellRange(sheet: *Sheet, range: Rect, start: f64, incr:
     sheet.queued_cells.appendAssumeCapacity(.{ new_cells.handle(0), area });
     for (new_cells.values(), 0..area) |*value, i| {
         const expr: ast.Index = .from(@intCast(i + ast_start));
-        value.* = .{ .state = .enqueued, .expr_root = expr };
+        value.* = .{ .state = .enqueued, .expr_root = expr, .is_volatile = false };
     }
 
-    sheet.bulkInsertContiguousCells(new_cells.handle(0), opts);
+    assert(new_cells.len > 0);
+    for (new_cells.points(), new_cells.values(), 0..) |*p, *cell, i| {
+        const handle = new_cells.handle(i);
+        sheet.cell_tree.insertAssumeCapacityNoClobber(p, handle);
+        sheet.addCellAsDependentOfExprRanges(handle, cell.expr_root);
+        cell.state = .enqueued;
+    }
+
+    sheet.pushUndoAssumeCapacity(.init(.bulk_cell_delete_contiguous, .{
+        .start = new_cells.offset,
+        .end = new_cells.end(),
+    }), opts);
 }
 
 /// Creates a new cell handle for every cell in `range`. Only sets the point field of each handle.
 /// Only allocates memory for the cell tree.
 ///
 /// Asserts that the `area.range() <= std.math.maxInt(usize)`
-pub fn bulkCreateCellRange(sheet: *Sheet, range: Rect) CellTree.Slice {
+fn bulkCreateCellRange(sheet: *Sheet, range: Rect) CellTree.Slice {
     const area: usize = @intCast(range.area());
     const new_cells = sheet.cell_tree.addMany(area);
 
@@ -1986,51 +2014,6 @@ pub fn bulkCreateCellRange(sheet: *Sheet, range: Rect) CellTree.Slice {
     return new_cells;
 }
 
-/// Inserts all the cells from `cells_start` to `sheet.cell_tree.entries.len` into the cell tree.
-/// Also inserts dependency information. Asserts that the cell tree and undo cell buffer has enough
-/// capacity to hold all the cells.
-pub fn bulkInsertContiguousCells(
-    sheet: *Sheet,
-    cells_start: Cell.Handle,
-    opts: UndoOpts,
-) void {
-    const cells = sheet.cell_tree.sliceToEnd(cells_start.int());
-    assert(cells.len > 0);
-
-    for (cells.points(), cells.values(), 0..) |*p, *cell, i| {
-        const handle = cells.handle(i);
-        sheet.cell_tree.insertAssumeCapacityNoClobber(p, handle);
-        sheet.addCellAsDependentOfExprRanges(handle, cell.expr_root);
-        cell.state = .enqueued;
-    }
-
-    sheet.pushUndoAssumeCapacity(.init(.bulk_cell_delete_contiguous, .{
-        .start = cells.offset,
-        .end = cells.end(),
-    }), opts);
-}
-
-/// Creates all the columns required by range.
-fn createColumnRangeAssumeCapacity(sheet: *Sheet, range: Rect) void {
-    const width = range.width();
-    const new_cols = sheet.cols.addMany(width);
-    @memset(new_cols.values(), .{});
-
-    var i: u32 = 0;
-    while (i < new_cols.len) : (i += 1) {
-        const handle = new_cols.handle(i);
-        const x = range.tl.x + i;
-        const removed = sheet.cols.insertAssumeCapacity(&.{x}, handle);
-
-        if (removed != .invalid) {
-            sheet.cols.getValue(handle).* = sheet.cols.getValue(removed).*;
-            sheet.cols.destroyValue(removed);
-        } else {
-            sheet.cols.getValue(handle).* = .{};
-        }
-    }
-}
-
 pub const BulkSetCellOptions = struct {
     value: Cell.Value = .{ .err = .fromError(error.NotEvaluable) },
     tag: Cell.Value.Tag = .err,
@@ -2038,11 +2021,10 @@ pub const BulkSetCellOptions = struct {
 };
 
 /// Sets all cells in `range` to `expr`.
-pub fn bulkSetCellExpr(
+pub fn insertCellRange(
     sheet: *Sheet,
     range: Rect,
-    source: []const u8,
-    expr: ast.Index,
+    expr: Expression,
     opts: BulkSetCellOptions,
 ) !void {
     const need_cell_eval = opts.tag == .err;
@@ -2056,52 +2038,65 @@ pub fn bulkSetCellExpr(
         return error.OutOfMemory;
     };
     try sheet.ensureUnusedCellCapacity(area);
-    try sheet.ensureUnusedStringsCapacity(source.len);
+    try sheet.ensureUnusedStringsCapacity(expr.source.len);
     if (need_cell_eval)
         try sheet.ensureUnusedCellQueueCapacity(1);
-    if (expr.isValid())
-        try sheet.ensureExpressionDependentsCapacity(expr);
+    if (expr.root.isValid())
+        try sheet.ensureExpressionDependentsCapacity(expr.root);
     try sheet.ensureUnusedColumnCapacity(width);
     try sheet.ensureUnusedUndoCapacity(2);
     try sheet.ensureUnusedCellBufferCapacity(area + 1);
 
-    const ref_count = blk: {
-        var ref_count: u32 = 0;
-        var iter: ExprRangeIterator = .init(sheet, expr);
-        while (iter.next()) |_| ref_count += 1;
-        break :blk ref_count;
-    };
+    const ref_count = ast.countDependencies(sheet.ast_nodes, expr.root);
     try sheet.deps.ensureUnusedCapacity(sheet.gpa, area * ref_count);
+    if (expr.is_volatile) {
+        try sheet.volatile_cells.ensureUnusedCapacity(sheet.gpa, 1);
+    }
     errdefer comptime unreachable;
+    sheet.needs_update = true;
 
     _ = sheet.deleteCellRangeAssumeCapacity(range, opts.undo_opts);
 
-    if (expr.isValid())
-        sheet.dupeExprStrings(source, expr);
+    if (expr.root.isValid())
+        sheet.dupeExprStrings(expr);
 
     const new_cells = sheet.cell_tree.addMany(area);
+    if (expr.is_volatile)
+        sheet.volatile_cells.appendAssumeCapacity(.{ new_cells.handle(0), new_cells.len });
 
     // Create dependency information
     // For each range we depend on, prepend the cell handle of every cell we're creating
-    var iter: ExprRangeIterator = .init(sheet, expr);
-    while (iter.next()) |expr_range| {
-        const p = expr_range.array();
-        const res = sheet.dependents.getOrPutAssumeCapacity(&p);
-        const head = res.value_ptr;
-        if (!res.found_existing) head.* = .none;
+    const Context = struct {
+        sheet: *Sheet,
+        new_cells: CellTree.Slice,
+        area: usize,
 
-        const start = sheet.deps.items.len;
-        const new_deps = sheet.deps.addManyAtAssumeCapacity(sheet.deps.items.len, area);
-        // TODO: Make this suck less
-        for (new_deps, start + 1.., 0..) |*dep, i, j| {
-            dep.* = .{
-                .handle = new_cells.handle(j),
-                .next = .from(@intCast(i)),
-            };
+        pub fn func(ctx: *const @This(), r: Rect) void {
+            const p = r.array();
+            const res = ctx.sheet.dependents.getOrPutAssumeCapacity(&p);
+            const head = res.value_ptr;
+            if (!res.found_existing) head.* = .none;
+
+            const start = ctx.sheet.deps.items.len;
+            const new_deps = ctx.sheet.deps.addManyAtAssumeCapacity(ctx.sheet.deps.items.len, ctx.area);
+            // TODO: Make this suck less
+            for (new_deps, start + 1.., 0..) |*dep, i, j| {
+                dep.* = .{
+                    .handle = ctx.new_cells.handle(j),
+                    .next = .from(@intCast(i)),
+                };
+            }
+            new_deps[new_deps.len - 1].next = head.*;
+            head.* = .from(@intCast(start));
         }
-        new_deps[new_deps.len - 1].next = head.*;
-        head.* = .from(@intCast(start));
-    }
+    };
+
+    const ctx: Context = .{
+        .sheet = sheet,
+        .new_cells = new_cells,
+        .area = area,
+    };
+    ast.traverseDependencies(sheet.ast_nodes, expr.root, &ctx, Context.func);
 
     if (need_cell_eval) {
         sheet.queued_cells.appendAssumeCapacity(.{ new_cells.handle(0), area });
@@ -2111,7 +2106,8 @@ pub fn bulkSetCellExpr(
         .value = opts.value,
         .value_tag = opts.tag,
         .state = if (need_cell_eval) .enqueued else .up_to_date,
-        .expr_root = expr,
+        .expr_root = expr.root,
+        .is_volatile = expr.is_volatile,
     };
     // All created cells share the same cell value
     @memset(new_cells.values(), cell);
@@ -2148,28 +2144,35 @@ pub fn bulkSetCellExpr(
 pub fn setCell(
     sheet: *Sheet,
     pos: Position,
-    source: []const u8,
-    expr_root: ast.Index,
+    expr: Expression,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
     try sheet.ensureUnusedCellCapacity(1);
-    try sheet.ensureUnusedStringsCapacity(source.len);
+    try sheet.ensureUnusedStringsCapacity(expr.source.len);
     try sheet.ensureUnusedCellQueueCapacity(1);
-    try sheet.ensureExpressionDependentsCapacity(expr_root);
+    try sheet.ensureExpressionDependentsCapacity(expr.root);
     try sheet.ensureUnusedUndoCapacity(1);
+    if (expr.is_volatile) {
+        try sheet.volatile_cells.ensureUnusedCapacity(sheet.gpa, 1);
+        std.log.debug("Set {f} to volatile expression", .{pos});
+    }
     errdefer comptime unreachable;
 
-    sheet.dupeExprStrings(source, expr_root);
+    sheet.dupeExprStrings(expr);
 
-    const new_node = sheet.cell_tree.createValueAssumeCapacity(&pos.array(), .{
-        .expr_root = expr_root,
+    const cell = sheet.cell_tree.createValueAssumeCapacity(&pos.array(), .{
+        .expr_root = expr.root,
+        .is_volatile = expr.is_volatile,
     });
+    if (expr.is_volatile) {
+        sheet.volatile_cells.appendAssumeCapacity(.{ cell, 1 });
+    }
 
-    return sheet.insertCellNode(new_node, undo_opts);
+    sheet.insertCellNode(cell, undo_opts);
 }
 
 /// Inserts a pre-allocated Cell node. Does not attempt to create any row/column anchors.
-pub fn insertCellNode(
+fn insertCellNode(
     sheet: *Sheet,
     handle: Cell.Handle,
     undo_opts: UndoOpts,
@@ -2182,15 +2185,15 @@ pub fn insertCellNode(
 
     var u: Undo = undefined;
     if (old_handle == .invalid) {
-        // log.debug("Creating cell {}", .{pos});
+        log.debug("Creating cell {f}", .{pos});
         sheet.addCellAsDependentOfExprRanges(handle, cell_ptr.expr_root);
 
         u = .init(.delete_cell, pos);
     } else {
-        // log.debug("Overwriting cell {}", .{pos});
+        log.debug("Overwriting cell {f}", .{pos});
 
         const old_cell_ptr = sheet.getCellFromHandle(old_handle);
-        sheet.removeCellAsDependentOfExpr(handle, old_cell_ptr.expr_root, true);
+        sheet.removeCellAsDependentOfExpr(old_handle, old_cell_ptr.expr_root, true);
         sheet.addCellAsDependentOfExprRanges(handle, cell_ptr.expr_root);
 
         sheet.setCellError(old_cell_ptr);
@@ -2203,7 +2206,7 @@ pub fn insertCellNode(
     sheet.has_changes = true;
 }
 
-pub fn deleteCellByHandle(
+fn deleteCellByHandle(
     sheet: *Sheet,
     handle: Cell.Handle,
     undo_opts: UndoOpts,
@@ -2255,11 +2258,7 @@ pub fn getCellPtr(sheet: *Sheet, pos: Position) ?*Cell {
     return sheet.cell_tree.find(&pos.array());
 }
 
-pub fn getCellHandleByPos(sheet: *Sheet, pos: Position) Cell.Handle {
-    return sheet.cell_tree.findEntry(&pos.array());
-}
-
-pub fn getCellHandleByPosOrNull(sheet: *Sheet, pos: Position) ?Cell.Handle {
+pub fn getCellHandleByPos(sheet: *Sheet, pos: Position) ?Cell.Handle {
     const handle = sheet.cell_tree.findEntry(&pos.array());
     if (handle != .invalid) return handle;
     return null;
@@ -2344,7 +2343,7 @@ pub fn deleteColOrRowRange(
                     i -= 2;
                 },
                 .range => {
-                    const lhs, const rhs = data[i].range.resolve(.from(i));
+                    const lhs, const rhs = data[i].range.args(.from(i));
                     const tl: Position = data[lhs.n].rel_rel;
                     const br: Position = data[rhs.n].rel_rel;
                     const tl_f = @field(tl, f);
@@ -2507,7 +2506,7 @@ pub fn deleteColOrRowRange(
                 i -= 2;
             },
             .range => {
-                const lhs, const rhs = data[i].range.resolve(.from(i));
+                const lhs, const rhs = data[i].range.args(.from(i));
                 const tl: *Position = &data[lhs.n].rel_rel;
                 const br: *Position = &data[rhs.n].rel_rel;
                 const u: Undo = .init(.update_range, .{
@@ -2608,7 +2607,7 @@ pub fn insertColsOrRows(
                 },
                 .invalidated_range => i -= 2,
                 .range => {
-                    const lhs, const rhs = data[i].range.resolve(.from(i));
+                    const lhs, const rhs = data[i].range.args(.from(i));
                     const tl: Position = data[lhs.n].rel_rel;
                     const br: Position = data[rhs.n].rel_rel;
                     const tl_f = @field(tl, f);
@@ -2716,7 +2715,7 @@ pub fn insertColsOrRows(
                 i -= 2;
             },
             .range => {
-                const lhs, const rhs = data[i].range.resolve(.from(i));
+                const lhs, const rhs = data[i].range.args(.from(i));
                 const tl = &data[lhs.n].rel_rel;
                 const br = &data[rhs.n].rel_rel;
                 assert(tl.x <= br.x);
@@ -2788,12 +2787,36 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
         }
     }
 
+    for (sheet.volatile_cells.items) |data| {
+        const cell_start, const len = data;
+        const cells = sheet.cell_tree.slice(cell_start.int(), len);
+        for (0..cells.len) |i| {
+            try sheet.markDirty(arena, cells.handle(i), &dirty_cells);
+            sheet.getCellFromHandle(cells.handle(i)).state = .@"volatile";
+        }
+    }
+
     while (dirty_cells.pop()) |cell| {
         try sheet.markDirty(arena, cell, &dirty_cells);
     }
-    // log.debug("Finished marking", .{});
 
-    // All dirty cells are reachable from the cells in queued_cells
+    for (sheet.volatile_cells.items) |data| {
+        const handle_start, const len = data;
+        const cells = sheet.cell_tree.slice(handle_start.int(), len);
+        for (0..cells.len) |i| {
+            _ = sheet.evalCellByHandle(cells.handle(i)) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.CyclicalReference => {
+                    // const point = sheet.cell_tree.getPoint(handle).*;
+                    // log.info("Cyclical reference encountered while evaluating {}", .{
+                    //     Position.init(point[0], point[1]),
+                    // });
+                },
+                else => {},
+            };
+        }
+    }
+
     while (sheet.queued_cells.pop()) |data| {
         const handle_start, const len = data;
         const cells = sheet.cell_tree.slice(handle_start.int(), len);
@@ -2816,6 +2839,8 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
             @as(f64, @floatFromInt(timer.read())) / std.time.ns_per_ms,
         });
     }
+
+    sheet.needs_update = false;
 }
 
 pub fn enqueueUpdate(
@@ -2928,7 +2953,7 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) ast.EvalError!ast.Ev
     sw: switch (cell.state) {
         .up_to_date => {},
         .computing => return error.CyclicalReference,
-        .enqueued, .dirty => {
+        .enqueued, .dirty, .@"volatile" => {
             if (!cell.expr_root.isValid()) {
                 cell.state = .up_to_date;
                 break :sw;
@@ -2969,6 +2994,14 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) ast.EvalError!ast.Ev
                     sheet.string_values.appendSliceAssumeCapacity(list, bytes);
                     cell.setValue(.string, list);
                 },
+                .ref => |r| switch (r) {
+                    .cell => |p| {
+                        cell.setValue(.ref_cell, p);
+                    },
+                    .range => |range| {
+                        cell.setValue(.ref_range, try sheet.pushCellValueRange(range));
+                    },
+                },
             }
             cell.state = .up_to_date;
         },
@@ -2985,11 +3018,13 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) ast.EvalError!ast.Ev
             },
         },
         .err => cell.value.err.getError(),
+        .ref_cell => .{ .ref = .{ .cell = cell.value.ref_cell } },
+        .ref_range => .{ .ref = .{ .range = sheet.cellValueRange(cell.value.ref_range).* } },
     };
 }
 
 pub fn evalCellByPos(sheet: *Sheet, pos: Position) ast.EvalError!ast.EvalResult {
-    if (sheet.getCellHandleByPosOrNull(pos)) |cell| {
+    if (sheet.getCellHandleByPos(pos)) |cell| {
         return sheet.evalCellByHandle(cell);
     }
 
@@ -3000,16 +3035,7 @@ pub fn evalCellByPos(sheet: *Sheet, pos: Position) ast.EvalError!ast.EvalResult 
 pub fn printCellExpression(sheet: *Sheet, pos: Position, writer: *std.io.Writer) !void {
     const cell = sheet.getCellPtr(pos) orelse return;
     if (!cell.expr_root.isValid()) {
-        switch (cell.value_tag) {
-            .number => {
-                try writer.print("{d}", .{cell.value.number});
-            },
-            .string => {
-                const str = sheet.cellStringValue(cell);
-                try writer.writeAll(str);
-            },
-            .err => {},
-        }
+        try sheet.formatCell(cell, writer);
         return;
     }
     try ast.print(
@@ -3113,12 +3139,13 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Rect, comptime adjust: Adjust
     try sheet.cell_buffer.ensureUnusedCapacity(sheet.gpa, cell_count);
 
     var total_asts_len: usize = 0;
-    var total_deps: u32 = 0;
+    var total_deps: usize = 0;
     for (cells.items) |cell| { // TODO: This kinda sucks
-        const ast_root = sheet.getCellFromHandle(cell).expr_root;
-        var iter: ExprRangeIterator = .init(sheet, ast_root);
-        total_asts_len += iter.i.n - iter.start.n;
-        while (iter.next()) |_| total_deps += @intCast(tile_count);
+        const root = sheet.getCellFromHandle(cell).expr_root;
+        const count = ast.countDependencies(sheet.ast_nodes, root);
+        const left = ast.leftMostChild(sheet.ast_nodes, root);
+        total_asts_len += root.n - left.n + 1;
+        total_deps += tile_count * count;
     }
 
     try sheet.ensureUnusedCellCapacity(cell_count - 1);
@@ -3179,6 +3206,51 @@ pub fn createCellCopiesContiguous(
         const new_y: u32 = @intCast(diffed_y);
 
         const src_cell = sheet.getCellFromHandle(src_handle).*;
+        if (!src_cell.expr_root.isValid()) {
+            var i: u64 = 0;
+            while (i < tile_x * tile_y) : (i += 1) {
+                const x: u32 = @intCast(i % tile_x);
+                const y: u32 = @intCast(i / tile_x);
+
+                const max = std.math.maxInt(u32);
+                if (x * width > max or y * height > max) {
+                    @branchHint(.unlikely);
+                    continue;
+                }
+
+                const wadd: u32 = @intCast(x * width);
+                const hadd: u32 = @intCast(y * height);
+                const tiled_x, ox = @addWithOverflow(new_x, wadd);
+                const tiled_y, oy = @addWithOverflow(new_y, hadd);
+                if (ox == 1 or oy == 1) {
+                    @branchHint(.unlikely);
+                    continue;
+                }
+
+                const tiled_diff_x, ox = @addWithOverflow(x_diff, wadd);
+                const tiled_diff_y, oy = @addWithOverflow(y_diff, hadd);
+                _ = tiled_diff_x;
+                _ = tiled_diff_y;
+                if (ox == 1 or oy == 1) {
+                    @branchHint(.unlikely);
+                    continue;
+                }
+
+                switch (src_cell.value_tag) {
+                    .number, .string, .err => {},
+                    .ref_cell, .ref_range => unreachable,
+                }
+
+                slice.append(.{
+                    .point = .{ @intCast(tiled_x), @intCast(tiled_y) },
+                    .parent = .invalid,
+                    .value = src_cell,
+                });
+            }
+
+            continue;
+        }
+
         const left = ast.leftMostChild(sheet.ast_nodes, src_cell.expr_root);
         const len = src_cell.expr_root.n - left.n + 1;
 
@@ -3275,6 +3347,7 @@ pub fn createCellCopiesContiguous(
                 .value = .{
                     .state = .enqueued,
                     .expr_root = expr_root,
+                    .is_volatile = src_cell.is_volatile,
                 },
             });
         }
@@ -3292,9 +3365,9 @@ test "Sheet basics" {
 
     const exprs: []const []const u8 = &.{ "50 + 5", "500 * 2 / 34 + 1", "a0", "a2 * a1" };
 
-    for (exprs, 0..) |expr, i| {
-        const root = try ast.parseFromExpression(&sheet, expr);
-        try sheet.setCell(.{ .x = 0, .y = @intCast(i) }, expr, root, .{});
+    for (exprs, 0..) |src, i| {
+        const expr = try ast.parseFromExpression(&sheet, src);
+        try sheet.setCell(.{ .x = 0, .y = @intCast(i) }, expr, .{});
     }
 
     try sheet.deleteCell(.init(0, 0), .{});
@@ -3308,15 +3381,15 @@ test "setCell allocations" {
             defer sheet.deinit();
 
             {
-                const expr = "a4 * a1 * a3";
-                const expr_root = try ast.parseFromExpression(&sheet, expr);
-                try sheet.setCell(.{ .x = 0, .y = 0 }, expr, expr_root, .{});
+                const src = "a4 * a1 * a3";
+                const expr = try ast.parseFromExpression(&sheet, src);
+                try sheet.setCell(.{ .x = 0, .y = 0 }, expr, .{});
             }
 
             {
-                const expr = "a2 * a1 * a3";
-                const expr_root = try ast.parseFromExpression(&sheet, expr);
-                try sheet.setCell(.{ .x = 1, .y = 0 }, expr, expr_root, .{});
+                const src = "a2 * a1 * a3";
+                const expr = try ast.parseFromExpression(&sheet, src);
+                try sheet.setCell(.{ .x = 1, .y = 0 }, expr, .{});
             }
 
             try sheet.deleteCell(.{ .x = 0, .y = 0 }, .{});
@@ -3335,7 +3408,6 @@ test "Update values" {
 
     try sheet.setCell(
         try Position.fromAddress("C0"),
-        "@sum(A0:B0)",
         try ast.parseFromExpression(&sheet, "@sum(A0:B0)"),
         .{},
     );
@@ -3344,13 +3416,11 @@ test "Update values" {
         const str = std.fmt.comptimePrint("{d}", .{i});
         try sheet.setCell(
             try Position.fromAddress("A0"),
-            str,
             try ast.parseFromExpression(&sheet, str),
             .{},
         );
         try sheet.setCell(
             try Position.fromAddress("B0"),
-            "A0",
             try ast.parseFromExpression(&sheet, "A0"),
             .{},
         );
@@ -3977,7 +4047,6 @@ test "Cell error propagation" {
 
     try sheet.setCell(
         .fromValidAddress("A0"),
-        "10",
         try ast.parseFromExpression(&sheet, "10"),
         .{},
     );
@@ -3987,7 +4056,6 @@ test "Cell error propagation" {
 
     try sheet.setCell(
         .fromValidAddress("B0"),
-        "A0",
         try ast.parseFromExpression(&sheet, "A0"),
         .{},
     );
@@ -3997,7 +4065,6 @@ test "Cell error propagation" {
 
     try sheet.setCell(
         .fromValidAddress("A0"),
-        "A0",
         try ast.parseFromExpression(&sheet, "A0"),
         .{},
     );
@@ -4019,7 +4086,6 @@ test "Overwrite with string" {
         const address, const source = data;
         try sheet.setCell(
             .fromValidAddress(address),
-            source,
             try ast.parseFromExpression(&sheet, source),
             .{},
         );
@@ -4047,7 +4113,6 @@ test "Overwrite with reference" {
         const address, const source = data;
         try sheet.setCell(
             .fromValidAddress(address),
-            source,
             try ast.parseFromExpression(&sheet, source),
             .{},
         );
@@ -4056,8 +4121,8 @@ test "Overwrite with reference" {
     }
 }
 
-fn testSetCell(sheet: *Sheet, address: []const u8, expr: []const u8) !void {
-    try sheet.setCell(.fromValidAddress(address), expr, try ast.parseFromExpression(sheet, expr), .{});
+fn testSetCell(sheet: *Sheet, address: []const u8, src: []const u8) !void {
+    try sheet.setCell(.fromValidAddress(address), try ast.parseFromExpression(sheet, src), .{});
 }
 
 fn testSetCellPos(sheet: *Sheet, pos: Position, expr: []const u8) !void {
@@ -4098,7 +4163,11 @@ test "insert column overflow" {
     var sheet = try init(std.testing.allocator);
     defer sheet.deinit();
 
-    try sheet.setCell(.init(std.math.maxInt(u32) - 1, 0), "5", try ast.parseFromExpression(&sheet, "5"), .{});
+    try sheet.setCell(
+        .init(std.math.maxInt(u32) - 1, 0),
+        try ast.parseFromExpression(&sheet, "5"),
+        .{},
+    );
     const res = sheet.insertColumns(0, 2, .{});
     try std.testing.expectError(error.Overflow, res);
 }
@@ -4107,7 +4176,7 @@ test "insert row overflow" {
     var sheet = try init(std.testing.allocator);
     defer sheet.deinit();
 
-    try sheet.setCell(.init(0, std.math.maxInt(u32) - 1), "5", try ast.parseFromExpression(&sheet, "5"), .{});
+    try sheet.setCell(.init(0, std.math.maxInt(u32) - 1), try ast.parseFromExpression(&sheet, "5"), .{});
     try sheet.insertRows(0, 1, .{});
     try std.testing.expectError(error.Overflow, sheet.insertRows(0, 1, .{}));
 }

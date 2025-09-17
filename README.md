@@ -42,18 +42,26 @@ editing the command line buffer, hence the multiple command modes.
 
 ## Statements and Commands
 
-Cellulator differentiates between **statements** and **commands**. They can both be entered via the
-command line. The main difference is that statements can be read from a file - this is how
-Cellulator saves sheet state to disk.
+Cellulator differentiates between **statements** and **commands**. They can both be entered via
+the command line. Commands are similar to *vim* commands, providing a command line experience to
+interact with the application. Statements use an expressive, functional language and are used for
+setting cell expressions. The reason for the separation is due to the difference in usage between
+statements and commands - having to surround your filepath in quotes to save would be annoying, and
+allowing strings without quotes in the expression language would be even worse.
 
-There is currently only one type of statement in cellulator:
+There are currently two types of statements in cellulator:
 
 ```
 let CELL = EXPR
+EXPR
 ```
 
 CELL is the address of a cell, e.g. `A0`, `GL3600`
 EXPR is any [expression](#expressions)
+
+The `let` statement assigns the expression a cell.
+
+A lone expression will print the result of evaluating the expression to the command line.
 
 Commands can be entered via placing a colon character as the first character of a command.
 Pressing ':' in normal mode will do this automatically. What follows is a list of currently
@@ -101,8 +109,8 @@ Type the command name followed by `-h` to see usage information for each command
 
 ## Expressions
 
-Expressions consist of number/string literals, cell references, cell ranges, builtins,
-and operators. They can be used on the right-hand side of the `=` in a `let` statement.
+Expressions consist of number/string literals, cell literals, builtins, and operators. They can be
+used on the right-hand side of the `=` in a `let` statement.
 
 ### Number literals
 
@@ -127,10 +135,19 @@ Examples:
 - 'Double "quotes" inside of single quotes'
 - "Single 'quotes' inside of double quotes"
 
-### Cell References
+### Cell Literals
 
-Cell references evaluate to the value of another cell. The value returned by a cell reference will be
-updated if the expression contained by that cell changes.
+Cell literals evaluate to the value of a cell, *or* to a cell reference if used in a context that
+requires a cell reference. This behaviour is called **automatic reference coercion**. For example,
+the binary `:` and prefix `*` operators require cell references as operands, so cell literals passed
+to these operators will be automatically coerced to a cell reference. Automatic reference coercion
+can be prevented by dereferencing a cell literal, which will always yield the cell's value
+regardless of context. Automatic reference coercion only happens for cell literals.
+
+The value returned by a cell literal will be updated if the expression contained by that cell
+changes.
+
+#### Automatic reference coercion
 
 Examples:
 
@@ -138,7 +155,29 @@ Examples:
 - `GP359`
 - `crxp65535`
 
+### Cell References
+
+Cell references and ranges are first class values in Cellulator.
+
+A cell reference is a reference to a cell, rather than the cell's value. Evaluating a cell reference
+does *not* evaluate the cell. Cell references can be created via the reference-of operator `&`, in
+addition to implicit conversions from cell literals. Cell references can be dereferenced with the
+dereference operator `*` (prefix.)
+
+Examples:
+
+- `&A0`
+- `&ZZ200`
+
 ### Cell Ranges
+
+Cell ranges represent all cells in the inclusive rectangular area between two positions. They are
+created by the range operator `:`. This operator takes two cell references as its operands.
+
+Examples:
+
+- `&A0:&D20`
+- `A0:D20` Implicit coercion from cell literal to cell reference
 
 Cell ranges represent all cells in the inclusive square area between two positions. Cell ranges can
 only be used in builtin functions. They are defined as two cell references separated with a colon
@@ -155,6 +194,22 @@ Examples:
 Cellulator has logical and equality operators but does not have a boolean data type. Instead, values
 have truthiness. An empty cell or the number zero is interpreted as false, and anything else is
 interpreted as true.
+
+### Volatile cells
+
+Volatile expressions are updated on every recalculation. Volatile expressions are created by
+accesses through a dynamic cell references or range. For example, if a cell's expression was
+`**A0 + 2` then that cell would have to be marked volatile, as it would need to be updated whenever
+the cell referenced by A0 changes.
+
+Note that only *accesses* through a dynamic range are volatile. The builtin function `@width` for
+example does not access through its argument, which means you can pass a dynamic range without
+making the expression volatile. Certain builtin functions will automatically dereference any
+reference arguments they receive, but will only dereference one level. As such, the arguments to
+these functions are a reference context and cell literals passed to them will undergo automatic
+reference coercion. Because the function only dereferences once, if the cell value is a reference it
+will not be dereferenced further. This prevents innocuous looking function invocations from making
+volatile accesses without explicit opt-in by using the * operator on the cell literal argument.
 
 ### Numeric Operators
 
@@ -182,9 +237,9 @@ The following operators return 0 for false and 1 for true:
 
 ### Logical Operators
 
-- `and` Returns it's first operand if it is false, otherwise returns it's second operand.
-- `or` Returns it's first argument if not false, otherwise returns it's second operand.
-- `!` Logical not. Returns either 0 or 1 depending on the truthiness of it's operand.
+- `and` Returns its first operand if it is false, otherwise returns its second operand.
+- `or` Returns its first argument if not false, otherwise returns its second operand.
+- `!` Logical not. Returns either 0 or 1 depending on the truthiness of its operand.
 
 Note that due to the `and`/`or` operators returning their arguments instead of a true/false value
 they can be used like conditionals. For example, `A0 > B0 and "Greater" or "Not greater"` will
@@ -195,11 +250,28 @@ evaluate to `"Greater"` when A0 > B0 and "Not greater" otherwise.
 The following is a list of operators that return string values. They try to convert non-string
 operands to strings. Converting a number to a string never fails outside of OOM situations.
 
-- `#` Concatenates the strings on the left and right
-  - Examples:
-    - `'This is a string' # ' that has been concatenated'`
-    - `'1: ' # A0`
-    - `A0 # B0`
+- `#` Concatenates the strings on the left and right. Examples:
+  - `'This is a string' # ' that has been concatenated'`
+  - `'1: ' # A0`
+  - `A0 # B0`
+
+### Cell Operators
+
+- prefix `&` Reference-of operator. Coerces a cell literal to a cell reference. This operator is
+  not usually necessary due to automatic reference coercion. Examples:
+  - `&a0`
+  - `&ZZ20`
+- prefix `*` Dereference operator. Coerces a cell reference to the value of the cell. This operator
+  can be used on a cell literal to prevent automatic reference coercion. This works because this
+  operator takes a reference, so using it on a cell literal will automatically coerce that literal
+  to a reference and then dereference that, resulting in the cell's value.
+- binary `:` Range operator. Takes cell references as operands and returns a range whose top left
+  and bottom right points are anchored on the given cell references. Examples:
+  - `&A0:&D20`
+  - `A0:D20` automatic reference coercion makes this work.
+  - `*A0:D20` prevent the automatic reference coercion of A0, and use the value stored at A0 as the
+    top left anchor. For instance, if `let A0 = &C10` then the expression `*A0:D20` would evaluate
+    to `C10:D20`.
 
 ### Builtins
 

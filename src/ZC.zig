@@ -458,17 +458,16 @@ pub const ChangeCellOpts = struct {
 pub fn setCell(
     zc: *ZC,
     pos: Position,
-    source: []const u8,
-    expr_root: ast.Index,
+    expr: Sheet.Expression,
     opts: ChangeCellOpts,
 ) !void {
-    try zc.currentSheet().setCell(pos, source, expr_root, .{});
+    try zc.currentSheet().setCell(pos, expr, .{});
     if (opts.emit_event) {
         const expr_string =
-            for (source, 0..) |c, i| {
+            for (expr.source, 0..) |c, i| {
                 if (c == '=') break std.mem.trimLeft(
                     u8,
-                    source[i + 1 ..],
+                    expr.source[i + 1 ..],
                     &std.ascii.whitespace,
                 );
             } else unreachable;
@@ -491,16 +490,16 @@ pub fn getSheetName(zc: *const ZC, index: usize) []const u8 {
 pub fn setCellString(
     zc: *ZC,
     pos: Position,
-    expr: [:0]const u8,
+    source: []const u8,
     diag: ?*Parser.Diagnostics,
     opts: ChangeCellOpts,
 ) !void {
     const old_ast_len = zc.currentSheet().ast_nodes.len;
     errdefer zc.currentSheet().ast_nodes.len = old_ast_len;
 
-    const expr_root = try ast.parseFromExpressionDiag(zc.currentSheet(), expr, diag);
+    const expr = try ast.parseFromExpressionDiag(zc.currentSheet(), source, diag);
 
-    try zc.setCell(pos, expr, expr_root, opts);
+    try zc.setCell(pos, expr, opts);
 }
 
 pub const StatusMessageType = enum { info, warn, err };
@@ -1361,7 +1360,10 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
     if (tokens.items(.tag)[0] == .eof)
         return;
 
-    const nodes = &zc.currentSheet().ast_nodes;
+    const sheet = zc.currentSheet();
+    const nodes = &sheet.ast_nodes;
+    const old_len = nodes.len;
+
     var diagnostics: Parser.Diagnostics = .{};
     var parser: Parser = .init(
         zc.allocator,
@@ -1371,52 +1373,58 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
         .{ .nodes = nodes.toMultiArrayList(), .diagnostics = &diagnostics },
     );
 
-    {
-        const old_len = nodes.len;
-
-        // The parser could re-allocate the underlying nodes
-        defer nodes.* = parser.nodes.slice();
-        errdefer nodes.len = old_len;
-
-        parser.parse() catch |err| switch (err) {
+    parser.parse() catch |err| {
+        nodes.* = parser.nodes.slice();
+        // Clear any newly created nodes
+        nodes.len = old_len;
+        return switch (err) {
             error.UnexpectedToken,
             error.InvalidCellAddress,
             error.InvalidBuiltin,
-            => {
-                defer nodes.len = old_len;
-                const root = parser.parseExpression() catch |e2| switch (e2) {
-                    error.UnexpectedToken,
-                    error.InvalidCellAddress,
-                    error.InvalidBuiltin,
-                    => {
-                        zc.setStatusMessage(.err, "{f}", .{diagnostics});
-                        return;
-                    },
-                    else => |e| return e,
-                };
-
-                const sheet = zc.currentSheet();
-                const res = try ast.evaluate(parser.nodes.slice(), root, sheet, str, sheet);
-                const fmt = ast.fmtAst(parser.nodes.slice(), root, str);
-                switch (res) {
-                    .none => zc.setStatusMessage(.info, "{f} = ()", .{fmt}),
-                    .number => |n| zc.setStatusMessage(.info, "{f} = {d}", .{ fmt, n }),
-                    .string => |s| zc.setStatusMessage(.info, "{f} = {s}", .{ fmt, s.bytes() }),
-                }
-                return;
-            },
-            else => |e| return e,
+            => zc.setStatusMessage(.err, "{f}", .{diagnostics}),
+            error.OutOfMemory => |e| return e,
         };
+    };
+
+    nodes.* = parser.nodes.slice();
+
+    const root = parser.root();
+    const root_node = nodes.get(parser.root().n);
+    switch (root_node.tag) {
+        .assignment => {
+            const pos = root_node.data.assignment;
+            sheet.ast_nodes.len -= 1;
+            const spliced_root: ast.Index = .from(root.n - 1);
+
+            try zc.setCell(pos, .{
+                .source = str,
+                .root = spliced_root,
+                .is_volatile = parser.is_volatile,
+            }, .{});
+            sheet.endUndoGroup();
+        },
+        else => {
+            // Evaluate the expression and print the result
+            defer nodes.len = old_len;
+            const res = ast.evaluate(parser.nodes.slice(), root, sheet, str, sheet) catch {
+                zc.setStatusMessage(.err, "Error evaluating '{s}'", .{str});
+                return;
+            };
+            const fmt = ast.fmtAst(parser.nodes.slice(), root, str);
+            switch (res) {
+                .none => zc.setStatusMessage(.info, "{f} = ()", .{fmt}),
+                .number => |n| zc.setStatusMessage(.info, "{f} = {d}", .{ fmt, n }),
+                .string => |s| {
+                    zc.setStatusMessage(.info, "{f} = {s}", .{ fmt, s.bytes() });
+                    switch (s) {
+                        .slice => sheet.gpa.free(s.bytes()),
+                        .cell => {},
+                    }
+                },
+                .ref => |r| zc.setStatusMessage(.info, "{f} = {f}", .{ fmt, r }),
+            }
+        },
     }
-
-    const expr_root: ast.Index = .from(@intCast(nodes.len - 1));
-    const pos = zc.currentSheet().ast_nodes.items(.data)[expr_root.n].assignment;
-
-    zc.currentSheet().ast_nodes.len -= 1;
-    const spliced_root: ast.Index = .from(expr_root.n - 1);
-
-    try zc.setCell(pos, str, spliced_root, .{});
-    zc.currentSheet().endUndoGroup();
 }
 
 fn interpretCommands(zc: *ZC, commands: []const u8) !void {
@@ -1924,7 +1932,7 @@ pub const Command = enum {
                     },
                     error.OutOfMemory => return error.OutOfMemory,
                 };
-                return .{ .str = expr_str, .root = expr };
+                return .{ .expr = expr };
             },
             else => return try .init(zc, arg),
         }
@@ -2010,7 +2018,7 @@ pub const Command = enum {
 
     fn cmdFill(zc: *ZC, r: RangeOrPointArg, n: NumberArg("initial_number")) Oom!void {
         // No increment was provided, so all cells can share the same expression
-        try zc.currentSheet().bulkSetCellExpr(r.range, "", .invalid, .{
+        try zc.currentSheet().insertCellRange(r.range, .invalid, .{
             .value = .{ .number = n.value },
             .tag = .number,
         });
@@ -2028,8 +2036,8 @@ pub const Command = enum {
         zc.currentSheet().endUndoGroup();
     }
 
-    fn cmdFillExpr(zc: *ZC, r: RangeOrPointArg, expr: ExpressionArg) Oom!void {
-        try zc.currentSheet().bulkSetCellExpr(r.range, expr.str, expr.root, .{});
+    fn cmdFillExpr(zc: *ZC, r: RangeOrPointArg, arg: ExpressionArg) Oom!void {
+        try zc.currentSheet().insertCellRange(r.range, arg.expr, .{});
         zc.currentSheet().endUndoGroup();
     }
 
@@ -2273,8 +2281,7 @@ pub const Command = enum {
     };
 
     const ExpressionArg = struct {
-        str: []const u8,
-        root: ast.Index,
+        expr: Sheet.Expression,
 
         const type_name = "expression";
     };
@@ -2498,11 +2505,12 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
     switch (cmd_tag) {
         .expect => {
             const sheet = zc.currentSheet();
-            const expression_string = iter.string[iter.index..];
-            const root = try ast.parseFromExpression(sheet, expression_string);
-            const res = try ast.evaluate(sheet.ast_nodes, root, sheet, expression_string, sheet);
+            const src = iter.string[iter.index..];
+            const expr = try ast.parseFromExpression(sheet, src);
+            const res = try ast.evaluate(sheet.ast_nodes, expr.root, sheet, src, sheet);
             defer if (res == .string and res.string == .slice) sheet.gpa.free(res.string.slice);
-            if (!res.boolean()) {
+
+            if (!res.boolean(sheet)) {
                 return error.UnexpectedResult;
             }
         },
@@ -2532,7 +2540,7 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
         },
         .update_cell => {
             const pos = zc.cursor;
-            if (zc.currentSheet().getCellHandleByPosOrNull(pos)) |handle| {
+            if (zc.currentSheet().getCellHandleByPos(pos)) |handle| {
                 try zc.currentSheet().enqueueUpdate(handle);
             }
         },
@@ -2554,14 +2562,14 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
             const cell = sheet.getCell(pos) orelse return error.CellNotFound;
             const cell_left = ast.leftMostChild(sheet.ast_nodes, cell.expr_root);
             errdefer std.debug.print("Expected '{f}', found '{f}'\n", .{
-                ast.fmtAst(sheet.ast_nodes, expr, rest),
+                ast.fmtAst(sheet.ast_nodes, expr.root, rest),
                 sheet.fmtCellExpr(pos),
             });
 
-            if (cell.expr_root.n - cell_left.n != expr.n - start)
+            if (cell.expr_root.n - cell_left.n != expr.root.n - start)
                 return error.TestExpectedEqualExpressions;
 
-            for (start..expr.n + 1, cell_left.n..) |i, j| {
+            for (start..expr.root.n + 1, cell_left.n..) |i, j| {
                 const n1 = sheet.ast_nodes.get(i).get();
                 const n2 = sheet.ast_nodes.get(j).get();
                 if (!std.meta.eql(n1, n2))
@@ -2735,7 +2743,7 @@ fn loadZcHeader(zc: *ZC, r: *std.io.Reader) !void {
             break;
         }
 
-        if (line[0] != ':')
+        if (line.len == 0 or line[0] != ':')
             continue;
 
         zc.runCommand(line[1..], Command.load_map) catch |err| switch (err) {
@@ -3104,31 +3112,22 @@ fn widthNeededForColumn(
 
         pub fn func(ctx: *@This(), handle: Sheet.Cell.Handle) !void {
             const cell = ctx.sheet.getCellFromHandle(handle);
-            switch (cell.value_tag) {
-                .err => {},
-                .number => {
-                    var buf: [512]u8 = undefined;
-                    var writer: std.io.Writer = .fixed(&buf);
-                    const n = cell.value.number;
-                    writer.end = 0;
-                    writer.print("{d:.[1]}", .{ n, ctx.precision }) catch unreachable;
-                    // Numbers are all ASCII, so 1 byte = 1 column
-                    const len: u16 = @intCast(writer.end);
-                    if (len > ctx.width) {
-                        ctx.width = len;
-                        if (ctx.width >= ctx.max_width) return error.Stopped;
-                    }
-                },
-                .string => {
-                    const str = ctx.sheet.cellStringValue(cell);
-                    const w: u16 = @intCast(ctx.zc.ui_interface.stringWidth(str, .{
-                        .max_width = ctx.zc.ui.term.width,
-                    }).width); // TODO: Make all widths u32
-                    if (w > ctx.width) {
-                        ctx.width = w;
-                        if (ctx.width >= ctx.max_width) return error.Stopped;
-                    }
-                },
+            // TODO: Make all widths u32
+            const w = switch (cell.value_tag) {
+                .err => 0,
+                .number => std.fmt.count("{d:.[1]}", .{ cell.value.number, ctx.precision }),
+                .string => ctx.zc.ui_interface.stringWidth(
+                    ctx.sheet.cellStringValue(cell),
+                    .{ .max_width = ctx.zc.ui.term.width },
+                ).width,
+                .ref_cell => std.fmt.count("{f}", .{cell.value.ref_cell}),
+                .ref_range => std.fmt.count("{f}", .{
+                    ctx.sheet.cellValueRange(cell.value.ref_range).*,
+                }),
+            };
+            if (w > ctx.width) {
+                ctx.width = @intCast(w);
+                if (ctx.width >= ctx.max_width) return error.Stopped;
             }
         }
     };
