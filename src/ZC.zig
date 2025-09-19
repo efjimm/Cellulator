@@ -1419,7 +1419,8 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
                         .cell => {},
                     }
                 },
-                .ref => |r| zc.setStatusMessage(.info, "{f} = {f}", .{ fmt, r }),
+                .cell => |pos| zc.setStatusMessage(.info, "{f} = {f}", .{ fmt, pos }),
+                .range => |r| zc.setStatusMessage(.info, "{f} = {f}", .{ fmt, r }),
             }
         },
     }

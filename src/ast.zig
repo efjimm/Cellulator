@@ -27,6 +27,7 @@ pub const String = extern struct {
 
 pub fn isSingle(tag: Node.Tag) bool {
     return switch (tag) {
+        .identifier,
         .number,
         .rel_rel,
         .abs_abs,
@@ -81,6 +82,7 @@ pub const Node = extern struct {
         rel_abs,
         rel_rel,
         string_literal,
+        identifier,
         invalidated_pos,
         invalidated_range,
         assignment,
@@ -118,6 +120,7 @@ pub const Node = extern struct {
         rel_abs: Position,
         rel_rel: Position,
         string_literal: String,
+        identifier: String,
         invalidated_pos: Position,
         invalidated_range,
 
@@ -196,6 +199,7 @@ pub const Node = extern struct {
             .minus,
             .reference,
             .dereference,
+            .identifier,
             => true,
             .add => true,
             .sub => false,
@@ -231,6 +235,7 @@ pub const Node = extern struct {
             .invalidated_range,
             .string_literal,
             .assignment,
+            .identifier,
             => 127,
 
             // Actual operators
@@ -425,7 +430,7 @@ pub fn printFromNode(
             Position.fmtColumnAddress(pos.x), pos.y,
         }),
         .invalidated_pos => |pos| try writer.print("{f}", .{pos}),
-
+        .identifier => |str| try writer.writeAll(strings[str.start..str.end]),
         .string_literal => |str| {
             try writer.print("\"{s}\"", .{strings[str.start..str.end]});
         },
@@ -676,6 +681,7 @@ pub fn leftMostChild(
         .rel_abs,
         .abs_rel,
         .abs_abs,
+        .identifier,
         => index,
         // branch nodes
         .concat,
@@ -743,14 +749,29 @@ pub const EvalResult = union(enum) {
     none,
     number: f64,
     string: StringResult,
-    ref: Reference,
+    cell: Position,
+    range: Range,
+
+    pub const Range = struct {
+        rect: Rect,
+        map: Index = .invalid,
+
+        pub fn format(r: Range, w: *std.io.Writer) !void {
+            try r.rect.format(w);
+        }
+
+        pub fn eql(a: Range, b: Range) bool {
+            return a.rect.eql(b.rect);
+        }
+    };
 
     pub fn boolean(res: EvalResult, _: *const Sheet) bool {
         return switch (res) {
             .none => false,
             .number => |n| n != 0,
             .string => true,
-            .ref => true,
+            .cell => true,
+            .range => true,
         };
     }
 };
@@ -777,7 +798,8 @@ pub const EvalResult2 = union(enum) {
     none,
     number: f64,
     string: StringResult,
-    ref: Reference,
+    cell: Position,
+    range: EvalResult.Range,
     cell_literal: Position,
 
     pub fn from(res: EvalResult) EvalResult2 {
@@ -785,7 +807,8 @@ pub const EvalResult2 = union(enum) {
             .none => .none,
             .number => |n| .{ .number = n },
             .string => |str| .{ .string = str },
-            .ref => |r| .{ .ref = r },
+            .cell => |pos| .{ .cell = pos },
+            .range => |r| .{ .range = r },
         };
     }
 };
@@ -854,7 +877,7 @@ pub fn EvalContext(comptime Context: type) type {
                 .none => null,
                 .number => |n| n,
                 .string => |str| std.fmt.parseFloat(f64, str.bytes()) catch error.InvalidCoercion,
-                .ref => error.InvalidCoercion,
+                .cell, .range => error.InvalidCoercion,
             };
         }
 
@@ -864,13 +887,11 @@ pub fn EvalContext(comptime Context: type) type {
                 .none => null,
                 .number => |n| n,
                 .string => |str| std.fmt.parseFloat(f64, str.bytes()) catch error.InvalidCoercion,
-                .ref => |ref| switch (ref) {
-                    .cell => |pos| {
-                        const r2 = try eval.context.evalCellByPos(pos);
-                        return eval.toNumberOrNull(r2);
-                    },
-                    .range => error.InvalidCoercion,
+                .cell => |pos| {
+                    const r2 = try eval.context.evalCellByPos(pos);
+                    return eval.toNumberOrNull(r2);
                 },
+                .range => error.InvalidCoercion,
             };
         }
 
@@ -882,12 +903,13 @@ pub fn EvalContext(comptime Context: type) type {
             const ret = eval.stack.pop().?;
             return switch (ret) {
                 .cell_literal => |pos| switch (result_type) {
-                    .reference => .{ .ref = .{ .cell = pos } },
+                    .reference => .{ .cell = pos },
                     .any => try eval.context.evalCellByPos(pos),
                 },
                 .none => .none,
                 .number => |n| .{ .number = n },
-                .ref => |r| .{ .ref = r },
+                .cell => |c| .{ .cell = c },
+                .range => |r| .{ .range = r },
                 .string => |str| .{ .string = str },
             };
         }
@@ -896,6 +918,9 @@ pub fn EvalContext(comptime Context: type) type {
             const start = leftMostChild(eval.nodes, root);
             for (start.n..root.n + 1) |i| switch (eval.nodes.get(i).get()) {
                 .end => break,
+                .identifier => {
+                    @panic("TODO");
+                },
                 .number => |n| try eval.push(.{ .number = n }),
                 .rel_rel, .rel_abs, .abs_rel, .abs_abs => |pos| {
                     try eval.push(.{ .cell_literal = pos });
@@ -916,14 +941,14 @@ pub fn EvalContext(comptime Context: type) type {
                 },
                 .reference => {
                     const arg = try eval.pop(.reference);
-                    try eval.push(.{ .ref = .{ .cell = arg.ref.cell } });
+                    try eval.push(.{ .cell = arg.cell });
                 },
                 .dereference => {
                     const arg = try eval.pop(.reference);
-                    if (arg != .ref or arg.ref != .cell)
+                    if (arg != .cell)
                         return error.NotEvaluable;
 
-                    const pos = arg.ref.cell;
+                    const pos = arg.cell;
                     const res = try eval.context.evalCellByPos(pos);
                     try eval.push(.from(res));
                 },
@@ -987,14 +1012,8 @@ pub fn EvalContext(comptime Context: type) type {
                         .none => true,
                         .number => |n| n == rhs.number,
                         .string => std.mem.eql(u8, lhs.string.bytes(), rhs.string.bytes()),
-                        .ref => blk: {
-                            const Tag = std.meta.Tag(@FieldType(EvalResult, "ref"));
-                            if (@as(Tag, lhs.ref) != rhs.ref) {
-                                try eval.push(.{ .number = false_value });
-                                continue;
-                            }
-                            break :blk Rect.eql(lhs.ref.toRange(), rhs.ref.toRange());
-                        },
+                        .cell => |pos| pos.eql(rhs.cell),
+                        .range => |r| r.eql(rhs.range),
                     };
 
                     const b = switch (tag) {
@@ -1066,15 +1085,14 @@ pub fn EvalContext(comptime Context: type) type {
                 .range, .dynamic_range => {
                     const rhs = try eval.pop(.reference);
                     const lhs = try eval.pop(.reference);
-                    const invalid_args = (lhs != .ref or lhs.ref != .cell) or
-                        (rhs != .ref or rhs.ref != .cell);
+                    const invalid_args = lhs != .cell or rhs != .cell;
 
                     if (invalid_args)
                         return error.NotEvaluable;
 
-                    try eval.push(.{ .ref = .{
-                        .range = .initNormalizePos(lhs.ref.cell, rhs.ref.cell),
-                    } });
+                    try eval.push(.{
+                        .range = .{ .rect = .initNormalizePos(lhs.cell, rhs.cell) },
+                    });
                 },
                 .string_literal => |str| try eval.push(.{ .string = .{
                     .slice = eval.strings[str.start..str.end],
@@ -1100,7 +1118,8 @@ pub fn EvalContext(comptime Context: type) type {
                 .none => {},
                 .number => |n| try w.print("{d}", .{n}),
                 .string => |str| try w.writeAll(str.bytes()),
-                .ref => |r| try r.format(w),
+                .cell => |c| try c.format(w),
+                .range => |r| try r.format(w),
             }
         }
 
@@ -1119,20 +1138,19 @@ pub fn EvalContext(comptime Context: type) type {
             for (0..arg_count) |_| {
                 const res = try eval.pop(.reference);
                 switch (res) {
-                    .ref => |r| switch (r) {
-                        .cell => |pos| {
-                            const res2 = try eval.context.evalCellByPos(pos);
-                            const number = try eval.toNumberOrNull(res2);
-                            try ctx.func(number);
-                        },
-                        .range => |range| {
-                            var map_ctx: MapContext = .{ .eval = eval, .outer_ctx = ctx };
-                            try eval.sheet.cell_tree.traverse(
-                                &.{ range.tl.x, range.tl.y },
-                                &.{ range.br.x, range.br.y },
-                                &map_ctx,
-                            );
-                        },
+                    .cell => |pos| {
+                        const res2 = try eval.context.evalCellByPos(pos);
+                        const number = try eval.toNumberOrNull(res2);
+                        try ctx.func(number);
+                    },
+                    .range => |range| {
+                        const rect = range.rect;
+                        var map_ctx: MapContext = .{ .eval = eval, .outer_ctx = ctx };
+                        try eval.sheet.cell_tree.traverse(
+                            &.{ rect.tl.x, rect.tl.y },
+                            &.{ rect.br.x, rect.br.y },
+                            &map_ctx,
+                        );
                     },
                     else => {
                         const n = try eval.toNumberOrNull(res);
@@ -1293,9 +1311,7 @@ pub fn EvalContext(comptime Context: type) type {
                     while (iter.next()) |_| count += 1;
                     return @floatFromInt(count);
                 },
-                .ref => |r| switch (r) {
-                    inline else => |value| return @floatFromInt(std.fmt.count("{f}", .{value})),
-                },
+                inline .cell, .range => |value| return @floatFromInt(std.fmt.count("{f}", .{value})),
             }
         }
 
@@ -1342,12 +1358,22 @@ pub fn EvalContext(comptime Context: type) type {
                             },
                         }
                     },
-                    .ref => |r| {
-                        const range = r.toRange();
+                    .cell => |pos| {
+                        const range: Rect = .initSinglePos(pos);
                         var ctx: CountContext = .{ .count = 0, .eval = eval };
                         try eval.sheet.cell_tree.traverse(
                             &range.tl.array(),
                             &range.br.array(),
+                            &ctx,
+                        );
+                        total += ctx.count;
+                    },
+                    .range => |range| {
+                        const rect = range.rect;
+                        var ctx: CountContext = .{ .count = 0, .eval = eval };
+                        try eval.sheet.cell_tree.traverse(
+                            &rect.tl.array(),
+                            &rect.br.array(),
                             &ctx,
                         );
                         total += ctx.count;
@@ -1370,16 +1396,20 @@ pub fn EvalContext(comptime Context: type) type {
 
         fn evalWidth(eval: *@This()) !f64 {
             const res = try eval.pop(.any);
-            if (res != .ref) return error.NotEvaluable;
-            const range = res.ref.toRange();
-            return @floatFromInt(range.width2());
+            return switch (res) {
+                .cell => 1,
+                .range => |r| @floatFromInt(r.rect.width2()),
+                .none, .number, .string => return error.NotEvaluable,
+            };
         }
 
         fn evalHeight(eval: *@This()) !f64 {
             const res = try eval.pop(.any);
-            if (res != .ref) return error.NotEvaluable;
-            const range = res.ref.toRange();
-            return @floatFromInt(range.height2());
+            return switch (res) {
+                .cell => 1,
+                .range => |r| @floatFromInt(r.rect.height2()),
+                .none, .number, .string => return error.NotEvaluable,
+            };
         }
     };
 }
@@ -1416,7 +1446,7 @@ pub fn evaluate(
 
     return switch (res) {
         .string => |str| .{ .string = .{ .slice = try sheet.gpa.dupe(u8, str.bytes()) } },
-        .none, .number, .ref => res,
+        .none, .number, .cell, .range => res,
     };
 }
 
@@ -1471,6 +1501,7 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
                 .assignment, .end => {
                     self.traverse(index.sub(1), ctx, .no_deref);
                 },
+                .identifier => {},
                 .number, .string_literal, .invalidated_pos, .invalidated_range => {},
                 .rel_rel, .rel_abs, .abs_rel, .abs_abs => |pos| switch (ctx) {
                     .reference => switch (deref) {

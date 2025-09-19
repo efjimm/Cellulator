@@ -481,7 +481,7 @@ fn volatileAccessSingle(parser: *Parser, index: Index, result_type: Type) void {
         result_type.cell_ref and parser.isDynamicReference(index);
 }
 
-/// PrimaryExpr <- Number / Range / StringLiteral / Builtin / '(' Expression ')'
+/// PrimaryExpr <- Number / Range / StringLiteral / Identifier / Builtin / '(' Expression ')'
 fn parsePrimaryExpr(parser: *Parser, ctx: ExpressionContext) !Result {
     return switch (parser.token_tags[parser.tok_i]) {
         .number => try parser.parseNumber(),
@@ -493,11 +493,22 @@ fn parsePrimaryExpr(parser: *Parser, ctx: ExpressionContext) !Result {
             return ret;
         },
         .builtin => try parser.parseBuiltin(),
+        // .identifier => try parser.parseIdentifier(),
         inline .single_string_literal_start,
         .double_string_literal_start,
         => |tag| try parser.parseStringLiteral(tag),
         else => parser.setError(error.UnexpectedToken, .{ .expected_string = "expression" }),
     };
+}
+
+fn parseIdentifier(parser: *Parser) !Result {
+    const start = try parser.expectTokenGet(.identifier);
+    const end = parser.token_starts[parser.tok_i];
+    const index = try parser.addNode(.init(.identifier, .{
+        .start = start,
+        .end = end,
+    }));
+    return .{ index, .any };
 }
 
 /// Builtin <- builtin ('(' ArgList? ')')?

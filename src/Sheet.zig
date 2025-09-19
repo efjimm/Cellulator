@@ -2977,13 +2977,11 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) ast.EvalError!ast.Ev
                     sheet.string_values.appendSliceAssumeCapacity(list, bytes);
                     cell.setValue(.string, list);
                 },
-                .ref => |r| switch (r) {
-                    .cell => |p| {
-                        cell.setValue(.ref_cell, p);
-                    },
-                    .range => |range| {
-                        cell.setValue(.ref_range, try sheet.pushCellValueRange(range));
-                    },
+                .cell => |p| {
+                    cell.setValue(.ref_cell, p);
+                },
+                .range => |range| {
+                    cell.setValue(.ref_range, try sheet.pushCellValueRange(range.rect));
                 },
             }
             cell.state = .up_to_date;
@@ -3001,8 +2999,8 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) ast.EvalError!ast.Ev
             },
         },
         .err => cell.value.err.getError(),
-        .ref_cell => .{ .ref = .{ .cell = cell.value.ref_cell } },
-        .ref_range => .{ .ref = .{ .range = sheet.cellValueRange(cell.value.ref_range).* } },
+        .ref_cell => .{ .cell = cell.value.ref_cell },
+        .ref_range => .{ .range = .{ .rect = sheet.cellValueRange(cell.value.ref_range).* } },
     };
 }
 
