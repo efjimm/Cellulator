@@ -45,6 +45,7 @@ pub fn isSingle(tag: Node.Tag) bool {
         .dereference,
         => true,
         .assignment,
+        .end,
         .concat,
         .add,
         .sub,
@@ -64,55 +65,99 @@ pub fn isSingle(tag: Node.Tag) bool {
     };
 }
 
+comptime {
+    assert(@sizeOf(Node.Payload) <= 8);
+}
+
 pub const Node = extern struct {
     tag: Tag,
     data: Payload,
 
-    pub const Tag = blk: {
-        var t = @typeInfo(std.meta.FieldEnum(Payload));
-        t.@"enum".tag_type = u8;
-        break :blk @Type(t);
+    pub const Tag = enum(u8) {
+        end,
+        number,
+        abs_abs,
+        abs_rel,
+        rel_abs,
+        rel_rel,
+        string_literal,
+        invalidated_pos,
+        invalidated_range,
+        assignment,
+        builtin,
+        minus,
+        plus,
+        not,
+        concat,
+        add,
+        sub,
+        mul,
+        div,
+        mod,
+        pow,
+        greater_than,
+        less_than,
+        greater_equals,
+        less_equals,
+        equals,
+        not_equals,
+        logical_and,
+        logical_or,
+        range,
+        dynamic_range,
+        reference,
+        dereference,
     };
 
-    pub const Payload = extern union {
+    pub const Tagged = union(Tag) {
+        /// Stores the number of nodes in the AST.
+        end: usize,
         number: f64,
         abs_abs: Position,
         abs_rel: Position,
         rel_abs: Position,
         rel_rel: Position,
-        minus: void,
-        plus: void,
-        not: void,
+        string_literal: String,
+        invalidated_pos: Position,
+        invalidated_range,
+
         assignment: Position,
-        concat: BinaryOperator,
-        add: BinaryOperator,
-        sub: BinaryOperator,
-        mul: BinaryOperator,
-        div: BinaryOperator,
-        mod: BinaryOperator,
-        pow: BinaryOperator,
-        greater_than: BinaryOperator,
-        less_than: BinaryOperator,
-        greater_equals: BinaryOperator,
-        less_equals: BinaryOperator,
-        equals: BinaryOperator,
-        not_equals: BinaryOperator,
-        logical_and: BinaryOperator,
-        logical_or: BinaryOperator,
         builtin: Builtin,
+        minus,
+        plus,
+        not,
+        concat,
+        add,
+        sub,
+        mul,
+        div,
+        mod,
+        pow,
+        greater_than,
+        less_than,
+        greater_equals,
+        less_equals,
+        equals,
+        not_equals,
+        logical_and,
+        logical_or,
 
         /// The colon operator with two static arguments.
         /// Cell value accesses through this range are non-volatile.
-        range: BinaryOperator,
+        range,
         /// The colon operator with one or more dynamic arguments.
         /// Cell value accesses through this range are volatile.
-        dynamic_range: BinaryOperator,
+        dynamic_range,
 
-        invalidated_pos: Position,
-        invalidated_range: BinaryOperator,
-        string_literal: String,
-        reference: void,
-        dereference: void,
+        reference,
+        dereference,
+    };
+
+    pub const Payload = blk: {
+        var t = @typeInfo(Tagged).@"union";
+        t.layout = .@"extern";
+        t.tag_type = null;
+        break :blk @Type(.{ .@"union" = t });
     };
 
     pub fn init(comptime tag: Tag, data: @FieldType(Payload, @tagName(tag))) Node {
@@ -121,13 +166,6 @@ pub const Node = extern struct {
             .data = @unionInit(Payload, @tagName(tag), data),
         };
     }
-
-    pub const Tagged = blk: {
-        var t = @typeInfo(Payload);
-        t.@"union".layout = .auto;
-        t.@"union".tag_type = Tag;
-        break :blk @Type(t);
-    };
 
     pub inline fn get(n: Node) Tagged {
         switch (n.tag) {
@@ -140,6 +178,7 @@ pub const Node = extern struct {
 
     pub fn isCommutative(tag: Tag) bool {
         return switch (tag) {
+            .end,
             .number,
             .abs_abs,
             .abs_rel,
@@ -179,6 +218,7 @@ pub const Node = extern struct {
     pub fn precedence(tag: Tag) i8 {
         return switch (tag) {
             // These aren't operators
+            .end,
             .number,
             .abs_abs,
             .abs_rel,
@@ -227,12 +267,12 @@ pub const Index = packed struct {
         return .{ .n = n };
     }
 
-    pub fn sub(index: Index, offset: NegativeOffset) Index {
-        return index.subN(offset.int());
+    pub fn sub(index: Index, offset: usize) Index {
+        return .from(index.n - offset);
     }
 
-    pub fn subN(index: Index, offset: u32) Index {
-        return .from(index.n - offset);
+    pub fn addN(index: Index, offset: usize) Index {
+        return .from(index.n + offset);
     }
 
     pub fn isValid(i: Index) bool {
@@ -240,19 +280,6 @@ pub const Index = packed struct {
     }
 
     pub const invalid: Index = .{ .n = std.math.maxInt(usize) };
-};
-
-pub const NegativeOffset = enum(u32) {
-    _,
-
-    pub fn from(n: u32) NegativeOffset {
-        assert(n != 0);
-        return @enumFromInt(n);
-    }
-
-    pub fn int(o: NegativeOffset) u32 {
-        return @intFromEnum(o);
-    }
 };
 
 pub fn parseFromSource(
@@ -290,7 +317,7 @@ pub fn parseFromSource(
 
     try parser.parse();
 
-    return .from(@intCast(parser.nodes.len - 1));
+    return parser.root();
 }
 
 const Token = Tokenizer.Token;
@@ -354,11 +381,10 @@ pub fn parseFromExpressionDiag(
     defer sheet.ast_nodes = parser.nodes.slice();
     errdefer sheet.ast_nodes.len = old_len;
 
-    _ = try parser.parseExpression(.value);
-    _ = try parser.expectToken(.eof);
+    try parser.parse();
 
     return .{
-        .root = .from(@intCast(parser.nodes.len - 1)),
+        .root = .from(@intCast(parser.nodes.len - 2)),
         .source = source,
         .is_volatile = parser.is_volatile,
     };
@@ -403,17 +429,22 @@ pub fn printFromNode(
         .string_literal => |str| {
             try writer.print("\"{s}\"", .{strings[str.start..str.end]});
         },
-        .concat => |b| {
-            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
+        .concat => {
+            const rhs = index.sub(1);
+            const lhs = leftMostChild(nodes, rhs).sub(1);
+            try printFromIndex(nodes, lhs, writer, strings);
             try writer.writeAll(" # ");
-            try printFromIndex(nodes, index.sub(b.rhs), writer, strings);
+            try printFromIndex(nodes, rhs, writer, strings);
+        },
+        .end => {
+            try printFromIndex(nodes, index.sub(1), writer, strings);
         },
         .assignment => |pos| {
             try writer.print("let {f} = ", .{pos});
-            try printFromIndex(nodes, .from(index.n - 1), writer, strings);
+            try printFromIndex(nodes, index.sub(1), writer, strings);
         },
         inline .plus, .minus, .not, .reference, .dereference => |_, t| {
-            const n = index.subN(1);
+            const n = index.sub(1);
             const rhs = nodes.get(n.n);
 
             const byte = switch (t) {
@@ -448,7 +479,7 @@ pub fn printFromNode(
         .div,
         .mod,
         .add,
-        => |b, t| {
+        => |_, t| {
             const str = switch (t) {
                 .greater_than => ">",
                 .less_than => "<",
@@ -467,23 +498,27 @@ pub fn printFromNode(
                 else => comptime unreachable,
             };
 
-            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
+            const rhs = index.sub(1);
+            const lhs = leftMostChild(nodes, rhs).sub(1);
+            try printFromIndex(nodes, lhs, writer, strings);
             try writer.writeAll(" " ++ str ++ " ");
-            const rhs = nodes.get(index.sub(b.rhs).n);
+            const rhs_node = nodes.get(rhs.n);
             const prec = comptime Node.precedence(t);
-            const rprec = Node.precedence(rhs.tag);
-            if (rprec < prec or rprec == prec and (!Node.isCommutative(t) or !Node.isCommutative(rhs.tag))) {
+            const rprec = Node.precedence(rhs_node.tag);
+            if (rprec < prec or rprec == prec and (!Node.isCommutative(t) or !Node.isCommutative(rhs_node.tag))) {
                 try writer.writeByte('(');
-                try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
+                try printFromNode(nodes, rhs, rhs_node, writer, strings);
                 try writer.writeByte(')');
             } else {
-                try printFromNode(nodes, index.sub(b.rhs), rhs, writer, strings);
+                try printFromNode(nodes, rhs, rhs_node, writer, strings);
             }
         },
-        .range, .invalidated_range, .dynamic_range => |b| {
-            try printFromIndex(nodes, index.sub(b.lhs), writer, strings);
+        .range, .invalidated_range, .dynamic_range => {
+            const rhs = index.sub(1);
+            const lhs = leftMostChild(nodes, rhs).sub(1);
+            try printFromIndex(nodes, lhs, writer, strings);
             try writer.writeByte(':');
-            try printFromIndex(nodes, index.sub(b.rhs), writer, strings);
+            try printFromIndex(nodes, rhs, writer, strings);
         },
 
         .builtin => |b| {
@@ -598,6 +633,22 @@ pub fn formatAst(data: FormatData, w: *std.io.Writer) !void {
     return print(data.nodes, data.root, data.strings, w);
 }
 
+pub fn exprLen(nodes: NodeSlice, root: Index) usize {
+    assert(nodes.items(.tag)[root.n + 1] == .end);
+    return nodes.items(.data)[root.n + 1].end;
+}
+
+pub fn exprStart(nodes: NodeSlice, root: Index) Index {
+    const len = exprLen(nodes, root);
+    return root.sub(len - 1);
+}
+
+pub fn exprNodes(nodes: NodeSlice, root: Index) NodeSlice {
+    const start = exprStart(nodes, root);
+    const len = exprLen(nodes, root);
+    return nodes.subslice(start.n, len);
+}
+
 pub fn print(
     nodes: NodeSlice,
     root: Index,
@@ -626,7 +677,6 @@ pub fn leftMostChild(
         .abs_rel,
         .abs_abs,
         => index,
-        .assignment => leftMostChild(nodes, .from(index.n - 1)),
         // branch nodes
         .concat,
         .add,
@@ -646,8 +696,12 @@ pub fn leftMostChild(
         .less_equals,
         .equals,
         .not_equals,
-        => |b| leftMostChild(nodes, index.sub(b.lhs)),
-        .builtin => |b| if (b.first_arg.int() != 0)
+        => {
+            const rhs = index.sub(1);
+            const lhs = leftMostChild(nodes, rhs).sub(1);
+            return leftMostChild(nodes, lhs);
+        },
+        .builtin => |b| if (b.first_arg != 0)
             leftMostChild(nodes, index.sub(b.first_arg))
         else
             index,
@@ -656,7 +710,9 @@ pub fn leftMostChild(
         .not,
         .reference,
         .dereference,
-        => leftMostChild(nodes, index.subN(1)),
+        .assignment,
+        => leftMostChild(nodes, index.sub(1)),
+        .end => |n| index.sub(n),
     };
 }
 
@@ -686,37 +742,8 @@ pub const ResultType = enum {
 pub const EvalResult = union(enum) {
     none,
     number: f64,
-    string: union(enum) {
-        slice: []const u8,
-        cell: struct {
-            sheet: *Sheet,
-            list_index: @FieldType(Sheet, "string_values").List.Index,
-        },
-
-        pub fn bytes(self: @This()) []const u8 {
-            return switch (self) {
-                .slice => |s| s,
-                .cell => |s| s.sheet.string_values.items(s.list_index),
-            };
-        }
-    },
-    ref: union(enum) {
-        cell: Position,
-        range: Rect,
-
-        pub fn format(ref: @This(), w: *std.io.Writer) !void {
-            switch (ref) {
-                inline else => |f| try f.format(w),
-            }
-        }
-
-        pub fn toRange(ref: @This()) Rect {
-            return switch (ref) {
-                .cell => |p| .initSinglePos(p),
-                .range => |r| r,
-            };
-        }
-    },
+    string: StringResult,
+    ref: Reference,
 
     pub fn boolean(res: EvalResult, _: *const Sheet) bool {
         return switch (res) {
@@ -724,6 +751,56 @@ pub const EvalResult = union(enum) {
             .number => |n| n != 0,
             .string => true,
             .ref => true,
+        };
+    }
+};
+
+pub const Reference = union(enum) {
+    cell: Position,
+    range: Rect,
+
+    pub fn format(ref: @This(), w: *std.io.Writer) !void {
+        switch (ref) {
+            inline else => |f| try f.format(w),
+        }
+    }
+
+    pub fn toRange(ref: @This()) Rect {
+        return switch (ref) {
+            .cell => |p| .initSinglePos(p),
+            .range => |r| r,
+        };
+    }
+};
+
+pub const EvalResult2 = union(enum) {
+    none,
+    number: f64,
+    string: StringResult,
+    ref: Reference,
+    cell_literal: Position,
+
+    pub fn from(res: EvalResult) EvalResult2 {
+        return switch (res) {
+            .none => .none,
+            .number => |n| .{ .number = n },
+            .string => |str| .{ .string = str },
+            .ref => |r| .{ .ref = r },
+        };
+    }
+};
+
+pub const StringResult = union(enum) {
+    slice: []const u8,
+    cell: struct {
+        sheet: *Sheet,
+        list_index: @FieldType(Sheet, "string_values").List.Index,
+    },
+
+    pub fn bytes(self: @This()) []const u8 {
+        return switch (self) {
+            .slice => |s| s,
+            .cell => |s| s.sheet.string_values.items(s.list_index),
         };
     }
 };
@@ -745,6 +822,7 @@ pub fn EvalContext(comptime Context: type) type {
         strings: []const u8,
         sheet: *Sheet,
         context: Context,
+        stack: std.ArrayList(EvalResult2) = .empty,
 
         pub const Error = blk: {
             const E = error{
@@ -796,93 +874,114 @@ pub fn EvalContext(comptime Context: type) type {
             };
         }
 
-        // TODO: Make this iterative instead of recursive.
-        fn evaluate(
-            eval: *const @This(),
-            index: Index,
-            result_type: ResultType,
-        ) Error!EvalResult {
-            const node = eval.nodes.get(index.n);
+        fn push(eval: *@This(), res: EvalResult2) !void {
+            try eval.stack.append(eval.arena, res);
+        }
 
-            return switch (node.get()) {
+        fn pop(eval: *@This(), result_type: ResultType) !EvalResult {
+            const ret = eval.stack.pop().?;
+            return switch (ret) {
+                .cell_literal => |pos| switch (result_type) {
+                    .reference => .{ .ref = .{ .cell = pos } },
+                    .any => try eval.context.evalCellByPos(pos),
+                },
+                .none => .none,
                 .number => |n| .{ .number = n },
+                .ref => |r| .{ .ref = r },
+                .string => |str| .{ .string = str },
+            };
+        }
+
+        fn evaluate(eval: *@This(), root: Index) Error!void {
+            const start = leftMostChild(eval.nodes, root);
+            for (start.n..root.n + 1) |i| switch (eval.nodes.get(i).get()) {
+                .end => break,
+                .number => |n| try eval.push(.{ .number = n }),
                 .rel_rel, .rel_abs, .abs_rel, .abs_abs => |pos| {
-                    return switch (result_type) {
-                        .any => eval.context.evalCellByPos(pos),
-                        .reference => .{ .ref = .{ .cell = pos } },
-                    };
+                    try eval.push(.{ .cell_literal = pos });
                 },
                 .minus => {
-                    const rhs = try eval.evaluate(index.subN(1), .any);
-                    return .{ .number = -(try eval.toNumber(rhs, 0)) };
+                    const rhs = try eval.pop(.any);
+                    try eval.push(.{ .number = -(try eval.toNumber(rhs, 0)) });
                 },
                 .plus => {
-                    const rhs = try eval.evaluate(index.subN(1), .any);
-                    return .{ .number = @abs(try eval.toNumber(rhs, 0)) };
+                    const rhs = try eval.pop(.any);
+                    try eval.push(.{ .number = @abs(try eval.toNumber(rhs, 0)) });
                 },
                 .not => {
-                    const rhs = try eval.evaluate(index.subN(1), .any);
-                    return .{ .number = @floatFromInt(@intFromBool(!rhs.boolean(eval.sheet))) };
+                    const rhs = try eval.pop(.any);
+                    try eval.push(.{
+                        .number = @floatFromInt(@intFromBool(!rhs.boolean(eval.sheet))),
+                    });
                 },
                 .reference => {
-                    const arg_index = index.subN(1);
-                    const arg_tag = eval.tags[arg_index.n];
-                    switch (arg_tag) {
-                        .rel_rel, .abs_abs, .abs_rel, .rel_abs => {},
-                        else => return error.NotEvaluable,
-                    }
-                    const pos = eval.data[arg_index.n].rel_rel;
-                    return .{ .ref = .{ .cell = pos } };
+                    const arg = try eval.pop(.reference);
+                    try eval.push(.{ .ref = .{ .cell = arg.ref.cell } });
                 },
                 .dereference => {
-                    const arg_index = index.subN(1);
-                    const arg = try eval.evaluate(arg_index, .reference);
+                    const arg = try eval.pop(.reference);
                     if (arg != .ref or arg.ref != .cell)
                         return error.NotEvaluable;
 
                     const pos = arg.ref.cell;
-                    return try eval.context.evalCellByPos(pos);
+                    const res = try eval.context.evalCellByPos(pos);
+                    try eval.push(.from(res));
                 },
-                inline .add, .sub, .mul, .div, .mod, .pow => |op, t| {
-                    const lhs = try eval.evaluate(index.sub(op.lhs), .any);
-                    const rhs = try eval.evaluate(index.sub(op.rhs), .any);
+                inline .add, .sub, .mul, .div, .mod, .pow => |_, t| {
+                    const rhs = try eval.pop(.any);
+                    const lhs = try eval.pop(.any);
                     const l = try eval.toNumber(lhs, 0);
                     const r = try eval.toNumber(rhs, 0);
-                    return .{ .number = switch (t) {
+                    const res: EvalResult2 = .{ .number = switch (t) {
                         .add => l + r,
                         .sub => l - r,
                         .mul => l * r,
                         .div => {
                             if (r == 0) return error.DivideByZero;
-                            return .{ .number = l / r };
+                            try eval.push(.{ .number = l / r });
+                            continue;
                         },
                         .mod => {
                             if (r <= 0) return error.DivideByZero;
-                            return .{ .number = @rem(l, r) };
+                            try eval.push(.{ .number = @rem(l, r) });
+                            continue;
                         },
                         .pow => std.math.pow(f64, l, r),
                         else => comptime unreachable,
                     } };
+                    try eval.push(res);
                 },
                 // and/or have the same semantics as Lua's and/or operators.
-                .logical_and => |op| {
-                    const lhs = try eval.evaluate(index.sub(op.lhs), .any);
-                    const rhs = try eval.evaluate(index.sub(op.rhs), .any);
-                    if (lhs.boolean(eval.sheet)) return rhs;
-                    return .{ .number = 0 };
+                .logical_and => {
+                    const rhs = try eval.pop(.any);
+                    const lhs = try eval.pop(.any);
+                    const res: EvalResult2 =
+                        if (lhs.boolean(eval.sheet))
+                            .from(rhs)
+                        else
+                            .{ .number = 0 };
+
+                    try eval.push(res);
                 },
-                .logical_or => |op| {
-                    const lhs = try eval.evaluate(index.sub(op.lhs), .any);
-                    const rhs = try eval.evaluate(index.sub(op.rhs), .any);
-                    if (lhs.boolean(eval.sheet)) return lhs;
-                    return rhs;
+                .logical_or => {
+                    const rhs = try eval.pop(.any);
+                    const lhs = try eval.pop(.any);
+                    const res: EvalResult2 =
+                        if (lhs.boolean(eval.sheet))
+                            .from(lhs)
+                        else
+                            .from(rhs);
+
+                    try eval.push(res);
                 },
-                inline .equals, .not_equals => |op, tag| {
-                    const lhs = try eval.evaluate(index.sub(op.lhs), .any);
-                    const rhs = try eval.evaluate(index.sub(op.rhs), .any);
+                inline .equals, .not_equals => |_, tag| {
+                    const rhs = try eval.pop(.any);
+                    const lhs = try eval.pop(.any);
                     const false_value = @intFromBool(tag != .equals);
-                    if (@as(std.meta.Tag(EvalResult), lhs) != rhs)
-                        return .{ .number = false_value };
+                    if (@as(std.meta.Tag(EvalResult), lhs) != rhs) {
+                        try eval.push(.{ .number = false_value });
+                        continue;
+                    }
 
                     const n = switch (lhs) {
                         .none => true,
@@ -890,7 +989,10 @@ pub fn EvalContext(comptime Context: type) type {
                         .string => std.mem.eql(u8, lhs.string.bytes(), rhs.string.bytes()),
                         .ref => blk: {
                             const Tag = std.meta.Tag(@FieldType(EvalResult, "ref"));
-                            if (@as(Tag, lhs.ref) != rhs.ref) return .{ .number = false_value };
+                            if (@as(Tag, lhs.ref) != rhs.ref) {
+                                try eval.push(.{ .number = false_value });
+                                continue;
+                            }
                             break :blk Rect.eql(lhs.ref.toRange(), rhs.ref.toRange());
                         },
                     };
@@ -901,15 +1003,15 @@ pub fn EvalContext(comptime Context: type) type {
                         else => comptime unreachable,
                     };
 
-                    return .{ .number = @floatFromInt(@intFromBool(b)) };
+                    try eval.push(.{ .number = @floatFromInt(@intFromBool(b)) });
                 },
                 inline .greater_than,
                 .less_than,
                 .greater_equals,
                 .less_equals,
-                => |op, t| {
-                    const lhs = try eval.evaluate(index.sub(op.lhs), .any);
-                    const rhs = try eval.evaluate(index.sub(op.rhs), .any);
+                => |_, t| {
+                    const rhs = try eval.pop(.any);
+                    const lhs = try eval.pop(.any);
                     const l = try eval.toNumber(lhs, 0);
                     const r = try eval.toNumber(rhs, 0);
                     const n = switch (t) {
@@ -922,34 +1024,34 @@ pub fn EvalContext(comptime Context: type) type {
                         else => comptime unreachable,
                     };
 
-                    return .{ .number = @floatFromInt(@intFromBool(n)) };
+                    try eval.push(.{ .number = @floatFromInt(@intFromBool(n)) });
                 },
 
-                .builtin => |b| switch (b.tag) {
-                    .sum => .{ .number = try eval.evalSum(index.sub(b.first_arg), index) },
-                    .prod => .{ .number = try eval.evalProd(index.sub(b.first_arg), index) },
-                    .avg => .{ .number = try eval.evalAvg(index.sub(b.first_arg), index) },
-                    .max => .{ .number = try eval.evalMax(index.sub(b.first_arg), index) },
-                    .min => .{ .number = try eval.evalMin(index.sub(b.first_arg), index) },
-                    .upper => .{ .string = .{ .slice = try eval.evalUpper(index.sub(b.first_arg)) } },
-                    .lower => .{ .string = .{ .slice = try eval.evalLower(index.sub(b.first_arg)) } },
-                    .sqrt => .{ .number = try eval.evalSqrt(index.subN(1)) },
-                    .round => .{ .number = try eval.evalRound(index.subN(1)) },
-                    .floor => .{ .number = try eval.evalFloor(index.subN(1)) },
-                    .ceil => .{ .number = try eval.evalCeil(index.subN(1)) },
-                    .len => .{ .number = try eval.evalStringLen(index.subN(1)) },
-                    .count => .{ .number = try eval.evalCount(.numbers, index.sub(b.first_arg), index) },
-                    .count_all => .{ .number = try eval.evalCount(.all, index.sub(b.first_arg), index) },
-                    .log => .{ .number = try eval.evalLog(index.sub(b.first_arg), index.subN(1)) },
+                .builtin => |b| try eval.push(switch (b.tag) {
+                    .sum => .{ .number = try eval.evalSum(b.arg_count) },
+                    .prod => .{ .number = try eval.evalProd(b.arg_count) },
+                    .avg => .{ .number = try eval.evalAvg(b.arg_count) },
+                    .max => .{ .number = try eval.evalMax(b.arg_count) },
+                    .min => .{ .number = try eval.evalMin(b.arg_count) },
+                    .upper => .{ .string = .{ .slice = try eval.evalUpper() } },
+                    .lower => .{ .string = .{ .slice = try eval.evalLower() } },
+                    .sqrt => .{ .number = try eval.evalSqrt() },
+                    .round => .{ .number = try eval.evalRound() },
+                    .floor => .{ .number = try eval.evalFloor() },
+                    .ceil => .{ .number = try eval.evalCeil() },
+                    .len => .{ .number = try eval.evalStringLen() },
+                    .count => .{ .number = try eval.evalCount(.numbers, b.arg_count) },
+                    .count_all => .{ .number = try eval.evalCount(.all, b.arg_count) },
+                    .log => .{ .number = try eval.evalLog() },
                     .pi => .{ .number = std.math.pi },
                     .e => .{ .number = std.math.e },
-                    .width => .{ .number = try eval.evalWidth(index.subN(1)) },
-                    .height => .{ .number = try eval.evalHeight(index.subN(1)) },
-                },
+                    .width => .{ .number = try eval.evalWidth() },
+                    .height => .{ .number = try eval.evalHeight() },
+                }),
 
-                .concat => |op| {
-                    const lhs = try eval.evaluate(index.sub(op.lhs), .any);
-                    const rhs = try eval.evaluate(index.sub(op.rhs), .any);
+                .concat => {
+                    const rhs = try eval.pop(.any);
+                    const lhs = try eval.pop(.any);
                     var aw: std.io.Writer.Allocating = .init(eval.arena);
                     eval.formatString(lhs, &aw.writer) catch |err| switch (err) {
                         error.WriteFailed => return error.OutOfMemory,
@@ -959,24 +1061,28 @@ pub fn EvalContext(comptime Context: type) type {
                         error.WriteFailed => return error.OutOfMemory,
                         else => |e| return e,
                     };
-                    return .{ .string = .{ .slice = try aw.toOwnedSlice() } };
+                    try eval.push(.{ .string = .{ .slice = try aw.toOwnedSlice() } });
                 },
-                .range, .dynamic_range => |op| {
-                    const lhs = try eval.evaluate(index.sub(op.lhs), .reference);
-                    const rhs = try eval.evaluate(index.sub(op.rhs), .reference);
+                .range, .dynamic_range => {
+                    const rhs = try eval.pop(.reference);
+                    const lhs = try eval.pop(.reference);
                     const invalid_args = (lhs != .ref or lhs.ref != .cell) or
                         (rhs != .ref or rhs.ref != .cell);
 
                     if (invalid_args)
                         return error.NotEvaluable;
 
-                    return .{ .ref = .{ .range = .initNormalizePos(lhs.ref.cell, rhs.ref.cell) } };
+                    try eval.push(.{ .ref = .{
+                        .range = .initNormalizePos(lhs.ref.cell, rhs.ref.cell),
+                    } });
                 },
-                .string_literal => |str| .{ .string = .{ .slice = eval.strings[str.start..str.end] } },
+                .string_literal => |str| try eval.push(.{ .string = .{
+                    .slice = eval.strings[str.start..str.end],
+                } }),
                 .invalidated_pos,
                 .invalidated_range,
                 .assignment,
-                => error.NotEvaluable,
+                => return error.NotEvaluable,
             };
         }
 
@@ -998,7 +1104,7 @@ pub fn EvalContext(comptime Context: type) type {
             }
         }
 
-        fn mapArgsNumber(eval: *const @This(), start: Index, end: Index, ctx: anytype) !void {
+        fn mapArgsNumber(eval: *@This(), arg_count: u32, ctx: anytype) !void {
             const MapContext = struct {
                 eval: *const EvalContext(Context),
                 outer_ctx: @TypeOf(ctx),
@@ -1010,10 +1116,8 @@ pub fn EvalContext(comptime Context: type) type {
                 }
             };
 
-            var iter = argIterator(eval.nodes, start, end);
-
-            while (iter.next()) |i| {
-                const res = try eval.evaluate(i, .reference);
+            for (0..arg_count) |_| {
+                const res = try eval.pop(.reference);
                 switch (res) {
                     .ref => |r| switch (r) {
                         .cell => |pos| {
@@ -1059,16 +1163,16 @@ pub fn EvalContext(comptime Context: type) type {
             return .initPos(eval.data[lhs.n].rel_rel, eval.data[rhs.n].rel_rel);
         }
 
-        fn evalUpper(eval: *const @This(), arg: Index) ![]const u8 {
-            const evaled_arg = try eval.evaluate(arg, .any);
-            const str = try eval.formatStringAlloc(evaled_arg);
+        fn evalUpper(eval: *@This()) ![]const u8 {
+            const arg = try eval.pop(.any);
+            const str = try eval.formatStringAlloc(arg);
             for (str) |*c| c.* = std.ascii.toUpper(c.*);
             return str;
         }
 
-        fn evalLower(eval: *const @This(), arg: Index) ![]const u8 {
-            const evaled_arg = try eval.evaluate(arg, .any);
-            const str = try eval.formatStringAlloc(evaled_arg);
+        fn evalLower(eval: *@This()) ![]const u8 {
+            const arg = try eval.pop(.any);
+            const str = try eval.formatStringAlloc(arg);
             for (str) |*c| c.* = std.ascii.toLower(c.*);
             return str;
         }
@@ -1117,66 +1221,66 @@ pub fn EvalContext(comptime Context: type) type {
             }
         };
 
-        fn evalSum(eval: *const @This(), start: Index, end: Index) !f64 {
+        fn evalSum(eval: *@This(), arg_count: u32) !f64 {
             var ctx: SumContext = .{};
-            try eval.mapArgsNumber(start, end, &ctx);
+            try eval.mapArgsNumber(arg_count, &ctx);
             return ctx.total;
         }
 
-        fn evalProd(eval: *const @This(), start: Index, end: Index) !f64 {
+        fn evalProd(eval: *@This(), arg_count: u32) !f64 {
             var ctx: ProdContext = .{};
-            try eval.mapArgsNumber(start, end, &ctx);
+            try eval.mapArgsNumber(arg_count, &ctx);
             return ctx.total;
         }
 
         // TODO: This function assumes that ranges do not overlap?
-        fn evalAvg(eval: *const @This(), start: Index, end: Index) !f64 {
+        fn evalAvg(eval: *@This(), arg_count: u32) !f64 {
             var ctx: AvgContext = .{};
-            try eval.mapArgsNumber(start, end, &ctx);
+            try eval.mapArgsNumber(arg_count, &ctx);
             if (ctx.total_items == 0) return 0;
             return ctx.total / @as(f64, @floatFromInt(ctx.total_items));
         }
 
-        fn evalMax(eval: *const @This(), start: Index, end: Index) !f64 {
+        fn evalMax(eval: *@This(), arg_count: u32) !f64 {
             var ctx: MaxContext = .{};
-            try eval.mapArgsNumber(start, end, &ctx);
+            try eval.mapArgsNumber(arg_count, &ctx);
             return ctx.max orelse 0;
         }
 
-        fn evalMin(eval: *const @This(), start: Index, end: Index) !f64 {
+        fn evalMin(eval: *@This(), arg_count: u32) !f64 {
             var ctx: MinContext = .{};
-            try eval.mapArgsNumber(start, end, &ctx);
+            try eval.mapArgsNumber(arg_count, &ctx);
             return ctx.min orelse 0;
         }
 
-        fn evalSqrt(eval: *const @This(), arg: Index) !f64 {
-            const res = try eval.evaluate(arg, .reference);
-            const n = try eval.toNumberDeref(res) orelse 0;
+        fn evalSqrt(eval: *@This()) !f64 {
+            const arg = try eval.pop(.reference);
+            const n = try eval.toNumberDeref(arg) orelse 0;
             if (n < 0) return error.NotEvaluable;
             return std.math.sqrt(n);
         }
 
-        fn evalRound(eval: *const @This(), arg: Index) !f64 {
-            const res = try eval.evaluate(arg, .reference);
-            const n = try eval.toNumberDeref(res) orelse 0;
+        fn evalRound(eval: *@This()) !f64 {
+            const arg = try eval.pop(.reference);
+            const n = try eval.toNumberDeref(arg) orelse 0;
             return std.math.round(n);
         }
 
-        fn evalFloor(eval: *const @This(), arg: Index) !f64 {
-            const res = try eval.evaluate(arg, .reference);
-            const n = try eval.toNumberDeref(res) orelse 0;
+        fn evalFloor(eval: *@This()) !f64 {
+            const arg = try eval.pop(.reference);
+            const n = try eval.toNumberDeref(arg) orelse 0;
             return @floor(n);
         }
 
-        fn evalCeil(eval: *const @This(), arg: Index) !f64 {
-            const res = try eval.evaluate(arg, .reference);
-            const n = try eval.toNumberDeref(res) orelse 0;
+        fn evalCeil(eval: *@This()) !f64 {
+            const arg = try eval.pop(.reference);
+            const n = try eval.toNumberDeref(arg) orelse 0;
             return @ceil(n);
         }
 
-        fn evalStringLen(eval: *const @This(), arg: Index) !f64 {
-            const res = try eval.evaluate(arg, .any);
-            switch (res) {
+        fn evalStringLen(eval: *@This()) !f64 {
+            const arg = try eval.pop(.any);
+            switch (arg) {
                 .none => return 0,
                 .number => |n| {
                     // TODO: This should account for the current precision of the cell
@@ -1196,17 +1300,25 @@ pub fn EvalContext(comptime Context: type) type {
         }
 
         fn evalCount(
-            eval: *const @This(),
+            eval: *@This(),
             comptime operation: enum { all, numbers },
-            start: Index,
-            end: Index,
+            arg_count: u32,
         ) !f64 {
             const CountContext = struct {
                 count: u65,
                 eval: *const EvalContext(Context),
 
                 pub fn func(ctx: *@This(), cell: Sheet.Cell.Handle) !void {
-                    const res = try ctx.eval.context.evalCellByHandle(cell);
+                    const res = ctx.eval.context.evalCellByHandle(cell) catch |err| switch (err) {
+                        error.OutOfMemory => |e| return e,
+                        else => {
+                            switch (operation) {
+                                .all => ctx.count += 1,
+                                .numbers => {},
+                            }
+                            return;
+                        },
+                    };
 
                     switch (operation) {
                         .all => ctx.count += 1,
@@ -1217,10 +1329,9 @@ pub fn EvalContext(comptime Context: type) type {
                 }
             };
 
-            var iter = argIterator(eval.nodes, start, end);
             var total: u65 = 0;
-            while (iter.next()) |i| {
-                const res = eval.evaluate(i, .any) catch continue;
+            for (0..arg_count) |_| {
+                const res = try eval.pop(.any);
                 switch (res) {
                     .none => {},
                     inline .number, .string => |_, tag| {
@@ -1247,9 +1358,9 @@ pub fn EvalContext(comptime Context: type) type {
             return @floatFromInt(total);
         }
 
-        fn evalLog(eval: *const @This(), arg: Index, base_arg: Index) !f64 {
-            const base_result = try eval.evaluate(base_arg, .any);
-            const n_result = try eval.evaluate(arg, .any);
+        fn evalLog(eval: *@This()) !f64 {
+            const base_result = try eval.pop(.any);
+            const n_result = try eval.pop(.any);
             const base = try eval.toNumber(base_result, 10);
             const n = try eval.toNumber(n_result, 0);
             if (base <= 0 or base == 1 or n <= 0)
@@ -1257,15 +1368,15 @@ pub fn EvalContext(comptime Context: type) type {
             return std.math.log(f64, base, n);
         }
 
-        fn evalWidth(eval: *const @This(), arg: Index) !f64 {
-            const res = try eval.evaluate(arg, .any);
+        fn evalWidth(eval: *@This()) !f64 {
+            const res = try eval.pop(.any);
             if (res != .ref) return error.NotEvaluable;
             const range = res.ref.toRange();
             return @floatFromInt(range.width2());
         }
 
-        fn evalHeight(eval: *const @This(), arg: Index) !f64 {
-            const res = try eval.evaluate(arg, .any);
+        fn evalHeight(eval: *@This()) !f64 {
+            const res = try eval.pop(.any);
             if (res != .ref) return error.NotEvaluable;
             const range = res.ref.toRange();
             return @floatFromInt(range.height2());
@@ -1289,7 +1400,7 @@ pub fn evaluate(
     var arena: std.heap.ArenaAllocator = .init(sheet.gpa);
     defer arena.deinit();
 
-    const ctx: EvalContext(@TypeOf(context)) = .{
+    var ctx: EvalContext(@TypeOf(context)) = .{
         .nodes = nodes,
         .tags = nodes.items(.tag),
         .data = nodes.items(.data),
@@ -1300,7 +1411,8 @@ pub fn evaluate(
         .context = context,
     };
 
-    const res = try ctx.evaluate(root_node, .any);
+    try ctx.evaluate(root_node);
+    const res = try ctx.pop(.any);
 
     return switch (res) {
         .string => |str| .{ .string = .{ .slice = try sheet.gpa.dupe(u8, str.bytes()) } },
@@ -1356,8 +1468,8 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
             const node = nodes.get(index.n);
 
             switch (node.get()) {
-                .assignment => {
-                    self.traverse(index.subN(1), ctx, .no_deref);
+                .assignment, .end => {
+                    self.traverse(index.sub(1), ctx, .no_deref);
                 },
                 .number, .string_literal, .invalidated_pos, .invalidated_range => {},
                 .rel_rel, .rel_abs, .abs_rel, .abs_abs => |pos| switch (ctx) {
@@ -1369,7 +1481,7 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
                         func(self.user_ctx, .initSinglePos(pos));
                     },
                 },
-                .range => |op| {
+                .range => {
                     const add_dependency = switch (ctx) {
                         .reference => switch (deref) {
                             .deref => true,
@@ -1378,7 +1490,8 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
                         .value => false,
                     };
                     if (add_dependency) {
-                        const lhs, const rhs = op.args(index);
+                        const rhs = index.sub(1);
+                        const lhs = leftMostChild(nodes, rhs).sub(1);
                         const tags = nodes.items(.tag);
                         const data = nodes.items(.data);
                         const lhs_tag = tags[lhs.n];
@@ -1402,20 +1515,21 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
                         func(self.user_ctx, .initNormalizePos(tl, br));
                     }
                 },
-                .dynamic_range => |op| {
-                    const lhs, const rhs = op.args(index);
+                .dynamic_range => {
+                    const rhs = index.sub(1);
+                    const lhs = leftMostChild(nodes, rhs).sub(1);
                     self.traverse(lhs, .reference, .no_deref);
                     self.traverse(rhs, .reference, .no_deref);
                 },
                 .reference => switch (deref) {
-                    .deref => self.traverse(index.subN(1), .value, .no_deref),
+                    .deref => self.traverse(index.sub(1), .value, .no_deref),
                     .no_deref => {},
                 },
                 .dereference => {
-                    self.traverse(index.subN(1), .reference, .deref);
+                    self.traverse(index.sub(1), .reference, .deref);
                 },
                 .minus, .plus, .not => {
-                    self.traverse(index.subN(1), .value, .no_deref);
+                    self.traverse(index.sub(1), .value, .no_deref);
                 },
                 .add,
                 .sub,
@@ -1432,11 +1546,9 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
                 .greater_equals,
                 .less_equals,
                 .concat,
-                => |op| {
-                    const lhs, const rhs = op.args(index);
-                    // const lhs_tag = nodes.items(.tag)[lhs.n];
-                    // const rhs_tag = nodes.items(.tag)[rhs.n];
-                    // if ()
+                => {
+                    const rhs = index.sub(1);
+                    const lhs = leftMostChild(nodes, rhs).sub(1);
                     self.traverse(lhs, .value, .no_deref);
                     self.traverse(rhs, .value, .no_deref);
                 },
@@ -1491,6 +1603,33 @@ pub fn isDynamicReference(nodes: NodeSlice, index: Index) bool {
         else => true,
     };
 }
+
+/// Iterates backwards over a flat list of AST nodes that contains multiple expressions in sequence.
+pub const ExpressionIterator = struct {
+    tags: []const Node.Tag,
+    data: []const Node.Payload,
+    start: Index,
+    i: usize,
+
+    pub fn init(nodes: NodeSlice, start: Index) ExpressionIterator {
+        return .{
+            .tags = nodes.items(.tag),
+            .data = nodes.items(.data),
+            .start = start,
+            .i = nodes.len,
+        };
+    }
+
+    pub fn prev(iter: *ExpressionIterator) ?Index {
+        if (iter.i <= iter.start.n) return null;
+        iter.i -= 1;
+        assert(iter.tags[iter.i] == .end);
+        const len = iter.data[iter.i].end;
+        const ret = iter.i - 1;
+        iter.i -= len;
+        return .from(ret);
+    }
+};
 
 test "Parse and Eval Expression" {
     const t = std.testing;
@@ -1628,94 +1767,6 @@ test "Functions on Ranges" {
     try Test.testSheetExpr(0, "@min(3, a0:b1, 1, 2)");
     try t.expectError(error.UnexpectedToken, Test.testSheetExpr(0, "@min()"));
 }
-
-// test "Splice" {
-//     const t = std.testing;
-
-//     const Context = struct {
-//         pub fn evalCell(_: @This(), _: Reference) !EvalResult {
-//             return .none;
-//         }
-
-//         pub fn evalCellByHandle(_: @This(), _: Sheet.Cell.Handle) !EvalResult {
-//             return .none;
-//         }
-//     };
-
-//     const sheet = try Sheet.init(t.allocator);
-//     defer sheet.deinit();
-
-//     const expr_root = try fromSource(sheet, "let a0 = 100 * 3 + 5 / 2 + @avg(1, 10)");
-//     const root_node = sheet.ast_nodes.get(expr_root.n);
-
-//     var spliced_root = splice(&sheet.ast_nodes, root_node.data.assignment.rhs);
-
-//     try t.expectApproxEqRel(
-//         308,
-//         (try eval(sheet.ast_nodes, spliced_root, sheet, "", Context{})).number,
-//         0.0001,
-//     );
-//     try t.expectEqual(11, sheet.ast_nodes.len);
-
-//     spliced_root = splice(&sheet.ast_nodes, sheet.ast_nodes.get(spliced_root.n).data.add.rhs);
-
-//     try t.expectApproxEqRel(
-//         5.5,
-//         (try eval(sheet.ast_nodes, spliced_root, sheet, "", Context{})).number,
-//         0.0001,
-//     );
-//     try t.expectEqual(3, sheet.ast_nodes.len);
-// }
-
-// test "StringEval" {
-//     const data = .{
-//         .{ "'string'", "string" },
-//         .{ "'string1' # 'string2'", "string1string2" },
-//         .{ "'string1' # 'string2' # 'string3'", "string1string2string3" },
-
-//         .{ "@upper('String1')", "STRING1" },
-//         .{ "@lower('String1')", "string1" },
-//         .{ "@upper('STRING1')", "STRING1" },
-//         .{ "@lower('string1')", "string1" },
-//         .{ "@upper('StrINg1' # ' ' # 'StRinG2')", "STRING1 STRING2" },
-//         .{ "@lower('StrINg1' # ' ' # 'StRinG2')", "string1 string2" },
-//         .{ "@upper(@lower('String1'))", "STRING1" },
-//         .{ "@lower(@upper('String1'))", "string1" },
-
-//         .{ "@upper()", ParseError.UnexpectedToken },
-//         .{ "@lower()", ParseError.UnexpectedToken },
-//         .{ "@lower('string1', 'string2')", ParseError.UnexpectedToken },
-//         .{ "@lower('string1', 'string2')", ParseError.UnexpectedToken },
-//         .{ "@upper(a0:b0)", ParseError.UnexpectedToken },
-//         .{ "@lower(a0:b0)", ParseError.UnexpectedToken },
-//     };
-//     var buf = SizedArrayListUnmanaged(u8, u32){};
-//     defer buf.deinit(std.testing.allocator);
-
-//     inline for (data) |d| {
-//         switch (@TypeOf(d[1])) {
-//             ParseError => {
-//                 try std.testing.expectError(d[1], fromStringExpression(std.testing.allocator, d[0]));
-//             },
-//             EvalError => {
-//                 var ast = try fromStringExpression(std.testing.allocator, d[0]);
-//                 defer ast.deinit(std.testing.allocator);
-
-//                 buf.clearRetainingCapacity();
-//                 try std.testing.expectError(d[1], ast.stringEval(std.testing.allocator, {}, d[0], &buf));
-//             },
-//             else => {
-//                 var ast = try fromStringExpression(std.testing.allocator, d[0]);
-//                 defer ast.deinit(std.testing.allocator);
-
-//                 buf.clearRetainingCapacity();
-//                 try ast.stringEval(std.testing.allocator, {}, d[0], &buf);
-
-//                 try std.testing.expectEqualStrings(d[1], buf.items());
-//             },
-//         }
-//     }
-// }
 
 test "Print" {
     const t = std.testing;

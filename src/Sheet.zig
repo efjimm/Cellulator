@@ -375,43 +375,37 @@ pub fn deinit(sheet: *Sheet) void {
     sheet.arena.deinit();
 }
 
+pub fn exprLen(sheet: *const Sheet, root: ast.Index) usize {
+    return ast.exprLen(sheet.ast_nodes, root);
+}
+
+pub fn exprStart(sheet: *const Sheet, root: ast.Index) ast.Index {
+    return ast.exprStart(sheet.ast_nodes, root);
+}
+
+pub fn exprNodes(sheet: *const Sheet, root: ast.Index) std.MultiArrayList(ast.Node).Slice {
+    return ast.exprNodes(sheet.ast_nodes, root);
+}
+
+/// Removes the root node from the last expression appended to `ast_nodes`.
+pub fn spliceAssignmentRoot(sheet: *Sheet) struct { ast.Index, Position } {
+    const len = sheet.ast_nodes.len;
+    const tags = sheet.ast_nodes.items(.tag);
+    const data = sheet.ast_nodes.items(.data);
+
+    assert(tags[len - 1] == .end);
+    assert(tags[len - 2] == .assignment);
+
+    const pos = data[len - 2].assignment;
+    tags[len - 2] = .end;
+    data[len - 2] = .{ .end = data[len - 1].end - 1 };
+
+    sheet.ast_nodes.len -= 1;
+
+    return .{ .from(len - 3), pos };
+}
+
 const Lua = @import("zlua").Lua;
-
-// /// Creates a new 2D point tree for use in Lua plugins. The tree stores indexes into a Lua table,
-// /// which allows storing arbitrary lua data in the tree. Due to Lua's limitations, the maximum
-// /// number of elements is 2^31 - 1. The table associated with the tree is stored at
-// /// `zc.current_sheet.plugindata.[name]``
-// pub fn createLuaTree(sheet: *Sheet, lua: *Lua, name: []const u8) !void {
-//     defer lua.setTop(0);
-
-//     const res = try sheet.lua_point_trees.getOrPut(sheet.allocator, name);
-//     if (res.found_existing) {
-//         return error.TreeAlreadyExists;
-//     }
-//     errdefer sheet.lua_point_trees.removeByPtr(res.key_ptr);
-
-//     res.value_ptr.* = .empty;
-
-//     var t = try lua.getGlobal("zc");
-//     if (t != .table) return error.LuaError;
-
-//     t = lua.getField(-1, "userdata");
-//     if (t != .table) return error.LuaError;
-
-//     lua.newTable();
-//     lua.setField(-2, name);
-// }
-
-// pub fn destroyLuaTree(sheet: *Sheet, name: []const u8) void {
-//     if (sheet.lua_point_trees.fetchRemove(name)) |kv| {
-//         var tree = kv.value;
-//         tree.deinit(sheet.allocator);
-//     }
-// }
-
-// pub fn luaTreeCreateValue(sheet: *Sheet, name: []const u8) !i32 {
-
-// }
 
 pub fn setTextAlignment(
     sheet: *Sheet,
@@ -702,19 +696,13 @@ fn bulkParse(
             },
         };
         token_index += parser.tok_i;
-        const expr_root: ast.Index = .from(@intCast(sheet.ast_nodes.len - 1));
+        const expr_root, const pos = sheet.spliceAssignmentRoot();
 
         total_strings_len += parser.strings_len;
 
-        const data = sheet.ast_nodes.items(.data);
-        assert(sheet.ast_nodes.items(.tag)[expr_root.n] == .assignment);
-        const pos = data[expr_root.n].assignment;
-        sheet.ast_nodes.len -= 1;
-        const spliced_root: ast.Index = .from(expr_root.n - 1);
-
         assignments.appendAssumeCapacity(.{
             .pos = pos,
-            .root = spliced_root,
+            .root = expr_root,
             .is_volatile = parser.is_volatile,
         });
     }
@@ -766,21 +754,15 @@ pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
 
         assignments.clearRetainingCapacity();
         tokens.clearRetainingCapacity();
-        const ast_nodes_start: u32 = @intCast(sheet.ast_nodes.len);
+        const ast_nodes_start: ast.Index = .from(sheet.ast_nodes.len);
         const total_strings_len = try sheet.bulkParse(src, arena, &tokens, arena, &assignments);
         if (assignments.items.len == 0) continue;
 
         const dependent_count = blk: {
             var dependent_count: Cell.Handle.Int = 0;
-            for (sheet.ast_nodes.items(.tag)[ast_nodes_start..]) |tag| {
-                switch (tag) {
-                    .rel_rel,
-                    .abs_abs,
-                    .rel_abs,
-                    .abs_rel,
-                    => dependent_count += 1,
-                    else => {},
-                }
+            var iter: ast.ExpressionIterator = .init(sheet.ast_nodes, ast_nodes_start);
+            while (iter.prev()) |root| {
+                dependent_count += ast.countDependencies(sheet.ast_nodes, root);
             }
             break :blk dependent_count;
         };
@@ -814,7 +796,7 @@ pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
         try sheet.volatile_cells.ensureUnusedCapacity(sheet.gpa, total_volatile);
         errdefer comptime unreachable;
 
-        sheet.dupeAstStrings(src, .from(ast_nodes_start), .from(@intCast(sheet.ast_nodes.len)));
+        sheet.dupeAstStrings(src, ast_nodes_start, .from(sheet.ast_nodes.len));
 
         const new_cells = sheet.cell_tree.addMany(assignments.items.len);
 
@@ -1475,13 +1457,13 @@ pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
         },
         .update_range => {
             const p = u.payload.update_range;
-            try sheet.updateRange(p.ast_node, p.range, opts);
+            try sheet.updateRange(p.ast_node, p.range);
         },
         .update_pos => {
             const pos = u.payload.update_pos.pos;
             const i = u.payload.update_pos.ast_node;
             const tag = u.payload.update_pos.tag;
-            try sheet.updatePos(i, pos, tag, opts);
+            try sheet.updatePos(i, pos, tag);
         },
         .insert_dep => {
             const handle = u.payload.insert_dep;
@@ -1603,7 +1585,6 @@ fn updatePos(
     index: ast.Index,
     new_pos: Position,
     new_tag: ast.Node.Tag,
-    _: UndoOpts,
 ) !void {
     switch (new_tag) {
         .rel_rel, .rel_abs, .abs_rel, .abs_abs => {},
@@ -1617,12 +1598,13 @@ fn updatePos(
     sheet.ast_nodes.items(.tag)[index.n] = new_tag;
 }
 
-fn updateRange(sheet: *Sheet, index: ast.Index, new_range: Rect, _: UndoOpts) !void {
+fn updateRange(sheet: *Sheet, index: ast.Index, new_range: Rect) !void {
     const tag = sheet.ast_nodes.items(.tag)[index.n];
     assert(tag == .range or tag == .invalidated_range);
     try sheet.ensureUnusedUndoCapacity(1);
 
-    const l, const r = sheet.ast_nodes.items(.data)[index.n].range.args(index);
+    const r = index.sub(1);
+    const l = ast.leftMostChild(sheet.ast_nodes, r).sub(1);
     sheet.ast_nodes.items(.data)[l.n].rel_rel = new_range.tl;
     sheet.ast_nodes.items(.data)[r.n].rel_rel = new_range.br;
 
@@ -1828,10 +1810,7 @@ pub fn needsUpdate(sheet: *const Sheet) bool {
     return sheet.needs_update or sheet.queued_cells.items.len > 0;
 }
 
-fn dupeExprStrings(
-    sheet: *Sheet,
-    expr: Expression,
-) void {
+fn dupeExprStrings(sheet: *Sheet, expr: Expression) void {
     sheet.dupeAstStrings(
         expr.source,
         ast.leftMostChild(sheet.ast_nodes, expr.root),
@@ -2343,7 +2322,8 @@ pub fn deleteColOrRowRange(
                     i -= 2;
                 },
                 .range => {
-                    const lhs, const rhs = data[i].range.args(.from(i));
+                    const rhs: ast.Index = .from(i - 1);
+                    const lhs = ast.leftMostChild(sheet.ast_nodes, rhs).sub(1);
                     const tl: Position = data[lhs.n].rel_rel;
                     const br: Position = data[rhs.n].rel_rel;
                     const tl_f = @field(tl, f);
@@ -2506,7 +2486,8 @@ pub fn deleteColOrRowRange(
                 i -= 2;
             },
             .range => {
-                const lhs, const rhs = data[i].range.args(.from(i));
+                const rhs: ast.Index = .from(i - 1);
+                const lhs = ast.leftMostChild(sheet.ast_nodes, rhs).sub(1);
                 const tl: *Position = &data[lhs.n].rel_rel;
                 const br: *Position = &data[rhs.n].rel_rel;
                 const u: Undo = .init(.update_range, .{
@@ -2607,7 +2588,8 @@ pub fn insertColsOrRows(
                 },
                 .invalidated_range => i -= 2,
                 .range => {
-                    const lhs, const rhs = data[i].range.args(.from(i));
+                    const rhs: ast.Index = .from(i - 1);
+                    const lhs = ast.leftMostChild(sheet.ast_nodes, rhs).sub(1);
                     const tl: Position = data[lhs.n].rel_rel;
                     const br: Position = data[rhs.n].rel_rel;
                     const tl_f = @field(tl, f);
@@ -2715,7 +2697,8 @@ pub fn insertColsOrRows(
                 i -= 2;
             },
             .range => {
-                const lhs, const rhs = data[i].range.args(.from(i));
+                const rhs: ast.Index = .from(i - 1);
+                const lhs = ast.leftMostChild(sheet.ast_nodes, rhs).sub(1);
                 const tl = &data[lhs.n].rel_rel;
                 const br = &data[rhs.n].rel_rel;
                 assert(tl.x <= br.x);
@@ -3144,7 +3127,7 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Rect, comptime adjust: Adjust
         const root = sheet.getCellFromHandle(cell).expr_root;
         const count = ast.countDependencies(sheet.ast_nodes, root);
         const left = ast.leftMostChild(sheet.ast_nodes, root);
-        total_asts_len += root.n - left.n + 1;
+        total_asts_len += root.n - left.n + 2;
         total_deps += tile_count * count;
     }
 
@@ -3157,7 +3140,14 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Rect, comptime adjust: Adjust
     }
     errdefer comptime unreachable;
 
-    const new_cells = sheet.createCellCopiesContiguous(cells.items, src, dest.tl, tile_x, tile_y, adjust);
+    const new_cells = sheet.createCellCopiesContiguous(
+        cells.items,
+        src,
+        dest.tl,
+        tile_x,
+        tile_y,
+        adjust,
+    );
 
     _ = sheet.deleteCellRangeAssumeCapacity(real_dest, .{});
     sheet.bulkInsertCellHandlesContiguous(
@@ -3176,7 +3166,7 @@ pub const Adjust = enum { adjust, no_adjust };
 /// not inserted into the tree.
 ///
 /// The point of each cell is set to src + (dest - origin).
-pub fn createCellCopiesContiguous(
+fn createCellCopiesContiguous(
     sheet: *Sheet,
     cell_handles: []const Cell.Handle,
     origin: Rect,
@@ -3252,7 +3242,7 @@ pub fn createCellCopiesContiguous(
         }
 
         const left = ast.leftMostChild(sheet.ast_nodes, src_cell.expr_root);
-        const len = src_cell.expr_root.n - left.n + 1;
+        const len = src_cell.expr_root.n - left.n + 2;
 
         var i: u64 = 0;
         while (i < tile_x * tile_y) : (i += 1) {
@@ -3337,7 +3327,7 @@ pub fn createCellCopiesContiguous(
             }
 
             const expr_root: ast.Index = switch (adjust) {
-                .adjust => .from(@intCast(sheet.ast_nodes.len - 1)),
+                .adjust => .from(@intCast(sheet.ast_nodes.len - 2)),
                 .no_adjust => src_cell.expr_root,
             };
 

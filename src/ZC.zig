@@ -1389,12 +1389,10 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
     nodes.* = parser.nodes.slice();
 
     const root = parser.root();
-    const root_node = nodes.get(parser.root().n);
+    const root_node = nodes.get(root.n);
     switch (root_node.tag) {
         .assignment => {
-            const pos = root_node.data.assignment;
-            sheet.ast_nodes.len -= 1;
-            const spliced_root: ast.Index = .from(root.n - 1);
+            const spliced_root, const pos = sheet.spliceAssignmentRoot();
 
             try zc.setCell(pos, .{
                 .source = str,
@@ -1406,8 +1404,8 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
         else => {
             // Evaluate the expression and print the result
             defer nodes.len = old_len;
-            const res = ast.evaluate(parser.nodes.slice(), root, sheet, str, sheet) catch {
-                zc.setStatusMessage(.err, "Error evaluating '{s}'", .{str});
+            const res = ast.evaluate(parser.nodes.slice(), root, sheet, str, sheet) catch |err| {
+                zc.setStatusMessage(.err, "Error ({t}) evaluating '{s}'", .{ err, str });
                 return;
             };
             const fmt = ast.fmtAst(parser.nodes.slice(), root, str);
@@ -2551,28 +2549,23 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
             var aw: std.io.Writer.Allocating = .init(zc.allocator);
             defer aw.deinit();
 
-            const pos = try Position.fromAddress(arg1);
+            const pos: Position = try .fromAddress(arg1);
 
-            // try zc.currentSheet().printCellExpression(pos, &aw.writer);
-
-            // Normalize the passed in expression
             const sheet = zc.currentSheet();
-            const start = sheet.ast_nodes.len;
-            const expr = try ast.parseFromExpression(sheet, rest);
             const cell = sheet.getCell(pos) orelse return error.CellNotFound;
-            const cell_left = ast.leftMostChild(sheet.ast_nodes, cell.expr_root);
-            errdefer std.debug.print("Expected '{f}', found '{f}'\n", .{
-                ast.fmtAst(sheet.ast_nodes, expr.root, rest),
-                sheet.fmtCellExpr(pos),
-            });
+            const expected_expr = (try ast.parseFromExpression(sheet, rest)).root;
+            const actual_expr = cell.expr_root;
 
-            if (cell.expr_root.n - cell_left.n != expr.root.n - start)
+            const expected_nodes = sheet.exprNodes(expected_expr);
+            const actual_nodes = sheet.exprNodes(actual_expr);
+
+            if (actual_nodes.len != expected_nodes.len)
                 return error.TestExpectedEqualExpressions;
 
-            for (start..expr.root.n + 1, cell_left.n..) |i, j| {
-                const n1 = sheet.ast_nodes.get(i).get();
-                const n2 = sheet.ast_nodes.get(j).get();
-                if (!std.meta.eql(n1, n2))
+            for (0..expected_nodes.len) |i| {
+                const expected = expected_nodes.get(i).get();
+                const actual = actual_nodes.get(i).get();
+                if (!std.meta.eql(expected, actual))
                     return error.TestExpectedEqualExpressions;
             }
         },

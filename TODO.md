@@ -14,7 +14,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 - Make string evaluation not complete SHIT
 
-- Dependencies not being removed after cell changes.
 - Throw nicer errors with new type tracking in parser
 - Make all index types enums
 - MultiArrayList.Slice wrapper that uses index types, like PhTree.Slice
@@ -28,9 +27,14 @@ might be an interesting read so I committed it. The stuff at the top is probably
 - Reduce size of Cell struct
 - Labels for cells
 - Custom functions implemented in Lua
-- Selct around blocks
+- Select around blocks
 - Replace mode in cli
 - Commands not being respected when opening sheet
+- Tables with headings
+- Pipe operators
+  - Filtered range AST node
+- Errors as values
+  - count/countAll should work on cell references that are errors
 
 ## Statements and Commands
 

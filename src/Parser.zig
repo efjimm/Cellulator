@@ -112,22 +112,13 @@ pub const Diagnostics = struct {
 
 const Node = @import("ast.zig").Node;
 const Index = @import("ast.zig").Index;
-const NegativeOffset = @import("ast.zig").NegativeOffset;
 
-pub const BinaryOperator = extern struct {
-    lhs: NegativeOffset,
-    rhs: NegativeOffset,
-
-    pub fn args(b: BinaryOperator, from: Index) [2]Index {
-        return .{ from.sub(b.lhs), from.sub(b.rhs) };
-    }
-};
-
-pub const Builtin = extern struct {
+pub const Builtin = packed struct(u64) {
     tag: Tag,
-    first_arg: NegativeOffset,
+    arg_count: u27,
+    first_arg: u32,
 
-    const Tag = enum(u8) {
+    const Tag = enum(u5) {
         sum,
         prod,
         avg,
@@ -214,31 +205,37 @@ pub fn init(
 }
 
 pub fn root(parser: *const Parser) Index {
-    return .from(@intCast(parser.nodes.len - 1));
+    assert(parser.nodes.items(.tag)[parser.nodes.len - 1] == .end);
+    return .from(parser.nodes.len - 2);
 }
 
-/// <- Statement / Expression
+/// <- (Statement / Expression) eof
 pub fn parse(parser: *Parser) ParseError!void {
     _ = try parser.parseStatement();
     try parser.expectToken(.eof);
+    assert(parser.nodes.items(.tag)[parser.nodes.len - 1] == .end);
 }
 
 /// Statement <- 'let' Assignment
 pub fn parseStatement(parser: *Parser) ParseError!Index {
+    const start = parser.nodes.len;
     switch (parser.token_tags[parser.tok_i]) {
         .keyword_let => {
             parser.tok_i += 1;
-            return try parser.parseAssignment();
+            const index = try parser.parseAssignment();
+            _ = try parser.addNode(.init(.end, index.n - start + 1));
+            return index;
         },
         else => {
             const index, _ = try parser.parseExpression(.value);
+            _ = try parser.addNode(.init(.end, index.n - start + 1));
             return index;
         },
     }
 }
 
 /// Assignment <- CellReference '=' Expression
-pub fn parseAssignment(parser: *Parser) ParseError!Index {
+fn parseAssignment(parser: *Parser) ParseError!Index {
     switch (parser.token_tags[parser.tok_i]) {
         .rel_rel, .rel_abs, .abs_rel, .abs_abs => {},
         else => return error.UnexpectedToken,
@@ -260,7 +257,7 @@ pub fn parseAssignment(parser: *Parser) ParseError!Index {
 }
 
 /// Expression <- OrExpr
-pub fn parseExpression(parser: *Parser, ctx: ExpressionContext) ParseError!Result {
+fn parseExpression(parser: *Parser, ctx: ExpressionContext) ParseError!Result {
     return try parser.parseOrExpr(ctx);
 }
 
@@ -269,14 +266,9 @@ fn parseOrExpr(parser: *Parser, ctx: ExpressionContext) !Result {
     var index, var result_type = try parser.parseAndExpr(ctx);
 
     while (parser.eatToken(.keyword_or)) |_| {
-        const rhs, _ = try parser.parseAndExpr(ctx);
-        const len: u32 = @intCast(parser.nodes.len);
-        const op = BinaryOperator{
-            .lhs = @enumFromInt(len - index.n),
-            .rhs = @enumFromInt(len - rhs.n),
-        };
+        _ = try parser.parseAndExpr(ctx);
 
-        index = try parser.addNode(.init(.logical_or, op));
+        index = try parser.addNode(.init(.logical_or, {}));
         result_type = .number;
     }
 
@@ -288,14 +280,9 @@ fn parseAndExpr(parser: *Parser, ctx: ExpressionContext) !Result {
     var index, var result_type = try parser.parseEqualityExpr(ctx);
 
     while (parser.eatToken(.keyword_and)) |_| {
-        const rhs, _ = try parser.parseEqualityExpr(ctx);
-        const len: u32 = @intCast(parser.nodes.len);
-        const op = BinaryOperator{
-            .lhs = @enumFromInt(len - index.n),
-            .rhs = @enumFromInt(len - rhs.n),
-        };
+        _ = try parser.parseEqualityExpr(ctx);
 
-        index = try parser.addNode(.init(.logical_and, op));
+        index = try parser.addNode(.init(.logical_and, {}));
         result_type = .number;
     }
 
@@ -315,12 +302,7 @@ fn parseEqualityExpr(parser: *Parser, ctx: ExpressionContext) !Result {
         .less_equals,
         => |tag| {
             parser.tok_i += 1;
-            const rhs, _ = try parser.parseAddExpr(ctx);
-            const len: u32 = @intCast(parser.nodes.len);
-            const op = BinaryOperator{
-                .lhs = @enumFromInt(len - index.n),
-                .rhs = @enumFromInt(len - rhs.n),
-            };
+            _ = try parser.parseAddExpr(ctx);
 
             const node_tag: Node.Tag = switch (tag) {
                 .double_equals => .equals,
@@ -332,7 +314,7 @@ fn parseEqualityExpr(parser: *Parser, ctx: ExpressionContext) !Result {
                 else => comptime unreachable,
             };
 
-            index = try parser.addNode(.init(node_tag, op));
+            index = try parser.addNode(.init(node_tag, {}));
             result_type = .number;
         },
         else => break,
@@ -348,21 +330,16 @@ fn parseAddExpr(parser: *Parser, ctx: ExpressionContext) !Result {
     while (true) switch (parser.token_tags[parser.tok_i]) {
         inline .plus, .minus, .hash => |tag| {
             parser.tok_i += 1;
-            const rhs, _ = try parser.parseMulExpr(ctx);
-            const len: u32 = @intCast(parser.nodes.len);
-            const op = BinaryOperator{
-                .lhs = @enumFromInt(len - index.n),
-                .rhs = @enumFromInt(len - rhs.n),
-            };
+            _ = try parser.parseMulExpr(ctx);
 
-            const node: Node = switch (tag) {
-                .plus => .init(.add, op),
-                .minus => .init(.sub, op),
-                .hash => .init(.concat, op),
+            const node_tag: Node.Tag = switch (tag) {
+                .plus => .add,
+                .minus => .sub,
+                .hash => .concat,
                 else => comptime unreachable,
             };
 
-            index = try parser.addNode(node);
+            index = try parser.addNode(.init(node_tag, {}));
             result_type = switch (tag) {
                 .plus, .minus => .number,
                 .hash => .string,
@@ -382,21 +359,14 @@ fn parseMulExpr(parser: *Parser, ctx: ExpressionContext) !Result {
     while (true) switch (parser.token_tags[parser.tok_i]) {
         inline .asterisk, .forward_slash, .percent => |tag| {
             parser.tok_i += 1;
-            const rhs, _ = try parser.parsePowExpr(ctx);
-            const len: u32 = @intCast(parser.nodes.len);
-            const op = BinaryOperator{
-                .lhs = @enumFromInt(len - index.n),
-                .rhs = @enumFromInt(len - rhs.n),
-            };
+            _ = try parser.parsePowExpr(ctx);
 
-            const node: Node = switch (tag) {
-                .asterisk => .init(.mul, op),
-                .forward_slash => .init(.div, op),
-                .percent => .init(.mod, op),
+            index = try parser.addNode(.init(switch (tag) {
+                .asterisk => .mul,
+                .forward_slash => .div,
+                .percent => .mod,
                 else => comptime unreachable,
-            };
-
-            index = try parser.addNode(node);
+            }, {}));
             result_type = .number;
         },
         else => break,
@@ -410,15 +380,8 @@ fn parsePowExpr(parser: *Parser, ctx: ExpressionContext) !Result {
     var index, var result_type = try parser.parseUnaryExpr(ctx);
 
     while (parser.eatToken(.caret)) |_| {
-        const rhs, _ = try parser.parseUnaryExpr(ctx);
-        const len: u32 = @intCast(parser.nodes.len);
-        const op: BinaryOperator = .{
-            .lhs = @enumFromInt(len - index.n),
-            .rhs = @enumFromInt(len - rhs.n),
-        };
-
-        const node: Node = .init(.pow, op);
-        index = try parser.addNode(node);
+        _ = try parser.parseUnaryExpr(ctx);
+        index = try parser.addNode(.init(.pow, {}));
         result_type = .number;
     }
 
@@ -451,13 +414,7 @@ fn parseRangeExpr(parser: *Parser, ctx: ExpressionContext) !Result {
     _ = parser.eatToken(.colon) orelse return .{ lhs, lhs_type };
     const rhs, _ = try parser.parseReferenceExpr(ctx);
 
-    const len: u32 = @intCast(parser.nodes.len);
-    var node: Node = .init(.range, .{
-        .lhs = @enumFromInt(len - lhs.n),
-        .rhs = @enumFromInt(len - rhs.n),
-    });
-
-    assert(node.data.range.rhs.int() == 1);
+    var node: Node = .init(.range, {});
 
     // If either of the operands are anything other than a cell literal or a reference to a cell
     // literal, then this expression must be marked volatile.
@@ -554,13 +511,15 @@ fn parseBuiltin(parser: *Parser) !Result {
         .{ .invalid_builtin = identifier },
     );
 
+    var arg_count: u32 = 0;
     const args_start, const result_type: Type = sw: switch (builtin) {
         // These builtins aren't even functions!
         .pi, .e => {
             const index = try parser.addNode(
                 .init(.builtin, .{
                     .tag = builtin,
-                    .first_arg = @enumFromInt(0),
+                    .arg_count = 0,
+                    .first_arg = 0,
                 }),
             );
             return .{ index, .number };
@@ -571,6 +530,7 @@ fn parseBuiltin(parser: *Parser) !Result {
         => {
             try parser.expectToken(.lparen);
             const expr, _ = try parser.parseExpression(.value);
+            arg_count = 1;
             break :sw .{ expr, .number };
         },
         .sqrt,
@@ -582,6 +542,7 @@ fn parseBuiltin(parser: *Parser) !Result {
             try parser.expectToken(.lparen);
             const expr, const result_type = try parser.parseExpression(.reference);
             parser.volatileAccessSingle(expr, result_type);
+            arg_count = 1;
 
             break :sw .{ expr, .number };
         },
@@ -591,6 +552,7 @@ fn parseBuiltin(parser: *Parser) !Result {
             try parser.expectToken(.lparen);
             const expr, const result_type = try parser.parseExpression(.reference);
             parser.volatileAccessSingle(expr, result_type);
+            arg_count = 1;
 
             break :sw .{ expr, .string };
         },
@@ -604,36 +566,38 @@ fn parseBuiltin(parser: *Parser) !Result {
         .count_all,
         => {
             try parser.expectToken(.lparen);
-            const index = try parser.parseVarArgsAccess(.reference);
+            const index, arg_count = try parser.parseVarArgsAccess(.reference);
             break :sw .{ index, .number };
         },
         .log => {
             try parser.expectToken(.lparen);
             const index = try parser.parseArgsAccess(2, .reference);
+            arg_count = 2;
             break :sw .{ index, .number };
         },
     };
     try parser.expectToken(.rparen);
 
-    const len: u32 = @intCast(parser.nodes.len);
     const index = try parser.addNode(.init(.builtin, .{
         .tag = builtin,
-        .first_arg = @enumFromInt(len - args_start.n),
+        .arg_count = @intCast(arg_count),
+        .first_arg = @intCast(parser.nodes.len - args_start.n),
     }));
     return .{ index, result_type };
 }
 
 /// ArgList <- Expression (',' Expression)*
-fn parseVarArgsAccess(parser: *Parser, ctx: ExpressionContext) !Index {
+fn parseVarArgsAccess(parser: *Parser, ctx: ExpressionContext) !struct { Index, u32 } {
+    var count: u32 = 1;
     const start, var result_type = try parser.parseExpression(ctx);
     parser.volatileAccess(start, result_type);
 
-    while (parser.eatToken(.comma)) |_| {
+    while (parser.eatToken(.comma)) |_| : (count += 1) {
         const index, result_type = try parser.parseExpression(ctx);
         parser.volatileAccess(index, result_type);
     }
 
-    return start;
+    return .{ start, count };
 }
 
 /// Parses an argument list with exactly `n` arguments.
@@ -848,23 +812,23 @@ test "parser" {
         }
     }.func;
 
-    try testParser("let a0 = 5", &.{ .number, .assignment });
-    try testParser("let a0 = 5.0 + +5.0", &.{ .number, .number, .plus, .add, .assignment });
-    try testParser("let a0 = 5.0 + -5.0", &.{ .number, .number, .minus, .add, .assignment });
-    try testParser("let a0 = 5.0 - +5.0", &.{ .number, .number, .plus, .sub, .assignment });
-    try testParser("let a0 = 5.0 - -5.0", &.{ .number, .number, .minus, .sub, .assignment });
-    try testParser("let b0 = 0.0 + 1.123", &.{ .number, .number, .add, .assignment });
-    try testParser("let xxx50000 = 000000 - 11111122222223333333444444", &.{ .number, .number, .sub, .assignment });
-    try testParser("let c30 = 123_123.231 * 2", &.{ .number, .number, .mul, .assignment });
-    try testParser("let crxp65535 = 123_123.321 / 123_123.321", &.{ .number, .number, .div, .assignment });
+    try testParser("let a0 = 5", &.{ .number, .assignment, .end });
+    try testParser("let a0 = 5.0 + +5.0", &.{ .number, .number, .plus, .add, .assignment, .end });
+    try testParser("let a0 = 5.0 + -5.0", &.{ .number, .number, .minus, .add, .assignment, .end });
+    try testParser("let a0 = 5.0 - +5.0", &.{ .number, .number, .plus, .sub, .assignment, .end });
+    try testParser("let a0 = 5.0 - -5.0", &.{ .number, .number, .minus, .sub, .assignment, .end });
+    try testParser("let b0 = 0.0 + 1.123", &.{ .number, .number, .add, .assignment, .end });
+    try testParser("let xxx50000 = 000000 - 11111122222223333333444444", &.{ .number, .number, .sub, .assignment, .end });
+    try testParser("let c30 = 123_123.231 * 2", &.{ .number, .number, .mul, .assignment, .end });
+    try testParser("let crxp65535 = 123_123.321 / 123_123.321", &.{ .number, .number, .div, .assignment, .end });
 
-    try testParser("let a0 = 3 - 1 * 2", &.{ .number, .number, .number, .mul, .sub, .assignment });
-    try testParser("let a0 = 1 / 2 + 3", &.{ .number, .number, .div, .number, .add, .assignment });
-    try testParser("let a0 = 1 - (3 + 5)", &.{ .number, .number, .number, .add, .sub, .assignment });
-    try testParser("let a0 = (1 + 2) - (2 + 1)", &.{ .number, .number, .add, .number, .number, .add, .sub, .assignment });
-    try testParser("let a0 = 2 / (1 - (1 + 3))", &.{ .number, .number, .number, .number, .add, .sub, .div, .assignment });
+    try testParser("let a0 = 3 - 1 * 2", &.{ .number, .number, .number, .mul, .sub, .assignment, .end });
+    try testParser("let a0 = 1 / 2 + 3", &.{ .number, .number, .div, .number, .add, .assignment, .end });
+    try testParser("let a0 = 1 - (3 + 5)", &.{ .number, .number, .number, .add, .sub, .assignment, .end });
+    try testParser("let a0 = (1 + 2) - (2 + 1)", &.{ .number, .number, .add, .number, .number, .add, .sub, .assignment, .end });
+    try testParser("let a0 = 2 / (1 - (1 + 3))", &.{ .number, .number, .number, .number, .add, .sub, .div, .assignment, .end });
 
-    try testParser("let a0 = 'this is epic' # ' and nice'", &.{ .string_literal, .string_literal, .concat, .assignment });
+    try testParser("let a0 = 'this is epic' # ' and nice'", &.{ .string_literal, .string_literal, .concat, .assignment, .end });
 
     try testParseError("unga bunga", error.UnexpectedToken);
     try testParseError("let", error.UnexpectedToken);
@@ -961,13 +925,14 @@ test "Node contents" {
             .init(.number, 5.0),
             .init(.number, 3.0),
             .init(.number, 2.0),
-            .init(.sub, .{ .lhs = .from(2), .rhs = .from(1) }),
-            .init(.mul, .{ .lhs = .from(4), .rhs = .from(1) }),
+            .init(.sub, {}),
+            .init(.mul, {}),
             .init(.number, 2.0),
             .init(.number, 1.0),
-            .init(.add, .{ .lhs = .from(2), .rhs = .from(1) }),
-            .init(.div, .{ .lhs = .from(4), .rhs = .from(1) }),
+            .init(.add, {}),
+            .init(.div, {}),
             .init(.assignment, .fromValidAddress("b30")),
+            .init(.end, 10),
         },
     );
     try testNodes(
@@ -981,8 +946,9 @@ test "Node contents" {
                 .start = "let crxp65535 = 'this is epic' # '".len,
                 .end = "let crxp65535 = 'this is epic' # 'nice".len,
             }),
-            .init(.concat, .{ .lhs = .from(2), .rhs = .from(1) }),
+            .init(.concat, {}),
             .init(.assignment, .fromValidAddress("crxp65535")),
+            .init(.end, 4),
         },
     );
 
@@ -991,11 +957,9 @@ test "Node contents" {
         &.{
             .init(.number, 1.0),
             .init(.number, 2.0),
-            .init(.logical_and, .{
-                .lhs = .from(2),
-                .rhs = .from(1),
-            }),
+            .init(.logical_and, {}),
             .init(.assignment, .fromValidAddress("a0")),
+            .init(.end, 4),
         },
     );
 }
