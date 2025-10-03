@@ -3,6 +3,12 @@ const Position = @import("Position.zig").Position;
 const Tokenizer = @import("Tokenizer.zig");
 const Token = Tokenizer.Token;
 
+const Ast = @import("Ast.zig");
+const Node = Ast.Node;
+const Index = Ast.Index;
+
+const MultiList = @import("multi_list.zig").MultiList;
+
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
@@ -17,7 +23,7 @@ strings_len: usize,
 
 src: []const u8,
 
-nodes: std.MultiArrayList(Node),
+nodes: MultiList(Node, usize),
 
 // TODO: When custom Lua functions are implemented, they could have volatile behaviour.
 //       It should be possible to explicitly mark a function as volatile. It should also be
@@ -29,7 +35,7 @@ nodes: std.MultiArrayList(Node),
 /// Any expression that accesses cells dynamically is volatile.
 is_volatile: bool = false,
 
-allocator: Allocator,
+gpa: Allocator,
 
 diagnostics: ?*Diagnostics = null,
 
@@ -110,9 +116,6 @@ pub const Diagnostics = struct {
     }
 };
 
-const Node = @import("ast.zig").Node;
-const Index = @import("ast.zig").Index;
-
 pub const Builtin = packed struct(u64) {
     tag: Tag,
     arg_count: u27,
@@ -181,7 +184,7 @@ pub const ParseError = error{
 } || Allocator.Error;
 
 const InitOptions = struct {
-    nodes: std.MultiArrayList(Node) = .{},
+    nodes: MultiList(Node, usize) = .empty,
     diagnostics: ?*Diagnostics = null,
 };
 
@@ -194,7 +197,7 @@ pub fn init(
 ) Parser {
     return .{
         .nodes = options.nodes,
-        .allocator = allocator,
+        .gpa = allocator,
         .token_tags = token_tags,
         .token_starts = token_starts,
         .strings_len = 0,
@@ -205,30 +208,30 @@ pub fn init(
 }
 
 pub fn root(parser: *const Parser) Index {
-    assert(parser.nodes.items(.tag)[parser.nodes.len - 1] == .end);
-    return .from(parser.nodes.len - 2);
+    assert(parser.nodes.items(.tag)[parser.nodes.len() - 1] == .end);
+    return @enumFromInt(parser.nodes.len() - 2);
 }
 
 /// <- (Statement / Expression) eof
 pub fn parse(parser: *Parser) ParseError!void {
     _ = try parser.parseStatement();
     try parser.expectToken(.eof);
-    assert(parser.nodes.items(.tag)[parser.nodes.len - 1] == .end);
+    assert(parser.nodes.items(.tag)[parser.nodes.len() - 1] == .end);
 }
 
 /// Statement <- 'let' Assignment
 pub fn parseStatement(parser: *Parser) ParseError!Index {
-    const start = parser.nodes.len;
+    const start = parser.nodes.len();
     switch (parser.token_tags[parser.tok_i]) {
         .keyword_let => {
             parser.tok_i += 1;
             const index = try parser.parseAssignment();
-            _ = try parser.addNode(.init(.end, index.n - start + 1));
+            _ = try parser.addNode(.init(.end, @intFromEnum(index) - start + 1));
             return index;
         },
         else => {
             const index, _ = try parser.parseExpression(.value);
-            _ = try parser.addNode(.init(.end, index.n - start + 1));
+            _ = try parser.addNode(.init(.end, @intFromEnum(index) - start + 1));
             return index;
         },
     }
@@ -452,13 +455,12 @@ fn parseReferenceExpr(parser: *Parser, ctx: ExpressionContext) !Result {
 
 /// Returns true if the given node is a cell literal or a reference to a cell literal.
 fn isDynamicReference(parser: *const Parser, index: Index) bool {
-    return @import("ast.zig").isDynamicReference(parser.nodes.slice(), index);
+    return Ast.isDynamicReference(parser.nodes, index);
 }
 
 /// Returns true if the given node is a cell literal or a reference to a cell literal.
 fn isDynamicRange(parser: *const Parser, index: Index) bool {
-    const tags = parser.nodes.items(.tag);
-    return switch (tags[index.n]) {
+    return switch (parser.nodes.item(index, .tag)) {
         .dynamic_range => true,
         else => false,
     };
@@ -592,7 +594,7 @@ fn parseBuiltin(parser: *Parser) !Result {
     const index = try parser.addNode(.init(.builtin, .{
         .tag = builtin,
         .arg_count = @intCast(arg_count),
-        .first_arg = @intCast(parser.nodes.len - args_start.n),
+        .first_arg = @intCast(parser.nodes.len() - @intFromEnum(args_start)),
     }));
     return .{ index, result_type };
 }
@@ -708,9 +710,7 @@ fn parseCellName(parser: *Parser, ctx: ExpressionContext) !Result {
 }
 
 fn addNode(noalias parser: *Parser, node: Node) Allocator.Error!Index {
-    const ret: Index = .from(@intCast(parser.nodes.len));
-    try parser.nodes.append(parser.allocator, node);
-    return ret;
+    return try parser.nodes.append(parser.gpa, node);
 }
 
 pub fn expectTokenGet(parser: *Parser, expected_tag: Token.Tag) !u32 {
@@ -912,8 +912,7 @@ test "Node contents" {
             defer parser.nodes.deinit(t.allocator);
 
             try parser.parse();
-            const slice = parser.nodes.slice();
-            for (nodes, slice.items(.tag), slice.items(.data)) |expected, tag, data| {
+            for (nodes, parser.nodes.items(.tag), parser.nodes.items(.data)) |expected, tag, data| {
                 const actual: Node = .{
                     .tag = tag,
                     .data = data,

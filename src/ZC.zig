@@ -6,7 +6,7 @@ const build = @import("build");
 const Lua = @import("zlua").Lua;
 const wcWidth = @import("wcwidth").wcWidth;
 
-const ast = @import("ast.zig");
+const Ast = @import("Ast.zig");
 const CommandLine = @import("Command.zig");
 const input = @import("input.zig");
 const Action = input.Action;
@@ -494,10 +494,11 @@ pub fn setCellString(
     diag: ?*Parser.Diagnostics,
     opts: ChangeCellOpts,
 ) !void {
-    const old_ast_len = zc.currentSheet().ast_nodes.len;
-    errdefer zc.currentSheet().ast_nodes.len = old_ast_len;
+    const sheet = zc.currentSheet();
+    const old_ast_len = sheet.ast.nodes.len();
+    errdefer sheet.ast.nodes.shrinkRetainingCapacity(old_ast_len);
 
-    const expr = try ast.parseFromExpressionDiag(zc.currentSheet(), source, diag);
+    const expr = try Ast.parseFromExpressionDiag(sheet, source, diag);
 
     try zc.setCell(pos, expr, opts);
 }
@@ -1361,8 +1362,8 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
         return;
 
     const sheet = zc.currentSheet();
-    const nodes = &sheet.ast_nodes;
-    const old_len = nodes.len;
+    const nodes = &sheet.ast.nodes;
+    const old_len = nodes.len();
 
     var diagnostics: Parser.Diagnostics = .{};
     var parser: Parser = .init(
@@ -1370,13 +1371,13 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
         str,
         tokens.items(.tag),
         tokens.items(.start),
-        .{ .nodes = nodes.toMultiArrayList(), .diagnostics = &diagnostics },
+        .{ .nodes = nodes.*, .diagnostics = &diagnostics },
     );
 
     parser.parse() catch |err| {
-        nodes.* = parser.nodes.slice();
+        nodes.* = parser.nodes;
         // Clear any newly created nodes
-        nodes.len = old_len;
+        nodes.shrinkRetainingCapacity(old_len);
         return switch (err) {
             error.UnexpectedToken,
             error.InvalidCellAddress,
@@ -1386,10 +1387,10 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
         };
     };
 
-    nodes.* = parser.nodes.slice();
+    nodes.* = parser.nodes;
 
     const root = parser.root();
-    const root_node = nodes.get(root.n);
+    const root_node = nodes.get(root);
     switch (root_node.tag) {
         .assignment => {
             const spliced_root, const pos = sheet.spliceAssignmentRoot();
@@ -1403,24 +1404,23 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
         },
         else => {
             // Evaluate the expression and print the result
-            defer nodes.len = old_len;
-            const res = ast.evaluate(parser.nodes.slice(), root, sheet, str, sheet) catch |err| {
+            defer nodes.shrinkRetainingCapacity(old_len);
+            const res = sheet.ast.evaluate(root, sheet, str, sheet) catch |err| {
                 zc.setStatusMessage(.err, "Error ({t}) evaluating '{s}'", .{ err, str });
                 return;
             };
-            const fmt = ast.fmtAst(parser.nodes.slice(), root, str);
             switch (res) {
-                .none => zc.setStatusMessage(.info, "{f} = ()", .{fmt}),
-                .number => |n| zc.setStatusMessage(.info, "{f} = {d}", .{ fmt, n }),
+                .none => zc.setStatusMessage(.info, "{s} = ()", .{str}),
+                .number => |n| zc.setStatusMessage(.info, "{s} = {d}", .{ str, n }),
                 .string => |s| {
-                    zc.setStatusMessage(.info, "{f} = {s}", .{ fmt, s.bytes() });
+                    zc.setStatusMessage(.info, "{s} = {s}", .{ str, s.bytes() });
                     switch (s) {
                         .slice => sheet.gpa.free(s.bytes()),
                         .cell => {},
                     }
                 },
-                .cell => |pos| zc.setStatusMessage(.info, "{f} = {f}", .{ fmt, pos }),
-                .range => |r| zc.setStatusMessage(.info, "{f} = {f}", .{ fmt, r }),
+                .cell => |pos| zc.setStatusMessage(.info, "{s} = {f}", .{ str, pos }),
+                .range => |r| zc.setStatusMessage(.info, "{s} = {f}", .{ str, r }),
             }
         },
     }
@@ -1917,7 +1917,7 @@ pub const Command = enum {
                 const expr_str = command[off..];
 
                 var diagnostics: Parser.Diagnostics = .{};
-                const expr = ast.parseFromExpressionDiag(
+                const expr = Ast.parseFromExpressionDiag(
                     zc.currentSheet(),
                     expr_str,
                     &diagnostics,
@@ -2505,8 +2505,8 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
         .expect => {
             const sheet = zc.currentSheet();
             const src = iter.string[iter.index..];
-            const expr = try ast.parseFromExpression(sheet, src);
-            const res = try ast.evaluate(sheet.ast_nodes, expr.root, sheet, src, sheet);
+            const expr = try Ast.parseFromExpression(sheet, src);
+            const res = try sheet.ast.evaluate(expr.root, sheet, src, sheet);
             defer if (res == .string and res.string == .slice) sheet.gpa.free(res.string.slice);
 
             if (!res.boolean(sheet)) {
@@ -2554,18 +2554,18 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
 
             const sheet = zc.currentSheet();
             const cell = sheet.getCell(pos) orelse return error.CellNotFound;
-            const expected_expr = (try ast.parseFromExpression(sheet, rest)).root;
+            const expected_expr = (try Ast.parseFromExpression(sheet, rest)).root;
             const actual_expr = cell.expr_root;
 
-            const expected_nodes = sheet.exprNodes(expected_expr);
-            const actual_nodes = sheet.exprNodes(actual_expr);
+            const expected_nodes = sheet.exprSlice(expected_expr);
+            const actual_nodes = sheet.exprSlice(actual_expr);
 
-            if (actual_nodes.len != expected_nodes.len)
+            if (actual_nodes.len() != expected_nodes.len())
                 return error.TestExpectedEqualExpressions;
 
-            for (0..expected_nodes.len) |i| {
-                const expected = expected_nodes.get(i).get();
-                const actual = actual_nodes.get(i).get();
+            for (0..expected_nodes.len()) |i| {
+                const expected = expected_nodes.geti(i).get();
+                const actual = actual_nodes.geti(i).get();
                 if (!std.meta.eql(expected, actual))
                     return error.TestExpectedEqualExpressions;
             }
@@ -3829,6 +3829,8 @@ fn testFile(gpa: std.mem.Allocator, path: []const u8) !void {
 
 test "Sheet operations" {
     for (build.test_files) |path| {
+        std.debug.print("Testing file {s}...", .{path});
         try testFile(std.testing.allocator, path);
+        std.debug.print(" Done\n", .{});
     }
 }

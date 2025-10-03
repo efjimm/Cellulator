@@ -14,8 +14,47 @@ const Parser = @import("Parser.zig");
 pub const BinaryOperator = Parser.BinaryOperator;
 pub const Builtin = Parser.Builtin;
 
+const MultiList = @import("multi_list.zig").MultiList;
+pub const NodeSlice = MultiList(Node, usize);
+
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
+
+const Ast = @This();
+
+nodes: NodeSlice,
+strings: std.ArrayList(u8),
+
+pub const empty: Ast = .{
+    .nodes = .empty,
+    .strings = .empty,
+};
+
+pub fn deinit(ast: *Ast, gpa: std.mem.Allocator) void {
+    ast.nodes.deinit(gpa);
+    ast.strings.deinit(gpa);
+}
+
+pub fn clearRetainingCapacity(ast: *Ast) void {
+    ast.nodes.clearRetainingCapacity();
+    ast.strings.clearRetainingCapacity();
+}
+
+pub fn tag(ast: *const Ast, index: NodeSlice.Index) Node.Tag {
+    return ast.nodes.item(index, .tag);
+}
+
+pub fn payload(ast: *const Ast, index: NodeSlice.Index) Node.Payload {
+    return ast.nodes.item(index, .data);
+}
+
+// pub fn tags(ast: *const Ast) []Node.Tag {
+//     return ast.nodes.items(.tag);
+// }
+
+// pub fn payloads(ast: *const Ast) []Node.Payload {
+//     return ast.nodes.items(.data);
+// }
 
 pub const ParseError = Parser.ParseError;
 
@@ -25,47 +64,6 @@ pub const String = extern struct {
     end: u32,
 };
 
-pub fn isSingle(tag: Node.Tag) bool {
-    return switch (tag) {
-        .identifier,
-        .number,
-        .rel_rel,
-        .abs_abs,
-        .abs_rel,
-        .rel_abs,
-        .string_literal,
-        .range,
-        .dynamic_range,
-        .builtin,
-        .invalidated_pos,
-        .invalidated_range,
-        .minus,
-        .plus,
-        .not,
-        .reference,
-        .dereference,
-        => true,
-        .assignment,
-        .end,
-        .concat,
-        .add,
-        .sub,
-        .mul,
-        .div,
-        .mod,
-        .pow,
-        .logical_and,
-        .logical_or,
-        .greater_than,
-        .less_than,
-        .greater_equals,
-        .less_equals,
-        .equals,
-        .not_equals,
-        => false,
-    };
-}
-
 comptime {
     assert(@sizeOf(Node.Payload) <= 8);
 }
@@ -73,6 +71,33 @@ comptime {
 pub const Node = extern struct {
     tag: Tag,
     data: Payload,
+
+    pub const End = extern struct {
+        length: u32,
+    };
+
+    pub const Payload = blk: {
+        var t = @typeInfo(Tagged).@"union";
+        t.layout = .@"extern";
+        t.tag_type = null;
+        break :blk @Type(.{ .@"union" = t });
+    };
+
+    pub fn init(comptime t: Tag, data: @FieldType(Payload, @tagName(t))) Node {
+        return .{
+            .tag = t,
+            .data = @unionInit(Payload, @tagName(t), data),
+        };
+    }
+
+    pub inline fn get(n: Node) Tagged {
+        switch (n.tag) {
+            inline else => |t| {
+                const field = @tagName(t);
+                return @unionInit(Tagged, field, @field(n.data, field));
+            },
+        }
+    }
 
     pub const Tag = enum(u8) {
         end,
@@ -109,6 +134,130 @@ pub const Node = extern struct {
         dynamic_range,
         reference,
         dereference,
+
+        pub fn isSingle(t: Tag) bool {
+            return switch (t) {
+                .identifier,
+                .number,
+                .rel_rel,
+                .abs_abs,
+                .abs_rel,
+                .rel_abs,
+                .string_literal,
+                .range,
+                .dynamic_range,
+                .builtin,
+                .invalidated_pos,
+                .invalidated_range,
+                .minus,
+                .plus,
+                .not,
+                .reference,
+                .dereference,
+                => true,
+                .assignment,
+                .end,
+                .concat,
+                .add,
+                .sub,
+                .mul,
+                .div,
+                .mod,
+                .pow,
+                .logical_and,
+                .logical_or,
+                .greater_than,
+                .less_than,
+                .greater_equals,
+                .less_equals,
+                .equals,
+                .not_equals,
+                => false,
+            };
+        }
+
+        pub fn isCommutative(t: Tag) bool {
+            return switch (t) {
+                .end,
+                .number,
+                .abs_abs,
+                .abs_rel,
+                .rel_abs,
+                .rel_rel,
+                .builtin,
+                .range,
+                .dynamic_range,
+                .invalidated_pos,
+                .invalidated_range,
+                .string_literal,
+                .assignment,
+                .not,
+                .plus,
+                .minus,
+                .reference,
+                .dereference,
+                .identifier,
+                => true,
+                .add => true,
+                .sub => false,
+                .mul => true,
+                .div => false,
+                .mod => false,
+                .pow => false,
+                .concat => false,
+                .less_than => false,
+                .greater_than => false,
+                .equals => false,
+                .greater_equals => false,
+                .less_equals => false,
+                .not_equals => false,
+                .logical_and => false,
+                .logical_or => false,
+            };
+        }
+
+        pub fn precedence(t: Tag) i8 {
+            return switch (t) {
+                // These aren't operators
+                .end,
+                .number,
+                .abs_abs,
+                .abs_rel,
+                .rel_abs,
+                .rel_rel,
+                .builtin,
+                .range,
+                .dynamic_range,
+                .invalidated_pos,
+                .invalidated_range,
+                .string_literal,
+                .assignment,
+                .identifier,
+                => 127,
+
+                // Actual operators
+                .reference => 3,
+                .dereference => 3,
+                .minus => 2,
+                .plus => 2,
+                .not => 2,
+                .mul => 1,
+                .div => 1,
+                .mod => 1,
+                .pow => 1,
+                .concat => 0,
+                .add => 0,
+                .sub => 0,
+                .less_than => -1,
+                .greater_than => -1,
+                .equals => -1,
+                .greater_equals => -1,
+                .less_equals => -1,
+                .not_equals => -1,
+                .logical_and => -2,
+                .logical_or => -3,
+            };
+        }
     };
 
     pub const Tagged = union(Tag) {
@@ -155,137 +304,31 @@ pub const Node = extern struct {
         reference,
         dereference,
     };
-
-    pub const Payload = blk: {
-        var t = @typeInfo(Tagged).@"union";
-        t.layout = .@"extern";
-        t.tag_type = null;
-        break :blk @Type(.{ .@"union" = t });
-    };
-
-    pub fn init(comptime tag: Tag, data: @FieldType(Payload, @tagName(tag))) Node {
-        return .{
-            .tag = tag,
-            .data = @unionInit(Payload, @tagName(tag), data),
-        };
-    }
-
-    pub inline fn get(n: Node) Tagged {
-        switch (n.tag) {
-            inline else => |tag| {
-                const field = @tagName(tag);
-                return @unionInit(Tagged, field, @field(n.data, field));
-            },
-        }
-    }
-
-    pub fn isCommutative(tag: Tag) bool {
-        return switch (tag) {
-            .end,
-            .number,
-            .abs_abs,
-            .abs_rel,
-            .rel_abs,
-            .rel_rel,
-            .builtin,
-            .range,
-            .dynamic_range,
-            .invalidated_pos,
-            .invalidated_range,
-            .string_literal,
-            .assignment,
-            .not,
-            .plus,
-            .minus,
-            .reference,
-            .dereference,
-            .identifier,
-            => true,
-            .add => true,
-            .sub => false,
-            .mul => true,
-            .div => false,
-            .mod => false,
-            .pow => false,
-            .concat => false,
-            .less_than => false,
-            .greater_than => false,
-            .equals => false,
-            .greater_equals => false,
-            .less_equals => false,
-            .not_equals => false,
-            .logical_and => false,
-            .logical_or => false,
-        };
-    }
-
-    pub fn precedence(tag: Tag) i8 {
-        return switch (tag) {
-            // These aren't operators
-            .end,
-            .number,
-            .abs_abs,
-            .abs_rel,
-            .rel_abs,
-            .rel_rel,
-            .builtin,
-            .range,
-            .dynamic_range,
-            .invalidated_pos,
-            .invalidated_range,
-            .string_literal,
-            .assignment,
-            .identifier,
-            => 127,
-
-            // Actual operators
-            .reference => 3,
-            .dereference => 3,
-            .minus => 2,
-            .plus => 2,
-            .not => 2,
-            .mul => 1,
-            .div => 1,
-            .mod => 1,
-            .pow => 1,
-            .concat => 0,
-            .add => 0,
-            .sub => 0,
-            .less_than => -1,
-            .greater_than => -1,
-            .equals => -1,
-            .greater_equals => -1,
-            .less_equals => -1,
-            .not_equals => -1,
-            .logical_and => -2,
-            .logical_or => -3,
-        };
-    }
 };
 
-pub const NodeList = std.MultiArrayList(Node);
-pub const NodeSlice = NodeList.Slice;
-pub const Index = packed struct {
-    n: usize,
+// pub const Index = packed struct {
+//     n: usize,
 
-    pub fn from(n: usize) Index {
-        return .{ .n = n };
-    }
+//     pub fn from(n: usize) Index {
+//         return .{ .n = n };
+//     }
 
-    pub fn sub(index: Index, offset: usize) Index {
-        return .from(index.n - offset);
-    }
+//     pub fn sub(index: Index, offset: usize) Index {
+//         return .from(index.n - offset);
+//     }
 
-    pub fn addN(index: Index, offset: usize) Index {
-        return .from(index.n + offset);
-    }
+//     pub fn addN(index: Index, offset: usize) Index {
+//         return .from(index.n + offset);
+//     }
 
-    pub fn isValid(i: Index) bool {
-        return i != invalid;
-    }
+//     pub fn isValid(i: Index) bool {
+//         return i != invalid;
+//     }
 
-    pub const invalid: Index = .{ .n = std.math.maxInt(usize) };
-};
+//     pub const invalid: Index = .{ .n = std.math.maxInt(usize) };
+// };
+
+pub const Index = MultiList(Node, usize).Index;
 
 pub fn parseFromSource(
     gpa: std.mem.Allocator,
@@ -337,14 +380,14 @@ pub fn initTokens(
         source,
         token_tags,
         token_starts,
-        .{ .nodes = sheet.ast_nodes.toMultiArrayList() },
+        .{ .nodes = sheet.ast.nodes },
     );
 
-    const old_len = sheet.ast_nodes.len;
+    const old_len = sheet.ast.nodes.len();
 
     // The parser could re-allocate the underlying nodes
-    defer sheet.ast_nodes = parser.nodes.slice();
-    errdefer sheet.ast_nodes.len = old_len;
+    defer sheet.ast.nodes = parser.nodes;
+    errdefer sheet.ast.nodes.shrinkRetainingCapacity(old_len);
 
     _ = try parser.parseStatement();
 
@@ -377,36 +420,59 @@ pub fn parseFromExpressionDiag(
         source,
         tokens.items(.tag),
         tokens.items(.start),
-        .{ .nodes = sheet.ast_nodes.toMultiArrayList(), .diagnostics = diag },
+        .{ .nodes = sheet.ast.nodes, .diagnostics = diag },
     );
 
-    const old_len = sheet.ast_nodes.len;
+    const old_len = sheet.ast.nodes.len();
 
     // The parser could re-allocate the underlying nodes
-    defer sheet.ast_nodes = parser.nodes.slice();
-    errdefer sheet.ast_nodes.len = old_len;
+    defer sheet.ast.nodes = parser.nodes;
+    errdefer sheet.ast.nodes.shrinkRetainingCapacity(old_len);
 
     try parser.parse();
 
     return .{
-        .root = .from(@intCast(parser.nodes.len - 2)),
+        .root = @enumFromInt(parser.nodes.len() - 2),
         .source = source,
         .is_volatile = parser.is_volatile,
     };
 }
 
+// TODO: Just store the whole string for expressions. This will massively simplify printing logic
+//       and allow for removing some book keeping information from nodes.
+pub fn dupeStrings(
+    ast: *Ast,
+    source: []const u8,
+    start: Ast.Index,
+    end: Ast.Index,
+) void {
+    const slice = ast.nodes.subsliceEndIndex(start, end);
+
+    // Append contents of all string literals to the list, and update their `start` and `end`
+    // indices to be into this list.
+    for (slice.items(.tag), 0..) |t, i| {
+        if (t == .string_literal) {
+            const str = &slice.items(.data)[i].string_literal;
+            const bytes = source[str.start..str.end];
+            str.start = @intCast(ast.strings.items.len);
+            str.end = @intCast(str.start + bytes.len);
+            ast.strings.appendSliceAssumeCapacity(bytes);
+        }
+    }
+}
+
 pub inline fn printFromIndex(
-    nodes: NodeSlice,
+    ast: *const Ast,
     index: Index,
     writer: *std.io.Writer,
     strings: []const u8,
 ) std.io.Writer.Error!void {
-    const node = nodes.get(index.n);
-    return printFromNode(nodes, index, node, writer, strings);
+    const node = ast.nodes.get(index);
+    return ast.printFromNode(index, node, writer, strings);
 }
 
 pub fn printFromNode(
-    nodes: NodeSlice,
+    ast: *const Ast,
     index: Index,
     node: Node,
     writer: *std.io.Writer,
@@ -435,22 +501,22 @@ pub fn printFromNode(
             try writer.print("\"{s}\"", .{strings[str.start..str.end]});
         },
         .concat => {
-            const rhs = index.sub(1);
-            const lhs = leftMostChild(nodes, rhs).sub(1);
-            try printFromIndex(nodes, lhs, writer, strings);
+            const rhs = index.subi(1);
+            const lhs = ast.leftMostChild(rhs).subi(1);
+            try ast.printFromIndex(lhs, writer, strings);
             try writer.writeAll(" # ");
-            try printFromIndex(nodes, rhs, writer, strings);
+            try ast.printFromIndex(rhs, writer, strings);
         },
         .end => {
-            try printFromIndex(nodes, index.sub(1), writer, strings);
+            try ast.printFromIndex(index.subi(1), writer, strings);
         },
         .assignment => |pos| {
             try writer.print("let {f} = ", .{pos});
-            try printFromIndex(nodes, index.sub(1), writer, strings);
+            try ast.printFromIndex(index.subi(1), writer, strings);
         },
         inline .plus, .minus, .not, .reference, .dereference => |_, t| {
-            const n = index.sub(1);
-            const rhs = nodes.get(n.n);
+            const n = index.subi(1);
+            const rhs = ast.nodes.get(n);
 
             const byte = switch (t) {
                 .plus => '+',
@@ -462,11 +528,11 @@ pub fn printFromNode(
             };
 
             try writer.writeByte(byte);
-            if (isSingle(rhs.tag)) {
-                try printFromNode(nodes, n, rhs, writer, strings);
+            if (rhs.tag.isSingle()) {
+                try ast.printFromNode(n, rhs, writer, strings);
             } else {
                 try writer.writeByte('(');
-                try printFromNode(nodes, n, rhs, writer, strings);
+                try ast.printFromNode(n, rhs, writer, strings);
                 try writer.writeByte(')');
             }
         },
@@ -503,27 +569,27 @@ pub fn printFromNode(
                 else => comptime unreachable,
             };
 
-            const rhs = index.sub(1);
-            const lhs = leftMostChild(nodes, rhs).sub(1);
-            try printFromIndex(nodes, lhs, writer, strings);
+            const rhs = index.subi(1);
+            const lhs = ast.leftMostChild(rhs).subi(1);
+            try ast.printFromIndex(lhs, writer, strings);
             try writer.writeAll(" " ++ str ++ " ");
-            const rhs_node = nodes.get(rhs.n);
-            const prec = comptime Node.precedence(t);
-            const rprec = Node.precedence(rhs_node.tag);
-            if (rprec < prec or rprec == prec and (!Node.isCommutative(t) or !Node.isCommutative(rhs_node.tag))) {
+            const rhs_node = ast.nodes.get(rhs);
+            const prec = comptime t.precedence();
+            const rprec = rhs_node.tag.precedence();
+            if (rprec < prec or rprec == prec and (!t.isCommutative() or !rhs_node.tag.isCommutative())) {
                 try writer.writeByte('(');
-                try printFromNode(nodes, rhs, rhs_node, writer, strings);
+                try ast.printFromNode(rhs, rhs_node, writer, strings);
                 try writer.writeByte(')');
             } else {
-                try printFromNode(nodes, rhs, rhs_node, writer, strings);
+                try ast.printFromNode(rhs, rhs_node, writer, strings);
             }
         },
         .range, .invalidated_range, .dynamic_range => {
-            const rhs = index.sub(1);
-            const lhs = leftMostChild(nodes, rhs).sub(1);
-            try printFromIndex(nodes, lhs, writer, strings);
+            const rhs = index.subi(1);
+            const lhs = ast.leftMostChild(rhs).subi(1);
+            try ast.printFromIndex(lhs, writer, strings);
             try writer.writeByte(':');
-            try printFromIndex(nodes, rhs, writer, strings);
+            try ast.printFromIndex(rhs, writer, strings);
         },
 
         .builtin => |b| {
@@ -532,15 +598,15 @@ pub fn printFromNode(
                     try writer.print("@{f}", .{b.tag});
                     return;
                 },
-                inline else => |tag| try writer.print("@{f}(", .{tag}),
+                inline else => |t| try writer.print("@{f}(", .{t}),
             }
-            var iter = argIteratorForwards(nodes, index.sub(b.first_arg), index);
+            var iter = ast.argIteratorForwards(index.subi(b.first_arg), index);
             if (iter.next()) |arg_index| {
-                try printFromIndex(nodes, arg_index, writer, strings);
+                try ast.printFromIndex(arg_index, writer, strings);
             }
             while (iter.next()) |arg_index| {
                 try writer.writeAll(", ");
-                try printFromIndex(nodes, arg_index, writer, strings);
+                try ast.printFromIndex(arg_index, writer, strings);
             }
             try writer.writeByte(')');
         },
@@ -549,21 +615,21 @@ pub fn printFromNode(
 
 /// Returns the root index of each argument of a function, backwards.
 pub const ArgIterator = struct {
-    nodes: NodeSlice,
+    ast: Ast,
     first_arg: Index,
     index: Index,
 
     pub fn next(iter: *ArgIterator) ?Index {
-        if (iter.index.n <= iter.first_arg.n) return null;
-        const ret: Index = .from(iter.index.n - 1);
-        iter.index = leftMostChild(iter.nodes, ret);
+        if (iter.index.le(iter.first_arg)) return null;
+        const ret = iter.index.subi(1);
+        iter.index = iter.ast.leftMostChild(ret);
         return ret;
     }
 };
 
-pub fn argIterator(nodes: NodeSlice, start: Index, end: Index) ArgIterator {
-    return ArgIterator{
-        .nodes = nodes,
+pub fn argIterator(ast: Ast, start: Index, end: Index) ArgIterator {
+    return .{
+        .ast = ast,
         .first_arg = start,
         .index = end,
     };
@@ -572,7 +638,7 @@ pub fn argIterator(nodes: NodeSlice, start: Index, end: Index) ArgIterator {
 /// Returns the root index of each argument of a function, forwards. Prefer to use `ArgIterator`
 /// for performance reasons.
 pub const ArgIteratorForwards = struct {
-    nodes: NodeSlice,
+    ast: Ast,
     end: Index,
     index: Index,
     backwards_iter: ArgIterator,
@@ -580,7 +646,7 @@ pub const ArgIteratorForwards = struct {
     i: usize = 0,
 
     pub fn next(iter: *ArgIteratorForwards) ?Index {
-        if (iter.index.n >= iter.end.n) return null;
+        if (@intFromEnum(iter.index) >= @intFromEnum(iter.end)) return null;
         const ret = iter.index;
 
         if (iter.i == 0) {
@@ -605,72 +671,59 @@ pub const ArgIteratorForwards = struct {
     }
 };
 
-pub fn argIteratorForwards(nodes: NodeSlice, start: Index, end: Index) ArgIteratorForwards {
-    return ArgIteratorForwards{
-        .nodes = nodes,
+pub fn argIteratorForwards(ast: *const Ast, start: Index, end: Index) ArgIteratorForwards {
+    return .{
+        .ast = ast.*,
         .end = end,
         .index = start,
-        .backwards_iter = argIterator(nodes, .from(start.n + 1), end),
+        .backwards_iter = ast.argIterator(start.addi(1), end),
     };
 }
 
 pub const FormatData = struct {
-    nodes: NodeSlice,
+    ast: *const Ast,
     root: Index,
-    strings: []const u8,
 };
 
-pub fn fmtAst(
-    nodes: NodeSlice,
-    root: Index,
-    strings: []const u8,
-) std.fmt.Formatter(FormatData, formatAst) {
-    return .{
-        .data = .{
-            .nodes = nodes,
-            .root = root,
-            .strings = strings,
-        },
-    };
+pub fn exprLen(ast: *const Ast, root: Index) usize {
+    assert(ast.tag(root.addi(1)) == .end);
+    return ast.payload(root.addi(1)).end;
 }
 
-pub fn formatAst(data: FormatData, w: *std.io.Writer) !void {
-    return print(data.nodes, data.root, data.strings, w);
+pub fn exprStart(ast: *const Ast, root: Index) Index {
+    const len = ast.exprLen(root);
+    return root.subi(len - 1);
 }
 
-pub fn exprLen(nodes: NodeSlice, root: Index) usize {
-    assert(nodes.items(.tag)[root.n + 1] == .end);
-    return nodes.items(.data)[root.n + 1].end;
+pub fn exprSlice(ast: *const Ast, root: Index) NodeSlice {
+    const start = ast.exprStart(root);
+    const len = ast.exprLen(root);
+    return ast.nodes.subslice(@intFromEnum(start), len);
 }
 
-pub fn exprStart(nodes: NodeSlice, root: Index) Index {
-    const len = exprLen(nodes, root);
-    return root.sub(len - 1);
-}
-
-pub fn exprNodes(nodes: NodeSlice, root: Index) NodeSlice {
-    const start = exprStart(nodes, root);
-    const len = exprLen(nodes, root);
-    return nodes.subslice(start.n, len);
+/// Slice of the expression's AST nodes including the sentinel node.
+pub fn exprSliceEnd(ast: *const Ast, root: Index) NodeSlice {
+    var ret = ast.exprSlice(root);
+    ret.slice.len += 1;
+    assert(ret.len() <= ast.nodes.capacity());
+    return ret;
 }
 
 pub fn print(
-    nodes: NodeSlice,
+    ast: *const Ast,
     root: Index,
-    strings: []const u8,
     writer: *std.io.Writer,
 ) std.io.Writer.Error!void {
-    if (!root.isValid()) return;
-    return printFromIndex(nodes, root, writer, strings);
+    if (root == .invalid) return;
+    return ast.printFromIndex(root, writer, ast.strings.items);
 }
 
 pub fn leftMostChild(
-    nodes: NodeSlice,
+    ast: *const Ast,
     index: Index,
 ) Index {
-    assert(index.n < nodes.len);
-
-    const node = nodes.get(index.n);
+    const nodes = &ast.nodes;
+    const node = nodes.get(index);
 
     return switch (node.get()) {
         // leaf nodes
@@ -703,12 +756,12 @@ pub fn leftMostChild(
         .equals,
         .not_equals,
         => {
-            const rhs = index.sub(1);
-            const lhs = leftMostChild(nodes, rhs).sub(1);
-            return leftMostChild(nodes, lhs);
+            const rhs = index.subi(1);
+            const lhs = ast.leftMostChild(rhs).subi(1);
+            return ast.leftMostChild(lhs);
         },
         .builtin => |b| if (b.first_arg != 0)
-            leftMostChild(nodes, index.sub(b.first_arg))
+            ast.leftMostChild(index.subi(b.first_arg))
         else
             index,
         .minus,
@@ -717,8 +770,8 @@ pub fn leftMostChild(
         .reference,
         .dereference,
         .assignment,
-        => leftMostChild(nodes, index.sub(1)),
-        .end => |n| index.sub(n),
+        .end,
+        => ast.leftMostChild(index.subi(1)),
     };
 }
 
@@ -837,15 +890,15 @@ pub const EvalError = error{
 
 pub fn EvalContext(comptime Context: type) type {
     return struct {
-        nodes: NodeSlice,
+        ast: Ast,
         tags: []const Node.Tag,
         data: []const Node.Payload,
 
         arena: Allocator,
-        strings: []const u8,
         sheet: *Sheet,
         context: Context,
         stack: std.ArrayList(EvalResult2) = .empty,
+        strings: []const u8,
 
         pub const Error = blk: {
             const E = error{
@@ -915,8 +968,8 @@ pub fn EvalContext(comptime Context: type) type {
         }
 
         fn evaluate(eval: *@This(), root: Index) Error!void {
-            const start = leftMostChild(eval.nodes, root);
-            for (start.n..root.n + 1) |i| switch (eval.nodes.get(i).get()) {
+            const nodes = eval.ast.exprSlice(root);
+            for (0..nodes.len()) |i| switch (nodes.geti(i).get()) {
                 .end => break,
                 .identifier => {
                     @panic("TODO");
@@ -999,10 +1052,10 @@ pub fn EvalContext(comptime Context: type) type {
 
                     try eval.push(res);
                 },
-                inline .equals, .not_equals => |_, tag| {
+                inline .equals, .not_equals => |_, t| {
                     const rhs = try eval.pop(.any);
                     const lhs = try eval.pop(.any);
-                    const false_value = @intFromBool(tag != .equals);
+                    const false_value = @intFromBool(t != .equals);
                     if (@as(std.meta.Tag(EvalResult), lhs) != rhs) {
                         try eval.push(.{ .number = false_value });
                         continue;
@@ -1016,7 +1069,7 @@ pub fn EvalContext(comptime Context: type) type {
                         .range => |r| r.eql(rhs.range),
                     };
 
-                    const b = switch (tag) {
+                    const b = switch (t) {
                         .equals => n,
                         .not_equals => !n,
                         else => comptime unreachable,
@@ -1350,10 +1403,10 @@ pub fn EvalContext(comptime Context: type) type {
                 const res = try eval.pop(.any);
                 switch (res) {
                     .none => {},
-                    inline .number, .string => |_, tag| {
+                    inline .number, .string => |_, t| {
                         switch (operation) {
                             .all => total += 1,
-                            .numbers => if (tag == .number) {
+                            .numbers => if (t == .number) {
                                 total += 1;
                             },
                         }
@@ -1416,29 +1469,29 @@ pub fn EvalContext(comptime Context: type) type {
 
 /// Dynamically typed evaluation of expressions.
 pub fn evaluate(
-    nodes: NodeSlice,
+    ast: *const Ast,
     root_node: Index,
     sheet: *Sheet,
     /// Strings required by the expression. String literal nodes contain offsets
     /// into this buffer. If the expression has no string literals then this
     /// argument can be left as "".
-    strings: []const u8,
     /// Instance of a type which has the method uevalCell`,
     /// which evaluates the cell at the given position.
+    strings: []const u8,
     context: anytype,
 ) !EvalResult {
     var arena: std.heap.ArenaAllocator = .init(sheet.gpa);
     defer arena.deinit();
 
     var ctx: EvalContext(@TypeOf(context)) = .{
-        .nodes = nodes,
-        .tags = nodes.items(.tag),
-        .data = nodes.items(.data),
+        .ast = ast.*,
+        .tags = ast.nodes.items(.tag),
+        .data = ast.nodes.items(.data),
 
         .arena = arena.allocator(),
         .sheet = sheet,
-        .strings = strings,
         .context = context,
+        .strings = strings,
     };
 
     try ctx.evaluate(root_node);
@@ -1458,22 +1511,22 @@ const CountDependenciesContext = struct {
     }
 };
 
-pub fn countDependencies(nodes: NodeSlice, root: Index) usize {
+pub fn countDependencies(ast: *const Ast, root: Index) usize {
     var ctx: CountDependenciesContext = .{};
-    traverseDependencies(nodes, root, &ctx, CountDependenciesContext.func);
+    ast.traverseDependencies(root, &ctx, CountDependenciesContext.func);
     return ctx.total;
 }
 
 pub fn traverseDependencies(
-    nodes: NodeSlice,
+    ast: *const Ast,
     root: Index,
     ctx: anytype,
     func: fn (@TypeOf(ctx), Rect) void,
 ) void {
-    if (!root.isValid()) return;
+    if (root == .invalid) return;
 
     var traverse: TraverseDependencies(@TypeOf(ctx), func) = .{
-        .nodes = nodes,
+        .ast = ast.*,
         .user_ctx = ctx,
     };
     traverse.traverse(root, .value, .no_deref);
@@ -1481,7 +1534,7 @@ pub fn traverseDependencies(
 
 fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
     return struct {
-        nodes: NodeSlice,
+        ast: Ast,
         user_ctx: Context,
 
         fn traverse(
@@ -1494,12 +1547,13 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
             /// literal is automatically dereferenced, it will be added to the dependency graph.
             deref: enum { deref, no_deref },
         ) void {
-            const nodes = self.nodes;
-            const node = nodes.get(index.n);
+            const ast = self.ast;
+            const nodes = self.ast.nodes;
+            const node = nodes.get(index);
 
             switch (node.get()) {
                 .assignment, .end => {
-                    self.traverse(index.sub(1), ctx, .no_deref);
+                    self.traverse(index.subi(1), ctx, .no_deref);
                 },
                 .identifier => {},
                 .number, .string_literal, .invalidated_pos, .invalidated_range => {},
@@ -1521,46 +1575,50 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
                         .value => false,
                     };
                     if (add_dependency) {
-                        const rhs = index.sub(1);
-                        const lhs = leftMostChild(nodes, rhs).sub(1);
-                        const tags = nodes.items(.tag);
-                        const data = nodes.items(.data);
-                        const lhs_tag = tags[lhs.n];
-                        const rhs_tag = tags[rhs.n];
-                        const tl = switch (lhs_tag) {
-                            .reference => switch (tags[lhs.n - 1]) {
-                                .rel_rel, .rel_abs, .abs_rel, .abs_abs => data[lhs.n - 1].rel_rel,
+                        const rhs = index.subi(1);
+                        const lhs = ast.leftMostChild(rhs).subi(1);
+                        const tl = switch (ast.tag(lhs)) {
+                            .reference => switch (ast.tag(lhs.subi(1))) {
+                                .rel_rel,
+                                .rel_abs,
+                                .abs_rel,
+                                .abs_abs,
+                                => ast.payload(lhs.subi(1)).rel_rel,
                                 else => unreachable,
                             },
-                            .rel_rel, .rel_abs, .abs_rel, .abs_abs => data[lhs.n].rel_rel,
+                            .rel_rel, .rel_abs, .abs_rel, .abs_abs => ast.payload(lhs).rel_rel,
                             else => unreachable,
                         };
-                        const br = switch (rhs_tag) {
-                            .reference => switch (tags[rhs.n - 1]) {
-                                .rel_rel, .rel_abs, .abs_rel, .abs_abs => data[rhs.n - 1].rel_rel,
+                        const br = switch (ast.tag(rhs)) {
+                            .reference => switch (ast.tag(rhs.subi(1))) {
+                                .rel_rel,
+                                .rel_abs,
+                                .abs_rel,
+                                .abs_abs,
+                                => ast.payload(rhs.subi(1)).rel_rel,
                                 else => unreachable,
                             },
-                            .rel_rel, .rel_abs, .abs_rel, .abs_abs => data[rhs.n].rel_rel,
+                            .rel_rel, .rel_abs, .abs_rel, .abs_abs => ast.payload(rhs).rel_rel,
                             else => unreachable,
                         };
                         func(self.user_ctx, .initNormalizePos(tl, br));
                     }
                 },
                 .dynamic_range => {
-                    const rhs = index.sub(1);
-                    const lhs = leftMostChild(nodes, rhs).sub(1);
+                    const rhs = index.subi(1);
+                    const lhs = ast.leftMostChild(rhs).subi(1);
                     self.traverse(lhs, .reference, .no_deref);
                     self.traverse(rhs, .reference, .no_deref);
                 },
                 .reference => switch (deref) {
-                    .deref => self.traverse(index.sub(1), .value, .no_deref),
+                    .deref => self.traverse(index.subi(1), .value, .no_deref),
                     .no_deref => {},
                 },
                 .dereference => {
-                    self.traverse(index.sub(1), .reference, .deref);
+                    self.traverse(index.subi(1), .reference, .deref);
                 },
                 .minus, .plus, .not => {
-                    self.traverse(index.sub(1), .value, .no_deref);
+                    self.traverse(index.subi(1), .value, .no_deref);
                 },
                 .add,
                 .sub,
@@ -1578,8 +1636,8 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
                 .less_equals,
                 .concat,
                 => {
-                    const rhs = index.sub(1);
-                    const lhs = leftMostChild(nodes, rhs).sub(1);
+                    const rhs = index.subi(1);
+                    const lhs = ast.leftMostChild(rhs).subi(1);
                     self.traverse(lhs, .value, .no_deref);
                     self.traverse(rhs, .value, .no_deref);
                 },
@@ -1596,7 +1654,7 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
                     .count_all,
                     .log,
                     => {
-                        var iter = argIterator(nodes, index.sub(b.first_arg), index);
+                        var iter = self.ast.argIterator(index.subi(b.first_arg), index);
                         while (iter.next()) |i| {
                             self.traverse(i, .reference, .deref);
                         }
@@ -1609,12 +1667,12 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
                     .ceil,
                     .len,
                     => {
-                        self.traverse(index.sub(b.first_arg), .reference, .deref);
+                        self.traverse(index.subi(b.first_arg), .reference, .deref);
                     },
                     .width,
                     .height,
                     => {
-                        self.traverse(index.sub(b.first_arg), .value, .no_deref);
+                        self.traverse(index.subi(b.first_arg), .value, .no_deref);
                     },
                 },
             }
@@ -1624,9 +1682,8 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
 
 /// Returns true if the given node is a cell literal or a reference to a cell literal.
 pub fn isDynamicReference(nodes: NodeSlice, index: Index) bool {
-    const tags = nodes.items(.tag);
-    return switch (tags[index.n]) {
-        .reference => switch (tags[index.n - 1]) {
+    return switch (nodes.item(index, .tag)) {
+        .reference => switch (nodes.item(index.subi(1), .tag)) {
             .rel_rel, .rel_abs, .abs_rel, .abs_abs => false,
             else => true,
         },
@@ -1647,18 +1704,18 @@ pub const ExpressionIterator = struct {
             .tags = nodes.items(.tag),
             .data = nodes.items(.data),
             .start = start,
-            .i = nodes.len,
+            .i = nodes.len(),
         };
     }
 
     pub fn prev(iter: *ExpressionIterator) ?Index {
-        if (iter.i <= iter.start.n) return null;
+        if (iter.i <= @intFromEnum(iter.start)) return null;
         iter.i -= 1;
         assert(iter.tags[iter.i] == .end);
         const len = iter.data[iter.i].end;
         const ret = iter.i - 1;
         iter.i -= len;
-        return .from(ret);
+        return @enumFromInt(ret);
     }
 };
 
@@ -1685,13 +1742,7 @@ test "Parse and Eval Expression" {
                 return if (err != expected) err else {};
             };
 
-            const res = evaluate(
-                sheet.ast_nodes,
-                expr.root,
-                &sheet,
-                src,
-                Context{},
-            ) catch |err| {
+            const res = sheet.ast.evaluate(expr.root, &sheet, src, Context{}) catch |err| {
                 return if (err != expected) err else {};
             };
             const n = res.number;
@@ -1724,7 +1775,7 @@ test "Parse and Eval Expression" {
 
 test "Functions on Ranges" {
     const t = std.testing;
-    const Test = struct {
+    const testSheetExpr = struct {
         fn testSheetExpr(expected: f64, src: []const u8) !void {
             var sheet = try Sheet.init(t.allocator);
             defer sheet.deinit();
@@ -1737,72 +1788,66 @@ test "Functions on Ranges" {
             const expr = try parseFromExpression(&sheet, src);
 
             try sheet.update();
-            const res = try evaluate(
-                sheet.ast_nodes,
-                expr.root,
-                &sheet,
-                "",
-                &sheet,
-            );
+            const res = try sheet.ast.evaluate(expr.root, &sheet, "", &sheet);
             try std.testing.expectApproxEqRel(expected, res.number, 0.0001);
         }
-    };
+    }.testSheetExpr;
 
-    try Test.testSheetExpr(0, "@sum(a0:a0)");
-    try Test.testSheetExpr(100, "@sum(a0:b0)");
-    try Test.testSheetExpr(500, "@sum(a0:a1)");
-    try Test.testSheetExpr(933.33, "@sum(a0:b1)");
-    try Test.testSheetExpr(933.33, "@sum(a0:z10)");
-    try Test.testSheetExpr(833.33, "@sum(a1:z10)");
-    try Test.testSheetExpr(0, "@sum(c3:z10)");
-    try Test.testSheetExpr(953.33, "@sum(5, a0:z10, 5, 10)");
-    try Test.testSheetExpr(35, "@sum(5, 30 / 2, c3:z10, 5, 10)");
-    try t.expectError(error.UnexpectedToken, Test.testSheetExpr(0, "@sum()"));
+    try testSheetExpr(0, "@sum(a0:a0)");
+    try testSheetExpr(100, "@sum(a0:b0)");
+    try testSheetExpr(500, "@sum(a0:a1)");
+    try testSheetExpr(933.33, "@sum(a0:b1)");
+    try testSheetExpr(933.33, "@sum(a0:z10)");
+    try testSheetExpr(833.33, "@sum(a1:z10)");
+    try testSheetExpr(0, "@sum(c3:z10)");
+    try testSheetExpr(953.33, "@sum(5, a0:z10, 5, 10)");
+    try testSheetExpr(35, "@sum(5, 30 / 2, c3:z10, 5, 10)");
+    try t.expectError(error.UnexpectedToken, testSheetExpr(0, "@sum()"));
 
-    try Test.testSheetExpr(0, "@prod(a0:a0)");
-    try Test.testSheetExpr(0, "@prod(a0:b0)");
-    try Test.testSheetExpr(0, "@prod(a0:a1)");
-    try Test.testSheetExpr(0, "@prod(a0:b1)");
-    try Test.testSheetExpr(166665, "@prod(a1:b1)");
-    try Test.testSheetExpr(166665, "@prod(a1:z10)");
-    try Test.testSheetExpr(333.33, "@prod(b1:z10)");
-    try Test.testSheetExpr(0, "@prod(100, -1, a0:z10, 50)");
-    try Test.testSheetExpr(-166665000, "@prod(100, -1, b0:b1, 50)");
-    try t.expectError(error.UnexpectedToken, Test.testSheetExpr(0, "@prod()"));
+    try testSheetExpr(0, "@prod(a0:a0)");
+    try testSheetExpr(0, "@prod(a0:b0)");
+    try testSheetExpr(0, "@prod(a0:a1)");
+    try testSheetExpr(0, "@prod(a0:b1)");
+    try testSheetExpr(166665, "@prod(a1:b1)");
+    try testSheetExpr(166665, "@prod(a1:z10)");
+    try testSheetExpr(333.33, "@prod(b1:z10)");
+    try testSheetExpr(0, "@prod(100, -1, a0:z10, 50)");
+    try testSheetExpr(-166665000, "@prod(100, -1, b0:b1, 50)");
+    try t.expectError(error.UnexpectedToken, testSheetExpr(0, "@prod()"));
 
-    try Test.testSheetExpr(0, "@avg(a0:a0)");
-    try Test.testSheetExpr(50, "@avg(a0:b0)");
-    try Test.testSheetExpr(250, "@avg(a0:a1)");
-    try Test.testSheetExpr(233.3325, "@avg(a0:b1)");
-    try Test.testSheetExpr(135.47571428571428571428, "@avg(5, 5, a0:b1, 5)");
-    try t.expectError(error.UnexpectedToken, Test.testSheetExpr(0, "@avg()"));
+    try testSheetExpr(0, "@avg(a0:a0)");
+    try testSheetExpr(50, "@avg(a0:b0)");
+    try testSheetExpr(250, "@avg(a0:a1)");
+    try testSheetExpr(233.3325, "@avg(a0:b1)");
+    try testSheetExpr(135.47571428571428571428, "@avg(5, 5, a0:b1, 5)");
+    try t.expectError(error.UnexpectedToken, testSheetExpr(0, "@avg()"));
 
-    try Test.testSheetExpr(0, "@max(a0:a0)");
-    try Test.testSheetExpr(100, "@max(a0:b0)");
-    try Test.testSheetExpr(500, "@max(a0:a1)");
-    try Test.testSheetExpr(500, "@max(a0:b1)");
-    try Test.testSheetExpr(100, "@max(a0:z0)");
-    try Test.testSheetExpr(500, "@max(a0:z10)");
-    try Test.testSheetExpr(0, "@max(c3:z10)");
-    try Test.testSheetExpr(3, "@max(3, c3:z10, 1, 2)");
-    try Test.testSheetExpr(500, "@max(3, a0:b1, 1, 2)");
-    try t.expectError(error.UnexpectedToken, Test.testSheetExpr(0, "@max()"));
+    try testSheetExpr(0, "@max(a0:a0)");
+    try testSheetExpr(100, "@max(a0:b0)");
+    try testSheetExpr(500, "@max(a0:a1)");
+    try testSheetExpr(500, "@max(a0:b1)");
+    try testSheetExpr(100, "@max(a0:z0)");
+    try testSheetExpr(500, "@max(a0:z10)");
+    try testSheetExpr(0, "@max(c3:z10)");
+    try testSheetExpr(3, "@max(3, c3:z10, 1, 2)");
+    try testSheetExpr(500, "@max(3, a0:b1, 1, 2)");
+    try t.expectError(error.UnexpectedToken, testSheetExpr(0, "@max()"));
 
-    try Test.testSheetExpr(0, "@min(a0:a0)");
-    try Test.testSheetExpr(0, "@min(a0:b0)");
-    try Test.testSheetExpr(0, "@min(a0:a1)");
-    try Test.testSheetExpr(0, "@min(a0:b1)");
-    try Test.testSheetExpr(333.33, "@min(a1:z10)");
-    try Test.testSheetExpr(0, "@min(c3:z10)");
-    try Test.testSheetExpr(1, "@min(3, c3:z10, 1, 2)");
-    try Test.testSheetExpr(0, "@min(3, a0:b1, 1, 2)");
-    try t.expectError(error.UnexpectedToken, Test.testSheetExpr(0, "@min()"));
+    try testSheetExpr(0, "@min(a0:a0)");
+    try testSheetExpr(0, "@min(a0:b0)");
+    try testSheetExpr(0, "@min(a0:a1)");
+    try testSheetExpr(0, "@min(a0:b1)");
+    try testSheetExpr(333.33, "@min(a1:z10)");
+    try testSheetExpr(0, "@min(c3:z10)");
+    try testSheetExpr(1, "@min(3, c3:z10, 1, 2)");
+    try testSheetExpr(0, "@min(3, a0:b1, 1, 2)");
+    try t.expectError(error.UnexpectedToken, testSheetExpr(0, "@min()"));
 }
 
 test "Print" {
     const t = std.testing;
 
-    const data = .{
+    const cases = .{
         .{ "1 + 2 + 3", "1 + 2 + 3" },
         .{ "1 + (2 + 3)", "1 + 2 + 3" },
         .{ "1 + 2 - 3", "1 + 2 - 3" },
@@ -1883,13 +1928,13 @@ test "Print" {
     var sheet = try Sheet.init(t.allocator);
     defer sheet.deinit();
 
-    inline for (data) |d| {
+    inline for (cases) |d| {
         const src, const expected = d;
         const expr = try parseFromExpression(&sheet, src);
 
         var buf: [4096]u8 = undefined;
         var fixed: std.io.Writer = .fixed(&buf);
-        try print(sheet.ast_nodes, expr.root, expr.source, &fixed);
+        try sheet.ast.print(expr.root, &fixed);
         try t.expectEqualStrings(expected, fixed.buffered());
     }
 
@@ -1898,7 +1943,7 @@ test "Print" {
 
         var buf: [4096]u8 = undefined;
         var fixed: std.io.Writer = .fixed(&buf);
-        try print(sheet.ast_nodes, expr.root, expr.source, &fixed);
+        try sheet.ast.print(expr.root, &fixed);
         try t.expectEqualStrings(src, fixed.buffered());
     }
 }

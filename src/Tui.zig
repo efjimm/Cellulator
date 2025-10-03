@@ -749,11 +749,9 @@ fn renderStatus(tui: *Tui, wr: *Screen.Writer) !void {
     try writer.writeAll(" [");
     const sheet = zc.currentSheet();
     if (sheet.getCell(zc.cursor)) |cell| {
-        const ast = @import("ast.zig");
-
         const buf = try arena.alloc(u8, 4096);
         var br: std.io.Writer = .fixed(buf);
-        ast.print(sheet.ast_nodes, cell.expr_root, sheet.strings_buf.items, &br) catch {};
+        sheet.ast.print(cell.expr_root, &br) catch {};
 
         const bytes = br.buffered();
         var reader: std.io.Reader = .fixed(bytes);
