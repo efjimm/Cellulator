@@ -1,0 +1,11 @@
+let b0 = 10
+let c0 = 20
+let d0 = 30
+:expect @avg(a0:d10) == 20
+:expect @avg(a0) == 0
+:expect @avg(a0:a10) == 0
+:expect @avg(b0, c0) == 15
+:expect @avg(b0, d0) == 20
+:expect @avg(c0, d0) == 25
+:expect @avg(a0:e0, 10) == 17.5
+:expect @avg(a0, 10, b0, c0, d0, e0) == 17.5
