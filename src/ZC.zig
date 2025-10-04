@@ -458,7 +458,7 @@ pub const ChangeCellOpts = struct {
 pub fn setCell(
     zc: *ZC,
     pos: Position,
-    expr: Sheet.Expression,
+    expr: Parser.Result,
     opts: ChangeCellOpts,
 ) !void {
     try zc.currentSheet().setCell(pos, expr, .{});
@@ -495,10 +495,14 @@ pub fn setCellString(
     opts: ChangeCellOpts,
 ) !void {
     const sheet = zc.currentSheet();
-    const old_ast_len = sheet.ast.nodes.len();
-    errdefer sheet.ast.nodes.shrinkRetainingCapacity(old_ast_len);
+    const old_state = sheet.ast.save();
+    errdefer sheet.ast.restore(old_state);
 
     const expr = try Ast.parseFromExpressionDiag(sheet, source, diag);
+    // TODO: Move this check into the parser
+    if (expr.destination != null) {
+        return error.UnexpectedToken;
+    }
 
     try zc.setCell(pos, expr, opts);
 }
@@ -1362,8 +1366,7 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
         return;
 
     const sheet = zc.currentSheet();
-    const nodes = &sheet.ast.nodes;
-    const old_len = nodes.len();
+    const ast_state = sheet.ast.save();
 
     var diagnostics: Parser.Diagnostics = .{};
     var parser: Parser = .init(
@@ -1371,45 +1374,39 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
         str,
         tokens.items(.tag),
         tokens.items(.start),
-        .{ .nodes = nodes.*, .diagnostics = &diagnostics },
+        &sheet.ast,
+        .{ .diagnostics = &diagnostics },
     );
 
-    parser.parse() catch |err| {
-        nodes.* = parser.nodes;
-        // Clear any newly created nodes
-        nodes.shrinkRetainingCapacity(old_len);
-        return switch (err) {
-            error.UnexpectedToken,
-            error.InvalidCellAddress,
-            error.InvalidBuiltin,
-            => zc.setStatusMessage(.err, "{f}", .{diagnostics}),
-            error.OutOfMemory => |e| return e,
-        };
+    const res = parser.parse() catch |err| return switch (err) {
+        error.UnexpectedToken,
+        error.InvalidCellAddress,
+        error.InvalidBuiltin,
+        => zc.setStatusMessage(.err, "{f}", .{diagnostics}),
+        error.OutOfMemory => |e| return e,
     };
 
-    nodes.* = parser.nodes;
-
-    const root = parser.root();
-    const root_node = nodes.get(root);
+    const root_node = sheet.ast.nodes.get(res.root);
     switch (root_node.tag) {
         .assignment => {
-            const spliced_root, const pos = sheet.spliceAssignmentRoot();
+            const spliced_root, const pos = sheet.ast.spliceLast();
 
             try zc.setCell(pos, .{
                 .source = str,
                 .root = spliced_root,
                 .is_volatile = parser.is_volatile,
+                .destination = null,
             }, .{});
             sheet.endUndoGroup();
         },
         else => {
             // Evaluate the expression and print the result
-            defer nodes.shrinkRetainingCapacity(old_len);
-            const res = sheet.ast.evaluate(root, sheet, str, sheet) catch |err| {
+            defer sheet.ast.restore(ast_state);
+            const value = sheet.ast.evaluate(res.root, sheet, str, sheet) catch |err| {
                 zc.setStatusMessage(.err, "Error ({t}) evaluating '{s}'", .{ err, str });
                 return;
             };
-            switch (res) {
+            switch (value) {
                 .none => zc.setStatusMessage(.info, "{s} = ()", .{str}),
                 .number => |n| zc.setStatusMessage(.info, "{s} = {d}", .{ str, n }),
                 .string => |s| {
@@ -2280,7 +2277,7 @@ pub const Command = enum {
     };
 
     const ExpressionArg = struct {
-        expr: Sheet.Expression,
+        expr: Parser.Result,
 
         const type_name = "expression";
     };

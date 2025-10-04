@@ -13,6 +13,7 @@ const PosInt = Position.Int;
 const Rect = Position.Rect;
 
 const Ast = @import("Ast.zig");
+const Parser = @import("Parser.zig");
 const NodeSlice = Ast.NodeSlice;
 const FlatListPool = @import("flat_list_pool.zig").FlatListPool;
 const PhTree = @import("phtree.zig").PhTree;
@@ -68,18 +69,6 @@ lua_point_trees: std.StringHashMapUnmanaged(LuaDataPointTree) = .empty,
 cell_value_ranges: std.ArrayList(Rect) = .{},
 
 needs_update: bool = true,
-
-pub const Expression = struct {
-    source: []const u8,
-    root: Ast.Index,
-    is_volatile: bool,
-
-    pub const invalid: Expression = .{
-        .source = "",
-        .root = .invalid,
-        .is_volatile = false,
-    };
-};
 
 pub const RangeIndex = enum(u64) {
     invalid = std.math.maxInt(u64),
@@ -375,24 +364,6 @@ pub fn exprSlice(sheet: *const Sheet, root: Ast.Index) NodeSlice {
     return sheet.ast.exprSlice(root);
 }
 
-/// Removes the root node from the last expression appended to `ast.nodes`.
-pub fn spliceAssignmentRoot(sheet: *Sheet) struct { Ast.Index, Position } {
-    const len = sheet.ast.nodes.len();
-    const tags = sheet.ast.nodes.items(.tag);
-    const data = sheet.ast.nodes.items(.data);
-
-    assert(tags[len - 1] == .end);
-    assert(tags[len - 2] == .assignment);
-
-    const pos = data[len - 2].assignment;
-    tags[len - 2] = .end;
-    data[len - 2] = .{ .end = data[len - 1].end - 1 };
-
-    sheet.ast.nodes.shrinkRetainingCapacity(sheet.ast.nodes.len() - 1);
-
-    return .{ @enumFromInt(len - 3), pos };
-}
-
 const Lua = @import("zlua").Lua;
 
 pub fn setTextAlignment(
@@ -660,7 +631,7 @@ fn bulkParse(
     var token_index: u32 = 0;
     var total_strings_len: usize = 0;
     while (lines.next()) |_| {
-        const parser = Ast.initTokens(
+        const parser = Parser.initTokens(
             sheet,
             src,
             token_tags[token_index..],
@@ -679,7 +650,7 @@ fn bulkParse(
             },
         };
         token_index += parser.tok_i;
-        const expr_root, const pos = sheet.spliceAssignmentRoot();
+        const expr_root, const pos = sheet.ast.spliceLast();
 
         total_strings_len += parser.strings_len;
 
@@ -1797,7 +1768,7 @@ pub fn needsUpdate(sheet: *const Sheet) bool {
     return sheet.needs_update or sheet.queued_cells.items.len > 0;
 }
 
-fn dupeExprStrings(sheet: *Sheet, expr: Expression) void {
+fn dupeExprStrings(sheet: *Sheet, expr: Parser.Result) void {
     sheet.ast.dupeStrings(
         expr.source,
         sheet.ast.leftMostChild(expr.root),
@@ -1959,7 +1930,7 @@ pub const BulkSetCellOptions = struct {
 pub fn insertCellRange(
     sheet: *Sheet,
     range: Rect,
-    expr: Expression,
+    expr: Parser.Result,
     opts: BulkSetCellOptions,
 ) !void {
     const need_cell_eval = opts.tag == .err;
@@ -2079,7 +2050,7 @@ pub fn insertCellRange(
 pub fn setCell(
     sheet: *Sheet,
     pos: Position,
-    expr: Expression,
+    expr: Parser.Result,
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
     try sheet.ensureUnusedCellCapacity(1);

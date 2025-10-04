@@ -12,7 +12,6 @@ const Rect = Position.Rect;
 const Tokenizer = @import("Tokenizer.zig");
 const Parser = @import("Parser.zig");
 pub const BinaryOperator = Parser.BinaryOperator;
-pub const Builtin = Parser.Builtin;
 
 const MultiList = @import("multi_list.zig").MultiList;
 pub const NodeSlice = MultiList(Node, usize);
@@ -23,16 +22,46 @@ const assert = std.debug.assert;
 const Ast = @This();
 
 nodes: NodeSlice,
+extra: std.ArrayListAligned(u8, .@"16"),
 strings: std.ArrayList(u8),
+
+/// Can be passed to `restore` to free any data added after the checkpoint was created.
+/// Useful for temporary ASTs.
+pub const Checkpoint = struct {
+    nodes_len: usize,
+    extra_len: usize,
+    strings_len: usize,
+};
 
 pub const empty: Ast = .{
     .nodes = .empty,
     .strings = .empty,
+    .extra = .empty,
 };
 
 pub fn deinit(ast: *Ast, gpa: std.mem.Allocator) void {
     ast.nodes.deinit(gpa);
     ast.strings.deinit(gpa);
+    ast.extra.deinit(gpa);
+}
+
+pub fn save(ast: *const Ast) Checkpoint {
+    return .{
+        .nodes_len = ast.nodes.len(),
+        .extra_len = ast.extra.items.len,
+        .strings_len = ast.strings.items.len,
+    };
+}
+
+pub fn restore(ast: *Ast, checkpoint: Checkpoint) void {
+    ast.nodes.shrinkRetainingCapacity(checkpoint.nodes_len);
+    ast.extra.shrinkRetainingCapacity(checkpoint.extra_len);
+    ast.strings.shrinkRetainingCapacity(checkpoint.strings_len);
+}
+
+// TODO: Rename
+pub fn lastIndex(ast: *const Ast) Index {
+    return ast.nodes.nextIndex();
 }
 
 pub fn clearRetainingCapacity(ast: *Ast) void {
@@ -40,12 +69,34 @@ pub fn clearRetainingCapacity(ast: *Ast) void {
     ast.strings.clearRetainingCapacity();
 }
 
-pub fn tag(ast: *const Ast, index: NodeSlice.Index) Node.Tag {
+pub fn tag(ast: *const Ast, index: Index) Node.Tag {
     return ast.nodes.item(index, .tag);
 }
 
-pub fn payload(ast: *const Ast, index: NodeSlice.Index) Node.Payload {
+pub fn payload(ast: *const Ast, index: Index) Node.Payload {
     return ast.nodes.item(index, .data);
+}
+
+pub fn node(ast: *const Ast, index: Index) Node.Tagged {
+    return ast.nodes.get(index).get();
+}
+
+/// Removes the root node from the last expression appended to `ast.nodes`.
+pub fn spliceLast(ast: *Ast) struct { Index, Position } {
+    const len = ast.nodes.len();
+    const tags = ast.nodes.items(.tag);
+    const data = ast.nodes.items(.data);
+
+    assert(tags[len - 1] == .end);
+    assert(tags[len - 2] == .assignment);
+
+    const pos = data[len - 2].assignment;
+    tags[len - 2] = .end;
+    data[len - 2] = .{ .end = data[len - 1].end - 1 };
+
+    ast.nodes.shrinkRetainingCapacity(ast.nodes.len() - 1);
+
+    return .{ @enumFromInt(len - 3), pos };
 }
 
 // pub fn tags(ast: *const Ast) []Node.Tag {
@@ -81,6 +132,41 @@ pub const Node = extern struct {
         t.layout = .@"extern";
         t.tag_type = null;
         break :blk @Type(.{ .@"union" = t });
+    };
+
+    pub const Builtin = packed struct(u64) {
+        tag: Builtin.Tag,
+        arg_count: u27,
+        first_arg: u32,
+
+        pub const Tag = enum(u5) {
+            sum,
+            prod,
+            avg,
+            max,
+            min,
+            upper,
+            lower,
+            sqrt,
+            round,
+            floor,
+            ceil,
+            len,
+            count,
+            count_all,
+            log,
+            pi,
+            e,
+            width,
+            height,
+
+            pub fn format(t: Builtin.Tag, w: *std.io.Writer) !void {
+                switch (t) {
+                    .count_all => try w.writeAll("countAll"),
+                    else => try w.writeAll(@tagName(t)),
+                }
+            }
+        };
     };
 
     pub fn init(comptime t: Tag, data: @FieldType(Payload, @tagName(t))) Node {
@@ -368,33 +454,7 @@ pub fn parseFromSource(
     return parser.root();
 }
 
-const Token = Tokenizer.Token;
-pub fn initTokens(
-    sheet: *Sheet,
-    source: []const u8,
-    token_tags: []const Token.Tag,
-    token_starts: []const u32,
-) ParseError!Parser {
-    var parser: Parser = .init(
-        sheet.gpa,
-        source,
-        token_tags,
-        token_starts,
-        .{ .nodes = sheet.ast.nodes },
-    );
-
-    const old_len = sheet.ast.nodes.len();
-
-    // The parser could re-allocate the underlying nodes
-    defer sheet.ast.nodes = parser.nodes;
-    errdefer sheet.ast.nodes.shrinkRetainingCapacity(old_len);
-
-    _ = try parser.parseStatement();
-
-    return parser;
-}
-
-pub fn parseFromExpression(sheet: *Sheet, source: []const u8) ParseError!Sheet.Expression {
+pub fn parseFromExpression(sheet: *Sheet, source: []const u8) ParseError!Parser.Result {
     return parseFromExpressionDiag(sheet, source, null);
 }
 
@@ -402,7 +462,7 @@ pub fn parseFromExpressionDiag(
     sheet: *Sheet,
     source: []const u8,
     diag: ?*Parser.Diagnostics,
-) ParseError!Sheet.Expression {
+) ParseError!Parser.Result {
     var reader: std.io.Reader = .fixed(source);
     var tokens = Tokenizer.collectTokens(
         sheet.gpa,
@@ -420,22 +480,11 @@ pub fn parseFromExpressionDiag(
         source,
         tokens.items(.tag),
         tokens.items(.start),
-        .{ .nodes = sheet.ast.nodes, .diagnostics = diag },
+        &sheet.ast,
+        .{ .diagnostics = diag },
     );
 
-    const old_len = sheet.ast.nodes.len();
-
-    // The parser could re-allocate the underlying nodes
-    defer sheet.ast.nodes = parser.nodes;
-    errdefer sheet.ast.nodes.shrinkRetainingCapacity(old_len);
-
-    try parser.parse();
-
-    return .{
-        .root = @enumFromInt(parser.nodes.len() - 2),
-        .source = source,
-        .is_volatile = parser.is_volatile,
-    };
+    return try parser.parse();
 }
 
 // TODO: Just store the whole string for expressions. This will massively simplify printing logic
@@ -467,14 +516,14 @@ pub inline fn printFromIndex(
     writer: *std.io.Writer,
     strings: []const u8,
 ) std.io.Writer.Error!void {
-    const node = ast.nodes.get(index);
-    return ast.printFromNode(index, node, writer, strings);
+    const n = ast.nodes.get(index);
+    return ast.printFromNode(index, n, writer, strings);
 }
 
 pub fn printFromNode(
     ast: *const Ast,
     index: Index,
-    node: Node,
+    data: Node,
     writer: *std.io.Writer,
     strings: []const u8,
 ) std.io.Writer.Error!void {
@@ -483,7 +532,7 @@ pub fn printFromNode(
 
     // On the right-hand side, expressions involving operators with lower precedence, or
     // non-commutative operators with the same precedence need to be surrounded by parentheses.
-    switch (node.get()) {
+    switch (data.get()) {
         .number => |n| try writer.print("{d}", .{n}),
         .rel_rel => |pos| try writer.print("{f}", .{pos}),
         .rel_abs => |pos| try writer.print("{f}${d}", .{
@@ -722,10 +771,7 @@ pub fn leftMostChild(
     ast: *const Ast,
     index: Index,
 ) Index {
-    const nodes = &ast.nodes;
-    const node = nodes.get(index);
-
-    return switch (node.get()) {
+    return switch (ast.node(index)) {
         // leaf nodes
         .string_literal,
         .number,
@@ -1548,10 +1594,8 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
             deref: enum { deref, no_deref },
         ) void {
             const ast = self.ast;
-            const nodes = self.ast.nodes;
-            const node = nodes.get(index);
 
-            switch (node.get()) {
+            switch (self.ast.node(index)) {
                 .assignment, .end => {
                     self.traverse(index.subi(1), ctx, .no_deref);
                 },

@@ -16,19 +16,6 @@ pub fn MultiList(T: type, I: type) type {
             .sliced = false,
         };
 
-        // pub const Index = enum(I) {
-        //     invalid = std.math.maxInt(I),
-        //     _,
-
-        //     pub fn add(in: Index, n: I) Index {
-        //         return @enumFromInt(@intFromEnum(in) + n);
-        //     }
-
-        //     pub fn sub(in: Index, n: I) Index {
-        //         return @enumFromInt(@intFromEnum(in) - n);
-        //     }
-        // };
-
         pub const Index = enum(I) {
             invalid = std.math.maxInt(I),
             _,
@@ -124,6 +111,12 @@ pub fn MultiList(T: type, I: type) type {
 
         pub fn index(self: *const Self, n: usize) Index {
             return @enumFromInt(self.offset + n);
+        }
+
+        /// Returns the last available index + 1. Not a valid index to access.
+        /// This would be the index created by the next `append` operation.
+        pub fn nextIndex(self: *const Self) Index {
+            return @enumFromInt(self.offset + self.len());
         }
 
         pub fn append(self: *Self, gpa: Allocator, elem: T) !Index {

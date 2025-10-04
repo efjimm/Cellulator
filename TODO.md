@@ -4,6 +4,8 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 # TODO
 
+- Pressing escape doesn't reset count in command mode
+
 - Cellulator as an interpreter
   - Treat each line as a command
   - Different from loading files
