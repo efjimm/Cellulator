@@ -2798,7 +2798,7 @@ fn queueDependents(sheet: *Sheet, rect: Rect) Allocator.Error!void {
     }
 }
 
-pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) Ast.EvalError!Ast.EvalResult {
+pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) Ast.EvalError!Ast.Value {
     const cell = sheet.getCellFromHandle(handle);
     sw: switch (cell.state) {
         .up_to_date => {},
@@ -2865,7 +2865,7 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) Ast.EvalError!Ast.Ev
     };
 }
 
-pub fn evalCellByPos(sheet: *Sheet, pos: Position) Ast.EvalError!Ast.EvalResult {
+pub fn evalCellByPos(sheet: *Sheet, pos: Position) Ast.EvalError!Ast.Value {
     if (sheet.getCellHandleByPos(pos)) |cell| {
         return sheet.evalCellByHandle(cell);
     }

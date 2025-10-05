@@ -739,7 +739,7 @@ pub const ResultType = enum {
     reference,
 };
 
-pub const EvalResult = union(enum) {
+pub const Value = union(enum) {
     none,
     number: f64,
     string: StringResult,
@@ -759,7 +759,7 @@ pub const EvalResult = union(enum) {
         }
     };
 
-    pub fn boolean(res: EvalResult, _: *const Sheet) bool {
+    pub fn boolean(res: Value, _: *const Sheet) bool {
         return switch (res) {
             .none => false,
             .number => |n| n != 0,
@@ -788,23 +788,9 @@ pub const Reference = union(enum) {
     }
 };
 
-pub const EvalResult2 = union(enum) {
-    none,
-    number: f64,
-    string: StringResult,
-    cell: Position,
-    range: EvalResult.Range,
+pub const StackFrame = union(enum) {
+    value: Value,
     cell_literal: Position,
-
-    pub fn from(res: EvalResult) EvalResult2 {
-        return switch (res) {
-            .none => .none,
-            .number => |n| .{ .number = n },
-            .string => |str| .{ .string = str },
-            .cell => |pos| .{ .cell = pos },
-            .range => |r| .{ .range = r },
-        };
-    }
 };
 
 pub const StringResult = union(enum) {
@@ -838,7 +824,7 @@ pub fn EvalContext(comptime Context: type) type {
         arena: Allocator,
         sheet: *Sheet,
         context: Context,
-        stack: std.ArrayList(EvalResult2) = .empty,
+        stack: std.ArrayList(StackFrame) = .empty,
         strings: []const u8,
 
         pub const Error = blk: {
@@ -862,11 +848,11 @@ pub fn EvalContext(comptime Context: type) type {
             break :blk E || ret_info.error_union.error_set;
         };
 
-        fn toNumber(eval: *const @This(), res: EvalResult, none_value: f64) !f64 {
+        fn toNumber(eval: *const @This(), res: Value, none_value: f64) !f64 {
             return try eval.toNumberOrNull(res) orelse none_value;
         }
 
-        fn toNumberOrNull(_: *const @This(), res: EvalResult) !?f64 {
+        fn toNumberOrNull(_: *const @This(), res: Value) !?f64 {
             return switch (res) {
                 .none => null,
                 .number => |n| n,
@@ -876,7 +862,7 @@ pub fn EvalContext(comptime Context: type) type {
         }
 
         /// Coerces `res` to a number, dereferencing one level of reference if required.
-        fn toNumberDeref(eval: *const @This(), res: EvalResult) !?f64 {
+        fn toNumberDeref(eval: *const @This(), res: Value) !?f64 {
             return switch (res) {
                 .none => null,
                 .number => |n| n,
@@ -889,22 +875,18 @@ pub fn EvalContext(comptime Context: type) type {
             };
         }
 
-        fn push(eval: *@This(), res: EvalResult2) !void {
+        fn push(eval: *@This(), res: StackFrame) !void {
             try eval.stack.append(eval.arena, res);
         }
 
-        fn pop(eval: *@This(), result_type: ResultType) !EvalResult {
+        fn pop(eval: *@This(), result_type: ResultType) !Value {
             const ret = eval.stack.pop().?;
             return switch (ret) {
                 .cell_literal => |pos| switch (result_type) {
                     .reference => .{ .cell = pos },
                     .any => try eval.context.evalCellByPos(pos),
                 },
-                .none => .none,
-                .number => |n| .{ .number = n },
-                .cell => |c| .{ .cell = c },
-                .range => |r| .{ .range = r },
-                .string => |str| .{ .string = str },
+                .value => |v| v,
             };
         }
 
@@ -915,27 +897,27 @@ pub fn EvalContext(comptime Context: type) type {
                 .identifier => {
                     @panic("TODO");
                 },
-                .number => |n| try eval.push(.{ .number = n }),
+                .number => |n| try eval.push(.{ .value = .{ .number = n } }),
                 .rel_rel, .rel_abs, .abs_rel, .abs_abs => |pos| {
                     try eval.push(.{ .cell_literal = pos });
                 },
                 .minus => {
                     const rhs = try eval.pop(.any);
-                    try eval.push(.{ .number = -(try eval.toNumber(rhs, 0)) });
+                    try eval.push(.{ .value = .{ .number = -(try eval.toNumber(rhs, 0)) } });
                 },
                 .plus => {
                     const rhs = try eval.pop(.any);
-                    try eval.push(.{ .number = @abs(try eval.toNumber(rhs, 0)) });
+                    try eval.push(.{ .value = .{ .number = @abs(try eval.toNumber(rhs, 0)) } });
                 },
                 .not => {
                     const rhs = try eval.pop(.any);
-                    try eval.push(.{
+                    try eval.push(.{ .value = .{
                         .number = @floatFromInt(@intFromBool(!rhs.boolean(eval.sheet))),
-                    });
+                    } });
                 },
                 .reference => {
                     const arg = try eval.pop(.reference);
-                    try eval.push(.{ .cell = arg.cell });
+                    try eval.push(.{ .value = .{ .cell = arg.cell } });
                 },
                 .dereference => {
                     const arg = try eval.pop(.reference);
@@ -944,61 +926,57 @@ pub fn EvalContext(comptime Context: type) type {
 
                     const pos = arg.cell;
                     const res = try eval.context.evalCellByPos(pos);
-                    try eval.push(.from(res));
+                    try eval.push(.{ .value = res });
                 },
                 inline .add, .sub, .mul, .div, .mod, .pow => |_, t| {
                     const rhs = try eval.pop(.any);
                     const lhs = try eval.pop(.any);
                     const l = try eval.toNumber(lhs, 0);
                     const r = try eval.toNumber(rhs, 0);
-                    const res: EvalResult2 = .{ .number = switch (t) {
+                    const res: Value = .{ .number = switch (t) {
                         .add => l + r,
                         .sub => l - r,
                         .mul => l * r,
                         .div => {
                             if (r == 0) return error.DivideByZero;
-                            try eval.push(.{ .number = l / r });
+                            try eval.push(.{ .value = .{ .number = l / r } });
                             continue;
                         },
                         .mod => {
                             if (r <= 0) return error.DivideByZero;
-                            try eval.push(.{ .number = @rem(l, r) });
+                            try eval.push(.{ .value = .{ .number = @rem(l, r) } });
                             continue;
                         },
                         .pow => std.math.pow(f64, l, r),
                         else => comptime unreachable,
                     } };
-                    try eval.push(res);
+                    try eval.push(.{ .value = res });
                 },
                 // and/or have the same semantics as Lua's and/or operators.
                 .logical_and => {
                     const rhs = try eval.pop(.any);
                     const lhs = try eval.pop(.any);
-                    const res: EvalResult2 =
+                    const res: StackFrame =
                         if (lhs.boolean(eval.sheet))
-                            .from(rhs)
+                            .{ .value = rhs }
                         else
-                            .{ .number = 0 };
+                            .{ .value = .{ .number = 0 } };
 
                     try eval.push(res);
                 },
                 .logical_or => {
                     const rhs = try eval.pop(.any);
                     const lhs = try eval.pop(.any);
-                    const res: EvalResult2 =
-                        if (lhs.boolean(eval.sheet))
-                            .from(lhs)
-                        else
-                            .from(rhs);
+                    const res = if (lhs.boolean(eval.sheet)) lhs else rhs;
 
-                    try eval.push(res);
+                    try eval.push(.{ .value = res });
                 },
                 inline .equals, .not_equals => |_, t| {
                     const rhs = try eval.pop(.any);
                     const lhs = try eval.pop(.any);
                     const false_value = @intFromBool(t != .equals);
-                    if (@as(std.meta.Tag(EvalResult), lhs) != rhs) {
-                        try eval.push(.{ .number = false_value });
+                    if (@as(std.meta.Tag(Value), lhs) != rhs) {
+                        try eval.push(.{ .value = .{ .number = false_value } });
                         continue;
                     }
 
@@ -1016,7 +994,7 @@ pub fn EvalContext(comptime Context: type) type {
                         else => comptime unreachable,
                     };
 
-                    try eval.push(.{ .number = @floatFromInt(@intFromBool(b)) });
+                    try eval.push(.{ .value = .{ .number = @floatFromInt(@intFromBool(b)) } });
                 },
                 inline .greater_than,
                 .less_than,
@@ -1037,10 +1015,10 @@ pub fn EvalContext(comptime Context: type) type {
                         else => comptime unreachable,
                     };
 
-                    try eval.push(.{ .number = @floatFromInt(@intFromBool(n)) });
+                    try eval.push(.{ .value = .{ .number = @floatFromInt(@intFromBool(n)) } });
                 },
 
-                .builtin => |b| try eval.push(switch (b.tag) {
+                .builtin => |b| try eval.push(.{ .value = switch (b.tag) {
                     .sum => .{ .number = try eval.evalSum(b.arg_count) },
                     .prod => .{ .number = try eval.evalProd(b.arg_count) },
                     .avg => .{ .number = try eval.evalAvg(b.arg_count) },
@@ -1060,7 +1038,7 @@ pub fn EvalContext(comptime Context: type) type {
                     .e => .{ .number = std.math.e },
                     .width => .{ .number = try eval.evalWidth() },
                     .height => .{ .number = try eval.evalHeight() },
-                }),
+                } }),
 
                 .concat => {
                     const rhs = try eval.pop(.any);
@@ -1074,7 +1052,7 @@ pub fn EvalContext(comptime Context: type) type {
                         error.WriteFailed => return error.OutOfMemory,
                         else => |e| return e,
                     };
-                    try eval.push(.{ .string = .{ .slice = try aw.toOwnedSlice() } });
+                    try eval.push(.{ .value = .{ .string = .{ .slice = try aw.toOwnedSlice() } } });
                 },
                 .range, .dynamic_range => {
                     const rhs = try eval.pop(.reference);
@@ -1084,13 +1062,13 @@ pub fn EvalContext(comptime Context: type) type {
                     if (invalid_args)
                         return error.NotEvaluable;
 
-                    try eval.push(.{
+                    try eval.push(.{ .value = .{
                         .range = .{ .rect = .initNormalizePos(lhs.cell, rhs.cell) },
-                    });
+                    } });
                 },
-                .string_literal => |str| try eval.push(.{ .string = .{
+                .string_literal => |str| try eval.push(.{ .value = .{ .string = .{
                     .slice = eval.strings[str.start..str.end],
-                } }),
+                } } }),
                 .invalidated_pos,
                 .invalidated_range,
                 .assignment,
@@ -1098,7 +1076,7 @@ pub fn EvalContext(comptime Context: type) type {
             };
         }
 
-        fn formatStringAlloc(eval: *const @This(), res: EvalResult) ![]u8 {
+        fn formatStringAlloc(eval: *const @This(), res: Value) ![]u8 {
             var aw: std.io.Writer.Allocating = .init(eval.arena);
             eval.formatString(res, &aw.writer) catch |err| switch (err) {
                 error.WriteFailed => return error.OutOfMemory,
@@ -1107,7 +1085,7 @@ pub fn EvalContext(comptime Context: type) type {
             return aw.toOwnedSlice();
         }
 
-        fn formatString(_: *const @This(), res: EvalResult, w: *std.io.Writer) !void {
+        fn formatString(_: *const @This(), res: Value, w: *std.io.Writer) !void {
             switch (res) {
                 .none => {},
                 .number => |n| try w.print("{d}", .{n}),
@@ -1419,7 +1397,7 @@ pub fn evaluate(
     /// Instance of a type which has the method uevalCell`,
     /// which evaluates the cell at the given position.
     context: anytype,
-) !EvalResult {
+) !Value {
     var arena: std.heap.ArenaAllocator = .init(sheet.gpa);
     defer arena.deinit();
 
@@ -1660,11 +1638,11 @@ pub const ExpressionIterator = struct {
 test "Parse and Eval Expression" {
     const t = std.testing;
     const Context = struct {
-        pub fn evalCellByHandle(_: @This(), _: Sheet.Cell.Handle) !EvalResult {
+        pub fn evalCellByHandle(_: @This(), _: Sheet.Cell.Handle) !Value {
             unreachable;
         }
 
-        pub fn evalCellByPos(_: @This(), _: Position) !EvalResult {
+        pub fn evalCellByPos(_: @This(), _: Position) !Value {
             unreachable;
         }
     };
