@@ -1409,6 +1409,7 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                     try tui.setStyle(.cell_text_unselected, wr);
 
                     const text = sheet.string_values.items(data.values[i].string);
+                    std.log.debug("TEXT LEN: {d}", .{text.len});
                     const alignment = utils.enumFromEnum(
                         shovel.TextAlignment,
                         data.attrs[i].alignment,

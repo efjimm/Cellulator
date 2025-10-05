@@ -11,19 +11,19 @@ const Rect = Position.Rect;
 
 const Tokenizer = @import("Tokenizer.zig");
 const Parser = @import("Parser.zig");
-pub const BinaryOperator = Parser.BinaryOperator;
 
 const MultiList = @import("multi_list.zig").MultiList;
-pub const NodeSlice = MultiList(Node, usize);
 
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 const Ast = @This();
 
-nodes: NodeSlice,
+nodes: NodeList,
 extra: std.ArrayListAligned(u8, .@"16"),
 strings: std.ArrayList(u8),
+
+pub const NodeList = MultiList(Node, usize);
 
 /// Can be passed to `restore` to free any data added after the checkpoint was created.
 /// Useful for temporary ASTs.
@@ -31,6 +31,12 @@ pub const Checkpoint = struct {
     nodes_len: usize,
     extra_len: usize,
     strings_len: usize,
+
+    pub const reset: Checkpoint = .{
+        .nodes_len = 0,
+        .extra_len = 0,
+        .strings_len = 0,
+    };
 };
 
 pub const empty: Ast = .{
@@ -60,7 +66,7 @@ pub fn restore(ast: *Ast, checkpoint: Checkpoint) void {
 }
 
 // TODO: Rename
-pub fn lastIndex(ast: *const Ast) Index {
+pub fn lastIndex(ast: *const Ast) Node.Index {
     return ast.nodes.nextIndex();
 }
 
@@ -69,29 +75,29 @@ pub fn clearRetainingCapacity(ast: *Ast) void {
     ast.strings.clearRetainingCapacity();
 }
 
-pub fn tag(ast: *const Ast, index: Index) Node.Tag {
+pub fn tag(ast: *const Ast, index: Node.Index) Node.Tag {
     return ast.nodes.item(index, .tag);
 }
 
-pub fn payload(ast: *const Ast, index: Index) Node.Payload {
+pub fn payload(ast: *const Ast, index: Node.Index) Node.Payload {
     return ast.nodes.item(index, .data);
 }
 
-pub fn node(ast: *const Ast, index: Index) Node.Tagged {
+pub fn node(ast: *const Ast, index: Node.Index) Node.Tagged {
     return ast.nodes.get(index).get();
 }
 
 /// Removes the root node from the last expression appended to `ast.nodes`.
-pub fn spliceLast(ast: *Ast) struct { Index, Position } {
+pub fn spliceLast(ast: *Ast) struct { Node.Index, Position } {
     const len = ast.nodes.len();
-    const tags = ast.nodes.items(.tag);
-    const data = ast.nodes.items(.data);
+    const t = ast.tags();
+    const data = ast.payloads();
 
-    assert(tags[len - 1] == .end);
-    assert(tags[len - 2] == .assignment);
+    assert(t[len - 1] == .end);
+    assert(t[len - 2] == .assignment);
 
     const pos = data[len - 2].assignment;
-    tags[len - 2] = .end;
+    t[len - 2] = .end;
     data[len - 2] = .{ .end = data[len - 1].end - 1 };
 
     ast.nodes.shrinkRetainingCapacity(ast.nodes.len() - 1);
@@ -99,17 +105,17 @@ pub fn spliceLast(ast: *Ast) struct { Index, Position } {
     return .{ @enumFromInt(len - 3), pos };
 }
 
-// pub fn tags(ast: *const Ast) []Node.Tag {
-//     return ast.nodes.items(.tag);
-// }
+pub fn tags(ast: *const Ast) []Node.Tag {
+    return ast.nodes.items(.tag);
+}
 
-// pub fn payloads(ast: *const Ast) []Node.Payload {
-//     return ast.nodes.items(.data);
-// }
+pub fn payloads(ast: *const Ast) []Node.Payload {
+    return ast.nodes.items(.data);
+}
 
 pub const ParseError = Parser.ParseError;
 
-// TODO: Make these usize
+// TODO: Make these u64
 pub const String = extern struct {
     start: u32,
     end: u32,
@@ -123,9 +129,7 @@ pub const Node = extern struct {
     tag: Tag,
     data: Payload,
 
-    pub const End = extern struct {
-        length: u32,
-    };
+    pub const Index = NodeList.Index;
 
     pub const Payload = blk: {
         var t = @typeInfo(Tagged).@"union";
@@ -184,6 +188,51 @@ pub const Node = extern struct {
             },
         }
     }
+
+    pub const Tagged = union(Tag) {
+        /// Stores the number of nodes in the AST.
+        end: u64,
+        number: f64,
+        abs_abs: Position,
+        abs_rel: Position,
+        rel_abs: Position,
+        rel_rel: Position,
+        string_literal: String,
+        identifier: String,
+        invalidated_pos: Position,
+        invalidated_range,
+
+        assignment: Position,
+        builtin: Builtin,
+        minus,
+        plus,
+        not,
+        concat,
+        add,
+        sub,
+        mul,
+        div,
+        mod,
+        pow,
+        greater_than,
+        less_than,
+        greater_equals,
+        less_equals,
+        equals,
+        not_equals,
+        logical_and,
+        logical_or,
+
+        /// The colon operator with two static arguments.
+        /// Cell value accesses through this range are non-volatile.
+        range,
+        /// The colon operator with one or more dynamic arguments.
+        /// Cell value accesses through this range are volatile.
+        dynamic_range,
+
+        reference,
+        dereference,
+    };
 
     pub const Tag = enum(u8) {
         end,
@@ -345,174 +394,20 @@ pub const Node = extern struct {
             };
         }
     };
-
-    pub const Tagged = union(Tag) {
-        /// Stores the number of nodes in the AST.
-        end: usize,
-        number: f64,
-        abs_abs: Position,
-        abs_rel: Position,
-        rel_abs: Position,
-        rel_rel: Position,
-        string_literal: String,
-        identifier: String,
-        invalidated_pos: Position,
-        invalidated_range,
-
-        assignment: Position,
-        builtin: Builtin,
-        minus,
-        plus,
-        not,
-        concat,
-        add,
-        sub,
-        mul,
-        div,
-        mod,
-        pow,
-        greater_than,
-        less_than,
-        greater_equals,
-        less_equals,
-        equals,
-        not_equals,
-        logical_and,
-        logical_or,
-
-        /// The colon operator with two static arguments.
-        /// Cell value accesses through this range are non-volatile.
-        range,
-        /// The colon operator with one or more dynamic arguments.
-        /// Cell value accesses through this range are volatile.
-        dynamic_range,
-
-        reference,
-        dereference,
-    };
 };
 
-// pub const Index = packed struct {
-//     n: usize,
-
-//     pub fn from(n: usize) Index {
-//         return .{ .n = n };
-//     }
-
-//     pub fn sub(index: Index, offset: usize) Index {
-//         return .from(index.n - offset);
-//     }
-
-//     pub fn addN(index: Index, offset: usize) Index {
-//         return .from(index.n + offset);
-//     }
-
-//     pub fn isValid(i: Index) bool {
-//         return i != invalid;
-//     }
-
-//     pub const invalid: Index = .{ .n = std.math.maxInt(usize) };
-// };
-
-pub const Index = MultiList(Node, usize).Index;
-
-pub fn parseFromSource(
-    gpa: std.mem.Allocator,
-    nodes: *NodeSlice,
-    source: []const u8,
-) ParseError!Index {
-    var reader: std.io.Reader = .fixed(source);
-    var tokens = Tokenizer.collectTokens(
-        gpa,
-        &reader,
-        @intCast(source.len / 2),
-    ) catch |err| switch (err) {
-        error.ReadFailed => unreachable,
-        else => |e| return e,
-    };
-    defer tokens.deinit(gpa);
-
-    if (tokens.items(.tag)[0] == .eof)
-        return .invalid;
-
-    var parser: Parser = .init(
-        gpa,
-        source,
-        tokens.items(.tag),
-        tokens.items(.start),
-        .{ .nodes = nodes.toMultiArrayList() },
-    );
-
-    const old_len = nodes.len;
-
-    // The parser could re-allocate the underlying nodes
-    defer nodes.* = parser.nodes.slice();
-    errdefer nodes.len = old_len;
-
-    try parser.parse();
-
-    return parser.root();
-}
-
-pub fn parseFromExpression(sheet: *Sheet, source: []const u8) ParseError!Parser.Result {
-    return parseFromExpressionDiag(sheet, source, null);
-}
-
-pub fn parseFromExpressionDiag(
-    sheet: *Sheet,
-    source: []const u8,
-    diag: ?*Parser.Diagnostics,
-) ParseError!Parser.Result {
-    var reader: std.io.Reader = .fixed(source);
-    var tokens = Tokenizer.collectTokens(
-        sheet.gpa,
-        &reader,
-        @intCast(source.len / 2),
-    ) catch |err| switch (err) {
-        error.ReadFailed => unreachable,
-        error.OutOfMemory => |e| return e,
-    };
-
-    defer tokens.deinit(sheet.gpa);
-
-    var parser: Parser = .init(
-        sheet.gpa,
-        source,
-        tokens.items(.tag),
-        tokens.items(.start),
-        &sheet.ast,
-        .{ .diagnostics = diag },
-    );
-
-    return try parser.parse();
-}
-
-// TODO: Just store the whole string for expressions. This will massively simplify printing logic
-//       and allow for removing some book keeping information from nodes.
-pub fn dupeStrings(
+pub fn parseFromExpression(
     ast: *Ast,
-    source: []const u8,
-    start: Ast.Index,
-    end: Ast.Index,
-) void {
-    const slice = ast.nodes.subsliceEndIndex(start, end);
-
-    // Append contents of all string literals to the list, and update their `start` and `end`
-    // indices to be into this list.
-    for (slice.items(.tag), 0..) |t, i| {
-        if (t == .string_literal) {
-            const str = &slice.items(.data)[i].string_literal;
-            const bytes = source[str.start..str.end];
-            str.start = @intCast(ast.strings.items.len);
-            str.end = @intCast(str.start + bytes.len);
-            ast.strings.appendSliceAssumeCapacity(bytes);
-        }
-    }
+    gpa: std.mem.Allocator,
+    src: []const u8,
+    options: Parser.Options,
+) !Parser.Result {
+    return Parser.parseFromExpression(ast, gpa, src, options);
 }
 
 pub inline fn printFromIndex(
     ast: *const Ast,
-    index: Index,
+    index: Node.Index,
     writer: *std.io.Writer,
     strings: []const u8,
 ) std.io.Writer.Error!void {
@@ -522,7 +417,7 @@ pub inline fn printFromIndex(
 
 pub fn printFromNode(
     ast: *const Ast,
-    index: Index,
+    index: Node.Index,
     data: Node,
     writer: *std.io.Writer,
     strings: []const u8,
@@ -665,10 +560,10 @@ pub fn printFromNode(
 /// Returns the root index of each argument of a function, backwards.
 pub const ArgIterator = struct {
     ast: Ast,
-    first_arg: Index,
-    index: Index,
+    first_arg: Node.Index,
+    index: Node.Index,
 
-    pub fn next(iter: *ArgIterator) ?Index {
+    pub fn next(iter: *ArgIterator) ?Node.Index {
         if (iter.index.le(iter.first_arg)) return null;
         const ret = iter.index.subi(1);
         iter.index = iter.ast.leftMostChild(ret);
@@ -676,7 +571,7 @@ pub const ArgIterator = struct {
     }
 };
 
-pub fn argIterator(ast: Ast, start: Index, end: Index) ArgIterator {
+pub fn argIterator(ast: Ast, start: Node.Index, end: Node.Index) ArgIterator {
     return .{
         .ast = ast,
         .first_arg = start,
@@ -688,13 +583,13 @@ pub fn argIterator(ast: Ast, start: Index, end: Index) ArgIterator {
 /// for performance reasons.
 pub const ArgIteratorForwards = struct {
     ast: Ast,
-    end: Index,
-    index: Index,
+    end: Node.Index,
+    index: Node.Index,
     backwards_iter: ArgIterator,
-    buffer: [32]Index = undefined,
+    buffer: [32]Node.Index = undefined,
     i: usize = 0,
 
-    pub fn next(iter: *ArgIteratorForwards) ?Index {
+    pub fn next(iter: *ArgIteratorForwards) ?Node.Index {
         if (@intFromEnum(iter.index) >= @intFromEnum(iter.end)) return null;
         const ret = iter.index;
 
@@ -720,7 +615,7 @@ pub const ArgIteratorForwards = struct {
     }
 };
 
-pub fn argIteratorForwards(ast: *const Ast, start: Index, end: Index) ArgIteratorForwards {
+pub fn argIteratorForwards(ast: *const Ast, start: Node.Index, end: Node.Index) ArgIteratorForwards {
     return .{
         .ast = ast.*,
         .end = end,
@@ -731,27 +626,27 @@ pub fn argIteratorForwards(ast: *const Ast, start: Index, end: Index) ArgIterato
 
 pub const FormatData = struct {
     ast: *const Ast,
-    root: Index,
+    root: Node.Index,
 };
 
-pub fn exprLen(ast: *const Ast, root: Index) usize {
+pub fn exprLen(ast: *const Ast, root: Node.Index) usize {
     assert(ast.tag(root.addi(1)) == .end);
     return ast.payload(root.addi(1)).end;
 }
 
-pub fn exprStart(ast: *const Ast, root: Index) Index {
+pub fn exprStart(ast: *const Ast, root: Node.Index) Node.Index {
     const len = ast.exprLen(root);
     return root.subi(len - 1);
 }
 
-pub fn exprSlice(ast: *const Ast, root: Index) NodeSlice {
+pub fn exprSlice(ast: *const Ast, root: Node.Index) NodeList {
     const start = ast.exprStart(root);
     const len = ast.exprLen(root);
     return ast.nodes.subslice(@intFromEnum(start), len);
 }
 
 /// Slice of the expression's AST nodes including the sentinel node.
-pub fn exprSliceEnd(ast: *const Ast, root: Index) NodeSlice {
+pub fn exprSliceEnd(ast: *const Ast, root: Node.Index) NodeList {
     var ret = ast.exprSlice(root);
     ret.slice.len += 1;
     assert(ret.len() <= ast.nodes.capacity());
@@ -760,7 +655,7 @@ pub fn exprSliceEnd(ast: *const Ast, root: Index) NodeSlice {
 
 pub fn print(
     ast: *const Ast,
-    root: Index,
+    root: Node.Index,
     writer: *std.io.Writer,
 ) std.io.Writer.Error!void {
     if (root == .invalid) return;
@@ -769,8 +664,8 @@ pub fn print(
 
 pub fn leftMostChild(
     ast: *const Ast,
-    index: Index,
-) Index {
+    index: Node.Index,
+) Node.Index {
     return switch (ast.node(index)) {
         // leaf nodes
         .string_literal,
@@ -853,7 +748,7 @@ pub const EvalResult = union(enum) {
 
     pub const Range = struct {
         rect: Rect,
-        map: Index = .invalid,
+        map: Node.Index = .invalid,
 
         pub fn format(r: Range, w: *std.io.Writer) !void {
             try r.rect.format(w);
@@ -1013,7 +908,7 @@ pub fn EvalContext(comptime Context: type) type {
             };
         }
 
-        fn evaluate(eval: *@This(), root: Index) Error!void {
+        fn evaluate(eval: *@This(), root: Node.Index) Error!void {
             const nodes = eval.ast.exprSlice(root);
             for (0..nodes.len()) |i| switch (nodes.geti(i).get()) {
                 .end => break,
@@ -1260,7 +1155,7 @@ pub fn EvalContext(comptime Context: type) type {
         }
 
         /// Converts an ast range to a position range.
-        fn toPosRange(eval: *const @This(), lhs: Index, rhs: Index) Position.Rect {
+        fn toPosRange(eval: *const @This(), lhs: Node.Index, rhs: Node.Index) Position.Rect {
             switch (eval.tags[lhs.n]) {
                 .rel_rel, .abs_abs, .rel_abs, .abs_rel => {},
                 else => {
@@ -1516,14 +1411,13 @@ pub fn EvalContext(comptime Context: type) type {
 /// Dynamically typed evaluation of expressions.
 pub fn evaluate(
     ast: *const Ast,
-    root_node: Index,
+    root_node: Node.Index,
     sheet: *Sheet,
     /// Strings required by the expression. String literal nodes contain offsets
     /// into this buffer. If the expression has no string literals then this
     /// argument can be left as "".
     /// Instance of a type which has the method uevalCell`,
     /// which evaluates the cell at the given position.
-    strings: []const u8,
     context: anytype,
 ) !EvalResult {
     var arena: std.heap.ArenaAllocator = .init(sheet.gpa);
@@ -1537,7 +1431,7 @@ pub fn evaluate(
         .arena = arena.allocator(),
         .sheet = sheet,
         .context = context,
-        .strings = strings,
+        .strings = ast.strings.items,
     };
 
     try ctx.evaluate(root_node);
@@ -1557,7 +1451,7 @@ const CountDependenciesContext = struct {
     }
 };
 
-pub fn countDependencies(ast: *const Ast, root: Index) usize {
+pub fn countDependencies(ast: *const Ast, root: Node.Index) usize {
     var ctx: CountDependenciesContext = .{};
     ast.traverseDependencies(root, &ctx, CountDependenciesContext.func);
     return ctx.total;
@@ -1565,7 +1459,7 @@ pub fn countDependencies(ast: *const Ast, root: Index) usize {
 
 pub fn traverseDependencies(
     ast: *const Ast,
-    root: Index,
+    root: Node.Index,
     ctx: anytype,
     func: fn (@TypeOf(ctx), Rect) void,
 ) void {
@@ -1585,7 +1479,7 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
 
         fn traverse(
             self: *const @This(),
-            index: Index,
+            index: Node.Index,
             /// Whether the context treats a cell literal as a value or a reference. If treated as a value,
             /// the cell literal will be added to the dependency graph.
             ctx: Parser.ExpressionContext,
@@ -1725,7 +1619,7 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
 }
 
 /// Returns true if the given node is a cell literal or a reference to a cell literal.
-pub fn isDynamicReference(nodes: NodeSlice, index: Index) bool {
+pub fn isDynamicReference(nodes: NodeList, index: Node.Index) bool {
     return switch (nodes.item(index, .tag)) {
         .reference => switch (nodes.item(index.subi(1), .tag)) {
             .rel_rel, .rel_abs, .abs_rel, .abs_abs => false,
@@ -1740,10 +1634,10 @@ pub fn isDynamicReference(nodes: NodeSlice, index: Index) bool {
 pub const ExpressionIterator = struct {
     tags: []const Node.Tag,
     data: []const Node.Payload,
-    start: Index,
+    start: Node.Index,
     i: usize,
 
-    pub fn init(nodes: NodeSlice, start: Index) ExpressionIterator {
+    pub fn init(nodes: NodeList, start: Node.Index) ExpressionIterator {
         return .{
             .tags = nodes.items(.tag),
             .data = nodes.items(.data),
@@ -1752,7 +1646,7 @@ pub const ExpressionIterator = struct {
         };
     }
 
-    pub fn prev(iter: *ExpressionIterator) ?Index {
+    pub fn prev(iter: *ExpressionIterator) ?Node.Index {
         if (iter.i <= @intFromEnum(iter.start)) return null;
         iter.i -= 1;
         assert(iter.tags[iter.i] == .end);
@@ -1782,11 +1676,11 @@ test "Parse and Eval Expression" {
             var sheet = try Sheet.init(t.allocator);
             defer sheet.deinit();
 
-            const expr = parseFromExpression(&sheet, src) catch |err| {
+            const expr = sheet.parseFromExpression(src) catch |err| {
                 return if (err != expected) err else {};
             };
 
-            const res = sheet.ast.evaluate(expr.root, &sheet, src, Context{}) catch |err| {
+            const res = sheet.ast.evaluate(expr.root, &sheet, Context{}) catch |err| {
                 return if (err != expected) err else {};
             };
             const n = res.number;
@@ -1824,15 +1718,15 @@ test "Functions on Ranges" {
             var sheet = try Sheet.init(t.allocator);
             defer sheet.deinit();
 
-            try sheet.setCell(try Position.fromAddress("A0"), try parseFromExpression(&sheet, "0"), .{});
-            try sheet.setCell(try Position.fromAddress("B0"), try parseFromExpression(&sheet, "100"), .{});
-            try sheet.setCell(try Position.fromAddress("A1"), try parseFromExpression(&sheet, "500"), .{});
-            try sheet.setCell(try Position.fromAddress("B1"), try parseFromExpression(&sheet, "333.33"), .{});
+            try sheet.setCell(try Position.fromAddress("A0"), try sheet.parseFromExpression("0"), .{});
+            try sheet.setCell(try Position.fromAddress("B0"), try sheet.parseFromExpression("100"), .{});
+            try sheet.setCell(try Position.fromAddress("A1"), try sheet.parseFromExpression("500"), .{});
+            try sheet.setCell(try Position.fromAddress("B1"), try sheet.parseFromExpression("333.33"), .{});
 
-            const expr = try parseFromExpression(&sheet, src);
+            const expr = try sheet.parseFromExpression(src);
 
             try sheet.update();
-            const res = try sheet.ast.evaluate(expr.root, &sheet, "", &sheet);
+            const res = try sheet.ast.evaluate(expr.root, &sheet, &sheet);
             try std.testing.expectApproxEqRel(expected, res.number, 0.0001);
         }
     }.testSheetExpr;
@@ -1974,7 +1868,7 @@ test "Print" {
 
     inline for (cases) |d| {
         const src, const expected = d;
-        const expr = try parseFromExpression(&sheet, src);
+        const expr = try sheet.parseFromExpression(src);
 
         var buf: [4096]u8 = undefined;
         var fixed: std.io.Writer = .fixed(&buf);
@@ -1983,7 +1877,7 @@ test "Print" {
     }
 
     inline for (data2) |src| {
-        const expr = try parseFromExpression(&sheet, src);
+        const expr = try sheet.parseFromExpression(src);
 
         var buf: [4096]u8 = undefined;
         var fixed: std.io.Writer = .fixed(&buf);

@@ -1,11 +1,12 @@
 const std = @import("std");
+const Sheet = @import("Sheet.zig");
 const Position = @import("Position.zig").Position;
 const Tokenizer = @import("Tokenizer.zig");
 const Token = Tokenizer.Token;
 
 const Ast = @import("Ast.zig");
 const Node = Ast.Node;
-const Index = Ast.Index;
+const Index = Node.Index;
 const Builtin = Node.Builtin;
 
 const MultiList = @import("multi_list.zig").MultiList;
@@ -15,17 +16,13 @@ const assert = std.debug.assert;
 
 const Parser = @This();
 
+/// The same allocator used for `ast`.
+gpa: Allocator,
+ast: *Ast,
 token_tags: []const Token.Tag,
 token_starts: []const u32,
-tok_i: u32,
-
-/// Total byte length of all parsed string literals.
-strings_len: usize,
-
 src: []const u8,
-
-// nodes: MultiList(Node, usize),
-ast: *Ast,
+tok_i: u32,
 
 // TODO: When custom Lua functions are implemented, they could have volatile behaviour.
 //       It should be possible to explicitly mark a function as volatile. It should also be
@@ -37,25 +34,25 @@ ast: *Ast,
 /// Any expression that accesses cells dynamically is volatile.
 is_volatile: bool = false,
 
-gpa: Allocator,
-
 diagnostics: ?*Diagnostics = null,
 
+pub const StringSlice = extern struct {
+    offset: u64,
+    len: u64,
+};
+
 pub const Result = struct {
-    source: []const u8,
-    root: Ast.Index,
+    root: Node.Index,
     is_volatile: bool,
     destination: ?Position,
 
     pub const invalid: Result = .{
-        .source = "",
         .root = .invalid,
         .is_volatile = false,
         .destination = null,
     };
 };
 
-// TODO: Rename this
 const Intermediate = struct { Index, Type };
 
 pub const Type = packed struct {
@@ -161,47 +158,60 @@ pub const ParseError = error{
     InvalidBuiltin,
 } || Allocator.Error;
 
-const InitOptions = struct {
+pub const Options = struct {
     diagnostics: ?*Diagnostics = null,
 };
 
 pub fn init(
-    allocator: Allocator,
-    src: []const u8,
+    gpa: std.mem.Allocator,
+    source: []const u8,
     token_tags: []const Token.Tag,
     token_starts: []const u32,
     ast: *Ast,
-    options: InitOptions,
-) Parser {
+    options: Options,
+) ParseError!Parser {
     return .{
         .ast = ast,
-        .gpa = allocator,
+        .gpa = gpa,
         .token_tags = token_tags,
         .token_starts = token_starts,
-        .strings_len = 0,
         .tok_i = 0,
-        .src = src,
+        .src = source,
         .diagnostics = options.diagnostics,
     };
 }
 
-pub fn initTokens(
-    sheet: *@import("Sheet.zig"),
+pub fn parseFromExpression(
+    ast: *Ast,
+    gpa: Allocator,
     source: []const u8,
-    token_tags: []const Token.Tag,
-    token_starts: []const u32,
-) ParseError!Parser {
-    var parser: Parser = .init(
-        sheet.gpa,
+    options: Options,
+) ParseError!Result {
+    var reader: std.io.Reader = .fixed(source);
+    var tokens = Tokenizer.collectTokens(
+        gpa,
+        &reader,
+        @intCast(source.len / 2),
+    ) catch |err| switch (err) {
+        error.ReadFailed => unreachable,
+        error.OutOfMemory => |e| return e,
+    };
+
+    defer tokens.deinit(gpa);
+
+    const start_state = ast.save();
+    errdefer ast.restore(start_state);
+
+    var parser: Parser = try .init(
+        gpa,
         source,
-        token_tags,
-        token_starts,
-        &sheet.ast,
-        .{},
+        tokens.items(.tag),
+        tokens.items(.start),
+        ast,
+        options,
     );
 
-    _ = try parser.parseStatement();
-    return parser;
+    return try parser.parseEof();
 }
 
 pub fn root(p: *const Parser) Index {
@@ -210,19 +220,32 @@ pub fn root(p: *const Parser) Index {
     return last.subi(2);
 }
 
-/// <- (Statement / Expression) eof
-pub fn parse(p: *Parser) ParseError!Result {
+/// Parse one statement, returning `null` on EOF.
+pub fn nextStatement(p: *Parser) ParseError!?Result {
+    if (p.tok_i >= p.token_tags.len or p.token_tags[p.tok_i] == .eof)
+        return null;
+
     const start_state = p.ast.save();
     errdefer p.ast.restore(start_state);
+    return try p.parse();
+}
 
-    _ = try p.parseStatement();
+fn parseEof(p: *Parser) ParseError!Result {
+    const ret = try p.parse();
     try p.expectToken(.eof);
-    assert(p.ast.nodes.items(.tag)[p.ast.nodes.len() - 1] == .end);
+    return ret;
+}
+
+/// <- (Statement / Expression) eof
+fn parse(p: *Parser) ParseError!Result {
+    p.is_volatile = false;
+    const nodes_start = p.ast.nodes.len();
+    const index = try p.parseStatement();
+    _ = try p.addNode(.init(.end, @intFromEnum(index) - nodes_start + 1));
 
     const root_index = p.root();
     return .{
         .root = root_index,
-        .source = p.src,
         .is_volatile = p.is_volatile,
         .destination = if (p.ast.tag(root_index) == .assignment)
             p.ast.payload(root_index).assignment
@@ -233,17 +256,13 @@ pub fn parse(p: *Parser) ParseError!Result {
 
 /// Statement <- 'let' Assignment
 fn parseStatement(p: *Parser) ParseError!Index {
-    const start = p.ast.nodes.len();
     switch (p.token_tags[p.tok_i]) {
         .keyword_let => {
             p.tok_i += 1;
-            const index = try p.parseAssignment();
-            _ = try p.addNode(.init(.end, @intFromEnum(index) - start + 1));
-            return index;
+            return try p.parseAssignment();
         },
         else => {
             const index, _ = try p.parseExpression(.value);
-            _ = try p.addNode(.init(.end, @intFromEnum(index) - start + 1));
             return index;
         },
     }
@@ -669,14 +688,15 @@ fn parseStringLiteral(p: *Parser, comptime expected_tag: Token.Tag) ParseError!I
     };
     const end = try p.expectTokenGet(end_tag);
 
-    const len = end - start;
-    p.strings_len += len;
+    const bytes = p.src[start + 1 .. end];
+    const string_start = p.ast.strings.items.len;
+    try p.ast.strings.appendSlice(p.gpa, bytes);
 
     // TODO: Handle escapes of quotes
     const index = try p.addNode(
         .init(.string_literal, .{
-            .start = start + 1,
-            .end = end,
+            .start = @intCast(string_start),
+            .end = @intCast(string_start + bytes.len),
         }),
     );
     return .{ index, .string };
@@ -791,54 +811,24 @@ test "parser" {
     const t = std.testing;
     const testParser = struct {
         fn func(bytes: []const u8, node_tags: []const Node.Tag) !void {
-            var reader: std.io.Reader = .fixed(bytes);
-            var tokens = try Tokenizer.collectTokens(t.allocator, &reader, 0);
-            defer tokens.deinit(t.allocator);
-
             var ast: Ast = .empty;
             defer ast.deinit(std.testing.allocator);
 
-            var parser = Parser.init(
-                t.allocator,
-                bytes,
-                tokens.items(.tag),
-                tokens.items(.start),
-                &ast,
-                .{},
-            );
-
-            _ = try parser.parse();
-            for (node_tags, parser.ast.nodes.items(.tag)) |expected, actual| {
+            _ = try ast.parseFromExpression(t.allocator, bytes, .{});
+            for (node_tags, ast.nodes.items(.tag)) |expected, actual| {
                 try t.expectEqual(expected, actual);
             }
         }
     }.func;
     const testParseError = struct {
         fn func(bytes: []const u8, err: ?anyerror) !void {
-            var reader: std.io.Reader = .fixed(bytes);
-            var tokens = try Tokenizer.collectTokens(
-                t.allocator,
-                &reader,
-                @intCast(bytes.len / 2),
-            );
-            defer tokens.deinit(t.allocator);
-
             var ast: Ast = .empty;
             defer ast.deinit(std.testing.allocator);
 
-            var parser = Parser.init(
-                t.allocator,
-                bytes,
-                tokens.items(.tag),
-                tokens.items(.start),
-                &ast,
-                .{},
-            );
-
             if (err) |e| {
-                try t.expectError(e, parser.parse());
+                try t.expectError(e, ast.parseFromExpression(t.allocator, bytes, .{}));
             } else {
-                _ = try parser.parse();
+                _ = try ast.parseFromExpression(t.allocator, bytes, .{});
             }
         }
     }.func;
@@ -914,28 +904,11 @@ test "Node contents" {
     const t = std.testing;
     const testNodes = struct {
         fn func(bytes: []const u8, nodes: []const Node) !void {
-            var reader: std.io.Reader = .fixed(bytes);
-            var tokens = try Tokenizer.collectTokens(
-                t.allocator,
-                &reader,
-                @intCast(bytes.len / 2),
-            );
-            defer tokens.deinit(t.allocator);
-
             var ast: Ast = .empty;
             defer ast.deinit(std.testing.allocator);
 
-            var parser: Parser = .init(
-                t.allocator,
-                bytes,
-                tokens.items(.tag),
-                tokens.items(.start),
-                &ast,
-                .{},
-            );
-
-            _ = try parser.parse();
-            for (nodes, parser.ast.nodes.items(.tag), parser.ast.nodes.items(.data)) |expected, tag, data| {
+            _ = try ast.parseFromExpression(t.allocator, bytes, .{});
+            for (nodes, ast.nodes.items(.tag), ast.nodes.items(.data)) |expected, tag, data| {
                 const actual: Node = .{
                     .tag = tag,
                     .data = data,
@@ -972,12 +945,12 @@ test "Node contents" {
         "let crxp65535 = 'this is epic' # 'nice'",
         &.{
             .init(.string_literal, .{
-                .start = "let crxp65535 = '".len,
-                .end = "let crxp65535 = 'this is epic".len,
+                .start = 0,
+                .end = "this is epic".len,
             }),
             .init(.string_literal, .{
-                .start = "let crxp65535 = 'this is epic' # '".len,
-                .end = "let crxp65535 = 'this is epic' # 'nice".len,
+                .start = "this is epic".len,
+                .end = "this is epic".len + "nice".len,
             }),
             .init(.concat, {}),
             .init(.assignment, .fromValidAddress("crxp65535")),
@@ -998,22 +971,10 @@ test "Node contents" {
 }
 
 fn testVolatile(expr: []const u8, volatility: bool) !void {
-    var r: std.io.Reader = .fixed(expr);
-    var tokens = try Tokenizer.collectTokens(std.testing.allocator, &r, @intCast(expr.len));
-    defer tokens.deinit(std.testing.allocator);
-
     var ast: Ast = .empty;
     defer ast.deinit(std.testing.allocator);
 
-    var p: Parser = .init(
-        std.testing.allocator,
-        expr,
-        tokens.items(.tag),
-        tokens.items(.start),
-        &ast,
-        .{},
-    );
-    const res = try p.parse();
+    const res = try ast.parseFromExpression(std.testing.allocator, expr, .{});
     try std.testing.expectEqual(volatility, res.is_volatile);
 }
 

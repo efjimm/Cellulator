@@ -459,15 +459,16 @@ pub fn setCell(
     zc: *ZC,
     pos: Position,
     expr: Parser.Result,
+    src: []const u8,
     opts: ChangeCellOpts,
 ) !void {
     try zc.currentSheet().setCell(pos, expr, .{});
     if (opts.emit_event) {
         const expr_string =
-            for (expr.source, 0..) |c, i| {
+            for (src, 0..) |c, i| {
                 if (c == '=') break std.mem.trimLeft(
                     u8,
-                    expr.source[i + 1 ..],
+                    src[i + 1 ..],
                     &std.ascii.whitespace,
                 );
             } else unreachable;
@@ -490,7 +491,7 @@ pub fn getSheetName(zc: *const ZC, index: usize) []const u8 {
 pub fn setCellString(
     zc: *ZC,
     pos: Position,
-    source: []const u8,
+    src: []const u8,
     diag: ?*Parser.Diagnostics,
     opts: ChangeCellOpts,
 ) !void {
@@ -498,13 +499,13 @@ pub fn setCellString(
     const old_state = sheet.ast.save();
     errdefer sheet.ast.restore(old_state);
 
-    const expr = try Ast.parseFromExpressionDiag(sheet, source, diag);
+    const expr = try sheet.parseFromExpressionDiag(src, diag);
     // TODO: Move this check into the parser
     if (expr.destination != null) {
         return error.UnexpectedToken;
     }
 
-    try zc.setCell(pos, expr, opts);
+    try zc.setCell(pos, expr, src, opts);
 }
 
 pub const StatusMessageType = enum { info, warn, err };
@@ -1357,52 +1358,36 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
     if (str[0] == ':')
         return zc.runCommand(str[1..], Command.map);
 
-    const Tokenizer = @import("Tokenizer.zig");
-    var reader: std.io.Reader = .fixed(str);
-    var tokens = try Tokenizer.collectTokens(zc.allocator, &reader, @intCast(str.len / 2));
-    defer tokens.deinit(zc.allocator);
-
-    if (tokens.items(.tag)[0] == .eof)
-        return;
-
     const sheet = zc.currentSheet();
     const ast_state = sheet.ast.save();
 
     var diagnostics: Parser.Diagnostics = .{};
-    var parser: Parser = .init(
-        zc.allocator,
-        str,
-        tokens.items(.tag),
-        tokens.items(.start),
-        &sheet.ast,
-        .{ .diagnostics = &diagnostics },
-    );
-
-    const res = parser.parse() catch |err| return switch (err) {
+    const res = sheet.parseFromExpressionDiag(str, &diagnostics) catch |err| switch (err) {
         error.UnexpectedToken,
         error.InvalidCellAddress,
         error.InvalidBuiltin,
-        => zc.setStatusMessage(.err, "{f}", .{diagnostics}),
+        => {
+            zc.setStatusMessage(.err, "{f}", .{diagnostics});
+            return;
+        },
         error.OutOfMemory => |e| return e,
     };
 
-    const root_node = sheet.ast.nodes.get(res.root);
-    switch (root_node.tag) {
+    switch (sheet.ast.tag(res.root)) {
         .assignment => {
             const spliced_root, const pos = sheet.ast.spliceLast();
 
             try zc.setCell(pos, .{
-                .source = str,
                 .root = spliced_root,
-                .is_volatile = parser.is_volatile,
+                .is_volatile = res.is_volatile,
                 .destination = null,
-            }, .{});
+            }, str, .{});
             sheet.endUndoGroup();
         },
         else => {
             // Evaluate the expression and print the result
             defer sheet.ast.restore(ast_state);
-            const value = sheet.ast.evaluate(res.root, sheet, str, sheet) catch |err| {
+            const value = sheet.ast.evaluate(res.root, sheet, sheet) catch |err| {
                 zc.setStatusMessage(.err, "Error ({t}) evaluating '{s}'", .{ err, str });
                 return;
             };
@@ -1914,8 +1899,7 @@ pub const Command = enum {
                 const expr_str = command[off..];
 
                 var diagnostics: Parser.Diagnostics = .{};
-                const expr = Ast.parseFromExpressionDiag(
-                    zc.currentSheet(),
+                const expr = zc.currentSheet().parseFromExpressionDiag(
                     expr_str,
                     &diagnostics,
                 ) catch |err| switch (err) {
@@ -2502,8 +2486,8 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
         .expect => {
             const sheet = zc.currentSheet();
             const src = iter.string[iter.index..];
-            const expr = try Ast.parseFromExpression(sheet, src);
-            const res = try sheet.ast.evaluate(expr.root, sheet, src, sheet);
+            const expr = try sheet.parseFromExpression(src);
+            const res = try sheet.ast.evaluate(expr.root, sheet, sheet);
             defer if (res == .string and res.string == .slice) sheet.gpa.free(res.string.slice);
 
             if (!res.boolean(sheet)) {
@@ -2551,7 +2535,7 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
 
             const sheet = zc.currentSheet();
             const cell = sheet.getCell(pos) orelse return error.CellNotFound;
-            const expected_expr = (try Ast.parseFromExpression(sheet, rest)).root;
+            const expected_expr = (try sheet.parseFromExpression(rest)).root;
             const actual_expr = cell.expr_root;
 
             const expected_nodes = sheet.exprSlice(expected_expr);
@@ -3825,9 +3809,10 @@ fn testFile(gpa: std.mem.Allocator, path: []const u8) !void {
 }
 
 test "Sheet operations" {
+    var wr = std.fs.File.stderr().writer(&.{});
     for (build.test_files) |path| {
-        std.debug.print("Testing file {s}...", .{path});
+        wr.interface.print("run \x1b[34m{s}\x1b[0m: ", .{path}) catch {};
         try testFile(std.testing.allocator, path);
-        std.debug.print(" Done\n", .{});
+        wr.interface.print("\x1b[32msuccess\x1b[0m\n", .{}) catch {};
     }
 }

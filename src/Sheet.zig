@@ -14,7 +14,7 @@ const Rect = Position.Rect;
 
 const Ast = @import("Ast.zig");
 const Parser = @import("Parser.zig");
-const NodeSlice = Ast.NodeSlice;
+const NodeList = Ast.NodeList;
 const FlatListPool = @import("flat_list_pool.zig").FlatListPool;
 const PhTree = @import("phtree.zig").PhTree;
 
@@ -159,7 +159,7 @@ pub const Cell = extern struct {
     is_volatile: bool,
 
     /// Abstract syntax tree representing the expression in the cell.
-    expr_root: Ast.Index = .invalid,
+    expr_root: Ast.Node.Index = .invalid,
 
     pub const Handle = CellTree.Entry.Handle;
 
@@ -271,11 +271,11 @@ pub const Undo = extern struct {
             len: u32,
         },
         update_range: extern struct {
-            ast_node: Ast.Index,
+            ast_node: Ast.Node.Index,
             range: Rect,
         },
         update_pos: extern struct {
-            ast_node: Ast.Index,
+            ast_node: Ast.Node.Index,
             pos: Position,
             tag: Ast.Node.Tag,
         },
@@ -360,7 +360,7 @@ pub fn deinit(sheet: *Sheet) void {
     sheet.arena.deinit();
 }
 
-pub fn exprSlice(sheet: *const Sheet, root: Ast.Index) NodeSlice {
+pub fn exprSlice(sheet: *const Sheet, root: Ast.Node.Index) NodeList {
     return sheet.ast.exprSlice(root);
 }
 
@@ -562,11 +562,11 @@ const Tokenizer = @import("Tokenizer.zig");
 const CsvAssignment = struct {
     pos: Position,
     f: f64,
-    root: Ast.Index,
+    root: Ast.Node.Index,
 };
 
 const Assignment = struct {
-    root: Ast.Index,
+    root: Ast.Node.Index,
     is_volatile: bool,
     pos: Position,
 };
@@ -601,7 +601,7 @@ fn bulkParse(
     tokens: *std.MultiArrayList(Tokenizer.Token),
     cells_allocator: std.mem.Allocator,
     assignments: *std.ArrayListUnmanaged(Assignment),
-) !usize {
+) !void {
     const line_count = blk: {
         var line_count: u32 = 1;
         for (src) |c| {
@@ -626,43 +626,41 @@ fn bulkParse(
     const token_tags = tokens.items(.tag);
     const token_starts = tokens.items(.start);
 
-    // Parse each line
-    var lines = std.mem.tokenizeScalar(u8, src, '\n');
-    var token_index: u32 = 0;
-    var total_strings_len: usize = 0;
-    while (lines.next()) |_| {
-        const parser = Parser.initTokens(
-            sheet,
-            src,
-            token_tags[token_index..],
-            token_starts[token_index..],
-        ) catch |err| switch (err) {
+    var p: Parser = try .init(sheet.gpa, src, token_tags, token_starts, &sheet.ast, .{});
+    while (true) {
+        const last_state = sheet.ast.save();
+        const res = p.nextStatement() catch |err| switch (err) {
             error.UnexpectedToken,
             error.InvalidCellAddress,
             error.InvalidBuiltin,
             => {
                 @branchHint(.unlikely);
+                p.tok_i += 1;
                 continue;
             },
-            error.OutOfMemory => {
+            error.OutOfMemory => |e| {
                 @branchHint(.cold);
-                return error.OutOfMemory;
+                return e;
             },
-        };
-        token_index += parser.tok_i;
-        const expr_root, const pos = sheet.ast.spliceLast();
+        } orelse break;
 
-        total_strings_len += parser.strings_len;
+        // Non assignments are ignored
+        if (res.destination == null) {
+            sheet.ast.restore(last_state);
+            continue;
+        }
+
+        const expr_root, const pos = sheet.ast.spliceLast();
 
         assignments.appendAssumeCapacity(.{
             .pos = pos,
             .root = expr_root,
-            .is_volatile = parser.is_volatile,
+            .is_volatile = res.is_volatile,
         });
     }
     if (assignments.items.len == 0) {
         @branchHint(.unlikely);
-        return 0;
+        return;
     }
 
     std.mem.sortUnstable(
@@ -677,8 +675,6 @@ fn bulkParse(
         AssignmentsContext{},
     );
     assignments.items.len = new_len;
-
-    return total_strings_len;
 }
 
 fn resetArena(sheet: *Sheet) void {
@@ -708,8 +704,8 @@ pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
 
         assignments.clearRetainingCapacity();
         tokens.clearRetainingCapacity();
-        const ast_nodes_start: Ast.Index = @enumFromInt(sheet.ast.nodes.len());
-        const total_strings_len = try sheet.bulkParse(src, arena, &tokens, arena, &assignments);
+        const ast_nodes_start: Ast.Node.Index = @enumFromInt(sheet.ast.nodes.len());
+        try sheet.bulkParse(src, arena, &tokens, arena, &assignments);
         if (assignments.items.len == 0) continue;
 
         const dependent_count = blk: {
@@ -740,7 +736,6 @@ pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
         try sheet.deps.ensureUnusedCapacity(sheet.gpa, dependent_count);
         try sheet.undos.ensureUnusedCapacity(sheet.gpa, 2); // + 1 for sentinel
 
-        try sheet.ensureUnusedStringsCapacity(total_strings_len);
         try sheet.ensureUnusedColumnCapacity(col_count);
         try sheet.ensureUnusedCellQueueCapacity(1);
         var total_volatile: usize = 0;
@@ -749,8 +744,6 @@ pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
         }
         try sheet.volatile_cells.ensureUnusedCapacity(sheet.gpa, total_volatile);
         errdefer comptime unreachable;
-
-        sheet.ast.dupeStrings(src, ast_nodes_start, @enumFromInt(sheet.ast.nodes.len()));
 
         const new_cells = sheet.cell_tree.addMany(assignments.items.len);
 
@@ -824,9 +817,6 @@ pub fn loadCsv(sheet: *Sheet, r: *std.io.Reader) !void {
         const src = bytes[0..end];
         r.toss(@min(end + 1, bytes.len));
 
-        const ast_nodes_start = sheet.ast.nodes.len();
-
-        var total_strings_len: usize = 0;
         assignments.clearRetainingCapacity();
         var lines = std.mem.splitScalar(u8, src, '\n');
         var prev_col = col;
@@ -844,15 +834,18 @@ pub fn loadCsv(sheet: *Sheet, r: *std.io.Reader) !void {
                 if (std.fmt.parseFloat(f64, field)) |f| {
                     ass.f = f;
                 } else |_| {
+                    // TODO: Don't make these into ASTs, just set the Cell's value.
                     try sheet.ast.nodes.ensureUnusedCapacity(sheet.gpa, 2);
+                    try sheet.ast.strings.ensureUnusedCapacity(sheet.gpa, field.len);
+                    const string_start = sheet.ast.strings.items.len;
+                    sheet.ast.strings.appendSliceAssumeCapacity(field);
                     const asts = sheet.ast.nodes.appendManyAssumeCapacity(2);
-                    const root = asts.index(0);
                     asts.seti(0, .{
                         .tag = .string_literal,
                         .data = .{
                             .string_literal = .{
-                                .start = @intCast(j),
-                                .end = @intCast(j + field.len),
+                                .start = @intCast(string_start),
+                                .end = @intCast(string_start + field.len),
                             },
                         },
                     });
@@ -860,8 +853,7 @@ pub fn loadCsv(sheet: *Sheet, r: *std.io.Reader) !void {
                         .tag = .end,
                         .data = .{ .end = 1 },
                     });
-                    total_strings_len += @intCast(field.len);
-                    ass.root = root;
+                    ass.root = asts.index(0);
                 }
                 try assignments.append(arena, ass);
             }
@@ -894,16 +886,7 @@ pub fn loadCsv(sheet: *Sheet, r: *std.io.Reader) !void {
         try sheet.ensureUnusedCellCapacity(assignments.items.len);
         try sheet.ensureUnusedColumnCapacity(col_count);
         try sheet.ensureUnusedUndoCapacity(2);
-        try sheet.ensureUnusedStringsCapacity(total_strings_len);
         try sheet.ensureUnusedCellQueueCapacity(1);
-
-        if (ast_nodes_start < sheet.ast.nodes.len())
-            // Dupe strings if we added any
-            sheet.ast.dupeStrings(
-                src,
-                @enumFromInt(ast_nodes_start),
-                @enumFromInt(sheet.ast.nodes.len()),
-            );
 
         const new_cells = sheet.cell_tree.addMany(assignments.items.len);
 
@@ -1041,7 +1024,7 @@ pub fn formatCell(sheet: *const Sheet, cell: *const Cell, w: *std.io.Writer) !vo
 fn addCellAsDependentOfExprRanges(
     sheet: *Sheet,
     dependent: Cell.Handle,
-    expr_root: Ast.Index,
+    expr_root: Ast.Node.Index,
 ) void {
     if (expr_root == .invalid) return;
     var ctx: AddDependenciesContext = .{
@@ -1122,7 +1105,7 @@ const RemoveDependenciesContext = struct {
     }
 };
 
-fn ensureExpressionDependentsCapacity(sheet: *Sheet, root: Ast.Index) Allocator.Error!void {
+fn ensureExpressionDependentsCapacity(sheet: *Sheet, root: Ast.Node.Index) Allocator.Error!void {
     const dependent_count = sheet.ast.countDependencies(root);
     try sheet.dependents.ensureUnusedCapacity(sheet.gpa, dependent_count);
     try sheet.deps.ensureUnusedCapacity(sheet.gpa, dependent_count);
@@ -1131,7 +1114,7 @@ fn ensureExpressionDependentsCapacity(sheet: *Sheet, root: Ast.Index) Allocator.
 fn removeCellAsDependentOfExpr(
     sheet: *Sheet,
     dependent: Cell.Handle,
-    expr_root: Ast.Index,
+    expr_root: Ast.Node.Index,
     comptime destroy: bool,
 ) void {
     const ctx: RemoveDependenciesContext = .{
@@ -1541,7 +1524,7 @@ fn getUndoCellsSlice(sheet: *Sheet, index: usize) []Cell.Handle {
 
 fn updatePos(
     sheet: *Sheet,
-    index: Ast.Index,
+    index: Ast.Node.Index,
     new_pos: Position,
     new_tag: Ast.Node.Tag,
 ) !void {
@@ -1557,7 +1540,7 @@ fn updatePos(
     sheet.ast.nodes.ptr(index, .tag).* = new_tag;
 }
 
-fn updateRange(sheet: *Sheet, index: Ast.Index, new_range: Rect) !void {
+fn updateRange(sheet: *Sheet, index: Ast.Node.Index, new_range: Rect) !void {
     const tag = sheet.ast.tag(index);
     assert(tag == .range or tag == .invalidated_range);
     try sheet.ensureUnusedUndoCapacity(1);
@@ -1768,20 +1751,8 @@ pub fn needsUpdate(sheet: *const Sheet) bool {
     return sheet.needs_update or sheet.queued_cells.items.len > 0;
 }
 
-fn dupeExprStrings(sheet: *Sheet, expr: Parser.Result) void {
-    sheet.ast.dupeStrings(
-        expr.source,
-        sheet.ast.leftMostChild(expr.root),
-        expr.root.addi(1),
-    );
-}
-
 fn ensureUnusedCellCapacity(sheet: *Sheet, n: usize) !void {
     try sheet.cell_tree.ensureUnusedCapacity(sheet.gpa, n);
-}
-
-fn ensureUnusedStringsCapacity(sheet: *Sheet, n: usize) !void {
-    try sheet.ast.strings.ensureUnusedCapacity(sheet.gpa, n);
 }
 
 fn ensureUnusedCellQueueCapacity(sheet: *Sheet, n: usize) !void {
@@ -1944,7 +1915,6 @@ pub fn insertCellRange(
         return error.OutOfMemory;
     };
     try sheet.ensureUnusedCellCapacity(area);
-    try sheet.ensureUnusedStringsCapacity(expr.source.len);
     if (need_cell_eval)
         try sheet.ensureUnusedCellQueueCapacity(1);
     if (expr.root != .invalid)
@@ -1962,9 +1932,6 @@ pub fn insertCellRange(
     sheet.needs_update = true;
 
     _ = sheet.deleteCellRangeAssumeCapacity(range, opts.undo_opts);
-
-    if (expr.root != .invalid)
-        sheet.dupeExprStrings(expr);
 
     const new_cells = sheet.cell_tree.addMany(area);
     if (expr.is_volatile)
@@ -2054,7 +2021,6 @@ pub fn setCell(
     undo_opts: UndoOpts,
 ) Allocator.Error!void {
     try sheet.ensureUnusedCellCapacity(1);
-    try sheet.ensureUnusedStringsCapacity(expr.source.len);
     try sheet.ensureUnusedCellQueueCapacity(1);
     try sheet.ensureExpressionDependentsCapacity(expr.root);
     try sheet.ensureUnusedUndoCapacity(1);
@@ -2063,8 +2029,6 @@ pub fn setCell(
         std.log.debug("Set {f} to volatile expression", .{pos});
     }
     errdefer comptime unreachable;
-
-    sheet.dupeExprStrings(expr);
 
     const cell = sheet.cell_tree.createValueAssumeCapacity(&pos.array(), .{
         .expr_root = expr.root,
@@ -2852,12 +2816,7 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) Ast.EvalError!Ast.Ev
             // dependents.
             try sheet.queueDependents(sheet.rectFromCellHandle(handle));
 
-            const res = sheet.ast.evaluate(
-                cell.expr_root,
-                sheet,
-                sheet.ast.strings.items,
-                sheet,
-            ) catch |err| {
+            const res = sheet.ast.evaluate(cell.expr_root, sheet, sheet) catch |err| {
                 cell.setValue(.err, Cell.Error.fromError(err));
                 return err;
             };
@@ -3219,7 +3178,7 @@ fn createCellCopiesContiguous(
                 }
             }
 
-            const expr_root: Ast.Index = switch (adjust) {
+            const expr_root: Ast.Node.Index = switch (adjust) {
                 .adjust => @enumFromInt(sheet.ast.nodes.len() - 2),
                 .no_adjust => src_cell.expr_root,
             };
@@ -3240,6 +3199,21 @@ fn createCellCopiesContiguous(
     return slice;
 }
 
+pub fn parseFromExpression(
+    sheet: *Sheet,
+    src: []const u8,
+) !Parser.Result {
+    return sheet.ast.parseFromExpression(sheet.gpa, src, .{});
+}
+
+pub fn parseFromExpressionDiag(
+    sheet: *Sheet,
+    src: []const u8,
+    diagnostics: ?*Parser.Diagnostics,
+) !Parser.Result {
+    return sheet.ast.parseFromExpression(sheet.gpa, src, .{ .diagnostics = diagnostics });
+}
+
 test "Sheet basics" {
     const t = std.testing;
 
@@ -3249,7 +3223,7 @@ test "Sheet basics" {
     const exprs: []const []const u8 = &.{ "50 + 5", "500 * 2 / 34 + 1", "a0", "a2 * a1" };
 
     for (exprs, 0..) |src, i| {
-        const expr = try Ast.parseFromExpression(&sheet, src);
+        const expr = try sheet.parseFromExpression(src);
         try sheet.setCell(.{ .x = 0, .y = @intCast(i) }, expr, .{});
     }
 
@@ -3265,13 +3239,13 @@ test "setCell allocations" {
 
             {
                 const src = "a4 * a1 * a3";
-                const expr = try Ast.parseFromExpression(&sheet, src);
+                const expr = try sheet.parseFromExpression(src);
                 try sheet.setCell(.{ .x = 0, .y = 0 }, expr, .{});
             }
 
             {
                 const src = "a2 * a1 * a3";
-                const expr = try Ast.parseFromExpression(&sheet, src);
+                const expr = try sheet.parseFromExpression(src);
                 try sheet.setCell(.{ .x = 1, .y = 0 }, expr, .{});
             }
 
@@ -3291,7 +3265,7 @@ test "Update values" {
 
     try sheet.setCell(
         try Position.fromAddress("C0"),
-        try Ast.parseFromExpression(&sheet, "@sum(A0:B0)"),
+        try sheet.parseFromExpression("@sum(A0:B0)"),
         .{},
     );
 
@@ -3299,12 +3273,12 @@ test "Update values" {
         const str = std.fmt.comptimePrint("{d}", .{i});
         try sheet.setCell(
             try Position.fromAddress("A0"),
-            try Ast.parseFromExpression(&sheet, str),
+            try sheet.parseFromExpression(str),
             .{},
         );
         try sheet.setCell(
             try Position.fromAddress("B0"),
-            try Ast.parseFromExpression(&sheet, "A0"),
+            try sheet.parseFromExpression("A0"),
             .{},
         );
         try sheet.update();
@@ -3930,7 +3904,7 @@ test "Cell error propagation" {
 
     try sheet.setCell(
         .fromValidAddress("A0"),
-        try Ast.parseFromExpression(&sheet, "10"),
+        try sheet.parseFromExpression("10"),
         .{},
     );
 
@@ -3939,7 +3913,7 @@ test "Cell error propagation" {
 
     try sheet.setCell(
         .fromValidAddress("B0"),
-        try Ast.parseFromExpression(&sheet, "A0"),
+        try sheet.parseFromExpression("A0"),
         .{},
     );
 
@@ -3948,7 +3922,7 @@ test "Cell error propagation" {
 
     try sheet.setCell(
         .fromValidAddress("A0"),
-        try Ast.parseFromExpression(&sheet, "A0"),
+        try sheet.parseFromExpression("A0"),
         .{},
     );
 
@@ -3969,7 +3943,7 @@ test "Overwrite with string" {
         const address, const source = data;
         try sheet.setCell(
             .fromValidAddress(address),
-            try Ast.parseFromExpression(&sheet, source),
+            try sheet.parseFromExpression(source),
             .{},
         );
 
@@ -3996,7 +3970,7 @@ test "Overwrite with reference" {
         const address, const source = data;
         try sheet.setCell(
             .fromValidAddress(address),
-            try Ast.parseFromExpression(&sheet, source),
+            try sheet.parseFromExpression(source),
             .{},
         );
 
@@ -4005,11 +3979,11 @@ test "Overwrite with reference" {
 }
 
 fn testSetCell(sheet: *Sheet, address: []const u8, src: []const u8) !void {
-    try sheet.setCell(.fromValidAddress(address), try Ast.parseFromExpression(sheet, src), .{});
+    try sheet.setCell(.fromValidAddress(address), try sheet.parseFromExpression(src), .{});
 }
 
 fn testSetCellPos(sheet: *Sheet, pos: Position, expr: []const u8) !void {
-    try sheet.setCell(pos, expr, try Ast.parseFromExpression(sheet, expr), .{});
+    try sheet.setCell(pos, expr, try Parser.parseFromExpression(sheet, expr), .{});
 }
 
 test "Dependencies" {
@@ -4048,7 +4022,7 @@ test "insert column overflow" {
 
     try sheet.setCell(
         .init(std.math.maxInt(u32) - 1, 0),
-        try Ast.parseFromExpression(&sheet, "5"),
+        try sheet.parseFromExpression("5"),
         .{},
     );
     const res = sheet.insertColumns(0, 2, .{});
@@ -4059,7 +4033,7 @@ test "insert row overflow" {
     var sheet = try init(std.testing.allocator);
     defer sheet.deinit();
 
-    try sheet.setCell(.init(0, std.math.maxInt(u32) - 1), try Ast.parseFromExpression(&sheet, "5"), .{});
+    try sheet.setCell(.init(0, std.math.maxInt(u32) - 1), try sheet.parseFromExpression("5"), .{});
     try sheet.insertRows(0, 1, .{});
     try std.testing.expectError(error.Overflow, sheet.insertRows(0, 1, .{}));
 }
@@ -4207,6 +4181,28 @@ test "read source with duplicate entries" {
 
     try sheet.expectCellEquals("A0", 20);
     try sheet.expectCellEquals("B0", 5);
+}
+
+test "read source with invalid statements" {
+    const src =
+        \\1
+        \\2
+        \\1 + 2
+        \\a0
+        \\a0 * 2
+        \\a0 = 10
+        \\ungabunga
+        \\a
+        \\le a0 = 10
+    ;
+
+    var sheet = try init(std.testing.allocator);
+    defer sheet.deinit();
+
+    var r: std.io.Reader = .fixed(src);
+    try sheet.interpretSource(&r);
+
+    try sheet.update();
 }
 
 test "save csv" {

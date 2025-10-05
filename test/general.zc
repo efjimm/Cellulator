@@ -150,3 +150,10 @@ let C5 = @sum(A5:B5)
 :expect-eql-number A5 5
 :expect-eql-number B5 10
 :expect-eql-number C5 15
+
+-- Non assignments should be ignored
+
+1
+a0
+a0 * 2
+5 * (3 + 1)
