@@ -541,6 +541,7 @@ pub fn setMode(zc: *ZC, new_mode: Mode) void {
     zc.prev_mode = zc.mode;
     zc.anchor = zc.cursor;
     zc.mode = new_mode;
+    zc.resetCount();
 
     if (new_mode.isCommandMode()) {
         zc.clampCommandCursor();

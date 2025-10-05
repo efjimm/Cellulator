@@ -5,7 +5,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
 # TODO
 
 - Opening a new buffer while the current buffer is empty with no undos should replace the empty buffer
-- Pressing escape doesn't reset count in command mode
 
 - Cellulator as an interpreter
   - Treat each line as a command
