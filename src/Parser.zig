@@ -46,8 +46,8 @@ pub const Result = struct {
     is_volatile: bool,
     destination: ?Position,
 
-    pub const invalid: Result = .{
-        .root = .invalid,
+    pub const none: Result = .{
+        .root = .none,
         .is_volatile = false,
         .destination = null,
     };

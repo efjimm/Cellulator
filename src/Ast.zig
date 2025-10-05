@@ -658,7 +658,7 @@ pub fn print(
     root: Node.Index,
     writer: *std.io.Writer,
 ) std.io.Writer.Error!void {
-    if (root == .invalid) return;
+    if (root == .none) return;
     return ast.printFromIndex(root, writer, ast.strings.items);
 }
 
@@ -748,7 +748,7 @@ pub const Value = union(enum) {
 
     pub const Range = struct {
         rect: Rect,
-        map: Node.Index = .invalid,
+        map: Node.Index = .none,
 
         pub fn format(r: Range, w: *std.io.Writer) !void {
             try r.rect.format(w);
@@ -1441,7 +1441,7 @@ pub fn traverseDependencies(
     ctx: anytype,
     func: fn (@TypeOf(ctx), Rect) void,
 ) void {
-    if (root == .invalid) return;
+    if (root == .none) return;
 
     var traverse: TraverseDependencies(@TypeOf(ctx), func) = .{
         .ast = ast.*,

@@ -17,7 +17,7 @@ pub fn MultiList(T: type, I: type) type {
         };
 
         pub const Index = enum(I) {
-            invalid = std.math.maxInt(I),
+            none = std.math.maxInt(I),
             _,
 
             pub fn addi(ind: Index, n: I) Index {

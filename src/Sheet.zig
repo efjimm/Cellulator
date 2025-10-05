@@ -159,7 +159,7 @@ pub const Cell = extern struct {
     is_volatile: bool,
 
     /// Abstract syntax tree representing the expression in the cell.
-    expr_root: Ast.Node.Index = .invalid,
+    expr_root: Ast.Node.Index = .none,
 
     pub const Handle = CellTree.Entry.Handle;
 
@@ -763,7 +763,7 @@ pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
             const pos = assignment.pos;
 
             new_cells.set(i, .{
-                .parent = .invalid,
+                .parent = .none,
                 .point = pos.array(),
                 .value = .{
                     .expr_root = assignment.root,
@@ -830,7 +830,7 @@ pub fn loadCsv(sheet: *Sheet, r: *std.io.Reader) !void {
                 if (field.len == 0) continue;
 
                 const pos: Position = .init(col, row);
-                var ass: CsvAssignment = .{ .pos = pos, .f = 0, .root = .invalid };
+                var ass: CsvAssignment = .{ .pos = pos, .f = 0, .root = .none };
                 if (std.fmt.parseFloat(f64, field)) |f| {
                     ass.f = f;
                 } else |_| {
@@ -894,11 +894,11 @@ pub fn loadCsv(sheet: *Sheet, r: *std.io.Reader) !void {
             const pos = assignment.pos;
 
             new_cells.set(i, .{
-                .parent = .invalid,
+                .parent = .none,
                 .point = pos.array(),
                 .value = .{
                     .expr_root = assignment.root,
-                    .state = if (assignment.root == .invalid) .up_to_date else .enqueued,
+                    .state = if (assignment.root == .none) .up_to_date else .enqueued,
                     .value = .{ .number = assignment.f },
                     .value_tag = .number,
                     .is_volatile = false,
@@ -1026,7 +1026,7 @@ fn addCellAsDependentOfExprRanges(
     dependent: Cell.Handle,
     expr_root: Ast.Node.Index,
 ) void {
-    if (expr_root == .invalid) return;
+    if (expr_root == .none) return;
     var ctx: AddDependenciesContext = .{
         .sheet = sheet,
         .dependent = dependent,
@@ -1420,7 +1420,7 @@ pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
         .update_dep => {
             const handle = u.payload.update_dep.handle;
             const new_point = u.payload.update_dep.point;
-            assert(handle != .invalid);
+            assert(handle != .none);
 
             const p = sheet.dependents.getPoint(handle);
 
@@ -1513,7 +1513,7 @@ fn bulkInsertCellHandlesContiguous(sheet: *Sheet, start: Cell.Handle.Int, end: C
 
 fn getUndoCellsSlice(sheet: *Sheet, index: usize) []Cell.Handle {
     for (sheet.cell_buffer.items[index..], index..) |handle, i| {
-        if (handle == .invalid) {
+        if (handle == .none) {
             assert(i > index);
             return sheet.cell_buffer.items[index..i];
         }
@@ -1792,7 +1792,7 @@ fn deleteCellRangeAssumeCapacity(sheet: *Sheet, range: Rect, opts: UndoOpts) u32
             return std.math.maxInt(u32);
         }
 
-        buf.appendAssumeCapacity(.invalid);
+        buf.appendAssumeCapacity(.none);
         break :blk .{ buf.items[start .. buf.items.len - 1], @intCast(start) };
     };
 
@@ -1848,7 +1848,7 @@ pub fn insertIncrementingCellRange(
             .value = .{ .number = start + incr * f },
             .value_tag = .number,
             .state = .up_to_date,
-            .expr_root = .invalid,
+            .expr_root = .none,
             .is_volatile = false,
         };
     }
@@ -1917,7 +1917,7 @@ pub fn insertCellRange(
     try sheet.ensureUnusedCellCapacity(area);
     if (need_cell_eval)
         try sheet.ensureUnusedCellQueueCapacity(1);
-    if (expr.root != .invalid)
+    if (expr.root != .none)
         try sheet.ensureExpressionDependentsCapacity(expr.root);
     try sheet.ensureUnusedColumnCapacity(width);
     try sheet.ensureUnusedUndoCapacity(2);
@@ -1984,7 +1984,7 @@ pub fn insertCellRange(
     };
     // All created cells share the same cell value
     @memset(new_cells.values(), cell);
-    @memset(new_cells.parents(), .invalid);
+    @memset(new_cells.parents(), .none);
 
     // TODO: These inserts get slow when we start inserting millions of cells at once.
     //       Each insert does a separate lookup. We should find some way to exploit the internal
@@ -2054,7 +2054,7 @@ fn insertCellNode(
     const old_handle = sheet.cell_tree.insertAssumeCapacity(&point, handle);
 
     var u: Undo = undefined;
-    if (old_handle == .invalid) {
+    if (old_handle == .none) {
         log.debug("Creating cell {f}", .{pos});
         sheet.addCellAsDependentOfExprRanges(handle, cell_ptr.expr_root);
 
@@ -2102,7 +2102,7 @@ pub fn deleteCell(
 ) Allocator.Error!void {
     const handle = sheet.cell_tree.findEntry(&pos.array());
 
-    if (handle != .invalid)
+    if (handle != .none)
         return sheet.deleteCellByHandle(handle, undo_opts);
 }
 
@@ -2130,7 +2130,7 @@ pub fn getCellPtr(sheet: *Sheet, pos: Position) ?*Cell {
 
 pub fn getCellHandleByPos(sheet: *Sheet, pos: Position) ?Cell.Handle {
     const handle = sheet.cell_tree.findEntry(&pos.array());
-    if (handle != .invalid) return handle;
+    if (handle != .none) return handle;
     return null;
 }
 
@@ -2434,7 +2434,7 @@ pub fn insertColsOrRows(
 
     // Check if columns would overflow
     const largest = sheet.cell_tree.largestDim(dim);
-    if (largest != .invalid) {
+    if (largest != .none) {
         const p = sheet.cell_tree.getPoint(largest).*[dim];
         if (std.math.maxInt(u32) - p < n)
             return error.Overflow;
@@ -2765,7 +2765,7 @@ pub fn freeCellString(sheet: *Sheet, cell: *Cell) void {
 }
 
 pub fn setCellError(sheet: *Sheet, cell: *Cell) void {
-    if (cell.expr_root == .invalid) return;
+    if (cell.expr_root == .none) return;
     if (cell.value_tag == .string)
         sheet.string_values.destroyList(cell.value.string);
 
@@ -2804,7 +2804,7 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) Ast.EvalError!Ast.Va
         .up_to_date => {},
         .computing => return error.CyclicalReference,
         .enqueued, .dirty, .@"volatile" => {
-            if (cell.expr_root == .invalid) {
+            if (cell.expr_root == .none) {
                 cell.state = .up_to_date;
                 break :sw;
             }
@@ -2876,7 +2876,7 @@ pub fn evalCellByPos(sheet: *Sheet, pos: Position) Ast.EvalError!Ast.Value {
 
 pub fn printCellExpression(sheet: *Sheet, pos: Position, w: *std.io.Writer) !void {
     const cell = sheet.getCellPtr(pos) orelse return;
-    if (cell.expr_root == .invalid) {
+    if (cell.expr_root == .none) {
         try sheet.formatCell(cell, w);
         return;
     }
@@ -2929,16 +2929,16 @@ pub fn getColumn(sheet: *Sheet, index: PosInt) ?Column {
 }
 
 pub inline fn getColumnByHandleOrDefault(sheet: *Sheet, handle: Column.Handle) Column {
-    return if (handle != .invalid) sheet.cols.getValue(handle).* else .{};
+    return if (handle != .none) sheet.cols.getValue(handle).* else .{};
 }
 
 pub inline fn getTextAttrs(sheet: *Sheet, handle: TextAttrs.Handle) TextAttrs {
-    return if (handle != .invalid) sheet.text_attrs.getValue(handle).* else .default;
+    return if (handle != .none) sheet.text_attrs.getValue(handle).* else .default;
 }
 
 pub fn getColumnHandle(sheet: *Sheet, index: PosInt) ?Column.Handle {
     const handle = sheet.cols.findEntry(&.{index});
-    return if (handle != .invalid) handle else null;
+    return if (handle != .none) handle else null;
 }
 
 fn roundUp(a: anytype, multiple: anytype) @TypeOf(a) {
@@ -2979,7 +2979,7 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Rect, comptime adjust: Adjust
     var total_deps: usize = 0;
     for (cells.items) |cell| { // TODO: This kinda sucks
         const root = sheet.getCellFromHandle(cell).expr_root;
-        if (root == .invalid) {
+        if (root == .none) {
             continue;
         }
 
@@ -3054,7 +3054,7 @@ fn createCellCopiesContiguous(
         const new_y: u32 = @intCast(diffed_y);
 
         const src_cell = sheet.getCellFromHandle(src_handle).*;
-        if (src_cell.expr_root == .invalid) {
+        if (src_cell.expr_root == .none) {
             var i: u64 = 0;
             while (i < tile_x * tile_y) : (i += 1) {
                 const x: u32 = @intCast(i % tile_x);
@@ -3091,7 +3091,7 @@ fn createCellCopiesContiguous(
 
                 slice.append(.{
                     .point = .{ @intCast(tiled_x), @intCast(tiled_y) },
-                    .parent = .invalid,
+                    .parent = .none,
                     .value = src_cell,
                 });
             }
@@ -3185,7 +3185,7 @@ fn createCellCopiesContiguous(
 
             slice.append(.{
                 .point = .{ @intCast(tiled_x), @intCast(tiled_y) },
-                .parent = .invalid,
+                .parent = .none,
                 .value = .{
                     .state = .enqueued,
                     .expr_root = expr_root,
@@ -4076,7 +4076,7 @@ test "undo delete column" {
     try sheet.update();
 
     const kv = sheet.dependents.findEntry(&.{ 0, 0, 0, 0 });
-    try std.testing.expect(kv != .invalid);
+    try std.testing.expect(kv != .none);
     const head = sheet.deps.items[kv.int()];
     try std.testing.expectEqualSlices(u32, &.{ 1, 0 }, sheet.cell_tree.getPoint(head.handle));
 

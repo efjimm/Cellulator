@@ -22,7 +22,7 @@ pub fn FlatListPool(comptime T: type) type {
             pub const Index = packed struct {
                 n: u32,
 
-                pub const invalid: Index = .{ .n = std.math.maxInt(u32) };
+                pub const none: Index = .{ .n = std.math.maxInt(u32) };
 
                 pub fn from(n: u32) Index {
                     assert(n != std.math.maxInt(u32));
@@ -30,7 +30,7 @@ pub fn FlatListPool(comptime T: type) type {
                 }
 
                 pub fn isValid(index: Index) bool {
-                    return index != invalid;
+                    return index != none;
                 }
             };
         };
@@ -40,7 +40,7 @@ pub fn FlatListPool(comptime T: type) type {
         pub const empty: Pool = .{
             .buf = .empty,
             .entries = .empty,
-            .free_entries_head = .invalid,
+            .free_entries_head = .none,
         };
 
         pub fn deinit(pool: *Pool, allocator: Allocator) void {
@@ -51,7 +51,7 @@ pub fn FlatListPool(comptime T: type) type {
         pub fn clearRetainingCapacity(pool: *Pool) void {
             pool.buf.clearRetainingCapacity();
             pool.entries.clearRetainingCapacity();
-            pool.free_entries_head = .invalid;
+            pool.free_entries_head = .none;
         }
 
         pub fn createList(pool: *Pool, allocator: Allocator) !List.Index {

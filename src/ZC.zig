@@ -1999,7 +1999,7 @@ pub const Command = enum {
 
     fn cmdFill(zc: *ZC, r: RangeOrPointArg, n: NumberArg("initial_number")) Oom!void {
         // No increment was provided, so all cells can share the same expression
-        try zc.currentSheet().insertCellRange(r.range, .invalid, .{
+        try zc.currentSheet().insertCellRange(r.range, .none, .{
             .value = .{ .number = n.value },
             .tag = .number,
         });
