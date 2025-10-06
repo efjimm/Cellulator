@@ -1913,7 +1913,7 @@ pub const Command = enum {
                     },
                     error.OutOfMemory => return error.OutOfMemory,
                 };
-                return .{ .expr = expr };
+                return .{ .expr = expr.toOptional() };
             },
             else => return try .init(zc, arg),
         }
@@ -2262,7 +2262,7 @@ pub const Command = enum {
     };
 
     const ExpressionArg = struct {
-        expr: Parser.Result,
+        expr: Parser.OptionalResult,
 
         const type_name = "expression";
     };
@@ -2537,7 +2537,7 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
             const sheet = zc.currentSheet();
             const cell = sheet.getCell(pos) orelse return error.CellNotFound;
             const expected_expr = (try sheet.parseFromExpression(rest)).root;
-            const actual_expr = cell.expr_root;
+            const actual_expr = cell.expr_root.unwrap().?;
 
             const expected_nodes = sheet.exprSlice(expected_expr);
             const actual_nodes = sheet.exprSlice(actual_expr);

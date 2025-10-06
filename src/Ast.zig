@@ -129,6 +129,7 @@ pub const Node = extern struct {
     tag: Tag,
     data: Payload,
 
+    pub const OptionalIndex = NodeList.OptionalIndex;
     pub const Index = NodeList.Index;
 
     pub const Payload = blk: {
@@ -624,11 +625,6 @@ pub fn argIteratorForwards(ast: *const Ast, start: Node.Index, end: Node.Index) 
     };
 }
 
-pub const FormatData = struct {
-    ast: *const Ast,
-    root: Node.Index,
-};
-
 pub fn exprLen(ast: *const Ast, root: Node.Index) usize {
     assert(ast.tag(root.addi(1)) == .end);
     return ast.payload(root.addi(1)).end;
@@ -653,12 +649,12 @@ pub fn exprSliceEnd(ast: *const Ast, root: Node.Index) NodeList {
     return ret;
 }
 
+// TODO: This should take a non-optional index
 pub fn print(
     ast: *const Ast,
     root: Node.Index,
     writer: *std.io.Writer,
 ) std.io.Writer.Error!void {
-    if (root == .none) return;
     return ast.printFromIndex(root, writer, ast.strings.items);
 }
 
@@ -748,7 +744,7 @@ pub const Value = union(enum) {
 
     pub const Range = struct {
         rect: Rect,
-        map: Node.Index = .none,
+        map: Node.OptionalIndex = .none,
 
         pub fn format(r: Range, w: *std.io.Writer) !void {
             try r.rect.format(w);
@@ -1132,27 +1128,6 @@ pub fn EvalContext(comptime Context: type) type {
             }
         }
 
-        /// Converts an ast range to a position range.
-        fn toPosRange(eval: *const @This(), lhs: Node.Index, rhs: Node.Index) Position.Rect {
-            switch (eval.tags[lhs.n]) {
-                .rel_rel, .abs_abs, .rel_abs, .abs_rel => {},
-                else => {
-                    std.debug.print("{}\n", .{eval.tags[lhs.n]});
-                    unreachable;
-                },
-            }
-
-            switch (eval.tags[rhs.n]) {
-                .rel_rel, .abs_abs, .rel_abs, .abs_rel => {},
-                else => {
-                    std.debug.print("{}\n", .{eval.tags[rhs.n]});
-                    unreachable;
-                },
-            }
-
-            return .initPos(eval.data[lhs.n].rel_rel, eval.data[rhs.n].rel_rel);
-        }
-
         fn evalUpper(eval: *@This()) ![]const u8 {
             const arg = try eval.pop(.any);
             const str = try eval.formatStringAlloc(arg);
@@ -1429,7 +1404,7 @@ const CountDependenciesContext = struct {
     }
 };
 
-pub fn countDependencies(ast: *const Ast, root: Node.Index) usize {
+pub fn countDependencies(ast: *const Ast, root: Node.OptionalIndex) usize {
     var ctx: CountDependenciesContext = .{};
     ast.traverseDependencies(root, &ctx, CountDependenciesContext.func);
     return ctx.total;
@@ -1437,17 +1412,17 @@ pub fn countDependencies(ast: *const Ast, root: Node.Index) usize {
 
 pub fn traverseDependencies(
     ast: *const Ast,
-    root: Node.Index,
+    root: Node.OptionalIndex,
     ctx: anytype,
     func: fn (@TypeOf(ctx), Rect) void,
 ) void {
-    if (root == .none) return;
+    const unwrapped = root.unwrap() orelse return;
 
     var traverse: TraverseDependencies(@TypeOf(ctx), func) = .{
         .ast = ast.*,
         .user_ctx = ctx,
     };
-    traverse.traverse(root, .value, .no_deref);
+    traverse.traverse(unwrapped, .value, .no_deref);
 }
 
 fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {

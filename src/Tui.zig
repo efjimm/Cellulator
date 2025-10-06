@@ -751,7 +751,8 @@ fn renderStatus(tui: *Tui, wr: *Screen.Writer) !void {
     if (sheet.getCell(zc.cursor)) |cell| {
         const buf = try arena.alloc(u8, 4096);
         var br: std.io.Writer = .fixed(buf);
-        sheet.ast.print(cell.expr_root, &br) catch {};
+        if (cell.expr_root.unwrap()) |unwrapped|
+            sheet.ast.print(unwrapped, &br) catch {};
 
         const bytes = br.buffered();
         var reader: std.io.Reader = .fixed(bytes);

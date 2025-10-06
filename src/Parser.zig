@@ -41,16 +41,30 @@ pub const StringSlice = extern struct {
     len: u64,
 };
 
+pub const OptionalResult = struct {
+    root: Node.OptionalIndex,
+    is_volatile: bool,
+    destination: ?Position,
+
+    pub const none: OptionalResult = .{
+        .root = .none,
+        .is_volatile = false,
+        .destination = null,
+    };
+};
+
 pub const Result = struct {
     root: Node.Index,
     is_volatile: bool,
     destination: ?Position,
 
-    pub const none: Result = .{
-        .root = .none,
-        .is_volatile = false,
-        .destination = null,
-    };
+    pub fn toOptional(res: Result) OptionalResult {
+        return .{
+            .root = res.root.toOptional(),
+            .is_volatile = res.is_volatile,
+            .destination = res.destination,
+        };
+    }
 };
 
 const Intermediate = struct { Index, Type };

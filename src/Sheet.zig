@@ -159,10 +159,9 @@ pub const Cell = extern struct {
     is_volatile: bool,
 
     /// Abstract syntax tree representing the expression in the cell.
-    expr_root: Ast.Node.Index = .none,
+    expr_root: Ast.Node.OptionalIndex = .none,
 
     pub const Handle = CellTree.Entry.Handle;
-
     pub const Slice = CellTree.Slice;
 
     // Non-extern unions get a hidden tag in safe builds which makes serialising them annoying.
@@ -562,7 +561,7 @@ const Tokenizer = @import("Tokenizer.zig");
 const CsvAssignment = struct {
     pos: Position,
     f: f64,
-    root: Ast.Node.Index,
+    root: Ast.Node.OptionalIndex,
 };
 
 const Assignment = struct {
@@ -704,7 +703,7 @@ pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
 
         assignments.clearRetainingCapacity();
         tokens.clearRetainingCapacity();
-        const ast_nodes_start: Ast.Node.Index = @enumFromInt(sheet.ast.nodes.len());
+        const ast_nodes_start = sheet.ast.lastIndex();
         try sheet.bulkParse(src, arena, &tokens, arena, &assignments);
         if (assignments.items.len == 0) continue;
 
@@ -712,7 +711,7 @@ pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
             var dependent_count: Cell.Handle.Int = 0;
             var iter: Ast.ExpressionIterator = .init(sheet.ast.nodes, ast_nodes_start);
             while (iter.prev()) |root| {
-                dependent_count += sheet.ast.countDependencies(root);
+                dependent_count += sheet.ast.countDependencies(root.toOptional());
             }
             break :blk dependent_count;
         };
@@ -766,7 +765,7 @@ pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
                 .parent = .none,
                 .point = pos.array(),
                 .value = .{
-                    .expr_root = assignment.root,
+                    .expr_root = assignment.root.toOptional(),
                     .state = .enqueued,
                     .is_volatile = assignment.is_volatile,
                 },
@@ -780,7 +779,7 @@ pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
                 sheet.volatile_cells.appendAssumeCapacity(.{ handle, 1 });
             }
             sheet.cell_tree.insertAssumeCapacityNoClobber(&pos.array(), handle);
-            sheet.addCellAsDependentOfExprRanges(handle, assignment.root);
+            sheet.addCellAsDependentOfExprRanges(handle, assignment.root.toOptional());
         }
     }
 }
@@ -853,7 +852,7 @@ pub fn loadCsv(sheet: *Sheet, r: *std.io.Reader) !void {
                         .tag = .end,
                         .data = .{ .end = 1 },
                     });
-                    ass.root = asts.index(0);
+                    ass.root = asts.index(0).toOptional();
                 }
                 try assignments.append(arena, ass);
             }
@@ -1024,7 +1023,7 @@ pub fn formatCell(sheet: *const Sheet, cell: *const Cell, w: *std.io.Writer) !vo
 fn addCellAsDependentOfExprRanges(
     sheet: *Sheet,
     dependent: Cell.Handle,
-    expr_root: Ast.Node.Index,
+    expr_root: Ast.Node.OptionalIndex,
 ) void {
     if (expr_root == .none) return;
     var ctx: AddDependenciesContext = .{
@@ -1106,7 +1105,7 @@ const RemoveDependenciesContext = struct {
 };
 
 fn ensureExpressionDependentsCapacity(sheet: *Sheet, root: Ast.Node.Index) Allocator.Error!void {
-    const dependent_count = sheet.ast.countDependencies(root);
+    const dependent_count = sheet.ast.countDependencies(root.toOptional());
     try sheet.dependents.ensureUnusedCapacity(sheet.gpa, dependent_count);
     try sheet.deps.ensureUnusedCapacity(sheet.gpa, dependent_count);
 }
@@ -1114,7 +1113,7 @@ fn ensureExpressionDependentsCapacity(sheet: *Sheet, root: Ast.Node.Index) Alloc
 fn removeCellAsDependentOfExpr(
     sheet: *Sheet,
     dependent: Cell.Handle,
-    expr_root: Ast.Node.Index,
+    expr_root: Ast.Node.OptionalIndex,
     comptime destroy: bool,
 ) void {
     const ctx: RemoveDependenciesContext = .{
@@ -1901,7 +1900,7 @@ pub const BulkSetCellOptions = struct {
 pub fn insertCellRange(
     sheet: *Sheet,
     range: Rect,
-    expr: Parser.Result,
+    expr: Parser.OptionalResult,
     opts: BulkSetCellOptions,
 ) !void {
     const need_cell_eval = opts.tag == .err;
@@ -1917,8 +1916,8 @@ pub fn insertCellRange(
     try sheet.ensureUnusedCellCapacity(area);
     if (need_cell_eval)
         try sheet.ensureUnusedCellQueueCapacity(1);
-    if (expr.root != .none)
-        try sheet.ensureExpressionDependentsCapacity(expr.root);
+    if (expr.root.unwrap()) |root|
+        try sheet.ensureExpressionDependentsCapacity(root);
     try sheet.ensureUnusedColumnCapacity(width);
     try sheet.ensureUnusedUndoCapacity(2);
     try sheet.ensureUnusedCellBufferCapacity(area + 1);
@@ -2031,7 +2030,7 @@ pub fn setCell(
     errdefer comptime unreachable;
 
     const cell = sheet.cell_tree.createValueAssumeCapacity(&pos.array(), .{
-        .expr_root = expr.root,
+        .expr_root = expr.root.toOptional(),
         .is_volatile = expr.is_volatile,
     });
     if (expr.is_volatile) {
@@ -2804,10 +2803,10 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) Ast.EvalError!Ast.Va
         .up_to_date => {},
         .computing => return error.CyclicalReference,
         .enqueued, .dirty, .@"volatile" => {
-            if (cell.expr_root == .none) {
+            const root = cell.expr_root.unwrap() orelse {
                 cell.state = .up_to_date;
                 break :sw;
-            }
+            };
             cell.state = .computing;
 
             const pos = sheet.posFromCellHandle(handle);
@@ -2816,7 +2815,7 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) Ast.EvalError!Ast.Va
             // dependents.
             try sheet.queueDependents(sheet.rectFromCellHandle(handle));
 
-            const res = sheet.ast.evaluate(cell.expr_root, sheet, sheet) catch |err| {
+            const res = sheet.ast.evaluate(root, sheet, sheet) catch |err| {
                 cell.setValue(.err, Cell.Error.fromError(err));
                 return err;
             };
@@ -2880,7 +2879,8 @@ pub fn printCellExpression(sheet: *Sheet, pos: Position, w: *std.io.Writer) !voi
         try sheet.formatCell(cell, w);
         return;
     }
-    try sheet.ast.print(cell.expr_root, w);
+    if (cell.expr_root.unwrap()) |root|
+        try sheet.ast.print(root, w);
 }
 
 const FmtData = struct {
@@ -2978,12 +2978,9 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Rect, comptime adjust: Adjust
     var total_asts_len: usize = 0;
     var total_deps: usize = 0;
     for (cells.items) |cell| { // TODO: This kinda sucks
-        const root = sheet.getCellFromHandle(cell).expr_root;
-        if (root == .none) {
-            continue;
-        }
+        const root = sheet.getCellFromHandle(cell).expr_root.unwrap() orelse continue;
 
-        const count = sheet.ast.countDependencies(root);
+        const count = sheet.ast.countDependencies(root.toOptional());
         const left = sheet.ast.leftMostChild(root);
         total_asts_len += @intFromEnum(root.sub(left)) + 2;
         total_deps += tile_count * count;
@@ -3099,7 +3096,8 @@ fn createCellCopiesContiguous(
             continue;
         }
 
-        const orig_asts = sheet.ast.exprSliceEnd(src_cell.expr_root);
+        // TODO: Handle none index
+        const orig_asts = sheet.ast.exprSliceEnd(src_cell.expr_root.unwrap().?);
 
         var i: u64 = 0;
         while (i < tile_x * tile_y) : (i += 1) {
@@ -3178,7 +3176,7 @@ fn createCellCopiesContiguous(
                 }
             }
 
-            const expr_root: Ast.Node.Index = switch (adjust) {
+            const expr_root: Ast.Node.OptionalIndex = switch (adjust) {
                 .adjust => @enumFromInt(sheet.ast.nodes.len() - 2),
                 .no_adjust => src_cell.expr_root,
             };

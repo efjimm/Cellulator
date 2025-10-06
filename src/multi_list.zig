@@ -17,27 +17,53 @@ pub fn MultiList(T: type, I: type) type {
         };
 
         pub const Index = enum(I) {
-            none = std.math.maxInt(I),
             _,
 
+            fn assertValid(i: Index) void {
+                assert(@intFromEnum(i) != @intFromEnum(OptionalIndex.none));
+            }
+
+            pub fn toOptional(i: Index) OptionalIndex {
+                const res: OptionalIndex = @enumFromInt(@intFromEnum(i));
+                assert(res != .none);
+                return res;
+            }
+
             pub fn addi(ind: Index, n: I) Index {
+                assertValid(ind);
                 return @enumFromInt(@intFromEnum(ind) + n);
             }
 
             pub fn subi(ind: Index, n: I) Index {
+                assertValid(ind);
                 return @enumFromInt(@intFromEnum(ind) - n);
             }
 
             pub fn add(a: Index, b: Index) Index {
+                assertValid(a);
+                assertValid(b);
                 return a.addi(@intFromEnum(b));
             }
 
             pub fn sub(a: Index, b: Index) Index {
+                assertValid(a);
+                assertValid(b);
                 return a.subi(@intFromEnum(b));
             }
 
             pub fn le(a: Index, b: Index) bool {
+                assertValid(a);
+                assertValid(b);
                 return @intFromEnum(a) <= @intFromEnum(b);
+            }
+        };
+
+        pub const OptionalIndex = enum(I) {
+            none = std.math.maxInt(I),
+            _,
+
+            pub fn unwrap(o: OptionalIndex) ?Index {
+                return if (o == .none) null else @enumFromInt(@intFromEnum(o));
             }
         };
 
