@@ -397,7 +397,55 @@ fn parseAssignment(p: *Parser) ParseError!Index {
 
 /// Expression <- OrExpr
 fn parseExpression(p: *Parser, ctx: ExpressionContext) ParseError!Intermediate {
-    return try p.parseOrExpr(ctx);
+    return try p.parsePipeExpr(ctx);
+}
+
+fn parsePipeExpr(p: *Parser, ctx: ExpressionContext) ParseError!Intermediate {
+    const start = p.ast.nodes.len();
+    var index, var result_type = try p.parseOrExpr(ctx);
+
+    while (p.eatToken(.pipe_to)) |_| {
+        const temp_tags = try p.gpa.dupe(Node.Tag, p.ast.tags()[start..]);
+        defer p.gpa.free(temp_tags);
+        const temp_data = try p.gpa.dupe(Node.Payload, p.ast.payloads()[start..]);
+        defer p.gpa.free(temp_data);
+
+        p.ast.nodes.shrinkRetainingCapacity(start);
+
+        index, result_type = try p.parseOrExpr(ctx);
+        var function_index: u48 = undefined;
+        if (p.ast.tag(index) != .function_call) {
+            index = try p.addNode(.init(.function_call, .{
+                .function_index = @intCast(1 + temp_tags.len),
+                .arg_count = 1,
+                .is_pipe = true,
+            }));
+            function_index = 1;
+        } else {
+            const call = p.ast.payload(index).function_call;
+            p.ast.payloadPtr(index).function_call.arg_count += 1;
+            p.ast.payloadPtr(index).function_call.function_index += @intCast(temp_tags.len);
+            p.ast.payloadPtr(index).function_call.is_pipe = true;
+            function_index = call.function_index;
+        }
+
+        const dest = try p.ast.nodes.insertMany(
+            p.gpa,
+            @intFromEnum(index) - (function_index - 1),
+            temp_tags.len,
+        );
+
+        for (temp_tags, temp_data, 0..) |tag, data, i| {
+            dest.seti(i, .{
+                .tag = tag,
+                .data = data,
+            });
+        }
+
+        index = index.addi(@intCast(temp_tags.len));
+    }
+
+    return .{ index, result_type };
 }
 
 /// OrExpr <- AndExpr ('or' AndExpr)*
@@ -636,6 +684,7 @@ fn parseSuffixExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
         }
 
         index = try p.addNode(.init(.function_call, .{
+            .is_pipe = false,
             .arg_count = arg_count,
             .function_index = @intCast(@intFromEnum(p.ast.lastIndex().sub(index))),
         }));
@@ -1191,7 +1240,7 @@ test "Node contents" {
             .init(.function_body_start, .{ .arg_count = 0, .body_length = 1, .capture_count = 0 }),
             .init(.number, 2.0),
             .init(.function_body_end, .{ .arg_count = 0, .body_length = 1, .capture_count = 0 }),
-            .init(.function_call, .{ .arg_count = 0, .function_index = 1 }),
+            .init(.function_call, .{ .is_pipe = false, .arg_count = 0, .function_index = 1 }),
             .init(.assignment, .fromValidAddress("a0")),
             .init(.end, .{ .length = 5 }),
         },
@@ -1254,6 +1303,28 @@ test "Node contents" {
             .init(.function_body_end, .{ .arg_count = 1, .body_length = 7, .capture_count = 0 }),
             .init(.assignment, .fromValidAddress("a0")),
             .init(.end, .{ .length = 11 }),
+        },
+    );
+
+    try testNodes(
+        "5 |> a0()",
+        &.{
+            .init(.rel_rel, .fromValidAddress("a0")),
+            .init(.number, 5),
+            .init(.function_call, .{ .is_pipe = true, .arg_count = 1, .function_index = 2 }),
+            .init(.end, .{ .length = 3 }),
+        },
+    );
+
+    try testNodes(
+        "3 |> a0(5, 10)",
+        &.{
+            .init(.rel_rel, .fromValidAddress("a0")),
+            .init(.number, 3),
+            .init(.number, 5),
+            .init(.number, 10),
+            .init(.function_call, .{ .is_pipe = true, .arg_count = 3, .function_index = 4 }),
+            .init(.end, .{ .length = 5 }),
         },
     );
 }

@@ -141,6 +141,12 @@ pub fn MultiList(T: type, I: type) type {
             return self.subsliceEnd(@intFromEnum(start), @intFromEnum(end));
         }
 
+        pub fn pop(self: *Self) ?T {
+            var m = self.slice.toMultiArrayList();
+            defer self.slice = m.toOwnedSlice();
+            return m.pop();
+        }
+
         pub fn index(self: *const Self, n: usize) Index {
             return @enumFromInt(self.offset + n);
         }
@@ -165,7 +171,7 @@ pub fn MultiList(T: type, I: type) type {
             return ret;
         }
 
-        pub fn appendMany(self: *Self, gpa: Allocator, n: usize) Self {
+        pub fn appendMany(self: *Self, gpa: Allocator, n: usize) !Self {
             assert(!self.sliced);
             try self.ensureUnusedCapacity(gpa, n);
             return self.appendManyAssumeCapacity(n);
@@ -177,6 +183,24 @@ pub fn MultiList(T: type, I: type) type {
             const start = self.len();
             self.slice.len += n;
             return self.subslice(start, n);
+        }
+
+        pub fn insertMany(self: *Self, gpa: Allocator, n: usize, count: usize) !Self {
+            try self.ensureUnusedCapacity(gpa, count);
+            return self.insertManyAssumeCapacity(n, count);
+        }
+
+        pub fn insertManyAssumeCapacity(self: *Self, n: usize, count: usize) Self {
+            assert(!self.sliced);
+            self.slice.len += count;
+            inline for (@typeInfo(T).@"struct".fields) |f| {
+                const E = std.MultiArrayList(T).Field;
+                const Type = @FieldType(T, f.name);
+                const slice = self.items(comptime std.meta.stringToEnum(E, f.name).?);
+                std.mem.copyBackwards(Type, slice[n + count ..], slice[n .. slice.len - count]);
+            }
+
+            return self.subslice(n, count);
         }
 
         pub fn len(self: *const Self) usize {

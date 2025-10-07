@@ -211,9 +211,11 @@ pub const Node = extern struct {
         }
     };
 
-    pub const FunctionCall = extern struct {
+    pub const FunctionCall = packed struct(u64) {
+        unused: u7 = 0,
+        is_pipe: bool,
         arg_count: u8,
-        function_index: u32,
+        function_index: u48,
     };
 
     pub fn init(comptime t: Tag, data: @FieldType(Payload, @tagName(t))) Node {
@@ -478,26 +480,55 @@ pub fn printFromNode(
         },
         .function_call => |call| {
             const func = index.subi(call.function_index);
-            const needs_parentheses = ast.tag(func) != .function_call and
-                func != ast.leftMostChild(func);
+            if (call.is_pipe) {
+                var iter = ast.argIteratorForwards(index.subi(call.function_index), index);
+                // Skip function
+                _ = iter.next().?;
+                // Print first argument
+                try ast.printFromIndex(iter.next().?, w, current_function);
+                try w.writeAll(" |> ");
+                iter = ast.argIteratorForwards(index.subi(call.function_index), index);
 
-            if (needs_parentheses) try w.writeByte('(');
-            var iter = ast.argIteratorForwards(index.subi(call.function_index), index);
-            if (iter.next()) |arg_index| {
-                try ast.printFromIndex(arg_index, w, current_function);
-            }
-            if (needs_parentheses) try w.writeByte(')');
-            try w.writeByte('(');
-            if (iter.next()) |arg_index| {
-                try ast.printFromIndex(arg_index, w, current_function);
-            }
+                const needs_parentheses = ast.tag(func) != .function_call and
+                    func != ast.leftMostChild(func);
+                if (needs_parentheses) try w.writeByte('(');
+                try ast.printFromIndex(iter.next().?, w, current_function);
+                if (needs_parentheses) try w.writeByte(')');
+                // Skip first argument
+                _ = iter.next().?;
 
-            while (iter.next()) |arg_index| {
-                try w.writeAll(", ");
-                try ast.printFromIndex(arg_index, w, current_function);
-            }
+                try w.writeByte('(');
+                if (iter.next()) |arg_index| {
+                    try ast.printFromIndex(arg_index, w, current_function);
+                }
 
-            try w.writeByte(')');
+                while (iter.next()) |arg_index| {
+                    try w.writeAll(", ");
+                    try ast.printFromIndex(arg_index, w, current_function);
+                }
+                try w.writeByte(')');
+            } else {
+                const needs_parentheses = ast.tag(func) != .function_call and
+                    func != ast.leftMostChild(func);
+
+                if (needs_parentheses) try w.writeByte('(');
+                var iter = ast.argIteratorForwards(index.subi(call.function_index), index);
+                if (iter.next()) |arg_index| {
+                    try ast.printFromIndex(arg_index, w, current_function);
+                }
+                if (needs_parentheses) try w.writeByte(')');
+                try w.writeByte('(');
+                if (iter.next()) |arg_index| {
+                    try ast.printFromIndex(arg_index, w, current_function);
+                }
+
+                while (iter.next()) |arg_index| {
+                    try w.writeAll(", ");
+                    try ast.printFromIndex(arg_index, w, current_function);
+                }
+
+                try w.writeByte(')');
+            }
         },
         .local_variable => |v| {
             const identifier = current_function.unwrap().?.addi(1 + v.offset);
