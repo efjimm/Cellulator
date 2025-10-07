@@ -145,6 +145,8 @@ fn configureTests(
         "test/logic.zc",
         "test/average.zc",
         "test/references.zc",
+        "test/volatile.zc",
+        "test/functions.zc",
     });
     opts.addOption(bool, "fast_tests", fast_tests);
 

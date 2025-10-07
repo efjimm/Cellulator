@@ -68,6 +68,7 @@ pub const Token = struct {
         exclamation_equals,
         exclamation,
         ampersand,
+        pipe,
 
         lparen,
         rparen,
@@ -128,6 +129,7 @@ pub const Token = struct {
                 .eof = "eof",
                 .caret = "^",
                 .ampersand = "&",
+                .pipe = "|",
                 .unknown = "",
             });
 
@@ -182,6 +184,10 @@ pub fn next(t: *Tokenizer) !Token {
             '0'...'9' => {
                 tag = .number;
                 continue :state .integer_number;
+            },
+            '|' => {
+                tag = .pipe;
+                t.toss(1);
             },
             '.' => {
                 t.toss(1);

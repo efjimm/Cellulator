@@ -500,7 +500,6 @@ pub fn setCellString(
     errdefer sheet.ast.restore(old_state);
 
     const expr = try sheet.parseFromExpressionDiag(src, diag);
-    // TODO: Move this check into the parser
     if (expr.destination != null) {
         return error.UnexpectedToken;
     }
@@ -1388,7 +1387,7 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
         else => {
             // Evaluate the expression and print the result
             defer sheet.ast.restore(ast_state);
-            const value = sheet.ast.evaluate(res.root, sheet, sheet) catch |err| {
+            const value = sheet.evaluate(res.root) catch |err| {
                 zc.setStatusMessage(.err, "Error ({t}) evaluating '{s}'", .{ err, str });
                 return;
             };
@@ -1402,8 +1401,9 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
                         .cell => {},
                     }
                 },
-                .cell => |pos| zc.setStatusMessage(.info, "{s} = {f}", .{ str, pos }),
-                .range => |r| zc.setStatusMessage(.info, "{s} = {f}", .{ str, r }),
+                .cell, .indirect_cell => |pos| zc.setStatusMessage(.info, "{s} = {f}", .{ str, pos }),
+                .range, .indirect_range => |r| zc.setStatusMessage(.info, "{s} = {f}", .{ str, r }),
+                .function => zc.setStatusMessage(.info, "{s} = FUNCTION", .{str}),
             }
         },
     }
@@ -2386,6 +2386,8 @@ const DebugCmd = enum {
     expect_expr,
     update_cell,
     expect,
+    expect_volatile,
+    expect_non_volatile,
 };
 
 const debug_cmds: std.StaticStringMap(DebugCmd) = .initComptime(.{
@@ -2396,6 +2398,8 @@ const debug_cmds: std.StaticStringMap(DebugCmd) = .initComptime(.{
     .{ "update-cell", .update_cell },
     .{ "expect-expr", .expect_expr },
     .{ "expect", .expect },
+    .{ "expect-volatile", .expect_volatile },
+    .{ "expect-non-volatile", .expect_non_volatile },
 });
 
 const RunCommandError = error{
@@ -2484,11 +2488,25 @@ fn argAsNumber(zc: *ZC, arg: []const u8) !f64 {
 fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !void {
     const cmd_tag = debug_cmds.get(cmd_str) orelse return error.InvalidCommand;
     switch (cmd_tag) {
+        .expect_volatile => {
+            const sheet = zc.currentSheet();
+            const arg1 = iter.next() orelse return error.InvalidSyntax;
+            const pos: Position = try .fromAddress(arg1);
+            const cell = sheet.getCell(pos) orelse return error.CellNotFound;
+            if (!cell.expr.is_volatile) return error.CellIsNonVolatile;
+        },
+        .expect_non_volatile => {
+            const sheet = zc.currentSheet();
+            const arg1 = iter.next() orelse return error.InvalidSyntax;
+            const pos: Position = try .fromAddress(arg1);
+            const cell = sheet.getCell(pos) orelse return error.CellNotFound;
+            if (cell.expr.is_volatile) return error.CellIsVolatile;
+        },
         .expect => {
             const sheet = zc.currentSheet();
             const src = iter.string[iter.index..];
             const expr = try sheet.parseFromExpression(src);
-            const res = try sheet.ast.evaluate(expr.root, sheet, sheet);
+            const res = try sheet.evaluate(expr.root);
             defer if (res == .string and res.string == .slice) sheet.gpa.free(res.string.slice);
 
             if (!res.boolean(sheet)) {
@@ -2537,7 +2555,7 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
             const sheet = zc.currentSheet();
             const cell = sheet.getCell(pos) orelse return error.CellNotFound;
             const expected_expr = (try sheet.parseFromExpression(rest)).root;
-            const actual_expr = cell.expr_root.unwrap().?;
+            const actual_expr = cell.root().unwrap().?;
 
             const expected_nodes = sheet.exprSlice(expected_expr);
             const actual_nodes = sheet.exprSlice(actual_expr);
@@ -3089,7 +3107,7 @@ fn widthNeededForColumn(
         pub fn func(ctx: *@This(), handle: Sheet.Cell.Handle) !void {
             const cell = ctx.sheet.getCellFromHandle(handle);
             // TODO: Make all widths u32
-            const w = switch (cell.value_tag) {
+            const w = sw: switch (cell.expr.value_tag) {
                 .err => 0,
                 .number => std.fmt.count("{d:.[1]}", .{ cell.value.number, ctx.precision }),
                 .string => ctx.zc.ui_interface.stringWidth(
@@ -3100,6 +3118,15 @@ fn widthNeededForColumn(
                 .ref_range => std.fmt.count("{f}", .{
                     ctx.sheet.cellValueRange(cell.value.ref_range).*,
                 }),
+                .simple_function => std.fmt.count("{f}", .{
+                    ctx.sheet.ast.fmtExpression(cell.value.simple_function.index),
+                }),
+                .closure => {
+                    const root = ctx.sheet.closures.items[cell.value.closure.index].function.root;
+                    break :sw std.fmt.count("{f}", .{
+                        ctx.sheet.ast.fmtExpression(root),
+                    });
+                },
             };
             if (w > ctx.width) {
                 ctx.width = @intCast(w);
@@ -3801,7 +3828,7 @@ fn testFile(gpa: std.mem.Allocator, path: []const u8) !void {
             for (content[0..lines.index]) |c| {
                 if (c == '\n') line_number += 1;
             }
-            std.debug.print("Error {} at {s}:{d}\n", .{ err, path, line_number });
+            std.debug.print("Error {t} at {s}:{d}\n", .{ err, path, line_number });
             has_errors = true;
         };
         try zc.updateCells();

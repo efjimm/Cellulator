@@ -751,7 +751,7 @@ fn renderStatus(tui: *Tui, wr: *Screen.Writer) !void {
     if (sheet.getCell(zc.cursor)) |cell| {
         const buf = try arena.alloc(u8, 4096);
         var br: std.io.Writer = .fixed(buf);
-        if (cell.expr_root.unwrap()) |unwrapped|
+        if (cell.root().unwrap()) |unwrapped|
             sheet.ast.print(unwrapped, &br) catch {};
 
         const bytes = br.buffered();
@@ -759,7 +759,7 @@ fn renderStatus(tui: *Tui, wr: *Screen.Writer) !void {
         const tokens = try Tokenizer.collectTokens(arena, &reader, 128);
         const tags = tokens.items(.tag);
         const starts = tokens.items(.start);
-        if (cell.is_volatile) {
+        if (cell.expr.is_volatile) {
             try tui.setStyle(.token_keyword, wr);
             try writer.writeAll("volatile ");
         }
@@ -1134,12 +1134,14 @@ fn renderCursor(tui: *Tui, wr: *Screen.Writer) !void {
             break :blk .cell_visual_selected;
 
         const cell = zc.currentSheet().getCellPtr(range.tl) orelse break :blk .cell_blank_selected;
-        break :blk switch (cell.value_tag) {
+        break :blk switch (cell.expr.value_tag) {
             .number => .cell_number_selected,
             .string => .cell_text_selected,
             .err => .cell_error_selected,
             .ref_cell => .cell_ref_selected,
             .ref_range => .cell_range_selected,
+            .simple_function => .cell_number_selected,
+            .closure => .cell_number_selected,
         };
     };
 
@@ -1233,6 +1235,8 @@ const ScreenData = struct {
         err,
         ref_cell,
         ref_range,
+        simple_function,
+        closure,
     };
 
     const Extra = packed struct {
@@ -1276,14 +1280,16 @@ fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !ScreenData {
             const y = p[1] - ctx.zc.screen_pos.y;
             const cell = ctx.sheet.cell_tree.getValue(h).*;
             ctx.extra[y * ctx.col_count + x] = .{
-                .tag = switch (cell.value_tag) {
+                .tag = switch (cell.expr.value_tag) {
                     .number => .number,
                     .string => .string,
                     .err => .err,
                     .ref_cell => .ref_cell,
                     .ref_range => .ref_range,
+                    .simple_function => .simple_function,
+                    .closure => .closure,
                 },
-                .is_volatile = cell.is_volatile,
+                .is_volatile = cell.expr.is_volatile,
             };
             ctx.values[y * ctx.col_count + x] = cell.value;
         }
@@ -1410,7 +1416,6 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                     try tui.setStyle(.cell_text_unselected, wr);
 
                     const text = sheet.string_values.items(data.values[i].string);
-                    std.log.debug("TEXT LEN: {d}", .{text.len});
                     const alignment = utils.enumFromEnum(
                         shovel.TextAlignment,
                         data.attrs[i].alignment,
@@ -1444,6 +1449,41 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                     const range = sheet.cellValueRange(data.values[i].ref_range).*;
 
                     const slice = std.fmt.bufPrint(&buf, "{f}", .{range}) catch unreachable;
+                    try shovel.writeTruncating(
+                        slice,
+                        width,
+                        .right,
+                        tui.term.grapheme_clustering_mode,
+                        &wr.interface,
+                    );
+                },
+                .simple_function => {
+                    try tui.setStyle(.cell_number_unselected, wr);
+                    // TODO: Syntax highlight these
+                    const root = data.values[i].simple_function.index;
+                    const slice = try std.fmt.allocPrint(
+                        tui.arena.allocator(),
+                        "{f}",
+                        .{sheet.ast.fmtExpression(root)},
+                    );
+                    try shovel.writeTruncating(
+                        slice,
+                        width,
+                        .right,
+                        tui.term.grapheme_clustering_mode,
+                        &wr.interface,
+                    );
+                },
+                .closure => {
+                    try tui.setStyle(.cell_number_unselected, wr);
+                    // TODO: Syntax highlight these
+                    const index = data.values[i].closure.index;
+                    const root = sheet.closures.items[index].function.root;
+                    const slice = try std.fmt.allocPrint(
+                        tui.arena.allocator(),
+                        "{f}",
+                        .{sheet.ast.fmtExpression(root)},
+                    );
                     try shovel.writeTruncating(
                         slice,
                         width,

@@ -4,7 +4,15 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 # TODO
 
+- Update README
+- Index type for interpreter stack
+- Tests
+
+- 32 bit builds
+- Vet uses of usize
+
 - Opening a new buffer while the current buffer is empty with no undos should replace the empty buffer
+  instead of opening a new one
 
 - Cellulator as an interpreter
   - Treat each line as a command

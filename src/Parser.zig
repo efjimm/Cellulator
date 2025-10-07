@@ -34,7 +34,25 @@ tok_i: u32,
 /// Any expression that accesses cells dynamically is volatile.
 is_volatile: bool = false,
 
+locals: std.ArrayList(LocalVariable) = .empty,
+captures: std.ArrayList(CapturedVariable) = .empty,
+scope: Node.OptionalIndex = .none,
+capture_count: u8 = 0,
+
 diagnostics: ?*Diagnostics = null,
+
+const CapturedVariable = struct {
+    scope: Index,
+    slot: u8,
+    capture_slot: u8,
+};
+
+const LocalVariable = struct {
+    name: Ast.String,
+    /// Index of the function whose scope this local variable is in
+    scope: Index,
+    slot: u8,
+};
 
 pub const StringSlice = extern struct {
     offset: u64,
@@ -195,6 +213,11 @@ pub fn init(
     };
 }
 
+pub fn deinit(p: *Parser) void {
+    p.captures.deinit(p.gpa);
+    p.locals.deinit(p.gpa);
+}
+
 pub fn parseFromExpression(
     ast: *Ast,
     gpa: Allocator,
@@ -224,6 +247,7 @@ pub fn parseFromExpression(
         ast,
         options,
     );
+    defer parser.deinit();
 
     return try parser.parseEof();
 }
@@ -253,19 +277,86 @@ fn parseEof(p: *Parser) ParseError!Result {
 /// <- (Statement / Expression) eof
 fn parse(p: *Parser) ParseError!Result {
     p.is_volatile = false;
+    p.locals.clearRetainingCapacity();
+
     const nodes_start = p.ast.nodes.len();
     const index = try p.parseStatement();
-    _ = try p.addNode(.init(.end, @intFromEnum(index) - nodes_start + 1));
+    _ = try p.addNode(.init(.end, .{ .length = @intCast(@intFromEnum(index) - nodes_start + 1) }));
 
     const root_index = p.root();
     return .{
         .root = root_index,
-        .is_volatile = p.is_volatile,
+        .is_volatile = false,
         .destination = if (p.ast.tag(root_index) == .assignment)
             p.ast.payload(root_index).assignment
         else
             null,
     };
+}
+
+fn parseFunctionDefinition(p: *Parser) ParseError!Intermediate {
+    try p.expectToken(.pipe);
+
+    const start_node = try p.addNode(.init(.function_body_start, .{
+        .arg_count = 0,
+        .body_length = 0,
+        .capture_count = 0,
+    }));
+
+    const old_cap_count = p.capture_count;
+    p.capture_count = 0;
+
+    const previous_scope = p.scope;
+    p.scope = start_node.toOptional();
+
+    var arg_count: u8 = 0;
+    while (true) {
+        if (p.eatToken(.pipe)) |_| break;
+        const start = try p.expectTokenGet(.identifier);
+        const end = p.token_starts[p.tok_i];
+        const bytes = std.mem.trimRight(u8, p.src[start..end], &std.ascii.whitespace);
+        const string = try p.addString(bytes);
+        try p.locals.append(p.gpa, .{
+            .name = string,
+            .scope = start_node,
+            .slot = arg_count,
+        });
+        _ = try p.addNode(.init(.function_parameter, string));
+        arg_count += 1;
+
+        _ = p.eatToken(.comma) orelse {
+            try p.expectToken(.pipe);
+            break;
+        };
+    }
+
+    const body_start = p.ast.nodes.len();
+    _ = try p.parseExpression(.value);
+    const body_len: u32 = @intCast(p.ast.nodes.len() - body_start);
+
+    const func: Ast.Node.FunctionDefinition = .{
+        .arg_count = arg_count,
+        .body_length = body_len,
+        .capture_count = p.capture_count,
+    };
+
+    const end_node = try p.addNode(.init(.function_body_end, func));
+    p.ast.payloadPtr(start_node).* = .{ .function_body_start = func };
+
+    for (0..p.capture_count) |_| {
+        const capture = p.captures.pop().?;
+        _ = try p.addNode(.init(.function_capture, .{
+            .offset = capture.slot,
+            .scope = capture.scope,
+        }));
+    }
+
+    p.scope = previous_scope;
+    p.capture_count = old_cap_count;
+    p.locals.items.len -= arg_count;
+
+    // TODO: Add function result type
+    return .{ end_node, .any };
 }
 
 /// Statement <- 'let' Assignment
@@ -479,7 +570,7 @@ fn parseReferenceExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
     return switch (p.token_tags[p.tok_i]) {
         .ampersand => {
             p.tok_i += 1;
-            _ = try p.parsePrimaryExpr(ctx);
+            _ = try p.parseSuffixExpr(ctx);
             const index = try p.addNode(.init(.reference, {}));
             return .{ index, .cell };
         },
@@ -494,7 +585,7 @@ fn parseReferenceExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
             const index = try p.addNode(.init(.dereference, {}));
             return .{ index, .any };
         },
-        else => try p.parsePrimaryExpr(ctx),
+        else => try p.parseSuffixExpr(ctx),
     };
 }
 
@@ -528,6 +619,32 @@ fn volatileAccessSingle(p: *Parser, index: Index, result_type: Type) void {
         result_type.cell_ref and p.isDynamicReference(index);
 }
 
+/// SuffixExpr <- PrimaryExpr '(' (FnCallArguments)? ')'
+fn parseSuffixExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
+    var index, var result_type = try p.parsePrimaryExpr(ctx);
+
+    while (true) {
+        var arg_count: u8 = 0;
+        _ = p.eatToken(.lparen) orelse return .{ index, result_type };
+        while (true) {
+            if (p.eatToken(.rparen)) |_| break;
+            // TODO: Volatility depends on the function, which is not known until evaluation time.
+            //       Volatility would need to be checked later.
+            _ = try p.parseExpression(.reference);
+            _ = p.eatToken(.comma);
+            arg_count += 1;
+        }
+
+        index = try p.addNode(.init(.function_call, .{
+            .arg_count = arg_count,
+            .function_index = @intCast(@intFromEnum(p.ast.lastIndex().sub(index))),
+        }));
+        result_type = .any;
+    }
+
+    return .{ index, result_type };
+}
+
 /// PrimaryExpr <- Number / Range / StringLiteral / Identifier / Builtin / '(' Expression ')'
 fn parsePrimaryExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
     return switch (p.token_tags[p.tok_i]) {
@@ -544,18 +661,63 @@ fn parsePrimaryExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
         inline .single_string_literal_start,
         .double_string_literal_start,
         => |tag| try p.parseStringLiteral(tag),
+        .pipe => try p.parseFunctionDefinition(),
+        .identifier => try p.parseVariable(),
         else => p.setError(error.UnexpectedToken, .{ .expected_string = "expression" }),
     };
 }
 
-fn parseIdentifier(p: *Parser) !Intermediate {
+fn parseVariable(p: *Parser) !Intermediate {
     const start = try p.expectTokenGet(.identifier);
     const end = p.token_starts[p.tok_i];
-    const index = try p.addNode(.init(.identifier, .{
-        .start = start,
-        .end = end,
-    }));
-    return .{ index, .any };
+    const bytes = std.mem.trimRight(u8, p.src[start..end], &std.ascii.whitespace);
+    var i = p.locals.items.len;
+    while (i > 0) {
+        i -= 1;
+        const local = p.locals.items[i];
+        const local_name = p.ast.string(local.name);
+        if (std.mem.eql(u8, bytes, local_name)) {
+            if (p.scope != local.scope.toOptional()) {
+                // Variable exists but not in the current scope. It's a capture.
+                // Check if the variable has already been captured.
+                var j = p.captures.items.len;
+                while (j > 0) {
+                    j -= 1;
+                    const cap = p.captures.items[j];
+                    if (cap.scope == local.scope and cap.slot == local.slot) {
+                        // Already captured
+                        const index = try p.addNode(.init(.captured_variable, .{
+                            .slot = cap.slot,
+                            .offset = cap.capture_slot,
+                            .scope = cap.scope,
+                        }));
+                        return .{ index, .any };
+                    }
+                }
+
+                // Create capture
+                const index = try p.addNode(.init(.captured_variable, .{
+                    .slot = local.slot,
+                    .offset = p.capture_count,
+                    .scope = local.scope,
+                }));
+                try p.captures.append(p.gpa, .{
+                    .capture_slot = p.capture_count,
+                    .slot = local.slot,
+                    .scope = local.scope,
+                });
+                p.capture_count += 1;
+                return .{ index, .any };
+            }
+
+            const index = try p.addNode(.init(.local_variable, .{ .offset = local.slot }));
+            return .{ index, .any };
+        }
+
+        // if (std.mem.eql(u8, a: []const T, b: []const T))
+    }
+
+    return error.UnexpectedToken; // TODO: Global variables
 }
 
 /// Builtin <- builtin ('(' ArgList? ')')?
@@ -759,6 +921,12 @@ fn addNode(p: *Parser, node: Node) Allocator.Error!Index {
     return try p.ast.nodes.append(p.gpa, node);
 }
 
+fn addString(p: *Parser, bytes: []const u8) !Ast.String {
+    const start: u32 = @intCast(p.ast.strings.items.len);
+    try p.ast.strings.appendSlice(p.gpa, bytes);
+    return .{ .start = start, .end = @intCast(start + bytes.len) };
+}
+
 fn expectTokenGet(p: *Parser, expected_tag: Token.Tag) !u32 {
     if (p.token_tags[p.tok_i] != expected_tag) {
         @branchHint(.unlikely);
@@ -909,9 +1077,11 @@ test "parser" {
     try testParseError("let a0 = 'string' 'string'", error.UnexpectedToken);
 
     try testParseError("let crxp0 = 5", null);
-    // try testParseError("let crxq0 = 5", error.InvalidCellAddress);
     try testParseError("let crxp0 = 'string'", null);
-    // try testParseError("let crxq0 = 'string'", error.InvalidCellAddress);
+
+    try testParseError("let a0 = n", error.UnexpectedToken);
+    try testParseError("let a0 = global", error.UnexpectedToken);
+    try testParseError("let a0 = |x| y", error.UnexpectedToken);
 }
 
 test "Node contents" {
@@ -922,19 +1092,28 @@ test "Node contents" {
             defer ast.deinit(std.testing.allocator);
 
             _ = try ast.parseFromExpression(t.allocator, bytes, .{});
+            errdefer {
+                std.debug.print("Expected {{\n", .{});
+                for (nodes) |node| {
+                    std.debug.print("    {any},\n", .{node.get()});
+                }
+                std.debug.print("}}\n\n", .{});
+                std.debug.print("Got {{\n", .{});
+                for (0..ast.nodes.len()) |i| {
+                    std.debug.print("    {any},\n", .{ast.nodes.geti(i).get()});
+                }
+                std.debug.print("}}\n", .{});
+            }
+
+            if (ast.nodes.len() != nodes.len) {
+                return error.Failed;
+            }
             for (nodes, ast.nodes.items(.tag), ast.nodes.items(.data)) |expected, tag, data| {
                 const actual: Node = .{
                     .tag = tag,
                     .data = data,
                 };
-                t.expectEqual(expected.get(), actual.get()) catch |err| {
-                    std.debug.print("bytes: {s}, expected {}, got {}\n", .{
-                        bytes,
-                        expected.get(),
-                        actual.get(),
-                    });
-                    return err;
-                };
+                try t.expectEqual(expected.get(), actual.get());
             }
         }
     }.func;
@@ -952,7 +1131,7 @@ test "Node contents" {
             .init(.add, {}),
             .init(.div, {}),
             .init(.assignment, .fromValidAddress("b30")),
-            .init(.end, 10),
+            .init(.end, .{ .length = 10 }),
         },
     );
     try testNodes(
@@ -968,7 +1147,7 @@ test "Node contents" {
             }),
             .init(.concat, {}),
             .init(.assignment, .fromValidAddress("crxp65535")),
-            .init(.end, 4),
+            .init(.end, .{ .length = 4 }),
         },
     );
 
@@ -979,7 +1158,102 @@ test "Node contents" {
             .init(.number, 2.0),
             .init(.logical_and, {}),
             .init(.assignment, .fromValidAddress("a0")),
-            .init(.end, 4),
+            .init(.end, .{ .length = 4 }),
+        },
+    );
+
+    try testNodes(
+        "**a0:b0",
+        &.{
+            .init(.rel_rel, .fromValidAddress("a0")),
+            .init(.dereference, {}),
+            .init(.dereference, {}),
+            .init(.rel_rel, .fromValidAddress("b0")),
+            .init(.dynamic_range, {}),
+            .init(.end, .{ .length = 5 }),
+        },
+    );
+
+    try testNodes(
+        "let a0 = || 2",
+        &.{
+            .init(.function_body_start, .{ .arg_count = 0, .body_length = 1, .capture_count = 0 }),
+            .init(.number, 2.0),
+            .init(.function_body_end, .{ .arg_count = 0, .body_length = 1, .capture_count = 0 }),
+            .init(.assignment, .fromValidAddress("a0")),
+            .init(.end, .{ .length = 4 }),
+        },
+    );
+
+    try testNodes(
+        "let a0 = (|| 2)()",
+        &.{
+            .init(.function_body_start, .{ .arg_count = 0, .body_length = 1, .capture_count = 0 }),
+            .init(.number, 2.0),
+            .init(.function_body_end, .{ .arg_count = 0, .body_length = 1, .capture_count = 0 }),
+            .init(.function_call, .{ .arg_count = 0, .function_index = 1 }),
+            .init(.assignment, .fromValidAddress("a0")),
+            .init(.end, .{ .length = 5 }),
+        },
+    );
+
+    try testNodes(
+        "let a0 = |x| 1",
+        &.{
+            .init(.function_body_start, .{ .arg_count = 1, .body_length = 1, .capture_count = 0 }),
+            .init(.function_parameter, .{ .start = 0, .end = 1 }),
+            .init(.number, 1.0),
+            .init(.function_body_end, .{ .arg_count = 1, .body_length = 1, .capture_count = 0 }),
+            .init(.assignment, .fromValidAddress("a0")),
+            .init(.end, .{ .length = 5 }),
+        },
+    );
+
+    try testNodes(
+        "let a0 = |x| x",
+        &.{
+            .init(.function_body_start, .{ .arg_count = 1, .body_length = 1, .capture_count = 0 }),
+            .init(.function_parameter, .{ .start = 0, .end = 1 }),
+            .init(.local_variable, .{ .offset = 0 }),
+            .init(.function_body_end, .{ .arg_count = 1, .body_length = 1, .capture_count = 0 }),
+            .init(.assignment, .fromValidAddress("a0")),
+            .init(.end, .{ .length = 5 }),
+        },
+    );
+
+    try testNodes(
+        "let a0 = |x, y, z| x * y + z",
+        &.{
+            .init(.function_body_start, .{ .arg_count = 3, .body_length = 5, .capture_count = 0 }),
+            .init(.function_parameter, .{ .start = 0, .end = 1 }),
+            .init(.function_parameter, .{ .start = 1, .end = 2 }),
+            .init(.function_parameter, .{ .start = 2, .end = 3 }),
+            .init(.local_variable, .{ .offset = 0 }),
+            .init(.local_variable, .{ .offset = 1 }),
+            .init(.mul, {}),
+            .init(.local_variable, .{ .offset = 2 }),
+            .init(.add, {}),
+            .init(.function_body_end, .{ .arg_count = 3, .body_length = 5, .capture_count = 0 }),
+            .init(.assignment, .fromValidAddress("a0")),
+            .init(.end, .{ .length = 11 }),
+        },
+    );
+
+    try testNodes(
+        "let a0 = |x| |y| x + y",
+        &.{
+            .init(.function_body_start, .{ .arg_count = 1, .body_length = 7, .capture_count = 0 }),
+            .init(.function_parameter, .{ .start = 0, .end = 1 }),
+            .init(.function_body_start, .{ .arg_count = 1, .body_length = 3, .capture_count = 1 }),
+            .init(.function_parameter, .{ .start = 1, .end = 2 }),
+            .init(.captured_variable, .{ .slot = 0, .offset = 0, .scope = @enumFromInt(0) }),
+            .init(.local_variable, .{ .offset = 0 }),
+            .init(.add, {}),
+            .init(.function_body_end, .{ .arg_count = 1, .body_length = 3, .capture_count = 1 }),
+            .init(.function_capture, .{ .offset = 0, .scope = @enumFromInt(0) }),
+            .init(.function_body_end, .{ .arg_count = 1, .body_length = 7, .capture_count = 0 }),
+            .init(.assignment, .fromValidAddress("a0")),
+            .init(.end, .{ .length = 11 }),
         },
     );
 }
@@ -990,38 +1264,4 @@ fn testVolatile(expr: []const u8, volatility: bool) !void {
 
     const res = try ast.parseFromExpression(std.testing.allocator, expr, .{});
     try std.testing.expectEqual(volatility, res.is_volatile);
-}
-
-test "Volatile expressions" {
-    try testVolatile("10", false);
-    try testVolatile("b0", false);
-    try testVolatile("&b0", false);
-    try testVolatile("b0:c0", false);
-    try testVolatile("b0:*c0", false);
-    try testVolatile("*b0:c0", false);
-    try testVolatile("*b0:*c0", false);
-    try testVolatile("**b0:c0", true);
-    try testVolatile("**b0", true);
-
-    // These builtins accept references and make accesses through them.
-    try testVolatile("@sqrt(a0)", false);
-    try testVolatile("@sqrt(*a0)", true);
-    try testVolatile("@sum(a0)", false);
-    try testVolatile("@sum(a0:d30, 1, 3 + 2 * 300 + @prod(a0:d3), zzz10)", false);
-    try testVolatile("@sum(a0:d1)", false);
-    try testVolatile("@sum(*a0:d1)", true);
-    try testVolatile("@sum(a0:*d1)", true);
-    try testVolatile("@sum(*a0:*d1)", true);
-
-    // These builtins accept references but don't make any accesses through them, and as such never
-    // need to be marked as volatile.
-    try testVolatile("@width(*a0)", false);
-    try testVolatile("@width(*a0:b0)", false);
-    try testVolatile("@width(a0:*b0)", false);
-    try testVolatile("@width(*a0:*b0)", false);
-
-    try testVolatile("@height(*a0)", false);
-    try testVolatile("@height(*a0:b0)", false);
-    try testVolatile("@height(a0:*b0)", false);
-    try testVolatile("@height(*a0:*b0)", false);
 }

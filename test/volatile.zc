@@ -1,0 +1,126 @@
+let a0 = 1
+:expect-non-volatile a0
+
+let a1 = a0
+:expect-non-volatile a1
+
+let a2 = **a1
+:expect-non-volatile a2
+
+-- Volatility is only flagged when a volatile access is made for the first time, so even if a cell
+-- 'looks' volatile it may not be.
+let a3 = **b3
+:expect-non-volatile a3
+let b3 = &a0
+:expect-volatile a3
+:expect-non-volatile b3
+
+let a4 = b0:c0
+:expect-non-volatile a4
+
+let a5 = b0:*c0
+:expect-non-volatile a5
+let c0 = &d10
+:expect-non-volatile a5
+
+let a6 = *b0:c0
+:expect-non-volatile a6
+let b0 = &d9
+:expect-non-volatile a6
+
+let a7 = *b0:*c0
+:expect-non-volatile a7
+
+let a8 = **d0
+:expect-non-volatile a8
+let d0 = &a0
+:expect-volatile a8
+
+-- Make sure volatility is propagated even on error
+let b9 = b9
+let c9 = &b9
+let a9 = **c9
+:expect-volatile a9
+:expect-error a9
+let b9 = 3
+:expect a9 == 3
+
+let a10 = 1
+let b10 = &a10
+let c10 = a10:a10
+
+let a11 = @sqrt(a10)
+:expect-non-volatile a11
+let a12 = @sqrt(*a10)
+:expect-non-volatile a12
+let a12 = @sqrt(*b10)
+:expect-volatile a12
+
+let a11 = @round(a10)
+:expect-non-volatile a11
+let a12 = @round(*a10)
+:expect-non-volatile a12
+let a12 = @round(*b10)
+:expect-volatile a12
+
+let a11 = @floor(a10)
+:expect-non-volatile a11
+let a12 = @floor(*a10)
+:expect-non-volatile a12
+let a12 = @floor(*b10)
+:expect-volatile a12
+
+let a11 = @ceil(a10)
+:expect-non-volatile a11
+let a12 = @ceil(*a10)
+:expect-non-volatile a12
+let a12 = @ceil(*b10)
+:expect-volatile a12
+
+let a12 = @width(*b10)
+:expect-non-volatile a12
+
+let b11 = @sum(a10)
+:expect-non-volatile b11
+let b12 = @sum(*a10)
+:expect-non-volatile b12
+let b12 = @sum(*b10)
+:expect-volatile b12
+let b12 = @sum(*c10)
+:expect-volatile b12
+
+let c11 = @prod(a10)
+:expect-non-volatile c11
+let c12 = @prod(*a10)
+:expect-non-volatile c12
+let c12 = @prod(*b10)
+:expect-volatile c12
+let c12 = @prod(*c10)
+:expect-volatile c12
+
+let d11 = @avg(a10)
+:expect-non-volatile d11
+let d12 = @avg(*a10)
+:expect-non-volatile d12
+let d12 = @avg(*b10)
+:expect-volatile d12
+let d12 = @avg(*c10)
+:expect-volatile d12
+
+let d11 = @max(a10)
+:expect-non-volatile d11
+let d12 = @max(*a10)
+:expect-non-volatile d12
+let d12 = @max(*b10)
+:expect-volatile d12
+let d12 = @max(*c10)
+:expect-volatile d12
+
+let d11 = @min(a10)
+:expect-non-volatile d11
+let d12 = @min(*a10)
+:expect-non-volatile d12
+let d12 = @min(*b10)
+:expect-volatile d12
+let d12 = @min(*c10)
+:expect-volatile d12

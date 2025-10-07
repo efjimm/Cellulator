@@ -16,6 +16,12 @@ pub fn MultiList(T: type, I: type) type {
             .sliced = false,
         };
 
+        pub const ExternInt = blk: {
+            const bits = @bitSizeOf(I);
+            const new_bits = std.math.ceilPowerOfTwo(usize, bits) catch @panic("");
+            break :blk @Type(.{ .int = .{ .bits = new_bits, .signedness = .unsigned } });
+        };
+
         pub const Index = enum(I) {
             _,
 
@@ -84,7 +90,7 @@ pub fn MultiList(T: type, I: type) type {
             i: Index,
             comptime field: std.MultiArrayList(T).Field,
         ) *@FieldType(T, @tagName(field)) {
-            return &self.slice.items(field)[@intFromEnum(i)];
+            return &self.slice.items(field)[@intFromEnum(i) - self.offset];
         }
 
         pub fn items(
@@ -95,11 +101,11 @@ pub fn MultiList(T: type, I: type) type {
         }
 
         pub fn get(self: *const Self, i: Index) T {
-            return self.geti(self.offset + @intFromEnum(i));
+            return self.geti(@intFromEnum(i) - self.offset);
         }
 
         pub fn set(self: *const Self, i: Index, elem: T) void {
-            return self.seti(self.offset + @intFromEnum(i), elem);
+            return self.seti(@intFromEnum(i) - self.offset, elem);
         }
 
         pub fn geti(self: *const Self, i: usize) T {

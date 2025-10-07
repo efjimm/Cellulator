@@ -185,9 +185,46 @@ only be used in builtin functions. They are defined as two cell references separ
 
 Examples:
 
+
+
 - `A0:B0` (Contains 2 cells)
 - `A0:A0` (Contains 1 cell)
 - `D6:E3` (Contains 8 cells)
+
+### Functions
+
+Functions are first class values in Cellulator. They can capture values from outer functions in a
+closure. They can be assigned to cells like any other value. A function is defined with the syntax
+`|ARGS| BODY`.
+
+Examples:
+
+```lua
+-- Function with no arguments returning 2
+|| 2
+
+-- Function with no arguments returning 3, immediately invoked
+(|| 3)()
+
+-- Function with 1 argument
+|x| x * x
+
+-- Function with 3 arguments
+|x, y, z| x * y + z
+
+-- Function that returns a new function, capturing the argument
+let a0 = |x| |y| x + y
+a0(3)(4) == 7
+-- b0 is now a function that takes one argument and adds 5 to it
+let b0 = a0(5)
+let c0 = b0(10)
+c0 == 15
+
+-- Function that takes another function as an argument
+let a0 = |f| f(3)
+a0(|x| x * x) == 9
+```
+
 
 ### Truthiness
 

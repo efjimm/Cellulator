@@ -26,16 +26,15 @@ gpa: Allocator,
 has_changes: bool,
 
 /// List of cells that need to be re-evaluated.
-queued_cells: std.ArrayListUnmanaged(struct { Cell.Handle, Cell.Handle.Int }),
-
-volatile_cells: std.ArrayListUnmanaged(struct { Cell.Handle, Cell.Handle.Int }),
+queued_cells: std.ArrayList(struct { Cell.Handle, Cell.Handle.Int }),
+volatile_cells: std.ArrayList(struct { Cell.Handle, Cell.Handle.Int }),
 
 /// Maps ranges to a list of cell handles that depend on them.
 /// Used to query whether a cell belongs to a range and then update the cells
 /// that depend on that range.
 dependents: Dependents,
 
-deps: std.ArrayListUnmanaged(Dep) = .empty,
+deps: std.ArrayList(Dep) = .empty,
 free_deps: DepIndex = .none,
 
 /// Range tree containing just the positions of extant cells.
@@ -53,11 +52,11 @@ undos: std.MultiArrayList(Undo),
 redos: std.MultiArrayList(Undo),
 
 /// Stores cell handles referenced in bulk cell insert/delete undos.
-cell_buffer: std.ArrayListUnmanaged(Cell.Handle) = .empty,
+cell_buffer: std.ArrayList(Cell.Handle) = .empty,
 
-search_buffer: std.ArrayListUnmanaged(Dependents.Entry.Handle),
+search_buffer: std.ArrayList(Dependents.Entry.Handle),
 
-filepath: std.ArrayListUnmanaged(u8),
+filepath: std.ArrayList(u8),
 
 /// Used for temporary allocations
 arena: std.heap.ArenaAllocator,
@@ -66,7 +65,8 @@ text_attrs: PhTree(TextAttrs, 2, Cell.Handle.Int),
 
 lua_point_trees: std.StringHashMapUnmanaged(LuaDataPointTree) = .empty,
 
-cell_value_ranges: std.ArrayList(Rect) = .{},
+cell_value_ranges: std.ArrayList(Rect) = .empty,
+closures: std.ArrayList(Ast.Value) = .empty,
 
 needs_update: bool = true,
 
@@ -139,27 +139,32 @@ pub const UndoOpts = struct {
     clear_redos: bool = true,
 };
 
-// TODO: Reduce size of this struct
+comptime {
+    assert(@sizeOf(Cell) <= 16);
+}
+
 pub const Cell = extern struct {
     /// Cached value of the cell
     value: Value = .{ .err = .fromError(error.NotEvaluable) },
 
-    /// Tag denoting the type of value. A tagged union would add extra unnecessary padding.
-    value_tag: Value.Tag = .err,
+    expr: packed struct(u64) {
+        unused: u3 = 0,
+        stored_volatile: bool = false,
+        value_tag: Value.Tag = .err,
 
-    /// State used for evaluating cells.
-    state: enum(u8) {
-        up_to_date,
-        dirty,
-        enqueued,
-        computing,
-        @"volatile",
-    } = .up_to_date,
+        /// State used for evaluating cells.
+        state: enum(u3) {
+            up_to_date,
+            dirty,
+            enqueued,
+            computing,
+            @"volatile",
+        } = .up_to_date,
+        is_volatile: bool,
 
-    is_volatile: bool,
-
-    /// Abstract syntax tree representing the expression in the cell.
-    expr_root: Ast.Node.OptionalIndex = .none,
+        /// Root node of the abstract syntax tree representing the expression in the cell.
+        index: Ast.Node.OptionalIndex = .none,
+    },
 
     pub const Handle = CellTree.Entry.Handle;
     pub const Slice = CellTree.Slice;
@@ -172,6 +177,18 @@ pub const Cell = extern struct {
         err: Error,
         ref_cell: Position,
         ref_range: RangeIndex,
+        simple_function: packed struct(u64) {
+            unused: u16 = 0,
+            index: Ast.Node.Index,
+        },
+        closure: packed struct(u64) {
+            unused: u8 = 0,
+            len: u8,
+            /// Index into the `closures` array. The element at this index is a `function` value
+            /// with no captures, storing the index of the function body. The next `len` elements
+            /// are the captured values.
+            index: u48,
+        },
 
         pub const Tag = blk: {
             var t = @typeInfo(std.meta.FieldEnum(Value));
@@ -204,7 +221,11 @@ pub const Cell = extern struct {
 
     pub fn setValue(cell: *Cell, comptime tag: Value.Tag, value: @FieldType(Value, @tagName(tag))) void {
         cell.value = @unionInit(Value, @tagName(tag), value);
-        cell.value_tag = tag;
+        cell.expr.value_tag = tag;
+    }
+
+    pub fn root(cell: *const Cell) Ast.Node.OptionalIndex {
+        return cell.expr.index;
     }
 };
 
@@ -270,13 +291,19 @@ pub const Undo = extern struct {
             len: u32,
         },
         update_range: extern struct {
-            ast_node: Ast.Node.Index,
+            ast_node: packed struct(u64) {
+                index: Ast.Node.Index,
+                unused: u16 = 0,
+            },
             range: Rect,
         },
         update_pos: extern struct {
-            ast_node: Ast.Node.Index,
+            node: packed struct(u64) {
+                index: Ast.Node.Index,
+                tag: Ast.Node.Tag,
+                unused: u8 = 0,
+            },
             pos: Position,
-            tag: Ast.Node.Tag,
         },
         insert_dep: Dependents.Entry.Handle,
         update_dep: extern struct {
@@ -356,6 +383,7 @@ pub fn deinit(sheet: *Sheet) void {
     sheet.deps.deinit(sheet.gpa);
     sheet.cell_buffer.deinit(sheet.gpa);
     sheet.text_attrs.deinit(sheet.gpa);
+    sheet.closures.deinit(sheet.gpa);
     sheet.arena.deinit();
 }
 
@@ -460,7 +488,6 @@ const SerializeHeader = extern struct {
 };
 
 pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
-    // TODO: Add volatile cells
     assert(sheet.queued_cells.items.len == 0);
 
     const header: SerializeHeader = .{
@@ -599,7 +626,7 @@ fn bulkParse(
     tokens_allocator: std.mem.Allocator,
     tokens: *std.MultiArrayList(Tokenizer.Token),
     cells_allocator: std.mem.Allocator,
-    assignments: *std.ArrayListUnmanaged(Assignment),
+    assignments: *std.ArrayList(Assignment),
 ) !void {
     const line_count = blk: {
         var line_count: u32 = 1;
@@ -626,6 +653,7 @@ fn bulkParse(
     const token_starts = tokens.items(.start);
 
     var p: Parser = try .init(sheet.gpa, src, token_tags, token_starts, &sheet.ast, .{});
+    defer p.deinit();
     while (true) {
         const last_state = sheet.ast.save();
         const res = p.nextStatement() catch |err| switch (err) {
@@ -688,7 +716,7 @@ pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
     const arena = sheet.arena.allocator();
     defer sheet.resetArena();
 
-    var assignments: std.ArrayListUnmanaged(Assignment) = .empty;
+    var assignments: std.ArrayList(Assignment) = .empty;
     var tokens: std.MultiArrayList(Tokenizer.Token) = .empty;
 
     while (true) {
@@ -765,9 +793,11 @@ pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
                 .parent = .none,
                 .point = pos.array(),
                 .value = .{
-                    .expr_root = assignment.root.toOptional(),
-                    .state = .enqueued,
-                    .is_volatile = assignment.is_volatile,
+                    .expr = .{
+                        .state = .enqueued,
+                        .index = assignment.root.toOptional(),
+                        .is_volatile = assignment.is_volatile,
+                    },
                 },
             });
 
@@ -791,7 +821,7 @@ pub fn loadCsv(sheet: *Sheet, r: *std.io.Reader) !void {
     const arena = sheet.arena.allocator();
     defer sheet.resetArena();
 
-    var assignments: std.ArrayListUnmanaged(CsvAssignment) = .empty;
+    var assignments: std.ArrayList(CsvAssignment) = .empty;
 
     var col: u32 = 0;
     var row: u32 = 0;
@@ -850,7 +880,7 @@ pub fn loadCsv(sheet: *Sheet, r: *std.io.Reader) !void {
                     });
                     asts.seti(1, .{
                         .tag = .end,
-                        .data = .{ .end = 1 },
+                        .data = .{ .end = .{ .length = 1 } },
                     });
                     ass.root = asts.index(0).toOptional();
                 }
@@ -896,11 +926,13 @@ pub fn loadCsv(sheet: *Sheet, r: *std.io.Reader) !void {
                 .parent = .none,
                 .point = pos.array(),
                 .value = .{
-                    .expr_root = assignment.root,
-                    .state = if (assignment.root == .none) .up_to_date else .enqueued,
+                    .expr = .{
+                        .value_tag = .number,
+                        .state = if (assignment.root == .none) .up_to_date else .enqueued,
+                        .index = assignment.root,
+                        .is_volatile = false,
+                    },
                     .value = .{ .number = assignment.f },
-                    .value_tag = .number,
-                    .is_volatile = false,
                 },
             });
 
@@ -999,7 +1031,7 @@ pub fn writeCsv(sheet: *Sheet, writer: *std.io.Writer) !void {
 }
 
 pub fn formatCell(sheet: *const Sheet, cell: *const Cell, w: *std.io.Writer) !void {
-    switch (cell.value_tag) {
+    switch (cell.expr.value_tag) {
         .number => {
             try w.print("{d}", .{cell.value.number});
         },
@@ -1016,6 +1048,13 @@ pub fn formatCell(sheet: *const Sheet, cell: *const Cell, w: *std.io.Writer) !vo
         .ref_range => {
             const range = sheet.cellValueRange(cell.value.ref_range);
             try w.print("{f}:{f}", .{ range.tl, range.br });
+        },
+        .simple_function => {
+            try sheet.ast.print(cell.value.simple_function.index, w);
+        },
+        .closure => {
+            const root = sheet.closures.items[cell.value.closure.index].function.root;
+            try sheet.ast.print(root, w);
         },
     }
 }
@@ -1398,12 +1437,12 @@ pub fn doUndo(sheet: *Sheet, u: Undo, opts: UndoOpts) Allocator.Error!void {
         },
         .update_range => {
             const p = u.payload.update_range;
-            try sheet.updateRange(p.ast_node, p.range);
+            try sheet.updateRange(p.ast_node.index, p.range);
         },
         .update_pos => {
             const pos = u.payload.update_pos.pos;
-            const i = u.payload.update_pos.ast_node;
-            const tag = u.payload.update_pos.tag;
+            const i = u.payload.update_pos.node.index;
+            const tag = u.payload.update_pos.node.tag;
             try sheet.updatePos(i, pos, tag);
         },
         .insert_dep => {
@@ -1462,10 +1501,10 @@ fn bulkDeleteCellHandles(sheet: *Sheet, handles: []const Cell.Handle) void {
     for (handles) |handle| {
         const cell = sheet.getCellFromHandle(handle);
         // TODO: Doing this in a separate loop from removeHandle might be better
-        sheet.removeCellAsDependentOfExpr(handle, cell.expr_root, true);
+        sheet.removeCellAsDependentOfExpr(handle, cell.root(), true);
         sheet.setCellError(cell);
         sheet.cell_tree.removeHandle(handle);
-        cell.state = .enqueued;
+        cell.expr.state = .enqueued;
         sheet.queued_cells.appendAssumeCapacity(.{ handle, 1 });
     }
 }
@@ -1475,7 +1514,7 @@ fn bulkDeleteCellHandlesContiguous(sheet: *Sheet, start: Cell.Handle.Int, end: C
     for (cells.values(), 0..) |*cell, i| {
         const handle = cells.handle(i);
         // TODO: Doing this in a separate loop from removeHandle might be better
-        sheet.removeCellAsDependentOfExpr(handle, cell.expr_root, true);
+        sheet.removeCellAsDependentOfExpr(handle, cell.root(), true);
         sheet.setCellError(cell);
         sheet.cell_tree.removeHandle(handle);
     }
@@ -1493,8 +1532,8 @@ fn bulkInsertCellHandles(sheet: *Sheet, handles: []const Cell.Handle) void {
         const cell = sheet.getCellFromHandle(handle);
         const p = sheet.cell_tree.getPoint(handle).*;
         sheet.cell_tree.insertAssumeCapacityNoClobber(&p, handle);
-        sheet.addCellAsDependentOfExprRanges(handle, cell.expr_root);
-        cell.state = .enqueued;
+        sheet.addCellAsDependentOfExprRanges(handle, cell.root());
+        cell.expr.state = .enqueued;
     }
 }
 
@@ -1505,8 +1544,8 @@ fn bulkInsertCellHandlesContiguous(sheet: *Sheet, start: Cell.Handle.Int, end: C
     for (cells.values(), cells.points(), 0..) |*cell, *p, i| {
         const handle = cells.handle(i);
         sheet.cell_tree.insertAssumeCapacityNoClobber(p, handle);
-        sheet.addCellAsDependentOfExprRanges(handle, cell.expr_root);
-        cell.state = .enqueued;
+        sheet.addCellAsDependentOfExprRanges(handle, cell.root());
+        cell.expr.state = .enqueued;
     }
 }
 
@@ -1797,10 +1836,10 @@ fn deleteCellRangeAssumeCapacity(sheet: *Sheet, range: Rect, opts: UndoOpts) u32
 
     for (existing_cells) |cell_handle| {
         const old_cell = sheet.getCellFromHandle(cell_handle);
-        sheet.removeCellAsDependentOfExpr(cell_handle, old_cell.expr_root, true);
+        sheet.removeCellAsDependentOfExpr(cell_handle, old_cell.root(), true);
         sheet.cell_tree.removeHandle(cell_handle);
         sheet.setCellError(old_cell);
-        old_cell.state = .enqueued;
+        old_cell.expr.state = .enqueued;
     }
 
     if (existing_cells.len > 0) {
@@ -1845,10 +1884,12 @@ pub fn insertIncrementingCellRange(
         const f: f64 = @floatFromInt(i);
         value.* = .{
             .value = .{ .number = start + incr * f },
-            .value_tag = .number,
-            .state = .up_to_date,
-            .expr_root = .none,
-            .is_volatile = false,
+            .expr = .{
+                .value_tag = .number,
+                .state = .up_to_date,
+                .index = .none,
+                .is_volatile = false,
+            },
         };
     }
 
@@ -1856,8 +1897,8 @@ pub fn insertIncrementingCellRange(
     for (new_cells.points(), new_cells.values(), 0..) |*p, *cell, i| {
         const handle = new_cells.handle(i);
         sheet.cell_tree.insertAssumeCapacityNoClobber(p, handle);
-        sheet.addCellAsDependentOfExprRanges(handle, cell.expr_root);
-        cell.state = .enqueued;
+        sheet.addCellAsDependentOfExprRanges(handle, cell.root());
+        cell.expr.state = .enqueued;
     }
 
     sheet.pushUndoAssumeCapacity(.init(.bulk_cell_delete_contiguous, .{
@@ -1976,10 +2017,12 @@ pub fn insertCellRange(
 
     const cell: Cell = .{
         .value = opts.value,
-        .value_tag = opts.tag,
-        .state = if (need_cell_eval) .enqueued else .up_to_date,
-        .expr_root = expr.root,
-        .is_volatile = expr.is_volatile,
+        .expr = .{
+            .value_tag = opts.tag,
+            .state = if (need_cell_eval) .enqueued else .up_to_date,
+            .index = expr.root,
+            .is_volatile = expr.is_volatile,
+        },
     };
     // All created cells share the same cell value
     @memset(new_cells.values(), cell);
@@ -2030,8 +2073,7 @@ pub fn setCell(
     errdefer comptime unreachable;
 
     const cell = sheet.cell_tree.createValueAssumeCapacity(&pos.array(), .{
-        .expr_root = expr.root.toOptional(),
-        .is_volatile = expr.is_volatile,
+        .expr = .{ .index = expr.root.toOptional(), .is_volatile = expr.is_volatile },
     });
     if (expr.is_volatile) {
         sheet.volatile_cells.appendAssumeCapacity(.{ cell, 1 });
@@ -2055,15 +2097,15 @@ fn insertCellNode(
     var u: Undo = undefined;
     if (old_handle == .none) {
         log.debug("Creating cell {f}", .{pos});
-        sheet.addCellAsDependentOfExprRanges(handle, cell_ptr.expr_root);
+        sheet.addCellAsDependentOfExprRanges(handle, cell_ptr.root());
 
         u = .init(.delete_cell, pos);
     } else {
         log.debug("Overwriting cell {f}", .{pos});
 
         const old_cell_ptr = sheet.getCellFromHandle(old_handle);
-        sheet.removeCellAsDependentOfExpr(old_handle, old_cell_ptr.expr_root, true);
-        sheet.addCellAsDependentOfExprRanges(handle, cell_ptr.expr_root);
+        sheet.removeCellAsDependentOfExpr(old_handle, old_cell_ptr.root(), true);
+        sheet.addCellAsDependentOfExprRanges(handle, cell_ptr.root());
 
         sheet.setCellError(old_cell_ptr);
 
@@ -2085,7 +2127,7 @@ fn deleteCellByHandle(
     try sheet.ensureUnusedUndoCapacity(1);
 
     try sheet.enqueueUpdate(handle);
-    sheet.removeCellAsDependentOfExpr(handle, cell.expr_root, true);
+    sheet.removeCellAsDependentOfExpr(handle, cell.root(), true);
 
     sheet.setCellError(cell);
     _ = sheet.cell_tree.removeHandle(handle);
@@ -2247,7 +2289,7 @@ pub fn deleteColOrRowRange(
         while (n.isValid()) : (n = sheet.deps.items[n.n].next) {
             const cell_handle = sheet.deps.items[n.n].handle;
             sheet.queued_cells.appendAssumeCapacity(.{ cell_handle, 1 });
-            sheet.getCellFromHandle(cell_handle).state = .enqueued;
+            sheet.getCellFromHandle(cell_handle).expr.state = .enqueued;
         }
     }
     for (cells.items) |handle| {
@@ -2260,7 +2302,11 @@ pub fn deleteColOrRowRange(
         sheet.cell_tree.removeHandle(handle);
 
         if (p[index] >= start and p[index] <= end) {
-            sheet.removeCellAsDependentOfExpr(handle, sheet.getCellFromHandle(handle).expr_root, false);
+            sheet.removeCellAsDependentOfExpr(
+                handle,
+                sheet.getCellFromHandle(handle).root(),
+                false,
+            );
         }
     }
 
@@ -2273,7 +2319,7 @@ pub fn deleteColOrRowRange(
             p[index] -= deleted_count;
             _ = sheet.cell_tree.insertAssumeCapacity(p, handle);
         }
-        sheet.getCellFromHandle(handle).state = .enqueued;
+        sheet.getCellFromHandle(handle).expr.state = .enqueued;
     }
 
     if (axis == .col) {
@@ -2352,9 +2398,8 @@ pub fn deleteColOrRowRange(
             const n = @field(pos, f);
             if (n >= start) {
                 sheet.pushUndoAssumeCapacity(.init(.update_pos, .{
-                    .ast_node = i,
+                    .node = .{ .index = i, .tag = sheet.ast.tag(i) },
                     .pos = pos.*,
-                    .tag = sheet.ast.tag(i),
                 }), undo_opts);
 
                 if (n <= end) {
@@ -2373,7 +2418,7 @@ pub fn deleteColOrRowRange(
             const tl = &sheet.ast.nodes.ptr(lhs, .data).rel_rel;
             const br = &sheet.ast.nodes.ptr(rhs, .data).rel_rel;
             const u: Undo = .init(.update_range, .{
-                .ast_node = i,
+                .ast_node = .{ .index = i },
                 .range = .{ .tl = tl.*, .br = br.* },
             });
 
@@ -2558,9 +2603,8 @@ pub fn insertColsOrRows(
             const pos = &nodes.ptr(i, .data).rel_rel;
             if (@field(pos, f) >= index) {
                 sheet.pushUndoAssumeCapacity(.init(.update_pos, .{
-                    .ast_node = i,
+                    .node = .{ .index = i, .tag = sheet.ast.tag(i) },
                     .pos = pos.*,
-                    .tag = sheet.ast.tag(i),
                 }), undo_opts);
                 @field(pos, f) += n;
             }
@@ -2575,7 +2619,7 @@ pub fn insertColsOrRows(
             assert(tl.y <= br.y);
 
             const u: Undo = .init(.update_range, .{
-                .ast_node = i,
+                .ast_node = .{ .index = i },
                 .range = .{ .tl = tl.*, .br = br.* },
             });
 
@@ -2612,6 +2656,22 @@ pub fn insertRows(sheet: *Sheet, index: u32, n: u32, undo_opts: UndoOpts) !void 
     return sheet.insertColsOrRows(index, n, undo_opts, .row);
 }
 
+pub fn evaluate(sheet: *Sheet, root_node: Ast.Node.Index) !Ast.Value {
+    var interp: Ast.Interpreter = .{
+        .arena = sheet.arena.allocator(),
+        .sheet = sheet,
+    };
+    defer sheet.resetArena();
+
+    _ = try interp.evaluate(sheet.ast.leftMostChild(root_node));
+    const res = try interp.pop(.any);
+
+    if (res == .string)
+        return .{ .string = .{ .slice = try sheet.gpa.dupe(u8, res.string.bytes()) } };
+
+    return res;
+}
+
 pub fn update(sheet: *Sheet) Allocator.Error!void {
     if (!sheet.needsUpdate()) return;
 
@@ -2641,7 +2701,7 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
         const cells = sheet.cell_tree.slice(cell_start.int(), len);
         for (0..cells.len) |i| {
             try sheet.markDirty(arena, cells.handle(i), &dirty_cells);
-            sheet.getCellFromHandle(cells.handle(i)).state = .@"volatile";
+            sheet.getCellFromHandle(cells.handle(i)).expr.state = .@"volatile";
         }
     }
 
@@ -2649,11 +2709,16 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
         try sheet.markDirty(arena, cell, &dirty_cells);
     }
 
+    var eval: Ast.Interpreter = .{
+        .arena = arena,
+        .sheet = sheet,
+    };
+
     for (sheet.volatile_cells.items) |data| {
         const handle_start, const len = data;
         const cells = sheet.cell_tree.slice(handle_start.int(), len);
         for (0..cells.len) |i| {
-            _ = sheet.evalCellByHandle(cells.handle(i)) catch |err| switch (err) {
+            _ = sheet.evalCellByHandle(&eval, cells.handle(i)) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.CyclicalReference => {
                     // const point = sheet.cell_tree.getPoint(handle).*;
@@ -2670,7 +2735,7 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
         const handle_start, const len = data;
         const cells = sheet.cell_tree.slice(handle_start.int(), len);
         for (0..cells.len) |i| {
-            _ = sheet.evalCellByHandle(cells.handle(i)) catch |err| switch (err) {
+            _ = sheet.evalCellByHandle(&eval, cells.handle(i)) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.CyclicalReference => {
                     // const point = sheet.cell_tree.getPoint(handle).*;
@@ -2697,7 +2762,7 @@ pub fn enqueueUpdate(
     handle: Cell.Handle,
 ) Allocator.Error!void {
     try sheet.queued_cells.append(sheet.gpa, .{ handle, 1 });
-    sheet.getCellFromHandle(handle).state = .enqueued;
+    sheet.getCellFromHandle(handle).expr.state = .enqueued;
 }
 
 /// Marks all of the dependents of `pos` as dirty. Any children that also need to be marked dirty
@@ -2726,8 +2791,8 @@ fn markDirty(
         while (index.isValid()) : (index = sheet.deps.items[index.n].next) {
             const h = sheet.deps.items[index.n].handle;
             const c = sheet.getCellFromHandle(h);
-            if (c.state != .dirty) {
-                c.state = .dirty;
+            if (c.expr.state != .dirty) {
+                c.expr.state = .dirty;
                 try dirty_cells.append(gpa, h);
             }
         }
@@ -2738,8 +2803,6 @@ fn markDirty(
 pub fn getFilePath(sheet: *const Sheet) []const u8 {
     return sheet.filepath.items;
 }
-
-// TODO: Allow for renaming sheets.
 
 /// Returns the name of the sheet.
 /// Currently this is the basename of the filepath, with the extension
@@ -2754,18 +2817,18 @@ pub fn setFilePath(sheet: *Sheet, filepath: []const u8) void {
 }
 
 pub fn cellStringValue(sheet: *const Sheet, cell: *const Cell) []const u8 {
-    assert(cell.value_tag == .string);
+    assert(cell.expr.value_tag == .string);
     return sheet.string_values.items(cell.value.string);
 }
 
 pub fn freeCellString(sheet: *Sheet, cell: *Cell) void {
-    assert(cell.value_tag == .string);
+    assert(cell.expr.value_tag == .string);
     sheet.string_values.destroyList(cell.value.string);
 }
 
 pub fn setCellError(sheet: *Sheet, cell: *Cell) void {
-    if (cell.expr_root == .none) return;
-    if (cell.value_tag == .string)
+    if (cell.root() == .none) return;
+    if (cell.expr.value_tag == .string)
         sheet.string_values.destroyList(cell.value.string);
 
     cell.setValue(.err, .fromError(error.NotEvaluable));
@@ -2789,25 +2852,29 @@ fn queueDependents(sheet: *Sheet, rect: Rect) Allocator.Error!void {
         while (index.isValid()) : (index = sheet.deps.items[index.n].next) {
             const handle = sheet.deps.items[index.n].handle;
             const cell = sheet.getCellFromHandle(handle);
-            if (cell.state == .dirty) {
-                cell.state = .enqueued;
+            if (cell.expr.state == .dirty) {
+                cell.expr.state = .enqueued;
                 try sheet.queued_cells.append(sheet.gpa, .{ handle, 1 });
             }
         }
     }
 }
 
-pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) Ast.EvalError!Ast.Value {
+pub fn evalCellByHandle(
+    sheet: *Sheet,
+    eval: *Ast.Interpreter,
+    handle: Cell.Handle,
+) Ast.EvalError!Ast.Value {
     const cell = sheet.getCellFromHandle(handle);
-    sw: switch (cell.state) {
+    sw: switch (cell.expr.state) {
         .up_to_date => {},
         .computing => return error.CyclicalReference,
         .enqueued, .dirty, .@"volatile" => {
-            const root = cell.expr_root.unwrap() orelse {
-                cell.state = .up_to_date;
+            const root = cell.root().unwrap() orelse {
+                cell.expr.state = .up_to_date;
                 break :sw;
             };
-            cell.state = .computing;
+            cell.expr.state = .computing;
 
             const pos = sheet.posFromCellHandle(handle);
             log.debug("eval {f}", .{pos});
@@ -2815,21 +2882,48 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) Ast.EvalError!Ast.Va
             // dependents.
             try sheet.queueDependents(sheet.rectFromCellHandle(handle));
 
-            const res = sheet.ast.evaluate(root, sheet, sheet) catch |err| {
-                cell.setValue(.err, Cell.Error.fromError(err));
+            const start = sheet.ast.leftMostChild(root);
+            const old_volatility = eval.is_volatile;
+            defer eval.is_volatile = old_volatility;
+            eval.is_volatile = false;
+
+            const res = eval.evaluate(start) catch |err| {
+                cell.setValue(.err, .fromError(err));
+
+                if (eval.is_volatile) {
+                    cell.expr.is_volatile = true;
+                    if (!cell.expr.stored_volatile) {
+                        std.log.debug("Volatile cell {any}", .{handle});
+                        try sheet.volatile_cells.append(sheet.gpa, .{ handle, 1 });
+                        cell.expr.stored_volatile = true;
+                    }
+                }
+
                 return err;
             };
 
-            if (cell.value_tag == .string)
+            if (res.is_volatile) {
+                cell.expr.is_volatile = true;
+                if (!cell.expr.stored_volatile) {
+                    std.log.debug("Volatile cell {any}", .{handle});
+                    try sheet.volatile_cells.append(sheet.gpa, .{ handle, 1 });
+                    cell.expr.stored_volatile = true;
+                }
+            }
+
+            if (cell.expr.value_tag == .string)
                 sheet.string_values.destroyList(cell.value.string);
 
-            switch (res) {
+            const value = eval.pop(.any) catch |err| {
+                cell.setValue(.err, .fromError(err));
+                return err;
+            };
+
+            switch (value) {
                 .none => cell.setValue(.number, 0),
                 .number => |n| cell.setValue(.number, n),
                 .string => |str| {
                     const bytes = str.bytes();
-                    defer if (str == .slice) sheet.gpa.free(bytes);
-
                     const list = try sheet.string_values.createList(sheet.gpa);
                     errdefer sheet.string_values.destroyList(list);
                     try sheet.string_values.ensureUnusedCapacity(sheet.gpa, list, @intCast(bytes.len));
@@ -2837,18 +2931,38 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) Ast.EvalError!Ast.Va
                     sheet.string_values.appendSliceAssumeCapacity(list, bytes);
                     cell.setValue(.string, list);
                 },
-                .cell => |p| {
+                .cell, .indirect_cell => |p| {
                     cell.setValue(.ref_cell, p);
+                    cell.expr.state = .up_to_date;
+                    return .{ .indirect_cell = p };
                 },
-                .range => |range| {
+                .range, .indirect_range => |range| {
                     cell.setValue(.ref_range, try sheet.pushCellValueRange(range.rect));
+                    cell.expr.state = .up_to_date;
+                    return .{ .indirect_range = range };
+                },
+                .function => |f| {
+                    if (f.captures.len > 0) {
+                        const index = sheet.closures.items.len;
+                        try sheet.closures.ensureUnusedCapacity(sheet.gpa, 1 + f.captures.len);
+                        sheet.closures.appendAssumeCapacity(.{ .function = .{ .root = f.root } });
+                        sheet.closures.appendSliceAssumeCapacity(f.captures);
+                        cell.setValue(.closure, .{
+                            .len = @intCast(f.captures.len),
+                            .index = @intCast(index),
+                        });
+                    } else {
+                        cell.setValue(.simple_function, .{ .index = f.root });
+                    }
                 },
             }
-            cell.state = .up_to_date;
+
+            cell.expr.state = .up_to_date;
+            return value;
         },
     }
 
-    return switch (cell.value_tag) {
+    return switch (cell.expr.value_tag) {
         .number => .{ .number = cell.value.number },
         .string => .{
             .string = .{
@@ -2859,14 +2973,22 @@ pub fn evalCellByHandle(sheet: *Sheet, handle: Cell.Handle) Ast.EvalError!Ast.Va
             },
         },
         .err => cell.value.err.getError(),
-        .ref_cell => .{ .cell = cell.value.ref_cell },
-        .ref_range => .{ .range = .{ .rect = sheet.cellValueRange(cell.value.ref_range).* } },
+        .ref_cell => .{ .indirect_cell = cell.value.ref_cell },
+        .ref_range => .{ .indirect_range = .{ .rect = sheet.cellValueRange(cell.value.ref_range).* } },
+        .simple_function => .{ .function = .{ .root = cell.value.simple_function.index } },
+        .closure => {
+            const closure = cell.value.closure;
+            const captured = sheet.closures.items[closure.index + 1 ..][0..closure.len];
+            const copied = try eval.arena.dupe(Ast.Value, captured);
+            const root = sheet.closures.items[closure.index].function.root;
+            return .{ .function = .{ .root = root, .captures = copied } };
+        },
     };
 }
 
-pub fn evalCellByPos(sheet: *Sheet, pos: Position) Ast.EvalError!Ast.Value {
+pub fn evalCellByPos(sheet: *Sheet, eval: *Ast.Interpreter, pos: Position) Ast.EvalError!Ast.Value {
     if (sheet.getCellHandleByPos(pos)) |cell| {
-        return sheet.evalCellByHandle(cell);
+        return sheet.evalCellByHandle(eval, cell);
     }
 
     try sheet.queueDependents(.initSinglePos(pos));
@@ -2875,11 +2997,11 @@ pub fn evalCellByPos(sheet: *Sheet, pos: Position) Ast.EvalError!Ast.Value {
 
 pub fn printCellExpression(sheet: *Sheet, pos: Position, w: *std.io.Writer) !void {
     const cell = sheet.getCellPtr(pos) orelse return;
-    if (cell.expr_root == .none) {
+    if (cell.root() == .none) {
         try sheet.formatCell(cell, w);
         return;
     }
-    if (cell.expr_root.unwrap()) |root|
+    if (cell.root().unwrap()) |root|
         try sheet.ast.print(root, w);
 }
 
@@ -2945,7 +3067,6 @@ fn roundUp(a: anytype, multiple: anytype) @TypeOf(a) {
     return ((a + (multiple - 1)) / multiple) * multiple;
 }
 
-// TODO: Make `dest` a range and have it tile the copied cells
 pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Rect, comptime adjust: Adjust) !void {
     assert(!Rect.eql(src, dest));
     defer sheet.resetArena();
@@ -2978,7 +3099,7 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Rect, comptime adjust: Adjust
     var total_asts_len: usize = 0;
     var total_deps: usize = 0;
     for (cells.items) |cell| { // TODO: This kinda sucks
-        const root = sheet.getCellFromHandle(cell).expr_root.unwrap() orelse continue;
+        const root = sheet.getCellFromHandle(cell).root().unwrap() orelse continue;
 
         const count = sheet.ast.countDependencies(root.toOptional());
         const left = sheet.ast.leftMostChild(root);
@@ -3051,7 +3172,7 @@ fn createCellCopiesContiguous(
         const new_y: u32 = @intCast(diffed_y);
 
         const src_cell = sheet.getCellFromHandle(src_handle).*;
-        if (src_cell.expr_root == .none) {
+        if (src_cell.root() == .none) {
             var i: u64 = 0;
             while (i < tile_x * tile_y) : (i += 1) {
                 const x: u32 = @intCast(i % tile_x);
@@ -3081,9 +3202,9 @@ fn createCellCopiesContiguous(
                     continue;
                 }
 
-                switch (src_cell.value_tag) {
+                switch (src_cell.expr.value_tag) {
                     .number, .string, .err => {},
-                    .ref_cell, .ref_range => unreachable,
+                    .ref_cell, .ref_range, .simple_function, .closure => unreachable,
                 }
 
                 slice.append(.{
@@ -3097,7 +3218,7 @@ fn createCellCopiesContiguous(
         }
 
         // TODO: Handle none index
-        const orig_asts = sheet.ast.exprSliceEnd(src_cell.expr_root.unwrap().?);
+        const orig_asts = sheet.ast.exprSliceEnd(src_cell.root().unwrap().?);
 
         var i: u64 = 0;
         while (i < tile_x * tile_y) : (i += 1) {
@@ -3178,16 +3299,18 @@ fn createCellCopiesContiguous(
 
             const expr_root: Ast.Node.OptionalIndex = switch (adjust) {
                 .adjust => @enumFromInt(sheet.ast.nodes.len() - 2),
-                .no_adjust => src_cell.expr_root,
+                .no_adjust => src_cell.root(),
             };
 
             slice.append(.{
                 .point = .{ @intCast(tiled_x), @intCast(tiled_y) },
                 .parent = .none,
                 .value = .{
-                    .state = .enqueued,
-                    .expr_root = expr_root,
-                    .is_volatile = src_cell.is_volatile,
+                    .expr = .{
+                        .index = expr_root,
+                        .is_volatile = src_cell.expr.is_volatile,
+                        .state = .enqueued,
+                    },
                 },
             });
         }
@@ -3845,10 +3968,10 @@ pub fn expectRangeNonExtant(sheet: *Sheet, address: []const u8) !void {
 pub fn expectCellEquals(sheet: *Sheet, address: []const u8, expected_value: f64) !void {
     const pos: Position = try .fromAddress(address);
     const cell = sheet.getCellPtr(pos) orelse return error.CellNotFound;
-    if (cell.value_tag != .number) {
+    if (cell.expr.value_tag != .number) {
         std.debug.print(
             "Cell {f} has value type {}, expected number\n",
-            .{ pos, cell.value_tag },
+            .{ pos, cell.expr.value_tag },
         );
         return error.TestExpectedCellsEql;
     }
@@ -3872,9 +3995,9 @@ pub fn expectCellEqualsString(sheet: *Sheet, address: []const u8, expected_value
         std.debug.print("Could not find cell '{s}'\n", .{address});
         return error.CellNotFound;
     };
-    if (cell.value_tag != .string) {
+    if (cell.expr.value_tag != .string) {
         std.debug.print("Cell {f} has value type {}, expected string '{s}'\n", .{
-            pos, cell.value_tag, expected_value,
+            pos, cell.expr.value_tag, expected_value,
         });
         return error.TestExpectedCellsEqlStrings;
     }
@@ -3888,9 +4011,9 @@ pub fn expectCellEqualsString(sheet: *Sheet, address: []const u8, expected_value
 pub fn expectCellError(sheet: *Sheet, address: []const u8) !void {
     const pos: Position = try .fromAddress(address);
     const cell = sheet.getCellPtr(pos) orelse return error.CellNotFound;
-    if (cell.value_tag != .err) {
+    if (cell.expr.value_tag != .err) {
         std.debug.print("Expected cell {f} to have error, but has value type {}\n", .{
-            pos, cell.value_tag,
+            pos, cell.expr.value_tag,
         });
         return error.UnexpectedValue;
     }
