@@ -132,7 +132,7 @@ pub fn MultiList(T: type, I: type) type {
         pub fn subslice(self: Self, start: usize, length: usize) Self {
             return .{
                 .slice = self.slice.subslice(start, length),
-                .offset = start,
+                .offset = self.offset + start,
                 .sliced = self.sliced or start > 0 or length < self.slice.len,
             };
         }

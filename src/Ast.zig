@@ -13,6 +13,7 @@ const Tokenizer = @import("Tokenizer.zig");
 const Parser = @import("Parser.zig");
 
 const MultiList = @import("multi_list.zig").MultiList;
+const List = @import("list.zig").List;
 
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -944,9 +945,12 @@ pub const StackFrame = union(enum) {
     function_header: FunctionHeader,
 
     pub const FunctionHeader = struct {
-        parent: ?u32, // TODO: Make this an Index type
+        parent: OptionalIndex,
         return_address: Node.Index,
     };
+
+    pub const Index = List(StackFrame, u32).Index;
+    pub const OptionalIndex = List(StackFrame, u32).OptionalIndex;
 };
 
 pub const StringResult = union(enum) {
@@ -974,10 +978,10 @@ pub const EvalError = error{
 pub const Interpreter = struct {
     arena: Allocator,
     sheet: *Sheet,
-    stack: std.ArrayList(StackFrame) = .empty,
+    stack: List(StackFrame, u32) = .empty,
 
     /// Index of the current function header in the stack
-    header: ?u32 = null,
+    header: StackFrame.OptionalIndex = .none,
     is_volatile: bool = false,
 
     pub const EvaluateResult = struct {
@@ -1009,8 +1013,8 @@ pub const Interpreter = struct {
         };
     }
 
-    fn valueAt(eval: *@This(), index: usize, result_type: ResultType) !Value {
-        const ret = eval.stack.items[index];
+    fn valueAt(eval: *@This(), index: StackFrame.Index, result_type: ResultType) !Value {
+        const ret = eval.stack.get(index);
         return switch (ret) {
             .cell_literal => |pos| switch (result_type) {
                 .reference => .{ .cell = pos },
@@ -1048,12 +1052,11 @@ pub const Interpreter = struct {
                 .end => break,
                 .function_body_end => {
                     // Return from the function
-                    std.log.debug("Function end. Header: {d}", .{eval.header.?});
-                    for (eval.stack.items) |item| {
+                    for (eval.stack.items()) |item| {
                         std.log.debug("    {any}", .{item});
                     }
-                    const header_index = eval.header.?;
-                    const header = eval.stack.items[header_index].function_header;
+                    const header_index = eval.header.unwrap().?;
+                    const header = eval.stack.get(header_index).function_header;
 
                     const return_value = eval.stack.pop().?;
                     assert(return_value == .value);
@@ -1065,7 +1068,8 @@ pub const Interpreter = struct {
                 },
                 .function_call => |call| {
                     // The arguments are at the top of the stack, with the function to call below.
-                    const arg = try eval.valueAt(eval.stack.items.len - 1 - call.arg_count, .any);
+                    const index = eval.stack.lastIndex().subi(1).subi(call.arg_count);
+                    const arg = try eval.valueAt(index, .any);
                     if (arg != .function) return error.NotEvaluable;
 
                     const func = arg.function.root;
@@ -1075,10 +1079,10 @@ pub const Interpreter = struct {
                         return error.NotEvaluable;
 
                     const old_header = eval.header;
-                    eval.header = @intCast(eval.stack.items.len - 1 - call.arg_count);
-                    try eval.stack.insert(
+                    eval.header = index.toOptional();
+                    try eval.stack.inserti(
                         eval.arena,
-                        eval.stack.items.len - 1 - call.arg_count,
+                        eval.stack.len() - 1 - call.arg_count,
                         .{ .function_header = .{
                             .parent = old_header,
                             .return_address = nodes.index(i),
@@ -1087,14 +1091,15 @@ pub const Interpreter = struct {
                     i = @intFromEnum(func.addi(def.arg_count));
                 },
                 .local_variable => |v| {
-                    const frame = eval.header.?;
-                    const value = eval.stack.items[frame + 2 + v.offset];
+                    // TODO: Should this resolve cell literals?
+                    const frame = eval.header.unwrap().?;
+                    const value = eval.stack.get(frame.addi(2).addi(v.offset));
                     assert(value != .function_header);
                     try eval.push(value);
                 },
                 .captured_variable => |v| {
-                    const frame = eval.header.?;
-                    const func = (try eval.valueAt(frame + 1, .any)).function;
+                    const frame = eval.header.unwrap().?;
+                    const func = (try eval.valueAt(frame.addi(1), .any)).function;
                     const value = func.captures[v.offset];
                     try eval.push(.{ .value = value });
                 },
@@ -1104,11 +1109,11 @@ pub const Interpreter = struct {
                     for (cap_slice, captures.items(.data)) |*dest, data| {
                         const cap = data.function_capture;
                         var frame = eval.header;
-                        while (frame) |f| : (frame = eval.stack.items[f].function_header.parent) {
-                            const func = try eval.valueAt(f + 1, .any);
+                        while (frame.unwrap()) |f| : (frame = eval.stack.get(f).function_header.parent) {
+                            const func = try eval.valueAt(f.addi(1), .any);
                             if (func.function.root == cap.scope) {
                                 // Found the value
-                                const value = eval.stack.items[f + 2 + cap.offset].value;
+                                const value = eval.stack.get(f.addi(2).addi(cap.offset)).value;
                                 dest.* = value;
                                 break;
                             }
