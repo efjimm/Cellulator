@@ -33,6 +33,13 @@ let a0 = (|| b0)()
 let b0 = 10
 :expect a0 == 10
 
+let a0 = |x, y| x + y
+let b0 = 0
+let c0 = a0(b0, 1 + 1)
+:expect c0 == 2
+let b0 = 3
+:expect c0 == 5
+
 -- Closures
 :expect (|x| (|| x))(3)() == 3
 let a0 = |x| |y| x + y

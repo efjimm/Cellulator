@@ -798,7 +798,7 @@ pub const ArgIteratorForwards = struct {
     end: Node.Index,
     index: Node.Index,
     backwards_iter: ArgIterator,
-    buffer: [32]Node.Index = undefined,
+    buffer: [256]Node.Index = undefined,
     i: usize = 0,
 
     pub fn next(iter: *ArgIteratorForwards) ?Node.Index {
@@ -1835,8 +1835,10 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
                     unreachable;
                 },
                 .function_call => |call| {
-                    for (0..call.arg_count) |i| {
-                        self.traverse(index.subi(@intCast(i)).subi(1), .reference, .deref);
+                    const start = index.subi(call.function_index);
+                    var iter = ast.argIteratorForwards(start, index);
+                    while (iter.next()) |i| {
+                        self.traverse(i, .reference, .deref);
                     }
                     const func_node = index.subi(call.function_index);
                     self.traverse(func_node, .value, .no_deref);
