@@ -1404,6 +1404,7 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
                 .cell, .indirect_cell => |pos| zc.setStatusMessage(.info, "{s} = {f}", .{ str, pos }),
                 .range, .indirect_range => |r| zc.setStatusMessage(.info, "{s} = {f}", .{ str, r }),
                 .function => zc.setStatusMessage(.info, "{s} = FUNCTION", .{str}),
+                .builtin_function => zc.setStatusMessage(.info, "{s} = BUILTIN", .{str}),
             }
         },
     }
@@ -3121,6 +3122,7 @@ fn widthNeededForColumn(
                 .simple_function => std.fmt.count("{f}", .{
                     ctx.sheet.ast.fmtExpression(cell.value.simple_function.index),
                 }),
+                .builtin_function => std.fmt.count("@{f}", .{cell.value.builtin_function}),
                 .closure => {
                     const root = ctx.sheet.closures.items[cell.value.closure.index].function.root;
                     break :sw std.fmt.count("{f}", .{

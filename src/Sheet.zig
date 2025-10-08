@@ -181,6 +181,7 @@ pub const Cell = extern struct {
             unused: u16 = 0,
             index: Ast.Node.Index,
         },
+        builtin_function: Ast.Node.Builtin.Tag,
         closure: packed struct(u64) {
             unused: u8 = 0,
             len: u8,
@@ -1051,6 +1052,9 @@ pub fn formatCell(sheet: *const Sheet, cell: *const Cell, w: *std.io.Writer) !vo
         },
         .simple_function => {
             try sheet.ast.print(cell.value.simple_function.index, w);
+        },
+        .builtin_function => {
+            try w.print("@{f}", .{cell.value.builtin_function});
         },
         .closure => {
             const root = sheet.closures.items[cell.value.closure.index].function.root;
@@ -2955,6 +2959,9 @@ pub fn evalCellByHandle(
                         cell.setValue(.simple_function, .{ .index = f.root });
                     }
                 },
+                .builtin_function => |f| {
+                    cell.setValue(.builtin_function, f.tag);
+                },
             }
 
             cell.expr.state = .up_to_date;
@@ -2976,6 +2983,7 @@ pub fn evalCellByHandle(
         .ref_cell => .{ .indirect_cell = cell.value.ref_cell },
         .ref_range => .{ .indirect_range = .{ .rect = sheet.cellValueRange(cell.value.ref_range).* } },
         .simple_function => .{ .function = .{ .root = cell.value.simple_function.index } },
+        .builtin_function => .{ .builtin_function = .{ .tag = cell.value.builtin_function } },
         .closure => {
             const closure = cell.value.closure;
             const captured = sheet.closures.items[closure.index + 1 ..][0..closure.len];
@@ -3202,9 +3210,15 @@ fn createCellCopiesContiguous(
                     continue;
                 }
 
+                // Cell does not have AST, so it can only be a simple value
                 switch (src_cell.expr.value_tag) {
                     .number, .string, .err => {},
-                    .ref_cell, .ref_range, .simple_function, .closure => unreachable,
+                    .ref_cell,
+                    .ref_range,
+                    .simple_function,
+                    .builtin_function,
+                    .closure,
+                    => unreachable,
                 }
 
                 slice.append(.{

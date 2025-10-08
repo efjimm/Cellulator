@@ -1141,6 +1141,7 @@ fn renderCursor(tui: *Tui, wr: *Screen.Writer) !void {
             .ref_cell => .cell_ref_selected,
             .ref_range => .cell_range_selected,
             .simple_function => .cell_number_selected,
+            .builtin_function => .cell_number_selected,
             .closure => .cell_number_selected,
         };
     };
@@ -1228,7 +1229,7 @@ const ScreenData = struct {
     attrs: []const Sheet.TextAttrs,
     extra: []const Extra,
 
-    const Tag = enum(u3) {
+    const Tag = enum(u4) {
         blank,
         number,
         string,
@@ -1236,6 +1237,7 @@ const ScreenData = struct {
         ref_cell,
         ref_range,
         simple_function,
+        builtin_function,
         closure,
     };
 
@@ -1287,6 +1289,7 @@ fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !ScreenData {
                     .ref_cell => .ref_cell,
                     .ref_range => .ref_range,
                     .simple_function => .simple_function,
+                    .builtin_function => .builtin_function,
                     .closure => .closure,
                 },
                 .is_volatile = cell.expr.is_volatile,
@@ -1466,6 +1469,19 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                         "{f}",
                         .{sheet.ast.fmtExpression(root)},
                     );
+                    try shovel.writeTruncating(
+                        slice,
+                        width,
+                        .right,
+                        tui.term.grapheme_clustering_mode,
+                        &wr.interface,
+                    );
+                },
+                .builtin_function => {
+                    try tui.setStyle(.cell_number_unselected, wr);
+                    // TODO: Syntax highlight these
+                    const tag = data.values[i].builtin_function;
+                    const slice = try std.fmt.allocPrint(tui.arena.allocator(), "{f}", .{tag});
                     try shovel.writeTruncating(
                         slice,
                         width,

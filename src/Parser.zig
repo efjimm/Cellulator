@@ -274,7 +274,7 @@ fn parseEof(p: *Parser) ParseError!Result {
     return ret;
 }
 
-/// <- (Statement / Expression) eof
+/// <- Statement / Expression
 fn parse(p: *Parser) ParseError!Result {
     p.is_volatile = false;
     p.locals.clearRetainingCapacity();
@@ -294,6 +294,15 @@ fn parse(p: *Parser) ParseError!Result {
     };
 }
 
+/// FunctionDef <- ('||' / ('|' (IDENTIFIER ',')* IDENTIFIER ','? '|')) Expression
+///
+/// Functions are laid out in the AST like so:
+///
+/// - function_body_start
+///   - function_parameter nodes
+///   - function body nodes
+///   - function_capture nodes
+/// - function_body_end
 fn parseFunctionDefinition(p: *Parser) ParseError!Intermediate {
     try p.expectToken(.pipe);
 
@@ -334,14 +343,11 @@ fn parseFunctionDefinition(p: *Parser) ParseError!Intermediate {
     _ = try p.parseExpression(.value);
     const body_len: u32 = @intCast(p.ast.nodes.len() - body_start);
 
-    const func: Ast.Node.FunctionDefinition = .{
+    const func: Ast.Node.FunctionDefStart = .{
         .arg_count = arg_count,
         .body_length = body_len,
         .capture_count = p.capture_count,
     };
-
-    const end_node = try p.addNode(.init(.function_body_end, func));
-    p.ast.payloadPtr(start_node).* = .{ .function_body_start = func };
 
     for (0..p.capture_count) |_| {
         const capture = p.captures.pop().?;
@@ -350,6 +356,13 @@ fn parseFunctionDefinition(p: *Parser) ParseError!Intermediate {
             .scope = capture.scope,
         }));
     }
+
+    const end_node = try p.addNode(.init(.function_body_end, .{
+        .arg_count = func.arg_count,
+        .capture_count = func.capture_count,
+        .body_length = func.body_length,
+    }));
+    p.ast.payloadPtr(start_node).* = .{ .function_body_start = func };
 
     p.scope = previous_scope;
     p.capture_count = old_cap_count;
@@ -395,11 +408,12 @@ fn parseAssignment(p: *Parser) ParseError!Index {
     return p.addNode(.init(.assignment, pos));
 }
 
-/// Expression <- OrExpr
+/// Expression <- PipeExpr
 fn parseExpression(p: *Parser, ctx: ExpressionContext) ParseError!Intermediate {
     return try p.parsePipeExpr(ctx);
 }
 
+/// PipeExpr <- OrExpr ('|>' OrExpr)*
 fn parsePipeExpr(p: *Parser, ctx: ExpressionContext) ParseError!Intermediate {
     const start = p.ast.nodes.len();
     var index, var result_type = try p.parseOrExpr(ctx);
@@ -780,79 +794,8 @@ fn parseBuiltin(p: *Parser) !Intermediate {
         .{ .invalid_builtin = identifier },
     );
 
-    var arg_count: u32 = 0;
-    const args_start, const result_type: Type = sw: switch (builtin) {
-        // These builtins aren't even functions!
-        .pi, .e => {
-            const index = try p.addNode(
-                .init(.builtin, .{
-                    .tag = builtin,
-                    .arg_count = 0,
-                    .first_arg = 0,
-                }),
-            );
-            return .{ index, .number };
-        },
-        // These builtins take only one argument
-        .width,
-        .height,
-        => {
-            try p.expectToken(.lparen);
-            const expr, _ = try p.parseExpression(.value);
-            arg_count = 1;
-            break :sw .{ expr, .number };
-        },
-        .sqrt,
-        .round,
-        .floor,
-        .ceil,
-        .len,
-        => {
-            try p.expectToken(.lparen);
-            const expr, const result_type = try p.parseExpression(.reference);
-            p.volatileAccessSingle(expr, result_type);
-            arg_count = 1;
-
-            break :sw .{ expr, .number };
-        },
-        .upper,
-        .lower,
-        => {
-            try p.expectToken(.lparen);
-            const expr, const result_type = try p.parseExpression(.reference);
-            p.volatileAccessSingle(expr, result_type);
-            arg_count = 1;
-
-            break :sw .{ expr, .string };
-        },
-        // These builtins require at least one argument
-        .sum,
-        .max,
-        .prod,
-        .avg,
-        .min,
-        .count,
-        .count_all,
-        => {
-            try p.expectToken(.lparen);
-            const index, arg_count = try p.parseVarArgsAccess(.reference);
-            break :sw .{ index, .number };
-        },
-        .log => {
-            try p.expectToken(.lparen);
-            const index = try p.parseArgsAccess(2, .reference);
-            arg_count = 2;
-            break :sw .{ index, .number };
-        },
-    };
-    try p.expectToken(.rparen);
-
-    const index = try p.addNode(.init(.builtin, .{
-        .tag = builtin,
-        .arg_count = @intCast(arg_count),
-        .first_arg = @intCast(p.ast.nodes.len() - @intFromEnum(args_start)),
-    }));
-    return .{ index, result_type };
+    const index = try p.addNode(.init(.builtin, .{ .tag = builtin }));
+    return .{ index, .any };
 }
 
 /// ArgList <- Expression (',' Expression)*
@@ -1109,12 +1052,12 @@ test "parser" {
     try testParseError("let a0 = 'string' / 'string'", null);
     try testParseError("let a0 = 'string' % 'string'", null);
 
-    try testParseError("let a0 = @upper()", error.UnexpectedToken);
-    try testParseError("let a0 = @lower()", error.UnexpectedToken);
+    try testParseError("let a0 = @upper()", null);
+    try testParseError("let a0 = @lower()", null);
     try testParseError("let a0 = @upper(a0:b0)", null);
     try testParseError("let a0 = @lower(a0:b0)", null);
-    try testParseError("let a0 = @upper(a0, b0)", error.UnexpectedToken); // Should only have one arg
-    try testParseError("let a0 = @lower(a0, b0)", error.UnexpectedToken); // Should only have one arg
+    try testParseError("let a0 = @upper(a0, b0)", null);
+    try testParseError("let a0 = @lower(a0, b0)", null);
 
     try testParseError("let a0 = @sum('string1')", null);
     try testParseError("let a0 = @prod('string1')", null);
@@ -1298,8 +1241,8 @@ test "Node contents" {
             .init(.captured_variable, .{ .slot = 0, .offset = 0, .scope = @enumFromInt(0) }),
             .init(.local_variable, .{ .offset = 0 }),
             .init(.add, {}),
-            .init(.function_body_end, .{ .arg_count = 1, .body_length = 3, .capture_count = 1 }),
             .init(.function_capture, .{ .offset = 0, .scope = @enumFromInt(0) }),
+            .init(.function_body_end, .{ .arg_count = 1, .body_length = 3, .capture_count = 1 }),
             .init(.function_body_end, .{ .arg_count = 1, .body_length = 7, .capture_count = 0 }),
             .init(.assignment, .fromValidAddress("a0")),
             .init(.end, .{ .length = 11 }),
@@ -1325,6 +1268,20 @@ test "Node contents" {
             .init(.number, 10),
             .init(.function_call, .{ .is_pipe = true, .arg_count = 3, .function_index = 4 }),
             .init(.end, .{ .length = 5 }),
+        },
+    );
+
+    try testNodes(
+        "@upper(A0) # @lower(B0)",
+        &.{
+            .init(.builtin, .{ .tag = .upper }),
+            .init(.rel_rel, .fromValidAddress("A0")),
+            .init(.function_call, .{ .is_pipe = false, .arg_count = 1, .function_index = 2 }),
+            .init(.builtin, .{ .tag = .lower }),
+            .init(.rel_rel, .fromValidAddress("B0")),
+            .init(.function_call, .{ .is_pipe = false, .arg_count = 1, .function_index = 2 }),
+            .init(.concat, {}),
+            .init(.end, .{ .length = 7 }),
         },
     );
 }

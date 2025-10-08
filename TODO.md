@@ -4,8 +4,12 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 # TODO
 
+- Streams
+  - map filter reduce
+- Anonymous functions with implicit arguments (placeholders)
+- Maybe remove @ prefix from builtins
+- Vet cell literal boundaries in evaluation
 - Update README
-- Index type for interpreter stack
 - Tests
 
 - 32 bit builds
