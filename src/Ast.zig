@@ -367,53 +367,6 @@ pub const Node = extern struct {
         reference,
         dereference,
 
-        pub fn isSingle(t: Tag) bool {
-            return switch (t) {
-                .number,
-                .rel_rel,
-                .abs_abs,
-                .abs_rel,
-                .rel_abs,
-                .string_literal,
-                .range,
-                .dynamic_range,
-                .builtin,
-                .invalidated_pos,
-                .invalidated_range,
-                .minus,
-                .plus,
-                .not,
-                .reference,
-                .dereference,
-                .function_body_end,
-                .function_body_start,
-                .function_parameter,
-                .function_capture,
-                .local_variable,
-                .captured_variable,
-                .function_call,
-                => true,
-                .assignment,
-                .end,
-                .concat,
-                .add,
-                .sub,
-                .mul,
-                .div,
-                .mod,
-                .pow,
-                .logical_and,
-                .logical_or,
-                .greater_than,
-                .less_than,
-                .greater_equals,
-                .less_equals,
-                .equals,
-                .not_equals,
-                => false,
-            };
-        }
-
         pub fn isCommutative(t: Tag) bool {
             return switch (t) {
                 .add, .mul, .equals, .not_equals => true,
@@ -431,12 +384,9 @@ pub const Node = extern struct {
                 .rel_abs,
                 .rel_rel,
                 .builtin,
-                .range,
-                .dynamic_range,
                 .invalidated_pos,
-                .invalidated_range,
                 .string_literal,
-                .assignment,
+                .assignment, // Not a real operator
                 .function_body_start,
                 .function_body_end,
                 .function_parameter,
@@ -446,16 +396,17 @@ pub const Node = extern struct {
                 => 127,
 
                 // Actual operators
-                .function_call => 4,
-                .reference => 3,
-                .dereference => 3,
-                .minus => 2,
-                .plus => 2,
-                .not => 2,
+                .function_call => 6,
+                .reference => 5,
+                .dereference => 5,
+                .range, .dynamic_range, .invalidated_range => 4,
+                .minus => 3,
+                .plus => 3,
+                .not => 3,
+                .pow => 2,
                 .mul => 1,
                 .div => 1,
                 .mod => 1,
-                .pow => 1,
                 .concat => 0,
                 .add => 0,
                 .sub => 0,
@@ -655,7 +606,8 @@ pub fn printFromNode(
 
             try w.writeByte(byte);
             // TODO: Remove this
-            if (rhs.tag.isSingle()) {
+            const prec = comptime t.precedence();
+            if (rhs.tag.precedence() >= prec) {
                 try ast.printFromNode(n, rhs, w, current_function);
             } else {
                 try w.writeByte('(');
@@ -713,19 +665,23 @@ pub fn printFromNode(
         .less_equals,
         .logical_or,
         .logical_and,
+        .range,
+        .dynamic_range,
+        .invalidated_range,
         => |_, t| {
             const str = switch (t) {
-                .greater_than => ">",
-                .less_than => "<",
-                .greater_equals => ">=",
-                .less_equals => "<=",
-                .sub => "-",
-                .div => "/",
-                .mod => "%",
+                .greater_than => " > ",
+                .less_than => " < ",
+                .greater_equals => " >= ",
+                .less_equals => " <= ",
+                .sub => " - ",
+                .div => " / ",
+                .mod => " % ",
                 .pow => "^",
-                .concat => "#",
-                .logical_or => "or",
-                .logical_and => "and",
+                .concat => " # ",
+                .logical_or => " or ",
+                .logical_and => " and ",
+                .range, .dynamic_range, .invalidated_range => ":",
                 else => comptime unreachable,
             };
 
@@ -744,7 +700,7 @@ pub fn printFromNode(
                 try ast.printFromIndex(lhs, w, current_function);
             }
 
-            try w.writeAll(" " ++ str ++ " ");
+            try w.writeAll(str);
 
             if (rhs_prec <= prec) {
                 try w.writeByte('(');
@@ -754,14 +710,6 @@ pub fn printFromNode(
                 try ast.printFromIndex(rhs, w, current_function);
             }
         },
-        .range, .invalidated_range, .dynamic_range => {
-            const rhs = index.subi(1);
-            const lhs = ast.leftMostChild(rhs).subi(1);
-            try ast.printFromIndex(lhs, w, current_function);
-            try w.writeByte(':');
-            try ast.printFromIndex(rhs, w, current_function);
-        },
-
         .builtin => |b| {
             try w.print("@{f}", .{b.tag});
         },
@@ -2154,6 +2102,7 @@ test "Print" {
         .{ "1 % (2 / 3)", "1 % (2 / 3)" },
         .{ "1 % 2 % 3", "1 % 2 % 3" },
         .{ "1 % (2 % 3)", "1 % (2 % 3)" },
+        .{ "(1 and 2) or (3 and 4)", "1 and 2 or 3 and 4" },
 
         .{ "A0:B0", "A0:B0" },
         .{ "@sum(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)", "@sum(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)" },
@@ -2174,11 +2123,26 @@ test "Print" {
         "(1 + 2) * 3",
         "(|x| x * 2)(5) == 10",
         "-(1 + 2)",
+        "-(1 * 2)",
+        "-(1 / 2)",
+        "-(1 % 2)",
+        "-*A0",
+        "**A0",
+        "***A0",
+        "A0:D10",
+        "*A0:D10",
+        "**A0:D0",
+        "A0:*D10",
+        "A0:**D10",
+        "**A0:**D10",
 
         "0 or 0",
         "0 or 1",
         "1 or 1",
         "1 or 1",
+
+        "1 and 2 or 3 and 4",
+        "1 and (2 or 3) and 4",
     };
 
     var sheet = try Sheet.init(t.allocator);
