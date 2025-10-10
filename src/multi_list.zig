@@ -5,21 +5,15 @@ const assert = std.debug.assert;
 pub fn MultiList(T: type, I: type) type {
     return struct {
         slice: std.MultiArrayList(T).Slice,
-        offset: usize,
+        start: usize,
         sliced: bool,
 
         const Self = @This();
 
         pub const empty: Self = .{
             .slice = .empty,
-            .offset = 0,
+            .start = 0,
             .sliced = false,
-        };
-
-        pub const ExternInt = blk: {
-            const bits = @bitSizeOf(I);
-            const new_bits = std.math.ceilPowerOfTwo(usize, bits) catch @panic("");
-            break :blk @Type(.{ .int = .{ .bits = new_bits, .signedness = .unsigned } });
         };
 
         pub const Index = enum(I) {
@@ -90,7 +84,7 @@ pub fn MultiList(T: type, I: type) type {
             i: Index,
             comptime field: std.MultiArrayList(T).Field,
         ) *@FieldType(T, @tagName(field)) {
-            return &self.slice.items(field)[@intFromEnum(i) - self.offset];
+            return &self.slice.items(field)[self.offset(i)];
         }
 
         pub fn items(
@@ -101,11 +95,11 @@ pub fn MultiList(T: type, I: type) type {
         }
 
         pub fn get(self: *const Self, i: Index) T {
-            return self.geti(@intFromEnum(i) - self.offset);
+            return self.geti(self.offset(i));
         }
 
         pub fn set(self: *const Self, i: Index, elem: T) void {
-            return self.seti(@intFromEnum(i) - self.offset, elem);
+            return self.seti(self.offset(i), elem);
         }
 
         pub fn geti(self: *const Self, i: usize) T {
@@ -132,13 +126,17 @@ pub fn MultiList(T: type, I: type) type {
         pub fn subslice(self: Self, start: usize, length: usize) Self {
             return .{
                 .slice = self.slice.subslice(start, length),
-                .offset = self.offset + start,
+                .start = self.start + start,
                 .sliced = self.sliced or start > 0 or length < self.slice.len,
             };
         }
 
+        pub fn subsliceIndex(self: Self, start: Index, length: usize) Self {
+            return self.subslice(self.offset(start), length);
+        }
+
         pub fn subsliceEndIndex(self: Self, start: Index, end: Index) Self {
-            return self.subsliceEnd(@intFromEnum(start), @intFromEnum(end));
+            return self.subsliceEnd(self.offset(start), self.offset(end));
         }
 
         pub fn pop(self: *Self) ?T {
@@ -148,13 +146,17 @@ pub fn MultiList(T: type, I: type) type {
         }
 
         pub fn index(self: *const Self, n: usize) Index {
-            return @enumFromInt(self.offset + n);
+            return @enumFromInt(self.start + n);
+        }
+
+        pub fn offset(self: *const Self, i: Index) I {
+            return @intCast(@intFromEnum(i) - self.start);
         }
 
         /// Returns the last available index + 1. Not a valid index to access.
         /// This would be the index created by the next `append` operation.
         pub fn nextIndex(self: *const Self) Index {
-            return @enumFromInt(self.offset + self.len());
+            return @enumFromInt(self.start + self.len());
         }
 
         pub fn append(self: *Self, gpa: Allocator, elem: T) !Index {
@@ -236,7 +238,7 @@ pub fn MultiList(T: type, I: type) type {
 
         pub fn containsIndex(self: *const Self, ind: Index) bool {
             const n = @intFromEnum(ind);
-            return n >= self.offset and n < self.len();
+            return n >= self.start and n < self.len();
         }
 
         pub fn reverseIterator(self: *const Self) ReverseIterator {
@@ -251,7 +253,7 @@ pub fn MultiList(T: type, I: type) type {
             i: Index,
 
             pub fn next(iter: *ReverseIterator) ?Index {
-                if (@intFromEnum(iter.i) <= iter.list.offset)
+                if (@intFromEnum(iter.i) <= iter.list.start)
                     return null;
 
                 iter.i = iter.i.subi(1);

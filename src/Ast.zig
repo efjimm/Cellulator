@@ -140,8 +140,6 @@ pub const Node = extern struct {
 
     pub const OptionalIndex = NodeList.OptionalIndex;
     pub const Index = NodeList.Index;
-    pub const ExternIndex = NodeList.ExternIndex;
-    pub const OptionalExternIndex = NodeList.OptionalExternIndex;
 
     pub const Payload = blk: {
         var t = @typeInfo(Tagged).@"union";
@@ -199,12 +197,12 @@ pub const Node = extern struct {
         scope: Index,
     };
 
-    pub const FunctionDefStart = extern struct {
+    pub const FunctionDefStart = packed struct(u64) {
         arg_count: u8,
         capture_count: u8,
-        body_length: u32,
+        body_length: u48,
 
-        pub fn length(def: FunctionDefStart) u32 {
+        pub fn length(def: FunctionDefStart) u48 {
             return def.arg_count + def.body_length + def.capture_count;
         }
 
@@ -225,12 +223,12 @@ pub const Node = extern struct {
         }
     };
 
-    pub const FunctionDefEnd = extern struct {
+    pub const FunctionDefEnd = packed struct(u64) {
         arg_count: u8,
         capture_count: u8,
-        body_length: u32, //TODO: Make u48
+        body_length: u48,
 
-        pub fn length(def: FunctionDefEnd) u32 {
+        pub fn length(def: FunctionDefEnd) u48 {
             return def.arg_count + def.body_length + def.capture_count;
         }
 
@@ -271,10 +269,10 @@ pub const Node = extern struct {
     }
 
     pub const Tagged = union(Tag) {
-        /// Stores the number of nodes in the AST.
         end: packed struct(u64) {
-            length: u48,
             unused: u16 = 0,
+            /// Stores the number of nodes in the AST.
+            length: u48,
         },
         number: f64,
         abs_abs: Position,
@@ -594,7 +592,7 @@ pub fn printFromNode(
             }
             try w.writeAll("| ");
             try ast.printFromIndex(
-                index.addi(def.bodyStart()),
+                index.addi(def.body()),
                 w,
                 index.toOptional(),
             );
@@ -656,6 +654,7 @@ pub fn printFromNode(
             };
 
             try w.writeByte(byte);
+            // TODO: Remove this
             if (rhs.tag.isSingle()) {
                 try ast.printFromNode(n, rhs, w, current_function);
             } else {
@@ -1060,17 +1059,16 @@ pub const Interpreter = struct {
         indirect,
     };
 
-    fn push(eval: *@This(), res: StackFrame) !void {
-        if (res == .value)
-            std.log.debug("Push {any}", .{res.value});
+    fn push(eval: *Interpreter, res: StackFrame) !void {
         try eval.stack.append(eval.arena, res);
     }
 
-    pub fn pop(eval: *@This(), result_type: ResultType) !Value {
-        const ret = eval.stack.pop().?;
-        if (ret == .value)
-            std.log.debug("Pop {any}", .{ret.value});
-        return switch (ret) {
+    fn pushv(eval: *Interpreter, value: Value) !void {
+        return eval.push(.{ .value = value });
+    }
+
+    pub fn pop(eval: *Interpreter, result_type: ResultType) !Value {
+        return switch (eval.stack.pop().?) {
             .cell_literal => |pos| switch (result_type) {
                 .reference => .{ .cell = pos },
                 .any => eval.evaluateCell(pos, .direct),
@@ -1080,7 +1078,9 @@ pub const Interpreter = struct {
         };
     }
 
-    fn valueAt(eval: *@This(), index: StackFrame.Index, result_type: ResultType) !Value {
+    /// Return the value at the specified index. Cell literals will be evaluated based on
+    /// `result_type`.
+    fn valueAt(eval: *Interpreter, index: StackFrame.Index, result_type: ResultType) !Value {
         const ret = eval.stack.get(index);
         return switch (ret) {
             .cell_literal => |pos| switch (result_type) {
@@ -1093,7 +1093,7 @@ pub const Interpreter = struct {
     }
 
     fn evaluateCellPush(
-        eval: *@This(),
+        eval: *Interpreter,
         pos: Position,
         comptime direct: Direction,
     ) !void {
@@ -1101,8 +1101,9 @@ pub const Interpreter = struct {
         try eval.push(.{ .value = res });
     }
 
+    /// Returns the value of a cell. If the access is indirect, sets the volatile flag.
     fn evaluateCell(
-        eval: *@This(),
+        eval: *Interpreter,
         pos: Position,
         comptime direct: Direction,
     ) !Value {
@@ -1110,7 +1111,7 @@ pub const Interpreter = struct {
         return try eval.sheet.evalCellByPos(eval, pos);
     }
 
-    fn evaluateBuiltin(eval: *@This(), builtin_tag: Node.Builtin.Tag, arg_count: u8) !Value {
+    fn evaluateBuiltin(eval: *Interpreter, builtin_tag: Node.Builtin.Tag, arg_count: u8) !Value {
         return switch (builtin_tag) {
             .sum => .{ .number = try eval.evalSum(arg_count) },
             .prod => .{ .number = try eval.evalProd(arg_count) },
@@ -1140,284 +1141,277 @@ pub const Interpreter = struct {
         };
     }
 
-    pub fn evaluate(eval: *@This(), start: Node.Index) !EvaluateResult {
-        const nodes = &eval.sheet.ast.nodes;
-        var i: u48 = @intFromEnum(start);
-        while (true) : (i += 1) {
-            // std.log.debug("Evaluate {t}", .{eval.ast.tag(nodes.index(i))});
-            switch (nodes.geti(i).get()) {
-                .end => break,
-                .function_body_end => {
-                    // Return from the function
-                    const header_index = eval.header.unwrap().?;
-                    const header = eval.stack.get(header_index).function_header;
+    pub fn evaluate(eval: *Interpreter, start: Node.Index) !EvaluateResult {
+        const ast = &eval.sheet.ast;
+        var i = start;
+        while (true) : (i = i.addi(1)) switch (ast.node(i)) {
+            .end => break,
+            .number => |n| try eval.pushv(.{ .number = n }),
+            .rel_rel, .rel_abs, .abs_rel, .abs_abs => |pos| {
+                try eval.push(.{ .cell_literal = pos });
+            },
+            .string_literal => |str| {
+                try eval.pushv(.{ .string = .{ .slice = ast.string(str) } });
+            },
+            .invalidated_pos, .invalidated_range => return error.NotEvaluable,
+            .function_body_start => |def| {
+                // Capture any necessary values
+                const captures = ast.nodes.subsliceIndex(i.addi(def.captures()), def.capture_count);
+                const cap_slice = try eval.arena.alloc(Value, def.capture_count);
+                for (cap_slice, captures.items(.data)) |*dest, data| {
+                    const cap = data.function_capture;
+                    var frame = eval.header;
+                    while (frame.unwrap()) |f| : (frame = eval.stack.get(f).function_header.parent) {
+                        const func = try eval.valueAt(f.addi(1), .any);
+                        if (func.function.root == cap.scope) {
+                            // Found the value
+                            const value = eval.stack.get(f.addi(2).addi(cap.offset)).value;
+                            dest.* = value;
+                            break;
+                        }
+                    } else unreachable;
+                }
 
-                    const return_value = eval.stack.pop().?;
-                    eval.stack.shrinkRetainingCapacity(header_index);
-                    eval.stack.appendAssumeCapacity(return_value);
+                try eval.pushv(.{ .function = .{ .root = i, .captures = cap_slice } });
+                i = i.addi(1 + def.length());
+            },
+            .function_body_end => {
+                // Return from the function
+                const header_index = eval.header.unwrap().?;
+                const header = eval.stack.get(header_index).function_header;
 
-                    eval.header = header.parent;
-                    i = @intFromEnum(header.return_address);
-                },
-                .function_call => |call| {
-                    // The arguments are at the top of the stack, with the function to call below.
-                    const index = eval.stack.lastIndex().subi(1).subi(call.arg_count);
-                    const arg = try eval.valueAt(index, .any);
-                    switch (arg) {
-                        .function => {
-                            const func = arg.function.root;
-                            assert(eval.sheet.ast.tag(func) == .function_body_start);
-                            const def = eval.sheet.ast.payload(func).function_body_start;
-                            if (def.arg_count != call.arg_count)
-                                return error.NotEvaluable;
+                const return_value = eval.stack.pop().?;
+                eval.stack.shrinkRetainingCapacity(header_index);
+                eval.stack.appendAssumeCapacity(return_value);
 
-                            const old_header = eval.header;
-                            eval.header = index.toOptional();
-                            try eval.stack.inserti(
-                                eval.arena,
-                                eval.stack.len() - 1 - call.arg_count,
-                                .{ .function_header = .{
-                                    .parent = old_header,
-                                    .return_address = nodes.index(i),
-                                } },
-                            );
-                            i = @intFromEnum(func.addi(def.bodyStart() - 1));
-                            // const jump_tag = eval.sheet.ast.tag(@enumFromInt(i + 1));
-                            // std.log.debug("JUMP {t}", .{jump_tag});
-                        },
-                        // We don't need to insert a frame header because we don't actually 'jump'
-                        // anywhere in the AST to evaluate a builtin.
-                        .builtin_function => |f| {
-                            const res = try eval.evaluateBuiltin(f.tag, call.arg_count);
-                            eval.stack.shrinkRetainingCapacity(index);
-                            try eval.push(.{ .value = res });
-                        },
-                        else => return error.NotEvaluable,
-                    }
-                },
-                .local_variable => |v| {
-                    // TODO: Should this resolve cell literals?
-                    const frame = eval.header.unwrap().?;
-                    const value = eval.stack.get(frame.addi(2).addi(v.offset));
-                    assert(value != .function_header);
-                    try eval.push(value);
-                },
-                .captured_variable => |v| {
-                    const frame = eval.header.unwrap().?;
-                    const func = (try eval.valueAt(frame.addi(1), .any)).function;
-                    const value = func.captures[v.offset];
-                    try eval.push(.{ .value = value });
-                },
-                .function_body_start => |def| {
-                    const captures = nodes.subslice(
-                        i + def.captures(),
-                        def.capture_count,
-                    );
-                    const cap_slice = try eval.arena.alloc(Value, def.capture_count);
-                    for (cap_slice, captures.items(.data)) |*dest, data| {
-                        const cap = data.function_capture;
-                        var frame = eval.header;
-                        while (frame.unwrap()) |f| : (frame = eval.stack.get(f).function_header.parent) {
-                            const func = try eval.valueAt(f.addi(1), .any);
-                            if (func.function.root == cap.scope) {
-                                // Found the value
-                                const value = eval.stack.get(f.addi(2).addi(cap.offset)).value;
-                                dest.* = value;
-                                break;
-                            }
-                        } else unreachable;
-                    }
+                eval.header = header.parent;
+                i = header.return_address;
+            },
+            .function_parameter => unreachable,
+            .function_capture => {},
+            .function_call => |call| {
+                // The arguments are at the top of the stack, with the function to call below.
+                const index = eval.stack.lastIndex().subi(1).subi(call.arg_count);
+                const arg = try eval.valueAt(index, .any);
+                switch (arg) {
+                    .function => {
+                        const func = arg.function.root;
+                        assert(eval.sheet.ast.tag(func) == .function_body_start);
+                        const def = eval.sheet.ast.payload(func).function_body_start;
+                        if (def.arg_count != call.arg_count)
+                            return error.NotEvaluable;
 
-                    try eval.push(.{ .value = .{
-                        .function = .{ .root = nodes.index(i), .captures = cap_slice },
-                    } });
-                    i += 1 + def.length();
-                },
-                .function_parameter => unreachable,
-                .function_capture => {},
-                .number => |n| try eval.push(.{ .value = .{ .number = n } }),
-                .rel_rel, .rel_abs, .abs_rel, .abs_abs => |pos| {
-                    try eval.push(.{ .cell_literal = pos });
-                },
-                .minus => {
-                    const rhs = try eval.pop(.any);
-                    try eval.push(.{ .value = .{ .number = -(try eval.toNumber(rhs, 0)) } });
-                },
-                .plus => {
-                    const rhs = try eval.pop(.any);
-                    try eval.push(.{ .value = .{ .number = @abs(try eval.toNumber(rhs, 0)) } });
-                },
-                .not => {
-                    const rhs = try eval.pop(.any);
-                    try eval.push(.{ .value = .{
-                        .number = @floatFromInt(@intFromBool(!rhs.boolean(eval.sheet))),
-                    } });
-                },
-                .reference => {
-                    const arg = try eval.pop(.reference);
-                    try eval.push(.{ .value = .{ .cell = arg.cell } });
-                },
-                .dereference => {
-                    const arg = try eval.pop(.reference);
-                    switch (arg) {
-                        .cell => |pos| try eval.evaluateCellPush(pos, .direct),
-                        .indirect_cell => |pos| try eval.evaluateCellPush(pos, .indirect),
-                        else => return error.NotEvaluable,
-                    }
-                },
-                inline .add, .sub, .mul, .div, .mod, .pow => |_, t| {
-                    const rhs = try eval.pop(.any);
-                    const lhs = try eval.pop(.any);
-                    const l = try eval.toNumber(lhs, 0);
-                    const r = try eval.toNumber(rhs, 0);
-                    const res: Value = .{ .number = switch (t) {
-                        .add => l + r,
-                        .sub => l - r,
-                        .mul => l * r,
-                        .div => {
-                            if (r == 0) return error.DivideByZero;
-                            try eval.push(.{ .value = .{ .number = l / r } });
-                            continue;
-                        },
-                        .mod => {
-                            if (r <= 0) return error.DivideByZero;
-                            try eval.push(.{ .value = .{ .number = @rem(l, r) } });
-                            continue;
-                        },
-                        .pow => std.math.pow(f64, l, r),
-                        else => comptime unreachable,
-                    } };
-                    try eval.push(.{ .value = res });
-                },
-                // and/or have the same semantics as Lua's and/or operators.
-                .logical_and => {
-                    const rhs = try eval.pop(.any);
-                    const lhs = try eval.pop(.any);
-                    const res: StackFrame =
-                        if (lhs.boolean(eval.sheet))
-                            .{ .value = rhs }
-                        else
-                            .{ .value = .{ .number = 0 } };
+                        const old_header = eval.header;
+                        eval.header = index.toOptional();
+                        try eval.stack.inserti(
+                            eval.arena,
+                            eval.stack.len() - 1 - call.arg_count,
+                            .{ .function_header = .{
+                                .parent = old_header,
+                                .return_address = i,
+                            } },
+                        );
+                        i = func.addi(def.bodyStart() - 1);
+                    },
+                    // We don't need to insert a frame header because we don't actually 'jump'
+                    // anywhere in the AST to evaluate a builtin.
+                    .builtin_function => |f| {
+                        const res = try eval.evaluateBuiltin(f.tag, call.arg_count);
+                        eval.stack.shrinkRetainingCapacity(index);
+                        try eval.pushv(res);
+                    },
+                    else => return error.NotEvaluable,
+                }
+            },
+            .local_variable => |v| {
+                // TODO: Should this resolve cell literals?
+                const frame = eval.header.unwrap().?;
+                const value = eval.stack.get(frame.addi(2).addi(v.offset));
+                assert(value != .function_header);
+                try eval.push(value);
+            },
+            .captured_variable => |v| {
+                const frame = eval.header.unwrap().?;
+                const func = (try eval.valueAt(frame.addi(1), .any)).function;
+                const value = func.captures[v.offset];
+                try eval.pushv(value);
+            },
 
-                    try eval.push(res);
-                },
-                .logical_or => {
-                    const rhs = try eval.pop(.any);
-                    const lhs = try eval.pop(.any);
-                    const res = if (lhs.boolean(eval.sheet)) lhs else rhs;
+            .assignment => return error.NotEvaluable,
+            .builtin => |b| {
+                try eval.pushv(.{ .builtin_function = .{ .tag = b.tag } });
+            },
+            .minus => {
+                const rhs = try eval.pop(.any);
+                try eval.pushv(.{ .number = -(try eval.toNumber(rhs, 0)) });
+            },
+            .plus => {
+                const rhs = try eval.pop(.any);
+                try eval.pushv(.{ .number = @abs(try eval.toNumber(rhs, 0)) });
+            },
+            .not => {
+                const rhs = try eval.pop(.any);
+                try eval.pushv(.{
+                    .number = @floatFromInt(@intFromBool(!rhs.boolean(eval.sheet))),
+                });
+            },
+            .concat => {
+                const rhs = try eval.pop(.any);
+                const lhs = try eval.pop(.any);
+                var aw: std.io.Writer.Allocating = .init(eval.arena);
+                eval.formatString(lhs, &aw.writer) catch |err| switch (err) {
+                    error.WriteFailed => return error.OutOfMemory,
+                    else => |e| return e,
+                };
+                eval.formatString(rhs, &aw.writer) catch |err| switch (err) {
+                    error.WriteFailed => return error.OutOfMemory,
+                    else => |e| return e,
+                };
+                try eval.pushv(.{ .string = .{ .slice = try aw.toOwnedSlice() } });
+            },
+            inline .add, .sub, .mul, .pow => |_, t| {
+                const rhs = try eval.pop(.any);
+                const lhs = try eval.pop(.any);
+                const l = try eval.toNumber(lhs, 0);
+                const r = try eval.toNumber(rhs, 0);
+                const res: f64 = switch (t) {
+                    .add => l + r,
+                    .sub => l - r,
+                    .mul => l * r,
+                    .pow => std.math.pow(f64, l, r),
+                    else => comptime unreachable,
+                };
+                try eval.pushv(.{ .number = res });
+            },
+            .div => {
+                const rhs = try eval.pop(.any);
+                const lhs = try eval.pop(.any);
+                const l = try eval.toNumber(lhs, 0);
+                const r = try eval.toNumber(rhs, 0);
+                if (r == 0) return error.DivideByZero;
+                try eval.pushv(.{ .number = l / r });
+            },
+            .mod => {
+                const rhs = try eval.pop(.any);
+                const lhs = try eval.pop(.any);
+                const l = try eval.toNumber(lhs, 0);
+                const r = try eval.toNumber(rhs, 0);
+                if (r <= 0) return error.DivideByZero;
+                try eval.pushv(.{ .number = @rem(l, r) });
+            },
+            .reference => {
+                const arg = try eval.pop(.reference);
+                try eval.pushv(.{ .cell = arg.cell });
+            },
+            .dereference => {
+                const arg = try eval.pop(.reference);
+                switch (arg) {
+                    .cell => |pos| try eval.evaluateCellPush(pos, .direct),
+                    .indirect_cell => |pos| try eval.evaluateCellPush(pos, .indirect),
+                    else => return error.NotEvaluable,
+                }
+            },
+            // and/or have the same semantics as Lua's and/or operators.
+            .logical_and => {
+                const rhs = try eval.pop(.any);
+                const lhs = try eval.pop(.any);
+                const res: StackFrame =
+                    if (lhs.boolean(eval.sheet))
+                        .{ .value = rhs }
+                    else
+                        .{ .value = .{ .number = 0 } };
 
-                    try eval.push(.{ .value = res });
-                },
-                inline .equals, .not_equals => |_, t| {
-                    const rhs = try eval.pop(.any);
-                    const lhs = try eval.pop(.any);
+                try eval.push(res);
+            },
+            .logical_or => {
+                const rhs = try eval.pop(.any);
+                const lhs = try eval.pop(.any);
+                const res = if (lhs.boolean(eval.sheet)) lhs else rhs;
 
-                    const n = switch (lhs) {
-                        .none => true,
-                        .number => |n1| switch (rhs) {
-                            .number => |n2| n1 == n2,
-                            else => false,
-                        },
-                        .string => |str1| switch (rhs) {
-                            .string => |str2| std.mem.eql(u8, str1.bytes(), str2.bytes()),
-                            else => false,
-                        },
-                        .cell, .indirect_cell => |p1| switch (rhs) {
-                            .cell, .indirect_cell => |p2| p1.eql(p2),
-                            else => false,
-                        },
-                        .range, .indirect_range => |p1| switch (rhs) {
-                            .range, .indirect_range => |p2| p1.eql(p2),
-                            else => false,
-                        },
-                        .function => |f1| switch (rhs) {
-                            .function => |f2| f1.root == f2.root,
-                            else => false,
-                        },
-                        .builtin_function => |f1| switch (rhs) {
-                            .builtin_function => |f2| f1.tag == f2.tag,
-                            else => false,
-                        },
-                    };
+                try eval.pushv(res);
+            },
+            inline .greater_than,
+            .less_than,
+            .greater_equals,
+            .less_equals,
+            => |_, t| {
+                const rhs = try eval.pop(.any);
+                const lhs = try eval.pop(.any);
+                const l = try eval.toNumber(lhs, 0);
+                const r = try eval.toNumber(rhs, 0);
+                const n = switch (t) {
+                    .greater_equals => l >= r,
+                    .less_equals => l <= r,
+                    .greater_than => l > r,
+                    .less_than => l < r,
+                    .equals => l == r,
+                    .not_equals => l != r,
+                    else => comptime unreachable,
+                };
 
-                    const b = switch (t) {
-                        .equals => n,
-                        .not_equals => !n,
-                        else => comptime unreachable,
-                    };
-                    try eval.push(.{ .value = .{ .number = @floatFromInt(@intFromBool(b)) } });
-                },
-                inline .greater_than,
-                .less_than,
-                .greater_equals,
-                .less_equals,
-                => |_, t| {
-                    const rhs = try eval.pop(.any);
-                    const lhs = try eval.pop(.any);
-                    const l = try eval.toNumber(lhs, 0);
-                    const r = try eval.toNumber(rhs, 0);
-                    const n = switch (t) {
-                        .greater_equals => l >= r,
-                        .less_equals => l <= r,
-                        .greater_than => l > r,
-                        .less_than => l < r,
-                        .equals => l == r,
-                        .not_equals => l != r,
-                        else => comptime unreachable,
-                    };
+                try eval.pushv(.{ .number = @floatFromInt(@intFromBool(n)) });
+            },
+            inline .equals, .not_equals => |_, t| {
+                const rhs = try eval.pop(.any);
+                const lhs = try eval.pop(.any);
 
-                    try eval.push(.{ .value = .{ .number = @floatFromInt(@intFromBool(n)) } });
-                },
+                const n = switch (lhs) {
+                    .none => true,
+                    .number => |n1| switch (rhs) {
+                        .number => |n2| n1 == n2,
+                        else => false,
+                    },
+                    .string => |str1| switch (rhs) {
+                        .string => |str2| std.mem.eql(u8, str1.bytes(), str2.bytes()),
+                        else => false,
+                    },
+                    .cell, .indirect_cell => |p1| switch (rhs) {
+                        .cell, .indirect_cell => |p2| p1.eql(p2),
+                        else => false,
+                    },
+                    .range, .indirect_range => |p1| switch (rhs) {
+                        .range, .indirect_range => |p2| p1.eql(p2),
+                        else => false,
+                    },
+                    .function => |f1| switch (rhs) {
+                        .function => |f2| f1.root == f2.root,
+                        else => false,
+                    },
+                    .builtin_function => |f1| switch (rhs) {
+                        .builtin_function => |f2| f1.tag == f2.tag,
+                        else => false,
+                    },
+                };
 
-                .builtin => |b| {
-                    try eval.push(.{ .value = .{ .builtin_function = .{ .tag = b.tag } } });
-                },
-                .concat => {
-                    const rhs = try eval.pop(.any);
-                    const lhs = try eval.pop(.any);
-                    var aw: std.io.Writer.Allocating = .init(eval.arena);
-                    eval.formatString(lhs, &aw.writer) catch |err| switch (err) {
-                        error.WriteFailed => return error.OutOfMemory,
-                        else => |e| return e,
-                    };
-                    eval.formatString(rhs, &aw.writer) catch |err| switch (err) {
-                        error.WriteFailed => return error.OutOfMemory,
-                        else => |e| return e,
-                    };
-                    try eval.push(.{ .value = .{ .string = .{ .slice = try aw.toOwnedSlice() } } });
-                },
-                .range, .dynamic_range => {
-                    const rhs = try eval.pop(.reference);
-                    const lhs = try eval.pop(.reference);
-                    const a = switch (lhs) {
-                        .cell, .indirect_cell => |pos| pos,
-                        else => return error.NotEvaluable,
-                    };
-                    const b = switch (rhs) {
-                        .cell, .indirect_cell => |pos| pos,
-                        else => return error.NotEvaluable,
-                    };
+                const b = switch (t) {
+                    .equals => n,
+                    .not_equals => !n,
+                    else => comptime unreachable,
+                };
+                try eval.pushv(.{ .number = @floatFromInt(@intFromBool(b)) });
+            },
+            .range, .dynamic_range => {
+                const rhs = try eval.pop(.reference);
+                const lhs = try eval.pop(.reference);
+                const a = switch (lhs) {
+                    .cell, .indirect_cell => |pos| pos,
+                    else => return error.NotEvaluable,
+                };
+                const b = switch (rhs) {
+                    .cell, .indirect_cell => |pos| pos,
+                    else => return error.NotEvaluable,
+                };
 
-                    try eval.push(.{ .value = .{
-                        .range = .{ .rect = .initNormalizePos(a, b) },
-                    } });
-                },
-                .string_literal => |str| try eval.push(.{ .value = .{ .string = .{
-                    .slice = eval.sheet.ast.strings.items[str.start..str.end],
-                } } }),
-                .invalidated_pos,
-                .invalidated_range,
-                .assignment,
-                => return error.NotEvaluable,
-            }
-        }
+                try eval.pushv(.{ .range = .{ .rect = .initNormalizePos(a, b) } });
+            },
+        };
 
         return .{
             .is_volatile = eval.is_volatile,
         };
     }
 
-    fn toNumber(eval: *const @This(), res: Value, none_value: f64) !f64 {
+    fn toNumber(eval: *const Interpreter, res: Value, none_value: f64) !f64 {
         return try eval.toNumberOrNull(res) orelse none_value;
     }
 
@@ -1437,7 +1431,7 @@ pub const Interpreter = struct {
     }
 
     /// Coerces `res` to a number, dereferencing one level of reference if required.
-    fn toNumberDeref(eval: *@This(), res: Value) !?f64 {
+    fn toNumberDeref(eval: *Interpreter, res: Value) !?f64 {
         return switch (res) {
             .none => null,
             .number => |n| n,
@@ -1452,7 +1446,7 @@ pub const Interpreter = struct {
         };
     }
 
-    fn formatStringAlloc(eval: *const @This(), res: Value) ![]u8 {
+    fn formatStringAlloc(eval: *const Interpreter, res: Value) ![]u8 {
         var aw: std.io.Writer.Allocating = .init(eval.arena);
         eval.formatString(res, &aw.writer) catch |err| switch (err) {
             error.WriteFailed => return error.OutOfMemory,
@@ -1474,7 +1468,7 @@ pub const Interpreter = struct {
         }
     }
 
-    fn mapArgsNumber(eval: *@This(), arg_count: u32, ctx: anytype) !void {
+    fn mapArgsNumber(eval: *Interpreter, arg_count: u8, ctx: anytype) !void {
         const MapContext = struct {
             eval: *Interpreter,
             outer_ctx: @TypeOf(ctx),
@@ -1517,7 +1511,7 @@ pub const Interpreter = struct {
         }
     }
 
-    fn evalUpper(eval: *@This(), arg_count: u8) ![]const u8 {
+    fn evalUpper(eval: *Interpreter, arg_count: u8) ![]const u8 {
         if (arg_count != 1) return error.NotEvaluable;
         const arg = try eval.pop(.any);
         const str = try eval.formatStringAlloc(arg);
@@ -1525,7 +1519,7 @@ pub const Interpreter = struct {
         return str;
     }
 
-    fn evalLower(eval: *@This(), arg_count: u8) ![]const u8 {
+    fn evalLower(eval: *Interpreter, arg_count: u8) ![]const u8 {
         if (arg_count != 1) return error.NotEvaluable;
         const arg = try eval.pop(.any);
         const str = try eval.formatStringAlloc(arg);
@@ -1577,39 +1571,39 @@ pub const Interpreter = struct {
         }
     };
 
-    fn evalSum(eval: *@This(), arg_count: u32) !f64 {
+    fn evalSum(eval: *Interpreter, arg_count: u8) !f64 {
         var ctx: SumContext = .{};
         try eval.mapArgsNumber(arg_count, &ctx);
         return ctx.total;
     }
 
-    fn evalProd(eval: *@This(), arg_count: u32) !f64 {
+    fn evalProd(eval: *Interpreter, arg_count: u8) !f64 {
         var ctx: ProdContext = .{};
         try eval.mapArgsNumber(arg_count, &ctx);
         return ctx.total;
     }
 
     // TODO: This function assumes that ranges do not overlap?
-    fn evalAvg(eval: *@This(), arg_count: u32) !f64 {
+    fn evalAvg(eval: *Interpreter, arg_count: u8) !f64 {
         var ctx: AvgContext = .{};
         try eval.mapArgsNumber(arg_count, &ctx);
         if (ctx.total_items == 0) return 0;
         return ctx.total / @as(f64, @floatFromInt(ctx.total_items));
     }
 
-    fn evalMax(eval: *@This(), arg_count: u32) !f64 {
+    fn evalMax(eval: *Interpreter, arg_count: u8) !f64 {
         var ctx: MaxContext = .{};
         try eval.mapArgsNumber(arg_count, &ctx);
         return ctx.max orelse 0;
     }
 
-    fn evalMin(eval: *@This(), arg_count: u32) !f64 {
+    fn evalMin(eval: *Interpreter, arg_count: u8) !f64 {
         var ctx: MinContext = .{};
         try eval.mapArgsNumber(arg_count, &ctx);
         return ctx.min orelse 0;
     }
 
-    fn evalSqrt(eval: *@This(), arg_count: u8) !f64 {
+    fn evalSqrt(eval: *Interpreter, arg_count: u8) !f64 {
         if (arg_count != 1) return error.NotEvaluable;
         const arg = try eval.pop(.reference);
         const n = try eval.toNumberDeref(arg) orelse 0;
@@ -1617,28 +1611,28 @@ pub const Interpreter = struct {
         return std.math.sqrt(n);
     }
 
-    fn evalRound(eval: *@This(), arg_count: u8) !f64 {
+    fn evalRound(eval: *Interpreter, arg_count: u8) !f64 {
         if (arg_count != 1) return error.NotEvaluable;
         const arg = try eval.pop(.reference);
         const n = try eval.toNumberDeref(arg) orelse 0;
         return std.math.round(n);
     }
 
-    fn evalFloor(eval: *@This(), arg_count: u8) !f64 {
+    fn evalFloor(eval: *Interpreter, arg_count: u8) !f64 {
         if (arg_count != 1) return error.NotEvaluable;
         const arg = try eval.pop(.reference);
         const n = try eval.toNumberDeref(arg) orelse 0;
         return @floor(n);
     }
 
-    fn evalCeil(eval: *@This(), arg_count: u8) !f64 {
+    fn evalCeil(eval: *Interpreter, arg_count: u8) !f64 {
         if (arg_count != 1) return error.NotEvaluable;
         const arg = try eval.pop(.reference);
         const n = try eval.toNumberDeref(arg) orelse 0;
         return @ceil(n);
     }
 
-    fn evalStringLen(eval: *@This(), arg_count: u8) !f64 {
+    fn evalStringLen(eval: *Interpreter, arg_count: u8) !f64 {
         if (arg_count != 1) return error.NotEvaluable;
         const arg = try eval.pop(.any);
         switch (arg) {
@@ -1664,7 +1658,7 @@ pub const Interpreter = struct {
     }
 
     fn evalCount(
-        eval: *@This(),
+        eval: *Interpreter,
         comptime operation: enum { all, numbers },
         arg_count: u8,
     ) !f64 {
@@ -1737,7 +1731,7 @@ pub const Interpreter = struct {
         return @floatFromInt(total);
     }
 
-    fn evalLog(eval: *@This(), arg_count: u8) !f64 {
+    fn evalLog(eval: *Interpreter, arg_count: u8) !f64 {
         if (arg_count != 2) return error.NotEvaluable;
         const base_result = try eval.pop(.any);
         const n_result = try eval.pop(.any);
@@ -1748,7 +1742,7 @@ pub const Interpreter = struct {
         return std.math.log(f64, base, n);
     }
 
-    fn evalWidth(eval: *@This(), arg_count: u8) !f64 {
+    fn evalWidth(eval: *Interpreter, arg_count: u8) !f64 {
         if (arg_count != 1) return error.NotEvaluable;
         const res = try eval.pop(.any);
         return switch (res) {
@@ -1763,7 +1757,7 @@ pub const Interpreter = struct {
         };
     }
 
-    fn evalHeight(eval: *@This(), arg_count: u8) !f64 {
+    fn evalHeight(eval: *Interpreter, arg_count: u8) !f64 {
         if (arg_count != 1) return error.NotEvaluable;
         const res = try eval.pop(.any);
         return switch (res) {
