@@ -13,6 +13,7 @@ const PosInt = Position.Int;
 const Rect = Position.Rect;
 
 const Ast = @import("Ast.zig");
+const Interpreter = @import("Interpreter.zig");
 const Parser = @import("Parser.zig");
 const NodeList = Ast.NodeList;
 const FlatListPool = @import("flat_list_pool.zig").FlatListPool;
@@ -66,7 +67,7 @@ text_attrs: PhTree(TextAttrs, 2, Cell.Handle.Int),
 lua_point_trees: std.StringHashMapUnmanaged(LuaDataPointTree) = .empty,
 
 cell_value_ranges: std.ArrayList(Rect) = .empty,
-closures: std.ArrayList(Ast.Value) = .empty,
+closures: std.ArrayList(Interpreter.Value) = .empty,
 
 needs_update: bool = true,
 
@@ -2660,8 +2661,8 @@ pub fn insertRows(sheet: *Sheet, index: u32, n: u32, undo_opts: UndoOpts) !void 
     return sheet.insertColsOrRows(index, n, undo_opts, .row);
 }
 
-pub fn evaluate(sheet: *Sheet, root_node: Ast.Node.Index) !Ast.Value {
-    var interp: Ast.Interpreter = .{
+pub fn evaluate(sheet: *Sheet, root_node: Ast.Node.Index) !Interpreter.Value {
+    var interp: Interpreter = .{
         .arena = sheet.arena.allocator(),
         .sheet = sheet,
     };
@@ -2713,7 +2714,7 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
         try sheet.markDirty(arena, cell, &dirty_cells);
     }
 
-    var eval: Ast.Interpreter = .{
+    var eval: Interpreter = .{
         .arena = arena,
         .sheet = sheet,
     };
@@ -2866,9 +2867,9 @@ fn queueDependents(sheet: *Sheet, rect: Rect) Allocator.Error!void {
 
 pub fn evalCellByHandle(
     sheet: *Sheet,
-    eval: *Ast.Interpreter,
+    eval: *Interpreter,
     handle: Cell.Handle,
-) Ast.EvalError!Ast.Value {
+) Ast.EvalError!Interpreter.Value {
     const cell = sheet.getCellFromHandle(handle);
     sw: switch (cell.expr.state) {
         .up_to_date => {},
@@ -2987,14 +2988,14 @@ pub fn evalCellByHandle(
         .closure => {
             const closure = cell.value.closure;
             const captured = sheet.closures.items[closure.index + 1 ..][0..closure.len];
-            const copied = try eval.arena.dupe(Ast.Value, captured);
+            const copied = try eval.arena.dupe(Interpreter.Value, captured);
             const root = sheet.closures.items[closure.index].function.root;
             return .{ .function = .{ .root = root, .captures = copied } };
         },
     };
 }
 
-pub fn evalCellByPos(sheet: *Sheet, eval: *Ast.Interpreter, pos: Position) Ast.EvalError!Ast.Value {
+pub fn evalCellByPos(sheet: *Sheet, eval: *Interpreter, pos: Position) Ast.EvalError!Interpreter.Value {
     if (sheet.getCellHandleByPos(pos)) |cell| {
         return sheet.evalCellByHandle(eval, cell);
     }
