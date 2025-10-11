@@ -2892,7 +2892,7 @@ pub fn evalCellByHandle(
             defer eval.is_volatile = old_volatility;
             eval.is_volatile = false;
 
-            const res = eval.evaluate(start) catch |err| {
+            eval.evaluate(start) catch |err| {
                 cell.setValue(.err, .fromError(err));
 
                 if (eval.is_volatile) {
@@ -2907,7 +2907,7 @@ pub fn evalCellByHandle(
                 return err;
             };
 
-            if (res.is_volatile) {
+            if (eval.is_volatile) {
                 cell.expr.is_volatile = true;
                 if (!cell.expr.stored_volatile) {
                     std.log.debug("Volatile cell {any}", .{handle});

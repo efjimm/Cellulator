@@ -186,7 +186,7 @@ fn evaluateBuiltin(eval: *Interpreter, builtin_tag: Node.Builtin.Tag, arg_count:
     };
 }
 
-pub fn evaluate(eval: *Interpreter, start: Node.Index) !EvaluateResult {
+pub fn evaluate(eval: *Interpreter, start: Node.Index) !void {
     const ast = &eval.sheet.ast;
     var i = start;
     while (true) : (i = i.addi(1)) switch (ast.node(i)) {
@@ -449,10 +449,6 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index) !EvaluateResult {
 
             try eval.pushv(.{ .range = .{ .rect = .initNormalizePos(a, b) } });
         },
-    };
-
-    return .{
-        .is_volatile = eval.is_volatile,
     };
 }
 
