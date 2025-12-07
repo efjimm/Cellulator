@@ -202,7 +202,7 @@ const Tui = @This();
 
 var needs_resize: std.atomic.Value(bool) = .init(true);
 
-fn resizeHandler(_: c_int) callconv(.c) void {
+fn resizeHandler(_: std.posix.SIG) callconv(.c) void {
     needs_resize.store(true, .monotonic);
 }
 
@@ -321,7 +321,7 @@ pub fn stringWidthInternal(
 
 pub const InitError = Term.InitError || Term.UncookError || error{OperationNotSupported};
 
-pub fn init(allocator: std.mem.Allocator) InitError!Tui {
+pub fn init(allocator: std.mem.Allocator, io: std.Io) InitError!Tui {
     std.posix.sigaction(std.posix.SIG.WINCH, &.{
         .handler = .{ .handler = resizeHandler },
         .mask = std.posix.sigemptyset(),
@@ -330,7 +330,7 @@ pub fn init(allocator: std.mem.Allocator) InitError!Tui {
 
     try shovel.initUnicodeData(allocator);
 
-    const term: Term = try .init(allocator, .{
+    const term: Term = try .init(allocator, io, .{
         .truecolour = .check,
         .terminfo = .{
             .fallback = .@"xterm-256color",
@@ -750,12 +750,12 @@ fn renderStatus(tui: *Tui, wr: *Screen.Writer) !void {
     const sheet = zc.currentSheet();
     if (sheet.getCell(zc.cursor)) |cell| {
         const buf = try arena.alloc(u8, 4096);
-        var br: std.io.Writer = .fixed(buf);
+        var br: std.Io.Writer = .fixed(buf);
         if (cell.root().unwrap()) |unwrapped|
             sheet.ast.print(unwrapped, &br) catch {};
 
         const bytes = br.buffered();
-        var reader: std.io.Reader = .fixed(bytes);
+        var reader: std.Io.Reader = .fixed(bytes);
         const tokens = try Tokenizer.collectTokens(arena, &reader, 128);
         const tags = tokens.items(.tag);
         const starts = tokens.items(.start);
@@ -1403,7 +1403,7 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                 },
                 .number => {
                     try tui.setStyle(.cell_number_unselected, wr);
-                    var bw: std.io.Writer = .fixed(&buf);
+                    var bw: std.Io.Writer = .fixed(&buf);
                     bw.print("{d: >[1].[2]}", .{
                         data.values[i].number,
                         width,

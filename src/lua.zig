@@ -290,7 +290,7 @@ const metatables = .{
                 error.InvalidBuiltin,
                 => {
                     var buf: [1024]u8 = undefined;
-                    var w: std.io.Writer = .fixed(&buf);
+                    var w: std.Io.Writer = .fixed(&buf);
                     diag.format(&w) catch {};
                     w.writeByte(0) catch {
                         buf[buf.len - 1] = 0;
@@ -375,7 +375,7 @@ const metatables = .{
         pub fn __tostring(state: *Lua) callconv(.c) c_int {
             const pos = checkCellAddress(state, 1);
             var buf: [64]u8 = undefined;
-            var wr: std.io.Writer = .fixed(&buf);
+            var wr: std.Io.Writer = .fixed(&buf);
             wr.print("{f}", .{pos}) catch unreachable;
 
             _ = state.pushString(wr.buffered());

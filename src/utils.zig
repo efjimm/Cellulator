@@ -302,3 +302,9 @@ test "WordIterator comment" {
     try std.testing.expectEqualStrings("this", iter.next().?);
     try std.testing.expectEqual(null, iter.next());
 }
+
+pub fn FieldEnum(T: type, IntType: ?type) type {
+    const field_names = std.meta.fieldNames(T);
+    const Int = IntType orelse std.math.IntFittingRange(0, field_names.len -| 1);
+    return @Enum(Int, .exhaustive, field_names, &std.simd.iota(Int, field_names.len));
+}

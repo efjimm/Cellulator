@@ -62,13 +62,18 @@ pub fn main() !void {
     };
     defer _ = if (is_debug) debug_allocator.deinit();
 
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    defer threaded.deinit();
+    const io = threaded.ioBasic();
+
     try initUnicodeData(gpa);
     defer if (is_debug) deinitUnicodeData(gpa);
 
-    try zc.init(gpa, .{ .filepath = filepath, .ui = true });
+    try zc.init(gpa, io, .{ .filepath = filepath, .ui = true });
     defer zc.deinit();
 
     try zc.run();
+    std.process.cleanExit();
 }
 
 fn panicFn(msg: []const u8, ret_addr: ?usize) noreturn {

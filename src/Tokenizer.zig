@@ -5,7 +5,7 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Tokenizer = @This();
 
-reader: *std.io.Reader,
+reader: *std.Io.Reader,
 pos: u32 = 0,
 state: State = .start,
 
@@ -25,7 +25,7 @@ const State = enum {
 
 pub fn collectTokens(
     allocator: std.mem.Allocator,
-    r: *std.io.Reader,
+    r: *std.Io.Reader,
     pre_alloc: u32,
 ) error{ ReadFailed, OutOfMemory }!std.MultiArrayList(Token) {
     var tokenizer: Tokenizer = .init(r);
@@ -93,7 +93,7 @@ pub const Token = struct {
         eof,
         unknown,
 
-        pub fn format(tag: Tag, writer: *std.io.Writer) !void {
+        pub fn format(tag: Tag, writer: *std.Io.Writer) !void {
             const strings = comptime std.EnumArray(Tag, []const u8).init(.{
                 .number = "number",
                 .equals_sign = "'='",
@@ -147,7 +147,7 @@ const keywords = std.StaticStringMap(Token.Tag).initComptime(.{
     .{ "or", .keyword_or },
 });
 
-pub fn init(reader: *std.io.Reader) Tokenizer {
+pub fn init(reader: *std.Io.Reader) Tokenizer {
     return .{ .reader = reader };
 }
 
@@ -453,7 +453,7 @@ pub fn next(t: *Tokenizer) !Token {
 test "Tokens" {
     const testTokens = struct {
         fn func(bytes: []const u8, tokens: []const Token.Tag) !void {
-            var reader: std.io.Reader = .fixed(bytes);
+            var reader: std.Io.Reader = .fixed(bytes);
             var tokenizer = Tokenizer.init(&reader);
             for (tokens) |tag| {
                 const token = try tokenizer.next();
@@ -496,7 +496,7 @@ test "Tokens" {
 
 test "Token text range" {
     const t = std.testing;
-    var reader: std.io.Reader = .fixed("let a0 = 'this is epic'");
+    var reader: std.Io.Reader = .fixed("let a0 = 'this is epic'");
     var tokenizer: Tokenizer = .init(&reader);
     var token = try tokenizer.next();
     try t.expectEqual(.keyword_let, token.tag);

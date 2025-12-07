@@ -192,21 +192,13 @@ pub const Cell = extern struct {
             index: u48,
         },
 
-        pub const Tag = blk: {
-            var t = @typeInfo(std.meta.FieldEnum(Value));
-            t.@"enum".tag_type = u8;
-            break :blk @Type(t);
-        };
+        pub const Tag = utils.FieldEnum(Value, u8);
     };
 
     pub const Error = extern struct {
         tag: Tag,
 
-        pub const Tag = blk: {
-            var t = @typeInfo(std.meta.FieldEnum(Ast.EvalError));
-            t.@"enum".tag_type = u8;
-            break :blk @Type(t);
-        };
+        pub const Tag = utils.FieldEnum(Ast.EvalError, u8);
 
         pub fn fromError(err: Ast.EvalError) Error {
             return switch (err) {
@@ -254,12 +246,7 @@ pub const Undo = extern struct {
 
     pub const sentinel: Undo = .{ .tag = .sentinel, .payload = undefined };
 
-    pub const Tag = blk: {
-        const AutoTag = std.meta.FieldEnum(Payload);
-        var info = @typeInfo(AutoTag);
-        info.@"enum".tag_type = u8;
-        break :blk @Type(info);
-    };
+    pub const Tag = utils.FieldEnum(Payload, u8);
 
     pub const Payload = extern union {
         sentinel: void,
@@ -489,6 +476,7 @@ const SerializeHeader = extern struct {
     const binary_version = 10;
 };
 
+// TODO: Update to use std.Io.File when writer is implemented
 pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
     assert(sheet.queued_cells.items.len == 0);
 
@@ -526,9 +514,9 @@ pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
     try writer.interface.writeVecAll(&iovecs);
 }
 
-pub fn deserialize(sheet: *Sheet, gpa: Allocator, file: std.fs.File) !void {
+pub fn deserialize(sheet: *Sheet, gpa: Allocator, io: std.Io, file: std.Io.File) !void {
     var buf: [@sizeOf(SerializeHeader)]u8 = undefined;
-    var reader = file.reader(&buf);
+    var reader = file.reader(io, &buf);
     const native_endian = builtin.target.cpu.arch.endian();
     const header = try reader.interface.takeStruct(SerializeHeader, native_endian);
 
@@ -643,7 +631,7 @@ fn bulkParse(
     try tokens.ensureTotalCapacity(tokens_allocator, src.len / 2);
 
     tokens.clearRetainingCapacity();
-    var reader: std.io.Reader = .fixed(src);
+    var reader: std.Io.Reader = .fixed(src);
     var t: Tokenizer = .init(&reader);
     while (true) {
         const token = t.next() catch unreachable;
@@ -711,7 +699,7 @@ fn resetArena(sheet: *Sheet) void {
 }
 
 // Optimized for bulk loading
-pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
+pub fn interpretSource(sheet: *Sheet, r: *std.Io.Reader) !void {
     assert(r.buffer.len > 0);
     errdefer sheet.clearRetainingCapacity();
 
@@ -817,7 +805,7 @@ pub fn interpretSource(sheet: *Sheet, r: *std.io.Reader) !void {
 }
 
 // TODO: Optimize this.
-pub fn loadCsv(sheet: *Sheet, r: *std.io.Reader) !void {
+pub fn loadCsv(sheet: *Sheet, r: *std.Io.Reader) !void {
     errdefer sheet.clearRetainingCapacity();
 
     const arena = sheet.arena.allocator();
@@ -950,34 +938,8 @@ pub fn loadCsv(sheet: *Sheet, r: *std.io.Reader) !void {
     }
 }
 
-pub fn writeFile(
-    sheet: *Sheet,
-    opts: struct {
-        filepath: ?[]const u8 = null,
-    },
-) !void {
-    const filepath = opts.filepath orelse sheet.filepath.items;
-    if (filepath.len == 0)
-        return error.EmptyFileName;
-
-    var buf: [8192]u8 = undefined;
-    var atomic_file = try std.fs.cwd().atomicFile(filepath, .{ .write_buffer = &buf });
-    defer atomic_file.deinit();
-
-    const w = &atomic_file.file_writer.interface;
-    if (std.mem.endsWith(u8, filepath, ".csv")) {
-        try sheet.writeCsv(w);
-    } else {
-        try sheet.writeContents(w);
-    }
-    try atomic_file.finish();
-
-    if (opts.filepath) |path|
-        sheet.setFilePath(path);
-}
-
 // TODO: This is dumb
-pub fn writeContents(sheet: *Sheet, writer: *std.io.Writer) !void {
+pub fn writeContents(sheet: *Sheet, writer: *std.Io.Writer) !void {
     var iter = sheet.cell_tree.iterator();
     while (iter.next()) |handle| {
         const p = sheet.cell_tree.getPoint(handle).*;
@@ -990,7 +952,7 @@ pub fn writeContents(sheet: *Sheet, writer: *std.io.Writer) !void {
     try writer.flush();
 }
 
-pub fn writeCsv(sheet: *Sheet, writer: *std.io.Writer) !void {
+pub fn writeCsv(sheet: *Sheet, writer: *std.Io.Writer) !void {
     const arena = sheet.arena.allocator();
     defer sheet.resetArena();
 
@@ -1032,7 +994,7 @@ pub fn writeCsv(sheet: *Sheet, writer: *std.io.Writer) !void {
     try writer.flush();
 }
 
-pub fn formatCell(sheet: *const Sheet, cell: *const Cell, w: *std.io.Writer) !void {
+pub fn formatCell(sheet: *const Sheet, cell: *const Cell, w: *std.Io.Writer) !void {
     switch (cell.expr.value_tag) {
         .number => {
             try w.print("{d}", .{cell.value.number});
@@ -3004,7 +2966,7 @@ pub fn evalCellByPos(sheet: *Sheet, eval: *Interpreter, pos: Position) Ast.EvalE
     return .none;
 }
 
-pub fn printCellExpression(sheet: *Sheet, pos: Position, w: *std.io.Writer) !void {
+pub fn printCellExpression(sheet: *Sheet, pos: Position, w: *std.Io.Writer) !void {
     const cell = sheet.getCellPtr(pos) orelse return;
     if (cell.root() == .none) {
         try sheet.formatCell(cell, w);
@@ -3019,7 +2981,7 @@ const FmtData = struct {
     pos: Position,
 };
 
-pub fn formatCellExpression(d: FmtData, writer: *std.io.Writer) !void {
+pub fn formatCellExpression(d: FmtData, writer: *std.Io.Writer) !void {
     try d.sheet.printCellExpression(d.pos, writer);
 }
 
@@ -3581,7 +3543,7 @@ fn testCellEvaluation(a: Allocator) !void {
         \\let F15 = F14+E15
         \\let C13 = C12+B13
     ;
-    var reader: std.io.Reader = .fixed(set_cells);
+    var reader: std.Io.Reader = .fixed(set_cells);
     try sheet.interpretSource(&reader);
     try sheet.update();
 
@@ -4131,7 +4093,7 @@ test "Dependencies" {
         \\
     ;
 
-    var reader: std.io.Reader = .fixed(bytes);
+    var reader: std.Io.Reader = .fixed(bytes);
 
     var sheet = try init(std.testing.allocator);
     defer sheet.deinit();
@@ -4310,7 +4272,7 @@ test "read source with duplicate entries" {
     var sheet = try init(std.testing.allocator);
     defer sheet.deinit();
 
-    var r: std.io.Reader = .fixed(src);
+    var r: std.Io.Reader = .fixed(src);
     try sheet.interpretSource(&r);
 
     try sheet.update();
@@ -4330,12 +4292,13 @@ test "read source with invalid statements" {
         \\ungabunga
         \\a
         \\le a0 = 10
+        \\
     ;
 
     var sheet = try init(std.testing.allocator);
     defer sheet.deinit();
 
-    var r: std.io.Reader = .fixed(src);
+    var r: std.Io.Reader = .fixed(src);
     try sheet.interpretSource(&r);
 
     try sheet.update();
@@ -4354,7 +4317,7 @@ test "save csv" {
     var sheet = try init(std.testing.allocator);
     defer sheet.deinit();
 
-    var r: std.io.Reader = .fixed(src1);
+    var r: std.Io.Reader = .fixed(src1);
     try sheet.interpretSource(&r);
     try sheet.update();
 
@@ -4365,7 +4328,7 @@ test "save csv" {
     try sheet.expectCellEquals("a1", 3);
     try sheet.expectCellEquals("c2", 5);
 
-    var aw: std.io.Writer.Allocating = .init(std.testing.allocator);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
 
     try sheet.writeCsv(&aw.writer);
@@ -4393,7 +4356,7 @@ test "load csv" {
     var sheet = try init(std.testing.allocator);
     defer sheet.deinit();
 
-    var r: std.io.Reader = .fixed(src);
+    var r: std.Io.Reader = .fixed(src);
     try sheet.loadCsv(&r);
     try sheet.update();
 }

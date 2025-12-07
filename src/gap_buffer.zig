@@ -22,11 +22,11 @@ pub fn GapBuffer(comptime T: type) type {
         pub const ChildType = T;
 
         pub const Reader = struct {
-            interface: std.io.Reader,
+            interface: std.Io.Reader,
             buffer: *const Self,
             i: u32,
 
-            pub fn stream(io_reader: *std.io.Reader, w: *std.io.Writer, limit: std.io.Limit) !usize {
+            pub fn stream(io_reader: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) !usize {
                 const r: *Reader = @fieldParentPtr("interface", io_reader);
                 if (r.i >= r.buffer.len) return error.EndOfStream;
                 const slice = if (r.i < r.buffer.gap_start)

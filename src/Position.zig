@@ -104,27 +104,27 @@ pub const Position = packed struct {
         return .{ .data = pos };
     }
 
-    pub fn formatCellAddress(pos: Position, writer: *std.io.Writer) !void {
+    pub fn formatCellAddress(pos: Position, writer: *std.Io.Writer) !void {
         try writer.print("{f}{d}", .{
             fmtColumnAddress(pos.x),
             pos.y,
         });
     }
 
-    pub fn fmtColumnAddress(index: u32) std.fmt.Formatter(u32, formatColumnAddress) {
+    pub fn fmtColumnAddress(index: u32) std.fmt.Alt(u32, formatColumnAddress) {
         return .{ .data = index };
     }
 
     /// Writes the alphabetic bijective base-26 representation of the given number to the passed
     /// writer.
-    pub fn formatColumnAddress(index: Int, writer: *std.io.Writer) !void {
+    pub fn formatColumnAddress(index: Int, writer: *std.Io.Writer) !void {
         if (index < 26) {
             try writer.writeByte('A' + @as(u8, @intCast(index)));
             return;
         }
 
         var buf: [64]u8 = undefined;
-        var fixed: std.io.Writer = .fixed(&buf);
+        var fixed: std.Io.Writer = .fixed(&buf);
 
         var i = @as(HashInt, index) + 1;
         while (i > 0) : (i /= 26) {
@@ -139,7 +139,7 @@ pub const Position = packed struct {
     }
 
     pub fn columnAddressBuf(index: Int, buf: []u8) []u8 {
-        var fixed: std.io.Writer = .fixed(buf);
+        var fixed: std.Io.Writer = .fixed(buf);
         formatColumnAddress(index, &fixed) catch unreachable;
         return fixed.buffered();
     }
@@ -286,7 +286,7 @@ pub const Position = packed struct {
             return dx * dy;
         }
 
-        pub fn format(range: Rect, writer: *std.io.Writer) !void {
+        pub fn format(range: Rect, writer: *std.Io.Writer) !void {
             try writer.print("{f}:{f}", .{ range.tl, range.br });
         }
 

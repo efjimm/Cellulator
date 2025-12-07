@@ -60,7 +60,7 @@ pub const Value = union(enum) {
         rect: Rect,
         map: Node.OptionalIndex = .none,
 
-        pub fn format(r: Range, w: *std.io.Writer) !void {
+        pub fn format(r: Range, w: *std.Io.Writer) !void {
             try r.rect.format(w);
         }
 
@@ -303,7 +303,7 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index) !void {
         .concat => {
             const rhs = try eval.pop(.any);
             const lhs = try eval.pop(.any);
-            var aw: std.io.Writer.Allocating = .init(eval.arena);
+            var aw: std.Io.Writer.Allocating = .init(eval.arena);
             eval.formatString(lhs, &aw.writer) catch |err| switch (err) {
                 error.WriteFailed => return error.OutOfMemory,
                 else => |e| return e,
@@ -488,7 +488,7 @@ fn toNumberDeref(eval: *Interpreter, res: Value) !?f64 {
 }
 
 fn formatStringAlloc(eval: *const Interpreter, res: Value) ![]u8 {
-    var aw: std.io.Writer.Allocating = .init(eval.arena);
+    var aw: std.Io.Writer.Allocating = .init(eval.arena);
     eval.formatString(res, &aw.writer) catch |err| switch (err) {
         error.WriteFailed => return error.OutOfMemory,
         else => |e| return e,
@@ -496,7 +496,7 @@ fn formatStringAlloc(eval: *const Interpreter, res: Value) ![]u8 {
     return aw.toOwnedSlice();
 }
 
-fn formatString(_: *const Interpreter, res: Value, w: *std.io.Writer) !void {
+fn formatString(_: *const Interpreter, res: Value, w: *std.Io.Writer) !void {
     switch (res) {
         .none => {},
         .number => |n| try w.print("{d}", .{n}),

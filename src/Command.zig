@@ -139,11 +139,11 @@ pub fn writer(self: *Self, allocator: Allocator, buffer: []u8) Writer {
 }
 
 pub const Writer = struct {
-    interface: std.io.Writer,
+    interface: std.Io.Writer,
     cmd: *Self,
     allocator: std.mem.Allocator,
 
-    pub fn drain(io_writer: *std.io.Writer, data: []const []const u8, splat: usize) !usize {
+    pub fn drain(io_writer: *std.Io.Writer, data: []const []const u8, splat: usize) !usize {
         const w: *Writer = @fieldParentPtr("interface", io_writer);
         const buffered = w.interface.buffered();
         if (buffered.len > 0) {
@@ -282,9 +282,9 @@ pub const Reader = struct {
     cmd: *const Self,
     gap_reader: GapBuffer(u8).Reader,
     i: u32,
-    interface: std.io.Reader,
+    interface: std.Io.Reader,
 
-    pub fn stream(io_reader: *std.io.Reader, w: *std.io.Writer, limit: std.io.Limit) !usize {
+    pub fn stream(io_reader: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) !usize {
         const r: *Reader = @fieldParentPtr("interface", io_reader);
         if (r.cmd.cow) {
             const bytes = r.cmd.getHistoryItem(r.cmd.index);

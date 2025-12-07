@@ -63,7 +63,7 @@ pub fn createKeymaps(allocator: Allocator) !KeyMaps {
 pub fn parse(
     term: *Term,
     bytes: []const u8,
-    w: *std.io.Writer,
+    w: *std.Io.Writer,
 ) !void {
     var iter = inputParser(bytes, term);
 

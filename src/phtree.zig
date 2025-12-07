@@ -1069,11 +1069,7 @@ pub fn PhTree(
             values_len: Node.Handle.Int,
             values_cap: Node.Handle.Int,
             root: Node.Handle.Int,
-            root_tag: blk: {
-                var t = @typeInfo(@typeInfo(NodeOrEntry).@"union".tag_type.?);
-                t.@"enum".tag_type = u8;
-                break :blk @Type(t);
-            },
+            root_tag: utils.FieldEnum(NodeOrEntry, u8),
             free: Node.Handle,
             free_count: Node.Handle.Int,
         };

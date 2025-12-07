@@ -141,13 +141,6 @@ pub const Node = extern struct {
     pub const OptionalIndex = NodeList.OptionalIndex;
     pub const Index = NodeList.Index;
 
-    pub const Payload = blk: {
-        var t = @typeInfo(Tagged).@"union";
-        t.layout = .@"extern";
-        t.tag_type = null;
-        break :blk @Type(.{ .@"union" = t });
-    };
-
     pub const Builtin = extern struct {
         tag: Builtin.Tag,
 
@@ -172,7 +165,7 @@ pub const Node = extern struct {
             width,
             height,
 
-            pub fn format(t: Builtin.Tag, w: *std.io.Writer) !void {
+            pub fn format(t: Builtin.Tag, w: *std.Io.Writer) !void {
                 switch (t) {
                     .count_all => try w.writeAll("countAll"),
                     else => try w.writeAll(@tagName(t)),
@@ -268,12 +261,65 @@ pub const Node = extern struct {
         }
     }
 
+    pub const End = packed struct(u64) {
+        unused: u16 = 0,
+        /// Stores the number of nodes in the AST.
+        length: u48,
+    };
+
+    pub const Payload = extern union {
+        end: End,
+        number: f64,
+        abs_abs: Position,
+        abs_rel: Position,
+        rel_abs: Position,
+        rel_rel: Position,
+        string_literal: String,
+        invalidated_pos: Position,
+        invalidated_range: void,
+
+        function_body_start: FunctionDefStart,
+        function_body_end: FunctionDefEnd,
+        function_parameter: String,
+        function_capture: CaptureDeclaration,
+        function_call: FunctionCall,
+        local_variable: LocalVariable,
+        captured_variable: CapturedVariable,
+
+        assignment: Position,
+        builtin: Builtin,
+        minus: void,
+        plus: void,
+        not: void,
+        concat: void,
+        add: void,
+        sub: void,
+        mul: void,
+        div: void,
+        mod: void,
+        pow: void,
+        greater_than: void,
+        less_than: void,
+        greater_equals: void,
+        less_equals: void,
+        equals: void,
+        not_equals: void,
+        logical_and: void,
+        logical_or: void,
+
+        /// The colon operator with two static arguments.
+        /// Cell value accesses through this range are non-volatile.
+        range: void,
+        /// The colon operator with one or more dynamic arguments.
+        /// Cell value accesses through this range are volatile.
+        dynamic_range: void,
+
+        reference: void,
+        dereference: void,
+    };
+
     pub const Tagged = union(Tag) {
-        end: packed struct(u64) {
-            unused: u16 = 0,
-            /// Stores the number of nodes in the AST.
-            length: u48,
-        },
+        end: End,
         number: f64,
         abs_abs: Position,
         abs_rel: Position,
@@ -439,9 +485,9 @@ pub fn string(ast: *const Ast, str: String) []u8 {
 pub fn printFromIndex(
     ast: *const Ast,
     index: Node.Index,
-    writer: *std.io.Writer,
+    writer: *std.Io.Writer,
     current_function: Node.OptionalIndex,
-) std.io.Writer.Error!void {
+) std.Io.Writer.Error!void {
     const n = ast.nodes.get(index);
     return ast.printFromNode(index, n, writer, current_function);
 }
@@ -450,10 +496,10 @@ pub fn printFromNode(
     ast: *const Ast,
     index: Node.Index,
     data: Node,
-    w: *std.io.Writer,
+    w: *std.Io.Writer,
     /// Index of the `function_body_start` node of the current function's defintion.
     current_function: Node.OptionalIndex,
-) std.io.Writer.Error!void {
+) std.Io.Writer.Error!void {
     // On the left-hand side, expressions involving operators with lower precedence need
     // parentheses.
 
@@ -823,7 +869,7 @@ pub fn format(f: FormatData, w: *std.Io.Writer) std.Io.Writer.Error!void {
 pub fn print(
     ast: *const Ast,
     root: Node.Index,
-    writer: *std.io.Writer,
+    writer: *std.Io.Writer,
 ) std.Io.Writer.Error!void {
     return ast.printFromIndex(root, writer, .none);
 }
@@ -1326,7 +1372,7 @@ test "Print" {
         const expr = try sheet.parseFromExpression(src);
 
         var buf: [4096]u8 = undefined;
-        var fixed: std.io.Writer = .fixed(&buf);
+        var fixed: std.Io.Writer = .fixed(&buf);
         try sheet.ast.print(expr.root, &fixed);
         try t.expectEqualStrings(expected, fixed.buffered());
     }
@@ -1335,7 +1381,7 @@ test "Print" {
         const expr = try sheet.parseFromExpression(src);
 
         var buf: [4096]u8 = undefined;
-        var fixed: std.io.Writer = .fixed(&buf);
+        var fixed: std.Io.Writer = .fixed(&buf);
         try sheet.ast.print(expr.root, &fixed);
         try t.expectEqualStrings(src, fixed.buffered());
     }

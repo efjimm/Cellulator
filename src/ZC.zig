@@ -125,8 +125,9 @@ command: CommandLine = .{},
 keymaps: input.KeyMaps,
 
 allocator: Allocator,
+io: std.Io,
 
-input_buf: std.io.Writer.Allocating,
+input_buf: std.Io.Writer.Allocating,
 
 /// Used as scratch space
 arena: std.heap.ArenaAllocator,
@@ -257,7 +258,7 @@ pub const Mode = enum {
         };
     }
 
-    pub fn format(mode: Mode, writer: *std.io.Writer) !void {
+    pub fn format(mode: Mode, writer: *std.Io.Writer) !void {
         try writer.writeAll(@tagName(mode));
     }
 };
@@ -269,7 +270,7 @@ pub const InitOptions = struct {
 
 /// Initialises via a pointer rather than returning an instance, as we need a
 /// stable pointer to a ZC instance.
-pub fn init(zc: *ZC, allocator: Allocator, options: InitOptions) !void {
+pub fn init(zc: *ZC, allocator: Allocator, io: std.Io, options: InitOptions) !void {
     errdefer zc.* = undefined;
 
     zc.allocator = allocator;
@@ -277,7 +278,7 @@ pub fn init(zc: *ZC, allocator: Allocator, options: InitOptions) !void {
     var keys = try input.createKeymaps(allocator);
     errdefer keys.deinit(allocator);
 
-    var tui = try Tui.init(allocator);
+    var tui = try Tui.init(allocator, io);
     errdefer tui.deinit(allocator);
 
     if (options.ui) try tui.uncook();
@@ -292,6 +293,7 @@ pub fn init(zc: *ZC, allocator: Allocator, options: InitOptions) !void {
         .ui = tui,
         .ui_interface = undefined,
         .allocator = allocator,
+        .io = io,
         .keymaps = keys,
         .arena = .init(allocator),
         .input_buf = try .initCapacity(allocator, 1),
@@ -685,10 +687,10 @@ fn clampScreenToCommandCursor(zc: *ZC) void {
 
 /// Doesn't wrap Command.Writer to avoid an unnecessary layer of indirection.
 const CommandWriter = struct {
-    interface: std.io.Writer,
+    interface: std.Io.Writer,
     zc: *ZC,
 
-    pub fn drain(io_writer: *std.io.Writer, data: []const []const u8, splat: usize) !usize {
+    pub fn drain(io_writer: *std.Io.Writer, data: []const []const u8, splat: usize) !usize {
         const w: *CommandWriter = @fieldParentPtr("interface", io_writer);
         defer w.zc.clampCommandCursor();
         defer w.zc.clampScreenToCommandCursor();
@@ -1067,6 +1069,7 @@ fn populatePathCompletions(zc: *ZC, query: []const u8) !void {
         zc.dir_entries.clearRetainingCapacity();
         zc.completions_buffer.clearRetainingCapacity();
 
+        // TODO: Update to std.Io.Dir when iterator becomes available
         var dir = std.fs.cwd().openDir(dirname, .{ .iterate = true }) catch {
             zc.last_dirname = dirname;
             return;
@@ -1835,7 +1838,7 @@ pub const Command = enum {
         zc.status.tag = .cmd_info;
         zc.status.cmd_description = description;
 
-        var w: std.io.Writer.Allocating = .fromArrayList(zc.allocator, &zc.status.usage);
+        var w: std.Io.Writer.Allocating = .fromArrayList(zc.allocator, &zc.status.usage);
         defer zc.status.usage = w.toArrayList();
 
         inline for (funcs, 0..) |func, i| {
@@ -1870,7 +1873,7 @@ pub const Command = enum {
         s.err_offset = err_offset;
         s.err_size = err_size;
 
-        var w: std.io.Writer.Allocating = .fromArrayList(zc.allocator, &s.usage);
+        var w: std.Io.Writer.Allocating = .fromArrayList(zc.allocator, &s.usage);
         defer s.usage = w.toArrayList();
 
         inline for (funcs, 0..) |func, i| {
@@ -2548,7 +2551,7 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
             const arg1 = iter.next() orelse return error.InvalidSyntax;
             const rest = iter.string[iter.index..];
 
-            var aw: std.io.Writer.Allocating = .init(zc.allocator);
+            var aw: std.Io.Writer.Allocating = .init(zc.allocator);
             defer aw.deinit();
 
             const pos: Position = try .fromAddress(arg1);
@@ -2616,14 +2619,14 @@ pub fn loadCmdBinary(zc: *ZC, filepath: []const u8) !void {
     assert(zc.sheets.entries.len > 0);
     if (filepath.len == 0) return error.EmptyFileName;
 
-    const file = try std.fs.cwd().openFile(filepath, .{});
-    defer file.close();
+    const file = try std.Io.Dir.cwd().openFile(zc.io, filepath, .{});
+    defer file.close(zc.io);
 
     const new_sheet = try zc.openSheet();
     errdefer comptime unreachable;
 
     const sheet = &zc.sheets.values()[new_sheet];
-    sheet.deserialize(sheet.gpa, file) catch |err| {
+    sheet.deserialize(sheet.gpa, zc.io, file) catch |err| {
         zc.setStatusMessage(.err, "Could not open file: {s}", .{@errorName(err)});
         zc.closeSheet(new_sheet) catch unreachable;
         return;
@@ -2654,6 +2657,7 @@ fn writeFile(zc: *ZC, maybe_filepath: ?[]const u8) !void {
     if (filepath.len == 0)
         return error.EmptyFileName;
 
+    // TODO: Upgrade usage of atomic file whenever it gets added to std.Io
     var buf: [8192]u8 = undefined;
     var atomic_file = try std.fs.cwd().atomicFile(filepath, .{ .write_buffer = &buf });
     defer atomic_file.deinit();
@@ -2671,7 +2675,7 @@ fn writeFile(zc: *ZC, maybe_filepath: ?[]const u8) !void {
         sheet.setFilePath(path);
 }
 
-fn writeZcHeader(zc: *ZC, w: *std.io.Writer) !void {
+fn writeZcHeader(zc: *ZC, w: *std.Io.Writer) !void {
     const sheet = zc.currentSheet();
     try w.writeAll(
         \\-- This file was automatically generated by Cellulator.
@@ -2693,7 +2697,7 @@ fn writeZcHeader(zc: *ZC, w: *std.io.Writer) !void {
 fn loadFile(zc: *ZC, sheet_index: usize, filepath: []const u8) !void {
     const sheet = zc.getSheet(sheet_index);
 
-    const file = std.fs.cwd().openFile(filepath, .{}) catch |err| switch (err) {
+    const file = std.Io.Dir.cwd().openFile(zc.io, filepath, .{}) catch |err| switch (err) {
         error.FileNotFound => {
             sheet.setFilePath(filepath);
             sheet.has_changes = false;
@@ -2701,7 +2705,7 @@ fn loadFile(zc: *ZC, sheet_index: usize, filepath: []const u8) !void {
         },
         else => return err,
     };
-    defer file.close();
+    defer file.close(zc.io);
 
     sheet.setFilePath(filepath);
     defer sheet.has_changes = false;
@@ -2713,7 +2717,7 @@ fn loadFile(zc: *ZC, sheet_index: usize, filepath: []const u8) !void {
     const arena = sheet.arena.allocator();
     const buf = try arena.alloc(u8, 1 << 18);
 
-    var r = file.reader(buf);
+    var r = file.reader(zc.io, buf);
     if (std.mem.endsWith(u8, filepath, ".csv")) {
         try sheet.loadCsv(&r.interface);
     } else {
@@ -2729,8 +2733,20 @@ fn loadFile(zc: *ZC, sheet_index: usize, filepath: []const u8) !void {
     });
 }
 
-fn loadZcHeader(zc: *ZC, r: *std.io.Reader) !void {
-    while (r.takeDelimiterExclusive('\n')) |line| {
+fn loadZcHeader(zc: *ZC, r: *std.Io.Reader) !void {
+    while (true) {
+        const line = r.takeDelimiter('\n') catch |err| switch (err) {
+            error.ReadFailed => |e| return e,
+            error.StreamTooLong => {
+                std.log.warn("Line too long, skipping", .{});
+                _ = r.discardDelimiterInclusive('\n') catch |err2| switch (err2) {
+                    error.ReadFailed => |e| return e,
+                    error.EndOfStream => break,
+                };
+                continue;
+            },
+        } orelse break;
+
         // Stop loading the header as soon as we encounter a let statement, putting this line
         // back into the buffer.
         if (std.mem.startsWith(u8, line, "let")) {
@@ -2745,9 +2761,6 @@ fn loadZcHeader(zc: *ZC, r: *std.io.Reader) !void {
             error.OutOfMemory => |e| return e,
             else => {},
         };
-    } else |err| switch (err) {
-        error.EndOfStream => unreachable,
-        else => |e| return e,
     }
 }
 
@@ -3223,7 +3236,7 @@ pub fn cursorGotoCol(zc: *ZC) void {
 test "Sheet mode counts" {
     const t = std.testing;
     var zc: ZC = undefined;
-    try zc.init(t.allocator, .{ .ui = false });
+    try zc.init(t.allocator, t.io, .{ .ui = false });
     defer zc.deinit();
 
     try t.expectEqual(Mode.normal, zc.mode);
@@ -3235,7 +3248,7 @@ test "Motions normal mode" {
     const max = std.math.maxInt(Position.Int);
 
     var zc: ZC = undefined;
-    try zc.init(t.allocator, .{ .ui = false });
+    try zc.init(t.allocator, t.io, .{ .ui = false });
     defer zc.deinit();
 
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
@@ -3438,7 +3451,7 @@ test "Motions visual mode" {
     const max = std.math.maxInt(Position.Int);
 
     var zc: ZC = undefined;
-    try zc.init(t.allocator, .{ .ui = false });
+    try zc.init(t.allocator, t.io, .{ .ui = false });
     defer zc.deinit();
 
     zc.setMode(.visual);
@@ -3808,15 +3821,17 @@ test "Motions visual mode" {
 }
 
 // Test files at runtime so no recompilation is needed if the data changes
-fn testFile(gpa: std.mem.Allocator, path: []const u8) !void {
+fn testFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     var zc: ZC = undefined;
-    try zc.init(gpa, .{ .ui = false });
+    try zc.init(gpa, io, .{ .ui = false });
     defer zc.deinit();
 
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
 
-    const bytes = try file.readToEndAlloc(gpa, 100_000_000);
+    var buf: [8192]u8 = undefined;
+    var reader = file.reader(io, &buf);
+    const bytes = try reader.interface.allocRemaining(gpa, .unlimited);
     defer gpa.free(bytes);
 
     const content = try std.mem.replaceOwned(u8, gpa, bytes, "$BUILD_TEMP_DIR", build.temp_dir);
@@ -3842,7 +3857,7 @@ test "Sheet operations" {
     var wr = std.fs.File.stderr().writer(&.{});
     for (build.test_files) |path| {
         wr.interface.print("run \x1b[34m{s}\x1b[0m: ", .{path}) catch {};
-        try testFile(std.testing.allocator, path);
+        try testFile(std.testing.allocator, std.testing.io, path);
         wr.interface.print("\x1b[32msuccess\x1b[0m\n", .{}) catch {};
     }
 }

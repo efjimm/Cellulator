@@ -131,7 +131,7 @@ pub const Diagnostics = struct {
         invalid_cell_address: []const u8,
     };
 
-    pub fn format(info: *const Diagnostics, writer: *std.io.Writer) !void {
+    pub fn format(info: *const Diagnostics, writer: *std.Io.Writer) !void {
         switch (info.payload) {
             .none => {},
             .expected_token => |token| {
@@ -224,7 +224,7 @@ pub fn parseFromExpression(
     source: []const u8,
     options: Options,
 ) ParseError!Result {
-    var reader: std.io.Reader = .fixed(source);
+    var reader: std.Io.Reader = .fixed(source);
     var tokens = Tokenizer.collectTokens(
         gpa,
         &reader,
@@ -954,7 +954,7 @@ fn fmtTags(tags: []const Token.Tag) std.fmt.Formatter([]const Token.Tag, formatT
     return .{ .data = tags };
 }
 
-fn formatTags(tags: []const Token.Tag, writer: *std.io.Writer) !void {
+fn formatTags(tags: []const Token.Tag, writer: *std.Io.Writer) !void {
     if (tags.len == 1) {
         try writer.print("{f}", .{tags[0]});
         return;

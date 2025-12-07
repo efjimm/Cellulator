@@ -4,6 +4,8 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 # TODO
 
+- Bug: Crash when taking reference of anything invalid
+
 - Streams
   - map filter reduce
 - Anonymous functions with implicit arguments (placeholders)
