@@ -117,7 +117,6 @@ fn configureTests(
     main_mod: *std.Build.Module,
     opts: *std.Build.Step.Options,
 ) *std.Build.Step.Compile {
-    const fast_tests = b.option(bool, "fast-tests", "Skip slow tests") orelse false;
     const test_filter = b.option([]const u8, "test-filter", "Skip tests that do not match filter");
     const use_kcov = b.option(bool, "coverage", "Generate code coverage reports with kcov") orelse false;
 
@@ -148,7 +147,6 @@ fn configureTests(
         "test/volatile.zc",
         "test/functions.zc",
     });
-    opts.addOption(bool, "fast_tests", fast_tests);
 
     // Create cache directory for temporarily storing files created by serialization tests
     const test_data_subpath = "tmp" ++ std.fs.path.sep_str ++ "test-data";
