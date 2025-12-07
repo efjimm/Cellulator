@@ -1355,6 +1355,7 @@ fn doVisualMode(zc: *ZC, action: Action) Oom!void {
     }
 }
 
+// TODO: Rename this function
 fn parseCommand(zc: *ZC, str: []const u8) !void {
     if (str.len == 0) return;
 
@@ -3860,4 +3861,13 @@ test "Sheet operations" {
         try testFile(std.testing.allocator, std.testing.io, path);
         wr.interface.print("\x1b[32msuccess\x1b[0m\n", .{}) catch {};
     }
+}
+
+test "Invalid reference" {
+    var zc: ZC = undefined;
+    try zc.init(std.testing.allocator, std.testing.io, .{ .ui = false });
+    defer zc.deinit();
+
+    try zc.parseCommand("let a0 = &10");
+    try zc.updateCells();
 }

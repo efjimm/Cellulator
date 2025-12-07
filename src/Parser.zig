@@ -632,7 +632,7 @@ fn parseReferenceExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
     return switch (p.token_tags[p.tok_i]) {
         .ampersand => {
             p.tok_i += 1;
-            _ = try p.parseSuffixExpr(ctx);
+            _ = try p.parseCellName(.reference);
             const index = try p.addNode(.init(.reference, {}));
             return .{ index, .cell };
         },
