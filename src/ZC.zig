@@ -572,8 +572,12 @@ fn handleInput(zc: *ZC) !void {
     assert(zc.currentSheet().undos.len == 0 or zc.currentSheet().undos.items(.tag)[zc.currentSheet().undos.len - 1] == .sentinel);
     assert(zc.currentSheet().redos.len == 0 or zc.currentSheet().redos.items(.tag)[zc.currentSheet().redos.len - 1] == .sentinel);
 
+    // TODO: Move most of this into the UI implementation.
     var buf: [256]u8 = undefined;
-    const slice = try zc.ui.term.readInput(&buf);
+    const slice = zc.ui.term.readInputSingleThreadedBlocking(&buf) catch |err| switch (err) {
+        error.Interrupted => &.{},
+        else => |e| return e,
+    };
 
     try input.parse(&zc.ui.term, slice, &zc.input_buf.writer);
     const bytes = try zc.inputSentinelSlice();

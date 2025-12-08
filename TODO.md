@@ -4,6 +4,13 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 # TODO
 
+- Globals / Named cells
+  - Some way to view globals
+- Aggregate types
+  - Arrays/Tuples
+  - Native arrays
+    - Array of "native" float/integer types instead of any type
+  - Structs
 - Streams
   - map filter reduce
 - Anonymous functions with implicit arguments (placeholders)
