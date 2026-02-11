@@ -21,6 +21,8 @@ const PhTree = @import("phtree.zig").PhTree;
 
 const Sheet = @This();
 
+// TODO: Combine memory allocations of data structures
+
 gpa: Allocator,
 
 /// True if there have been any changes since the last save
@@ -46,7 +48,6 @@ ast: Ast,
 
 string_values: FlatListPool(u8),
 
-// TODO: Only create columns for columns whose width/precision/whatever actually changes.
 cols: Columns,
 
 undos: std.MultiArrayList(Undo),
@@ -59,7 +60,6 @@ search_buffer: std.ArrayList(Dependents.Entry.Handle),
 
 filepath: std.ArrayList(u8),
 
-/// Used for temporary allocations
 arena: std.heap.ArenaAllocator,
 
 text_attrs: PhTree(TextAttrs, 2, Cell.Handle.Int),
@@ -68,6 +68,9 @@ lua_point_trees: std.StringHashMapUnmanaged(LuaDataPointTree) = .empty,
 
 cell_value_ranges: std.ArrayList(Rect) = .empty,
 closures: std.ArrayList(Interpreter.Value) = .empty,
+
+value_pool: std.heap.MemoryPool(Interpreter.Value) = .empty,
+values_to_free: std.ArrayList(*Interpreter.Value) = .empty,
 
 needs_update: bool = true,
 
@@ -191,6 +194,9 @@ pub const Cell = extern struct {
             /// are the captured values.
             index: u48,
         },
+        nil: void,
+        tuple: *Interpreter.Value,
+        pipeline: *Interpreter.Value,
 
         pub const Tag = utils.FieldEnum(Value, u8);
     };
@@ -365,6 +371,12 @@ pub fn deinit(sheet: *Sheet) void {
     sheet.volatile_cells.deinit(sheet.gpa);
     sheet.undos.deinit(sheet.gpa);
     sheet.redos.deinit(sheet.gpa);
+
+    for (sheet.values_to_free.items) |v| {
+        v.deinit(sheet.gpa);
+    }
+    sheet.values_to_free.deinit(sheet.gpa);
+    sheet.value_pool.deinit(sheet.gpa);
 
     sheet.cols.deinit(sheet.gpa);
     sheet.ast.deinit(sheet.gpa);
@@ -986,7 +998,7 @@ pub fn writeCsv(sheet: *Sheet, writer: *std.Io.Writer) !void {
             try writer.splatByteAll(',', p[0] - last_col);
         }
         const cell = sheet.cell_tree.getValue(handle);
-        try sheet.formatCell(cell, writer);
+        try sheet.formatCellValue(cell.expr.value_tag, cell.value, writer);
         last_line = p[1];
         last_col = p[0];
     }
@@ -994,34 +1006,84 @@ pub fn writeCsv(sheet: *Sheet, writer: *std.Io.Writer) !void {
     try writer.flush();
 }
 
-pub fn formatCell(sheet: *const Sheet, cell: *const Cell, w: *std.Io.Writer) !void {
-    switch (cell.expr.value_tag) {
-        .number => {
-            try w.print("{d}", .{cell.value.number});
+pub fn formatCellValue(
+    sheet: *Sheet,
+    tag: Cell.Value.Tag,
+    value: Cell.Value,
+    w: *std.Io.Writer,
+) !void {
+    const interpreter_value = sheet.interpreterValueFromCell(tag, value);
+    return try sheet.formatInterpreterValue(interpreter_value, w);
+}
+
+pub const FmtInterpreterValueData = struct {
+    sheet: *Sheet,
+    value: Interpreter.Value,
+};
+
+pub fn fmtInterpreterValue(
+    sheet: *Sheet,
+    value: Interpreter.Value,
+) std.fmt.Alt(FmtInterpreterValueData, formatInterpreterValueWrapper) {
+    return .{ .data = .{ .sheet = sheet, .value = value } };
+}
+
+fn formatInterpreterValueWrapper(
+    data: FmtInterpreterValueData,
+    w: *std.Io.Writer,
+) std.Io.Writer.Error!void {
+    return formatInterpreterValue(data.sheet, data.value, w);
+}
+
+pub fn formatInterpreterValue(
+    sheet: *Sheet,
+    value: Interpreter.Value,
+    w: *std.Io.Writer,
+) std.Io.Writer.Error!void {
+    switch (value) {
+        .none => {},
+        .nil => {
+            try w.writeAll("nil");
         },
-        .string => {
-            const string = sheet.cellStringValue(cell);
-            try w.writeAll(string);
+        .number => {
+            try w.print("{d}", .{value.number});
+        },
+        .string => |s| switch (s) {
+            .slice => |slice| try w.writeAll(slice),
+            .cell => |c| {
+                const string = c.sheet.string_values.items(c.list_index);
+                try w.writeAll(string);
+            },
         },
         .err => {
             try w.writeAll("ERROR");
         },
-        .ref_cell => {
-            try w.print("&{f}", .{cell.value.ref_cell});
+        .cell, .indirect_cell => |pos| {
+            try w.print("&{f}", .{pos});
         },
-        .ref_range => {
-            const range = sheet.cellValueRange(cell.value.ref_range);
-            try w.print("{f}:{f}", .{ range.tl, range.br });
+        .range, .indirect_range => |range| {
+            try range.rect.format(w);
         },
-        .simple_function => {
-            try sheet.ast.print(cell.value.simple_function.index, w);
+        .function => |f| {
+            const arena = sheet.arena.allocator();
+            sheet.ast.print(arena, f.root, w) catch return error.WriteFailed;
         },
-        .builtin_function => {
-            try w.print("@{f}", .{cell.value.builtin_function});
+        .builtin_function => |b| {
+            try w.print("@{f}", .{b.tag});
         },
-        .closure => {
-            const root = sheet.closures.items[cell.value.closure.index].function.root;
-            try sheet.ast.print(root, w);
+        .pipeline => |p| {
+            try w.print("<{d}>", .{p.stages.items.len});
+        },
+        .tuple => |t| {
+            if (t.values.len == 0) {
+                try w.writeAll("[]");
+            } else {
+                try w.writeAll("[");
+                for (t.values[0 .. t.values.len - 1]) |v| {
+                    try w.print("{f}, ", .{sheet.fmtInterpreterValue(v)});
+                }
+                try w.print("{f}]", .{sheet.fmtInterpreterValue(t.values[t.values.len - 1])});
+            }
         },
     }
 }
@@ -1534,14 +1596,22 @@ fn updatePos(
     new_tag: Ast.Node.Tag,
 ) !void {
     switch (new_tag) {
-        .rel_rel, .rel_abs, .abs_rel, .abs_abs => {},
+        .rel_rel_value,
+        .rel_abs_value,
+        .abs_rel_value,
+        .abs_abs_value,
+        .rel_rel_reference,
+        .rel_abs_reference,
+        .abs_rel_reference,
+        .abs_abs_reference,
+        => {},
         else => assert(false),
     }
     // const tag = sheet.ast.nodes.items(.tag)[index.n];
     // assert(tag == .pos or tag == .invalidated_pos);
     try sheet.ensureUnusedUndoCapacity(1);
 
-    sheet.ast.nodes.ptr(index, .data).rel_rel = new_pos;
+    sheet.ast.nodes.ptr(index, .data).rel_rel_value = new_pos;
     sheet.ast.nodes.ptr(index, .tag).* = new_tag;
 }
 
@@ -1552,8 +1622,8 @@ fn updateRange(sheet: *Sheet, index: Ast.Node.Index, new_range: Rect) !void {
 
     const r = index.subi(1);
     const l = sheet.ast.leftMostChild(r).subi(1);
-    sheet.ast.nodes.ptr(l, .data).rel_rel = new_range.tl;
-    sheet.ast.nodes.ptr(r, .data).rel_rel = new_range.br;
+    sheet.ast.nodes.ptr(l, .data).rel_rel_value = new_range.tl;
+    sheet.ast.nodes.ptr(r, .data).rel_rel_value = new_range.br;
     sheet.ast.nodes.ptr(index, .tag).* = .range;
 }
 
@@ -2209,8 +2279,16 @@ pub fn deleteColOrRowRange(
 
         var iter = sheet.ast.nodes.reverseIterator();
         while (iter.next()) |i| switch (sheet.ast.tag(i)) {
-            .rel_rel, .rel_abs, .abs_rel, .abs_abs => {
-                const pos = sheet.ast.payload(i).rel_rel;
+            .rel_rel_value,
+            .rel_abs_value,
+            .abs_rel_value,
+            .abs_abs_value,
+            .rel_rel_reference,
+            .rel_abs_reference,
+            .abs_rel_reference,
+            .abs_abs_reference,
+            => {
+                const pos = sheet.ast.payload(i).rel_rel_value;
                 if (@field(pos, f) >= start) undo_count += 1;
             },
             .invalidated_range => {
@@ -2219,8 +2297,8 @@ pub fn deleteColOrRowRange(
             .range => {
                 const rhs = i.subi(1);
                 const lhs = sheet.ast.leftMostChild(rhs).subi(1);
-                const tl = sheet.ast.payload(lhs).rel_rel;
-                const br = sheet.ast.payload(rhs).rel_rel;
+                const tl = sheet.ast.payload(lhs).rel_rel_value;
+                const br = sheet.ast.payload(rhs).rel_rel_value;
                 const tl_f = @field(tl, f);
                 const br_f = @field(br, f);
                 const needs_resize_or_delete = !(tl_f > end or (tl_f < start and br_f > end));
@@ -2360,8 +2438,16 @@ pub fn deleteColOrRowRange(
 
     var iter = sheet.ast.nodes.reverseIterator();
     while (iter.next()) |i| switch (sheet.ast.tag(i)) {
-        .rel_rel, .abs_abs, .rel_abs, .abs_rel => {
-            const pos = &sheet.ast.nodes.ptr(i, .data).rel_rel;
+        .rel_rel_value,
+        .abs_abs_value,
+        .rel_abs_value,
+        .abs_rel_value,
+        .rel_rel_reference,
+        .abs_abs_reference,
+        .rel_abs_reference,
+        .abs_rel_reference,
+        => {
+            const pos = &sheet.ast.nodes.ptr(i, .data).rel_rel_value;
             const n = @field(pos, f);
             if (n >= start) {
                 sheet.pushUndoAssumeCapacity(.init(.update_pos, .{
@@ -2382,8 +2468,8 @@ pub fn deleteColOrRowRange(
         .range => {
             const rhs = i.subi(1);
             const lhs = sheet.ast.leftMostChild(rhs).subi(1);
-            const tl = &sheet.ast.nodes.ptr(lhs, .data).rel_rel;
-            const br = &sheet.ast.nodes.ptr(rhs, .data).rel_rel;
+            const tl = &sheet.ast.nodes.ptr(lhs, .data).rel_rel_value;
+            const br = &sheet.ast.nodes.ptr(rhs, .data).rel_rel_value;
             const u: Undo = .init(.update_range, .{
                 .ast_node = .{ .index = i },
                 .range = .{ .tl = tl.*, .br = br.* },
@@ -2468,8 +2554,16 @@ pub fn insertColsOrRows(
         const nodes = &sheet.ast.nodes;
         var iter = nodes.reverseIterator();
         while (iter.next()) |i| switch (sheet.ast.tag(i)) {
-            .rel_rel, .rel_abs, .abs_rel, .abs_abs => {
-                const pos = sheet.ast.payload(i).rel_rel;
+            .rel_rel_value,
+            .rel_abs_value,
+            .abs_rel_value,
+            .abs_abs_value,
+            .rel_rel_reference,
+            .rel_abs_reference,
+            .abs_rel_reference,
+            .abs_abs_reference,
+            => {
+                const pos = sheet.ast.payload(i).rel_rel_value;
                 const pos_f = @field(pos, f);
                 if (pos_f >= index) undo_count += 1;
             },
@@ -2477,8 +2571,8 @@ pub fn insertColsOrRows(
             .range => {
                 const rhs = i.subi(1);
                 const lhs = sheet.ast.leftMostChild(rhs).subi(1);
-                const tl = sheet.ast.payload(lhs).rel_rel;
-                const br = sheet.ast.payload(rhs).rel_rel;
+                const tl = sheet.ast.payload(lhs).rel_rel_value;
+                const br = sheet.ast.payload(rhs).rel_rel_value;
                 const tl_f = @field(tl, f);
                 const br_f = @field(br, f);
                 if (tl_f >= index or br_f >= index)
@@ -2566,8 +2660,16 @@ pub fn insertColsOrRows(
     const nodes = sheet.ast.nodes;
     var iter = nodes.reverseIterator();
     while (iter.next()) |i| switch (sheet.ast.tag(i)) {
-        .rel_rel, .rel_abs, .abs_rel, .abs_abs => {
-            const pos = &nodes.ptr(i, .data).rel_rel;
+        .rel_rel_value,
+        .rel_abs_value,
+        .abs_rel_value,
+        .abs_abs_value,
+        .rel_rel_reference,
+        .rel_abs_reference,
+        .abs_rel_reference,
+        .abs_abs_reference,
+        => {
+            const pos = &nodes.ptr(i, .data).rel_rel_value;
             if (@field(pos, f) >= index) {
                 sheet.pushUndoAssumeCapacity(.init(.update_pos, .{
                     .node = .{ .index = i, .tag = sheet.ast.tag(i) },
@@ -2580,8 +2682,8 @@ pub fn insertColsOrRows(
         .range => {
             const rhs = i.subi(1);
             const lhs = sheet.ast.leftMostChild(rhs).subi(1);
-            const tl = &nodes.ptr(lhs, .data).rel_rel;
-            const br = &nodes.ptr(rhs, .data).rel_rel;
+            const tl = &nodes.ptr(lhs, .data).rel_rel_value;
+            const br = &nodes.ptr(rhs, .data).rel_rel_value;
             assert(tl.x <= br.x);
             assert(tl.y <= br.y);
 
@@ -2631,7 +2733,7 @@ pub fn evaluate(sheet: *Sheet, root_node: Ast.Node.Index) !Interpreter.Value {
     defer sheet.resetArena();
 
     _ = try interp.evaluate(sheet.ast.leftMostChild(root_node));
-    const res = try interp.pop(.any);
+    const res = interp.pop();
 
     if (res == .string)
         return .{ .string = .{ .slice = try sheet.gpa.dupe(u8, res.string.bytes()) } };
@@ -2788,17 +2890,42 @@ pub fn cellStringValue(sheet: *const Sheet, cell: *const Cell) []const u8 {
     return sheet.string_values.items(cell.value.string);
 }
 
-pub fn freeCellString(sheet: *Sheet, cell: *Cell) void {
-    assert(cell.expr.value_tag == .string);
-    sheet.string_values.destroyList(cell.value.string);
-}
-
 pub fn setCellError(sheet: *Sheet, cell: *Cell) void {
     if (cell.root() == .none) return;
-    if (cell.expr.value_tag == .string)
-        sheet.string_values.destroyList(cell.value.string);
+    sheet.deinitCellValue(cell);
 
     cell.setValue(.err, .fromError(error.NotEvaluable));
+}
+
+pub fn deinitCellValue(sheet: *Sheet, cell: *Cell) void {
+    switch (cell.expr.value_tag) {
+        .string => sheet.string_values.destroyList(cell.value.string),
+        .tuple => {
+            const v = cell.value.tuple;
+            v.deinit(sheet.gpa);
+            sheet.value_pool.destroy(v);
+        },
+        .pipeline => {
+            const v = cell.value.pipeline;
+            v.deinit(sheet.gpa);
+            sheet.value_pool.destroy(v);
+            for (sheet.values_to_free.items, 0..) |v2, i| {
+                if (v2 == v) {
+                    _ = sheet.values_to_free.swapRemove(i);
+                    break;
+                }
+            }
+        },
+        .err,
+        .ref_cell,
+        .ref_range,
+        .simple_function,
+        .builtin_function,
+        .closure,
+        .nil,
+        .number,
+        => {},
+    }
 }
 
 /// Queues the dependents of `ref` for update.
@@ -2878,16 +3005,13 @@ pub fn evalCellByHandle(
                 }
             }
 
-            if (cell.expr.value_tag == .string)
-                sheet.string_values.destroyList(cell.value.string);
+            sheet.deinitCellValue(cell);
 
-            const value = eval.pop(.any) catch |err| {
-                cell.setValue(.err, .fromError(err));
-                return err;
-            };
-
+            const value = eval.pop();
             switch (value) {
                 .none => cell.setValue(.number, 0),
+                .nil => cell.setValue(.nil, {}),
+                .err => cell.setValue(.err, .fromError(error.NotEvaluable)),
                 .number => |n| cell.setValue(.number, n),
                 .string => |str| {
                     const bytes = str.bytes();
@@ -2925,6 +3049,20 @@ pub fn evalCellByHandle(
                 .builtin_function => |f| {
                     cell.setValue(.builtin_function, f.tag);
                 },
+                .pipeline => {
+                    try sheet.values_to_free.ensureUnusedCapacity(sheet.gpa, 1);
+                    const new_value = try sheet.value_pool.create(sheet.gpa);
+                    errdefer sheet.value_pool.destroy(new_value);
+                    new_value.* = try value.clone(sheet.gpa);
+                    sheet.values_to_free.appendAssumeCapacity(new_value);
+                    cell.setValue(.pipeline, new_value);
+                },
+                .tuple => {
+                    const new_value = try sheet.value_pool.create(sheet.gpa);
+                    errdefer sheet.value_pool.destroy(new_value);
+                    new_value.* = try value.clone(sheet.gpa);
+                    cell.setValue(.tuple, new_value);
+                },
             }
 
             cell.expr.state = .up_to_date;
@@ -2933,6 +3071,7 @@ pub fn evalCellByHandle(
     }
 
     return switch (cell.expr.value_tag) {
+        .nil => .nil,
         .number => .{ .number = cell.value.number },
         .string => .{
             .string = .{
@@ -2954,6 +3093,12 @@ pub fn evalCellByHandle(
             const root = sheet.closures.items[closure.index].function.root;
             return .{ .function = .{ .root = root, .captures = copied } };
         },
+        .tuple => {
+            return try cell.value.tuple.clone(eval.arena);
+        },
+        .pipeline => {
+            return try cell.value.pipeline.clone(eval.arena);
+        },
     };
 }
 
@@ -2969,11 +3114,47 @@ pub fn evalCellByPos(sheet: *Sheet, eval: *Interpreter, pos: Position) Ast.EvalE
 pub fn printCellExpression(sheet: *Sheet, pos: Position, w: *std.Io.Writer) !void {
     const cell = sheet.getCellPtr(pos) orelse return;
     if (cell.root() == .none) {
-        try sheet.formatCell(cell, w);
+        try sheet.formatCellValue(cell.expr.value_tag, cell.value, w);
         return;
     }
-    if (cell.root().unwrap()) |root|
-        try sheet.ast.print(root, w);
+    if (cell.root().unwrap()) |root| {
+        const arena = sheet.arena.allocator();
+        try sheet.ast.print(arena, sheet.ast.leftMostChild(root.addi(1)), w);
+    }
+}
+
+/// Turns a cached cell value into an interpreter value. Any heap allocated data is *shallow*
+/// copied.
+pub fn interpreterValueFromCell(
+    sheet: *Sheet,
+    tag: Cell.Value.Tag,
+    value: Cell.Value,
+) Interpreter.Value {
+    return switch (tag) {
+        .nil => .nil,
+        .number => .{ .number = value.number },
+        .string => .{
+            .string = .{
+                .cell = .{
+                    .sheet = sheet,
+                    .list_index = value.string,
+                },
+            },
+        },
+        .err => .err,
+        .ref_cell => .{ .indirect_cell = value.ref_cell },
+        .ref_range => .{ .indirect_range = .{ .rect = sheet.cellValueRange(value.ref_range).* } },
+        .simple_function => .{ .function = .{ .root = value.simple_function.index } },
+        .builtin_function => .{ .builtin_function = .{ .tag = value.builtin_function } },
+        .closure => {
+            const closure = value.closure;
+            const captured = sheet.closures.items[closure.index + 1 ..][0..closure.len];
+            const root = sheet.closures.items[closure.index].function.root;
+            return .{ .function = .{ .root = root, .captures = captured } };
+        },
+        .tuple => value.tuple.*,
+        .pipeline => value.pipeline.*,
+    };
 }
 
 const FmtData = struct {
@@ -2982,7 +3163,7 @@ const FmtData = struct {
 };
 
 pub fn formatCellExpression(d: FmtData, writer: *std.Io.Writer) !void {
-    try d.sheet.printCellExpression(d.pos, writer);
+    d.sheet.printCellExpression(d.pos, writer) catch return error.WriteFailed;
 }
 
 pub fn fmtCellExpr(sheet: *Sheet, pos: Position) std.fmt.Alt(FmtData, formatCellExpression) {
@@ -3175,12 +3356,14 @@ fn createCellCopiesContiguous(
 
                 // Cell does not have AST, so it can only be a simple value
                 switch (src_cell.expr.value_tag) {
-                    .number, .string, .err => {},
+                    .number, .string, .err, .nil => {},
                     .ref_cell,
                     .ref_range,
                     .simple_function,
                     .builtin_function,
                     .closure,
+                    .tuple,
+                    .pipeline,
                     => unreachable,
                 }
 
@@ -3236,38 +3419,38 @@ fn createCellCopiesContiguous(
                     dest_tag.* = src_tag;
                     dest_data.* = src_data;
                     switch (src_tag) {
-                        .rel_rel => {
-                            const added_x, ox = @addWithOverflow(dest_data.rel_rel.x, tiled_diff_x);
-                            const added_y, oy = @addWithOverflow(dest_data.rel_rel.y, tiled_diff_y);
+                        .rel_rel_value, .rel_rel_reference => {
+                            const added_x, ox = @addWithOverflow(dest_data.rel_rel_value.x, tiled_diff_x);
+                            const added_y, oy = @addWithOverflow(dest_data.rel_rel_value.y, tiled_diff_y);
                             if (ox == 1 or oy == 1 or added_x < 0 or added_y < 0) {
                                 @branchHint(.unlikely);
                                 dest_tag.* = .invalidated_pos;
                                 continue;
                             }
 
-                            dest_data.rel_rel.x = @intCast(added_x);
-                            dest_data.rel_rel.y = @intCast(added_y);
+                            dest_data.rel_rel_value.x = @intCast(added_x);
+                            dest_data.rel_rel_value.y = @intCast(added_y);
                         },
-                        .abs_abs => {},
-                        .rel_abs => {
-                            const added_x, ox = @addWithOverflow(dest_data.rel_rel.x, tiled_diff_x);
+                        .abs_abs_value, .abs_abs_reference => {},
+                        .rel_abs_value, .rel_abs_reference => {
+                            const added_x, ox = @addWithOverflow(dest_data.rel_rel_value.x, tiled_diff_x);
                             if (ox == 1 or added_x < 0) {
                                 @branchHint(.unlikely);
                                 dest_tag.* = .invalidated_pos;
                                 continue;
                             }
 
-                            dest_data.rel_rel.x = @intCast(added_x);
+                            dest_data.rel_rel_value.x = @intCast(added_x);
                         },
-                        .abs_rel => {
-                            const added_y, oy = @addWithOverflow(dest_data.rel_rel.y, tiled_diff_y);
+                        .abs_rel_value, .abs_rel_reference => {
+                            const added_y, oy = @addWithOverflow(dest_data.rel_rel_value.y, tiled_diff_y);
                             if (oy == 1 or added_y < 0) {
                                 @branchHint(.unlikely);
                                 dest_tag.* = .invalidated_pos;
                                 continue;
                             }
 
-                            dest_data.rel_rel.y = @intCast(added_y);
+                            dest_data.rel_rel_value.y = @intCast(added_y);
                         },
                         else => {},
                     }
@@ -3477,6 +3660,18 @@ pub fn expectCellError(sheet: *Sheet, address: []const u8) !void {
         });
         return error.UnexpectedValue;
     }
+}
+
+test "guhbuh" {
+    var sheet = try Sheet.init(std.testing.allocator);
+    defer sheet.deinit();
+
+    try sheet.setCell(
+        .fromValidAddress("A0"),
+        try sheet.parseFromExpression("a0"),
+        .{},
+    );
+    try sheet.update();
 }
 
 test "Cell error propagation" {

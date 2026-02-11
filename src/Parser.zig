@@ -116,8 +116,6 @@ pub const Type = packed struct {
     }
 };
 
-pub const ExpressionContext = enum { value, reference };
-
 pub const Diagnostics = struct {
     payload: Payload = .none,
     actual: Token.Tag = .eof,
@@ -182,6 +180,9 @@ const builtins = std.StaticStringMap(Builtin.Tag).initComptime(.{
     .{ "e", .e },
     .{ "width", .width },
     .{ "height", .height },
+    .{ "range", .range },
+    .{ "filter", .filter },
+    .{ "map", .map },
 });
 
 pub const ParseError = error{
@@ -340,7 +341,7 @@ fn parseFunctionDefinition(p: *Parser) ParseError!Intermediate {
     }
 
     const body_start = p.ast.nodes.len();
-    _ = try p.parseExpression(.value);
+    _ = try p.parseExpression();
     const body_len: u32 = @intCast(p.ast.nodes.len() - body_start);
 
     const func: Ast.Node.FunctionDefStart = .{
@@ -380,7 +381,7 @@ fn parseStatement(p: *Parser) ParseError!Index {
             return try p.parseAssignment();
         },
         else => {
-            const index, _ = try p.parseExpression(.value);
+            const index, _ = try p.parseExpression();
             return index;
         },
     }
@@ -403,20 +404,20 @@ fn parseAssignment(p: *Parser) ParseError!Index {
     );
 
     try p.expectToken(.equals_sign);
-    _ = try p.parseExpression(.value);
+    _ = try p.parseExpression();
 
     return p.addNode(.init(.assignment, pos));
 }
 
 /// Expression <- PipeExpr
-fn parseExpression(p: *Parser, ctx: ExpressionContext) ParseError!Intermediate {
-    return try p.parsePipeExpr(ctx);
+fn parseExpression(p: *Parser) ParseError!Intermediate {
+    return try p.parsePipeExpr();
 }
 
 /// PipeExpr <- OrExpr ('|>' OrExpr)*
-fn parsePipeExpr(p: *Parser, ctx: ExpressionContext) ParseError!Intermediate {
+fn parsePipeExpr(p: *Parser) ParseError!Intermediate {
     const start = p.ast.nodes.len();
-    var index, var result_type = try p.parseOrExpr(ctx);
+    var index, var result_type = try p.parseOrExpr();
 
     while (p.eatToken(.pipe_to)) |_| {
         const temp_tags = try p.gpa.dupe(Node.Tag, p.ast.tags()[start..]);
@@ -426,10 +427,10 @@ fn parsePipeExpr(p: *Parser, ctx: ExpressionContext) ParseError!Intermediate {
 
         p.ast.nodes.shrinkRetainingCapacity(start);
 
-        index, result_type = try p.parseOrExpr(ctx);
+        index, result_type = try p.parseOrExpr();
         var function_index: u48 = undefined;
         if (p.ast.tag(index) != .function_call) {
-            index = try p.addNode(.init(.function_call, .{
+            index = try p.addNode(.init(.pipe_call, .{
                 .function_index = @intCast(1 + temp_tags.len),
                 .arg_count = 1,
                 .is_pipe = true,
@@ -440,6 +441,7 @@ fn parsePipeExpr(p: *Parser, ctx: ExpressionContext) ParseError!Intermediate {
             p.ast.payloadPtr(index).function_call.arg_count += 1;
             p.ast.payloadPtr(index).function_call.function_index += @intCast(temp_tags.len);
             p.ast.payloadPtr(index).function_call.is_pipe = true;
+            p.ast.tagPtr(index).* = .pipe_call;
             function_index = call.function_index;
         }
 
@@ -463,11 +465,11 @@ fn parsePipeExpr(p: *Parser, ctx: ExpressionContext) ParseError!Intermediate {
 }
 
 /// OrExpr <- AndExpr ('or' AndExpr)*
-fn parseOrExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
-    var index, var result_type = try p.parseAndExpr(ctx);
+fn parseOrExpr(p: *Parser) !Intermediate {
+    var index, var result_type = try p.parseAndExpr();
 
     while (p.eatToken(.keyword_or)) |_| {
-        _ = try p.parseAndExpr(ctx);
+        _ = try p.parseAndExpr();
 
         index = try p.addNode(.init(.logical_or, {}));
         result_type = .number;
@@ -477,11 +479,11 @@ fn parseOrExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
 }
 
 /// AndExpr <- EqualityExpr ('and' EqualityExpr)*
-fn parseAndExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
-    var index, var result_type = try p.parseEqualityExpr(ctx);
+fn parseAndExpr(p: *Parser) !Intermediate {
+    var index, var result_type = try p.parseEqualityExpr();
 
     while (p.eatToken(.keyword_and)) |_| {
-        _ = try p.parseEqualityExpr(ctx);
+        _ = try p.parseEqualityExpr();
 
         index = try p.addNode(.init(.logical_and, {}));
         result_type = .number;
@@ -491,8 +493,8 @@ fn parseAndExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
 }
 
 /// EqualityExpr <- AddExpr (('==' / '!=' / '<' / '>') AddExpr)*
-fn parseEqualityExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
-    var index, var result_type = try p.parseAddExpr(ctx);
+fn parseEqualityExpr(p: *Parser) !Intermediate {
+    var index, var result_type = try p.parseAddExpr();
 
     while (true) switch (p.token_tags[p.tok_i]) {
         inline .double_equals,
@@ -503,7 +505,7 @@ fn parseEqualityExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
         .less_equals,
         => |tag| {
             p.tok_i += 1;
-            _ = try p.parseAddExpr(ctx);
+            _ = try p.parseAddExpr();
 
             const node_tag: Node.Tag = switch (tag) {
                 .double_equals => .equals,
@@ -525,13 +527,13 @@ fn parseEqualityExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
 }
 
 /// AddExpr <- MulExpr (('+' / '-' / '#') MulExpr)*
-fn parseAddExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
-    var index, var result_type = try p.parseMulExpr(ctx);
+fn parseAddExpr(p: *Parser) !Intermediate {
+    var index, var result_type = try p.parseMulExpr();
 
     while (true) switch (p.token_tags[p.tok_i]) {
         inline .plus, .minus, .hash => |tag| {
             p.tok_i += 1;
-            _ = try p.parseMulExpr(ctx);
+            _ = try p.parseMulExpr();
 
             const node_tag: Node.Tag = switch (tag) {
                 .plus => .add,
@@ -554,13 +556,13 @@ fn parseAddExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
 }
 
 /// MulExpr <- PowExpr (('*' / '/' / '%') PowExpr)*
-fn parseMulExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
-    var index, var result_type = try p.parsePowExpr(ctx);
+fn parseMulExpr(p: *Parser) !Intermediate {
+    var index, var result_type = try p.parsePowExpr();
 
     while (true) switch (p.token_tags[p.tok_i]) {
         inline .asterisk, .forward_slash, .percent => |tag| {
             p.tok_i += 1;
-            _ = try p.parsePowExpr(ctx);
+            _ = try p.parsePowExpr();
 
             index = try p.addNode(.init(switch (tag) {
                 .asterisk => .mul,
@@ -577,11 +579,11 @@ fn parseMulExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
 }
 
 /// PowExpr <- UnaryExpr ('^' UnaryExpr)*
-fn parsePowExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
-    var index, var result_type = try p.parseUnaryExpr(ctx);
+fn parsePowExpr(p: *Parser) !Intermediate {
+    var index, var result_type = try p.parseUnaryExpr();
 
     while (p.eatToken(.caret)) |_| {
-        _ = try p.parseUnaryExpr(ctx);
+        _ = try p.parseUnaryExpr();
         index = try p.addNode(.init(.pow, {}));
         result_type = .number;
     }
@@ -590,7 +592,7 @@ fn parsePowExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
 }
 
 /// UnaryExpr <- ('+' / '-' / '!')* RangeExpr
-fn parseUnaryExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
+fn parseUnaryExpr(p: *Parser) !Intermediate {
     return switch (p.token_tags[p.tok_i]) {
         inline .minus, .plus, .exclamation => |t| {
             const tag: Node.Tag = switch (t) {
@@ -600,20 +602,22 @@ fn parseUnaryExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
                 else => comptime unreachable,
             };
             p.tok_i += 1;
-            _ = try p.parseUnaryExpr(ctx);
+            _ = try p.parseUnaryExpr();
             const index = try p.addNode(.init(tag, {}));
             return .{ index, .number };
         },
-        else => try p.parseRangeExpr(ctx),
+        else => try p.parseRangeExpr(),
     };
 }
 
 /// RangeExpr <- ReferenceExpr (':' ReferenceExpr)?
-fn parseRangeExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
-    const lhs, const lhs_type = try p.parseReferenceExpr(ctx);
+fn parseRangeExpr(p: *Parser) !Intermediate {
+    const lhs, const lhs_type = try p.parseReferenceExpr();
 
     _ = p.eatToken(.colon) orelse return .{ lhs, lhs_type };
-    const rhs, _ = try p.parseReferenceExpr(ctx);
+    p.setReference(lhs);
+    const rhs, _ = try p.parseReferenceExpr();
+    p.setReference(rhs);
 
     var node: Node = .init(.range, {});
 
@@ -628,17 +632,19 @@ fn parseRangeExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
     return .{ index, .range };
 }
 
-fn parseReferenceExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
+fn parseReferenceExpr(p: *Parser) !Intermediate {
     return switch (p.token_tags[p.tok_i]) {
         .ampersand => {
             p.tok_i += 1;
-            _ = try p.parseCellName(.reference);
+            const operand, _ = try p.parseCellName();
+            p.setReference(operand);
             const index = try p.addNode(.init(.reference, {}));
             return .{ index, .cell };
         },
         .asterisk => {
             p.tok_i += 1;
-            const operand, _ = try p.parseReferenceExpr(ctx);
+            const operand, _ = try p.parseReferenceExpr();
+            p.setReference(operand);
 
             // Accessing the value of a cell dynamically requires volatile
             if (p.isDynamicReference(operand))
@@ -647,7 +653,7 @@ fn parseReferenceExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
             const index = try p.addNode(.init(.dereference, {}));
             return .{ index, .any };
         },
-        else => try p.parseSuffixExpr(ctx),
+        else => try p.parseSuffixExpr(),
     };
 }
 
@@ -681,18 +687,45 @@ fn volatileAccessSingle(p: *Parser, index: Index, result_type: Type) void {
         result_type.cell_ref and p.isDynamicReference(index);
 }
 
+/// If index is a cell literal, marks it as a value
+fn setValue(p: *Parser, index: Node.Index) void {
+    switch (p.ast.tagPtr(index).*) {
+        .abs_abs_reference => |*t| t.* = .abs_abs_value,
+        .rel_abs_reference => |*t| t.* = .rel_abs_value,
+        .rel_rel_reference => |*t| t.* = .rel_rel_value,
+        .abs_rel_reference => |*t| t.* = .abs_rel_value,
+        else => {},
+    }
+}
+
+/// If `index` is a cell literal, marks it as a reference
+fn setReference(p: *Parser, index: Node.Index) void {
+    switch (p.ast.tagPtr(index).*) {
+        .abs_abs_value => |*t| t.* = .abs_abs_reference,
+        .rel_abs_value => |*t| t.* = .rel_abs_reference,
+        .rel_rel_value => |*t| t.* = .rel_rel_reference,
+        .abs_rel_value => |*t| t.* = .abs_rel_reference,
+        else => {},
+    }
+}
+
 /// SuffixExpr <- PrimaryExpr '(' (FnCallArguments)? ')'
-fn parseSuffixExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
-    var index, var result_type = try p.parsePrimaryExpr(ctx);
+fn parseSuffixExpr(p: *Parser) !Intermediate {
+    var index, var result_type = try p.parsePrimaryExpr();
 
     while (true) {
         var arg_count: u8 = 0;
         _ = p.eatToken(.lparen) orelse return .{ index, result_type };
+        const is_builtin = p.ast.tag(index) == .builtin;
+
+        p.setValue(index);
         while (true) {
             if (p.eatToken(.rparen)) |_| break;
             // TODO: Volatility depends on the function, which is not known until evaluation time.
             //       Volatility would need to be checked later.
-            _ = try p.parseExpression(.reference);
+            const argument, _ = try p.parseExpression();
+            if (is_builtin)
+                p.setReference(argument);
             _ = p.eatToken(.comma);
             arg_count += 1;
         }
@@ -708,14 +741,14 @@ fn parseSuffixExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
     return .{ index, result_type };
 }
 
-/// PrimaryExpr <- Number / Range / StringLiteral / Identifier / Builtin / '(' Expression ')'
-fn parsePrimaryExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
+/// PrimaryExpr <- 'nil' / Number / Range / StringLiteral / Identifier / Builtin / Tuple / '(' Expression ')'
+fn parsePrimaryExpr(p: *Parser) !Intermediate {
     return switch (p.token_tags[p.tok_i]) {
         .number => try p.parseNumber(),
-        .rel_rel, .rel_abs, .abs_rel, .abs_abs => try p.parseCellName(ctx),
+        .rel_rel, .rel_abs, .abs_rel, .abs_abs => try p.parseCellName(),
         .lparen => {
-            try p.expectToken(.lparen);
-            const ret = try p.parseExpression(ctx);
+            p.expectToken(.lparen) catch unreachable;
+            const ret = try p.parseExpression();
             try p.expectToken(.rparen);
             return ret;
         },
@@ -726,8 +759,32 @@ fn parsePrimaryExpr(p: *Parser, ctx: ExpressionContext) !Intermediate {
         => |tag| try p.parseStringLiteral(tag),
         .pipe => try p.parseFunctionDefinition(),
         .identifier => try p.parseVariable(),
+        .keyword_nil => {
+            p.expectToken(.keyword_nil) catch unreachable;
+            const index = try p.addNode(.init(.nil, {}));
+            return .{ index, .any };
+        },
+        .lbracket => try p.parseTuple(),
         else => p.setError(error.UnexpectedToken, .{ .expected_string = "expression" }),
     };
+}
+
+fn parseTuple(p: *Parser) !Intermediate {
+    _ = p.eatToken(.lbracket) orelse unreachable;
+    var arg_count: u8 = 0;
+    const start = p.ast.nodes.len();
+    while (true) {
+        if (p.eatToken(.rbracket)) |_| break;
+        _ = try p.parseExpression();
+        _ = p.eatToken(.comma);
+        arg_count += 1;
+    }
+    const len = p.ast.nodes.len() - start;
+    const index = try p.addNode(.init(.tuple, .{
+        .arg_count = arg_count,
+        .length = @intCast(len),
+    }));
+    return .{ index, .any };
 }
 
 fn parseVariable(p: *Parser) !Intermediate {
@@ -799,13 +856,13 @@ fn parseBuiltin(p: *Parser) !Intermediate {
 }
 
 /// ArgList <- Expression (',' Expression)*
-fn parseVarArgsAccess(p: *Parser, ctx: ExpressionContext) !struct { Index, u32 } {
+fn parseVarArgsAccess(p: *Parser) !struct { Index, u32 } {
     var count: u32 = 1;
-    const start, var result_type = try p.parseExpression(ctx);
+    const start, var result_type = try p.parseExpression();
     p.volatileAccess(start, result_type);
 
     while (p.eatToken(.comma)) |_| : (count += 1) {
-        const index, result_type = try p.parseExpression(ctx);
+        const index, result_type = try p.parseExpression();
         p.volatileAccess(index, result_type);
     }
 
@@ -813,13 +870,13 @@ fn parseVarArgsAccess(p: *Parser, ctx: ExpressionContext) !struct { Index, u32 }
 }
 
 /// Parses an argument list with exactly `n` arguments.
-fn parseArgsAccess(p: *Parser, n: usize, ctx: ExpressionContext) !Index {
-    const start, var result_type = try p.parseExpression(ctx);
+fn parseArgsAccess(p: *Parser, n: usize) !Index {
+    const start, var result_type = try p.parseExpression();
     p.volatileAccess(start, result_type);
 
     for (0..n - 1) |_| {
         try p.expectToken(.comma);
-        const index, result_type = try p.parseExpression(ctx);
+        const index, result_type = try p.parseExpression();
         p.volatileAccess(index, result_type);
     }
 
@@ -870,9 +927,8 @@ fn parseStringLiteral(p: *Parser, comptime expected_tag: Token.Tag) ParseError!I
     return .{ index, .string };
 }
 
-// TODO: Inidicate from caller if we're in a reference or value context and adjust result type
 /// CellReference <- ('a'-'z' / 'A'-'Z')+ ('0'-'9')+
-fn parseCellName(p: *Parser, ctx: ExpressionContext) !Intermediate {
+fn parseCellName(p: *Parser) !Intermediate {
     switch (p.token_tags[p.tok_i]) {
         .rel_rel, .rel_abs, .abs_rel, .abs_abs => {},
         else => return p.setError(
@@ -893,18 +949,14 @@ fn parseCellName(p: *Parser, ctx: ExpressionContext) !Intermediate {
     switch (res.tag) {
         inline else => |t| {
             const tag: Node.Tag = switch (t) {
-                .abs_abs => .abs_abs,
-                .abs_rel => .abs_rel,
-                .rel_abs => .rel_abs,
-                .rel_rel => .rel_rel,
+                .abs_abs => .abs_abs_value,
+                .abs_rel => .abs_rel_value,
+                .rel_abs => .rel_abs_value,
+                .rel_rel => .rel_rel_value,
             };
 
             const index = try p.addNode(.init(tag, res.pos));
-            const result_type: Type = switch (ctx) {
-                .value => .any,
-                .reference => .cell,
-            };
-            return .{ index, result_type };
+            return .{ index, .any };
         },
     }
 }
@@ -1127,6 +1179,16 @@ test "Node contents" {
         },
     );
     try testNodes(
+        "let a0 = a1 + a2",
+        &.{
+            .init(.rel_rel_value, .fromValidAddress("a1")),
+            .init(.rel_rel_value, .fromValidAddress("a2")),
+            .init(.add, {}),
+            .init(.assignment, .fromValidAddress("a0")),
+            .init(.end, .{ .length = 4 }),
+        },
+    );
+    try testNodes(
         "let crxp65535 = 'this is epic' # 'nice'",
         &.{
             .init(.string_literal, .{
@@ -1157,10 +1219,10 @@ test "Node contents" {
     try testNodes(
         "**a0:b0",
         &.{
-            .init(.rel_rel, .fromValidAddress("a0")),
+            .init(.rel_rel_reference, .fromValidAddress("a0")),
             .init(.dereference, {}),
             .init(.dereference, {}),
-            .init(.rel_rel, .fromValidAddress("b0")),
+            .init(.rel_rel_reference, .fromValidAddress("b0")),
             .init(.dynamic_range, {}),
             .init(.end, .{ .length = 5 }),
         },
@@ -1252,9 +1314,9 @@ test "Node contents" {
     try testNodes(
         "5 |> a0()",
         &.{
-            .init(.rel_rel, .fromValidAddress("a0")),
+            .init(.rel_rel_value, .fromValidAddress("a0")),
             .init(.number, 5),
-            .init(.function_call, .{ .is_pipe = true, .arg_count = 1, .function_index = 2 }),
+            .init(.pipe_call, .{ .is_pipe = true, .arg_count = 1, .function_index = 2 }),
             .init(.end, .{ .length = 3 }),
         },
     );
@@ -1262,11 +1324,11 @@ test "Node contents" {
     try testNodes(
         "3 |> a0(5, 10)",
         &.{
-            .init(.rel_rel, .fromValidAddress("a0")),
+            .init(.rel_rel_value, .fromValidAddress("a0")),
             .init(.number, 3),
             .init(.number, 5),
             .init(.number, 10),
-            .init(.function_call, .{ .is_pipe = true, .arg_count = 3, .function_index = 4 }),
+            .init(.pipe_call, .{ .is_pipe = true, .arg_count = 3, .function_index = 4 }),
             .init(.end, .{ .length = 5 }),
         },
     );
@@ -1275,10 +1337,10 @@ test "Node contents" {
         "@upper(A0) # @lower(B0)",
         &.{
             .init(.builtin, .{ .tag = .upper }),
-            .init(.rel_rel, .fromValidAddress("A0")),
+            .init(.rel_rel_reference, .fromValidAddress("A0")),
             .init(.function_call, .{ .is_pipe = false, .arg_count = 1, .function_index = 2 }),
             .init(.builtin, .{ .tag = .lower }),
-            .init(.rel_rel, .fromValidAddress("B0")),
+            .init(.rel_rel_reference, .fromValidAddress("B0")),
             .init(.function_call, .{ .is_pipe = false, .arg_count = 1, .function_index = 2 }),
             .init(.concat, {}),
             .init(.end, .{ .length = 7 }),

@@ -752,7 +752,7 @@ fn renderStatus(tui: *Tui, wr: *Screen.Writer) !void {
         const buf = try arena.alloc(u8, 4096);
         var br: std.Io.Writer = .fixed(buf);
         if (cell.root().unwrap()) |unwrapped|
-            sheet.ast.print(unwrapped, &br) catch {};
+            sheet.ast.print(tui.arena.allocator(), sheet.ast.leftMostChild(unwrapped.addi(1)), &br) catch {};
 
         const bytes = br.buffered();
         var reader: std.Io.Reader = .fixed(bytes);
@@ -1135,7 +1135,10 @@ fn renderCursor(tui: *Tui, wr: *Screen.Writer) !void {
 
         const cell = zc.currentSheet().getCellPtr(range.tl) orelse break :blk .cell_blank_selected;
         break :blk switch (cell.expr.value_tag) {
+            .nil => .cell_error_selected,
             .number => .cell_number_selected,
+            .tuple => .cell_number_selected,
+            .pipeline => .cell_number_selected,
             .string => .cell_text_selected,
             .err => .cell_error_selected,
             .ref_cell => .cell_ref_selected,
@@ -1231,6 +1234,7 @@ const ScreenData = struct {
 
     const Tag = enum(u4) {
         blank,
+        nil,
         number,
         string,
         err,
@@ -1239,6 +1243,8 @@ const ScreenData = struct {
         simple_function,
         builtin_function,
         closure,
+        tuple,
+        pipeline,
     };
 
     const Extra = packed struct {
@@ -1283,6 +1289,7 @@ fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !ScreenData {
             const cell = ctx.sheet.cell_tree.getValue(h).*;
             ctx.extra[y * ctx.col_count + x] = .{
                 .tag = switch (cell.expr.value_tag) {
+                    .nil => .nil,
                     .number => .number,
                     .string => .string,
                     .err => .err,
@@ -1291,6 +1298,8 @@ fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !ScreenData {
                     .simple_function => .simple_function,
                     .builtin_function => .builtin_function,
                     .closure => .closure,
+                    .tuple => .tuple,
+                    .pipeline => .pipeline,
                 },
                 .is_volatile = cell.expr.is_volatile,
             };
@@ -1395,11 +1404,45 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
             const width = @min(data.widths[x], wr.rect.width -| w);
             if (width == 0) continue;
 
+            // TODO: This whole thing sucks
             var buf: [512]u8 = undefined;
             switch (data.extra[i].tag) {
+                // NOTE: `ZC.widthNeededForCell` needs to be updated if these change
                 .blank => {
                     try tui.setStyle(.cell_blank_unselected, wr);
                     try wr.interface.splatByteAll(' ', width);
+                },
+                .nil => {
+                    try tui.setStyle(.cell_error_unselected, wr);
+                    try wr.interface.print("{s: >[1]}", .{ "nil", width });
+                },
+                .tuple => {
+                    try tui.setStyle(.cell_number_unselected, wr);
+                    var bw: std.Io.Writer = .fixed(&buf);
+                    sheet.formatCellValue(.tuple, data.values[i], &bw) catch {};
+
+                    const str = bw.buffered();
+                    try shovel.writeTruncating(
+                        str,
+                        width,
+                        .left,
+                        tui.term.grapheme_clustering_mode,
+                        &wr.interface,
+                    );
+                },
+                .pipeline => {
+                    try tui.setStyle(.cell_text_unselected, wr);
+                    const str = std.fmt.bufPrint(&buf, "<{d}>", .{
+                        data.values[i].pipeline.pipeline.stages.items.len,
+                    }) catch unreachable;
+
+                    try shovel.writeTruncating(
+                        str,
+                        width,
+                        .center,
+                        tui.term.grapheme_clustering_mode,
+                        &wr.interface,
+                    );
                 },
                 .number => {
                     try tui.setStyle(.cell_number_unselected, wr);
@@ -1467,7 +1510,7 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                     const slice = try std.fmt.allocPrint(
                         tui.arena.allocator(),
                         "{f}",
-                        .{sheet.ast.fmtExpression(root)},
+                        .{sheet.ast.fmtExpression(tui.arena.allocator(), root)},
                     );
                     try shovel.writeTruncating(
                         slice,
@@ -1498,7 +1541,7 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                     const slice = try std.fmt.allocPrint(
                         tui.arena.allocator(),
                         "{f}",
-                        .{sheet.ast.fmtExpression(root)},
+                        .{sheet.ast.fmtExpression(tui.arena.allocator(), root)},
                     );
                     try shovel.writeTruncating(
                         slice,

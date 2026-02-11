@@ -33,11 +33,11 @@ pub fn List(T: type, I: type) type {
             self.list.items[self.resolve(i)] = value;
         }
 
-        pub fn ensureUnusedCapacity(self: *Self, gpa: Allocator, n: usize) !void {
+        pub fn ensureUnusedCapacity(self: *Self, gpa: Allocator, n: usize) Allocator.Error!void {
             try self.list.ensureUnusedCapacity(gpa, n);
         }
 
-        pub fn ensureTotalCapacity(self: *Self, gpa: Allocator, n: usize) !void {
+        pub fn ensureTotalCapacity(self: *Self, gpa: Allocator, n: usize) Allocator.Error!void {
             try self.list.ensureTotalCapacity(gpa, n);
         }
 
@@ -45,11 +45,11 @@ pub fn List(T: type, I: type) type {
             self.list.clearRetainingCapacity();
         }
 
-        pub fn append(self: *Self, gpa: Allocator, value: T) !void {
+        pub fn append(self: *Self, gpa: Allocator, value: T) Allocator.Error!void {
             try self.list.append(gpa, value);
         }
 
-        pub fn appendSlice(self: *Self, gpa: Allocator, values: []const T) !void {
+        pub fn appendSlice(self: *Self, gpa: Allocator, values: []const T) Allocator.Error!void {
             try self.list.appendSlice(gpa, values);
         }
 
@@ -97,7 +97,7 @@ pub fn List(T: type, I: type) type {
             return self.list.pop();
         }
 
-        pub fn insert(self: *Self, gpa: Allocator, i: Index, value: T) !void {
+        pub fn insert(self: *Self, gpa: Allocator, i: Index, value: T) Allocator.Error!void {
             try self.list.insert(gpa, self.resolve(i), value);
         }
 
@@ -105,7 +105,7 @@ pub fn List(T: type, I: type) type {
             self.list.insertAssumeCapacity(self.resolve(i), value);
         }
 
-        pub fn inserti(self: *Self, gpa: Allocator, i: usize, value: T) !void {
+        pub fn inserti(self: *Self, gpa: Allocator, i: usize, value: T) Allocator.Error!void {
             try self.list.insert(gpa, i, value);
         }
 

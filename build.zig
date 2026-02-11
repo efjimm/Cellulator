@@ -146,6 +146,8 @@ fn configureTests(
         "test/references.zc",
         "test/volatile.zc",
         "test/functions.zc",
+        "test/count.zc",
+        "test/streams.zc",
     });
 
     // Create cache directory for temporarily storing files created by serialization tests

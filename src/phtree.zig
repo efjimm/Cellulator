@@ -844,6 +844,7 @@ pub fn PhTree(
             return .{ .none, parent };
         }
 
+        // TODO: Rewrite
         pub const Iterator = struct {
             tree: *const PhTree(V, dims, HandleInt),
             current: NodeOrEntry,
@@ -992,25 +993,6 @@ pub fn PhTree(
             if (handle == .none) return null;
             tree.removeHandle(handle);
             return handle;
-        }
-
-        pub fn traverse(
-            tree: *const @This(),
-            min: *const Point,
-            max: *const Point,
-            ctx: anytype,
-        ) !void {
-            switch (tree.root) {
-                .none => {},
-                .entry => |root| {
-                    const p = tree.entryItem(root, .point);
-                    if (entryInWindow(p, min, max))
-                        try ctx.func(root);
-                },
-                .node => |root| {
-                    try tree.traverseNodeWindow(root, min, max, ctx);
-                },
-            }
         }
 
         /// Appends all key/value pairs whose key falls between `min` and `max`.
@@ -1209,6 +1191,165 @@ pub fn PhTree(
             }
         }
 
+        pub fn traverse(
+            tree: *const @This(),
+            min: *const Point,
+            max: *const Point,
+            ctx: anytype,
+        ) !void {
+            switch (tree.root) {
+                .none => return,
+                .entry => |root| {
+                    const p = tree.entryItem(root, .point);
+                    if (entryInWindow(p, min, max))
+                        try ctx.func(root);
+                    return;
+                },
+                .node => {},
+            }
+
+            var handle = tree.root.node;
+            var depths: [32]u5 = @splat(0);
+            var depth: u5 = 0;
+            outer: while (handle != .none) {
+                const p = tree.branchItem(handle, .point);
+                if (!nodeInWindow(p, tree.branchItem(handle, .postfix_length).*, min, max)) {
+                    handle = tree.branchItem(handle, .parent).*;
+                    depth -%= 1;
+                    continue;
+                }
+
+                var mask_lower: u32 = 0;
+                var mask_upper: u32 = 0;
+
+                for (p, min, max) |v, minv, maxv| {
+                    assert(minv <= maxv);
+                    mask_lower = (mask_lower << 1) | @intFromBool(minv >= v);
+                    mask_upper = (mask_upper << 1) | @intFromBool(maxv >= v);
+                }
+
+                for (tree.branchItem(handle, .children)[depths[depth]..]) |child_handle| {
+                    const i = depths[depth];
+                    depths[depth] += 1;
+                    if ((i | mask_lower) & mask_upper != i) {
+                        continue;
+                    }
+
+                    switch (tree.getChild(handle, i)) {
+                        .none => {},
+                        .entry => |leaf| {
+                            const child_point = tree.entryItem(leaf, .point);
+                            if (entryInWindow(child_point, min, max)) {
+                                const h: Entry.Handle = .from(child_handle.int());
+                                try ctx.func(h);
+                            }
+                        },
+                        .node => |branch| {
+                            handle = branch;
+                            depth += 1;
+                            depths[depth] = 0;
+                            continue :outer;
+                        },
+                    }
+                }
+
+                handle = tree.branchItem(handle, .parent).*;
+                depth -%= 1;
+            }
+        }
+
+        // TODO: Pass min/max by value
+        pub fn iterator2(tree: *const @This(), min: *const Point, max: *const Point) QueryIterator {
+            return .{
+                .tree = tree,
+                .handle = switch (tree.root) {
+                    .entry => .none,
+                    .node => |h| h,
+                    .none => .none,
+                },
+                .depths = @splat(0),
+                .depth = 0,
+                .consumed = false,
+                .min = min.*,
+                .max = max.*,
+            };
+        }
+
+        pub const QueryIterator = struct {
+            tree: *const PhTree(V, dims, HandleInt),
+            handle: Node.Handle,
+            depths: [32]u5,
+            depth: u5,
+            consumed: bool,
+            min: Point,
+            max: Point,
+
+            pub fn next(
+                iter: *QueryIterator,
+            ) !?Entry.Handle {
+                if (iter.tree.root == .entry and !iter.consumed) {
+                    @branchHint(.unlikely);
+                    iter.consumed = true;
+                    const leaf = iter.tree.root.entry;
+                    const child_point = iter.tree.entryItem(leaf, .point);
+                    if (entryInWindow(child_point, &iter.min, &iter.max)) {
+                        return .from(leaf.int());
+                    }
+                }
+
+                const tree = iter.tree;
+                const depths = &iter.depths;
+                outer: while (iter.handle != .none) {
+                    // TODO: This work only needs to be done once per branch node
+                    const p = iter.tree.branchItem(iter.handle, .point);
+                    const pl = tree.branchItem(iter.handle, .postfix_length).*;
+                    if (!nodeInWindow(p, pl, &iter.min, &iter.max)) {
+                        iter.handle = tree.branchItem(iter.handle, .parent).*;
+                        iter.depth -%= 1;
+                        continue;
+                    }
+
+                    var mask_lower: u32 = 0;
+                    var mask_upper: u32 = 0;
+
+                    for (p, &iter.min, &iter.max) |v, minv, maxv| {
+                        assert(minv <= maxv);
+                        mask_lower = (mask_lower << 1) | @intFromBool(minv >= v);
+                        mask_upper = (mask_upper << 1) | @intFromBool(maxv >= v);
+                    }
+
+                    for (tree.branchItem(iter.handle, .children)[depths[iter.depth]..]) |child_handle| {
+                        const i = depths[iter.depth];
+                        depths[iter.depth] += 1;
+                        if ((i | mask_lower) & mask_upper != i) {
+                            continue;
+                        }
+
+                        switch (tree.getChild(iter.handle, i)) {
+                            .none => {},
+                            .entry => |leaf| {
+                                const child_point = tree.entryItem(leaf, .point);
+                                if (entryInWindow(child_point, &iter.min, &iter.max)) {
+                                    return .from(child_handle.int());
+                                }
+                            },
+                            .node => |branch| {
+                                iter.handle = branch;
+                                iter.depth += 1;
+                                depths[iter.depth] = 0;
+                                continue :outer;
+                            },
+                        }
+                    }
+
+                    iter.handle = tree.branchItem(iter.handle, .parent).*;
+                    iter.depth -%= 1;
+                }
+
+                return null;
+            }
+        };
+
         pub fn validate(tree: *const @This()) bool {
             if (tree.requested_nodes_alloc < tree.nodes.len) return false;
             if (tree.requested_entries_alloc < tree.entries.len) return false;
@@ -1362,6 +1503,51 @@ test "phtree query" {
     }
 
     try std.testing.expect(tree.validate());
+}
+
+test "query iterator" {
+    const gpa = std.testing.allocator;
+    const Tree = PhTree(void, 2, u32);
+    var tree: Tree = .empty;
+    defer tree.deinit(gpa);
+
+    // Empty tree
+    var iter = tree.iterator2(&.{ 0, 0 }, &.{ std.math.maxInt(u32), std.math.maxInt(u32) });
+    try std.testing.expectEqual(null, try iter.next());
+
+    _ = try tree.getOrPut(gpa, &.{ 0, 0 });
+    _ = try tree.getOrPut(gpa, &.{ 1, 10 });
+    _ = try tree.getOrPut(gpa, &.{ 1, 5 });
+    _ = try tree.getOrPut(gpa, &.{ 1, 6 });
+    _ = try tree.getOrPut(gpa, &.{ 2, 1 });
+    _ = try tree.getOrPut(gpa, &.{ 5, 1 });
+    _ = try tree.getOrPut(gpa, &.{ 6, 1 });
+    _ = try tree.getOrPut(gpa, &.{ 10, 1 });
+    _ = try tree.getOrPut(gpa, &.{ 5, 5 });
+    _ = try tree.getOrPut(gpa, &.{ 3, 3 });
+
+    iter = tree.iterator2(&.{ 1, 1 }, &.{ 5, 5 });
+    // Morton order
+    try std.testing.expectEqual(.{ 2, 1 }, tree.entryItem((try iter.next()).?, .point).*);
+    try std.testing.expectEqual(.{ 3, 3 }, tree.entryItem((try iter.next()).?, .point).*);
+    try std.testing.expectEqual(.{ 1, 5 }, tree.entryItem((try iter.next()).?, .point).*);
+    try std.testing.expectEqual(.{ 5, 1 }, tree.entryItem((try iter.next()).?, .point).*);
+    try std.testing.expectEqual(.{ 5, 5 }, tree.entryItem((try iter.next()).?, .point).*);
+    try std.testing.expectEqual(null, try iter.next());
+
+    iter = tree.iterator2(&.{ 10, 10 }, &.{ 50, 50 });
+    try std.testing.expectEqual(null, try iter.next());
+
+    tree.clearRetainingCapacity();
+
+    // Single item tree
+    _ = try tree.getOrPut(gpa, &.{ 2, 2 });
+    iter = tree.iterator2(&.{ 1, 1 }, &.{ 5, 5 });
+    try std.testing.expectEqual(.{ 2, 2 }, tree.entryItem((try iter.next()).?, .point).*);
+    try std.testing.expectEqual(null, try iter.next());
+
+    iter = tree.iterator2(&.{ 10, 10 }, &.{ 50, 50 });
+    try std.testing.expectEqual(null, try iter.next());
 }
 
 export fn zig_fuzz_init() void {}

@@ -164,6 +164,9 @@ pub const Node = extern struct {
             e,
             width,
             height,
+            range,
+            filter,
+            map,
 
             pub fn format(t: Builtin.Tag, w: *std.Io.Writer) !void {
                 switch (t) {
@@ -267,13 +270,24 @@ pub const Node = extern struct {
         length: u48,
     };
 
+    pub const Tuple = packed struct(u64) {
+        unused: u8 = 0,
+        arg_count: u8,
+        length: u48,
+    };
+
     pub const Payload = extern union {
         end: End,
+        nil: void,
         number: f64,
-        abs_abs: Position,
-        abs_rel: Position,
-        rel_abs: Position,
-        rel_rel: Position,
+        abs_abs_value: Position,
+        abs_rel_value: Position,
+        rel_abs_value: Position,
+        rel_rel_value: Position,
+        abs_abs_reference: Position,
+        abs_rel_reference: Position,
+        rel_abs_reference: Position,
+        rel_rel_reference: Position,
         string_literal: String,
         invalidated_pos: Position,
         invalidated_range: void,
@@ -283,6 +297,7 @@ pub const Node = extern struct {
         function_parameter: String,
         function_capture: CaptureDeclaration,
         function_call: FunctionCall,
+        pipe_call: FunctionCall,
         local_variable: LocalVariable,
         captured_variable: CapturedVariable,
 
@@ -316,15 +331,21 @@ pub const Node = extern struct {
 
         reference: void,
         dereference: void,
+        tuple: Tuple,
     };
 
     pub const Tagged = union(Tag) {
         end: End,
+        nil,
         number: f64,
-        abs_abs: Position,
-        abs_rel: Position,
-        rel_abs: Position,
-        rel_rel: Position,
+        abs_abs_value: Position,
+        abs_rel_value: Position,
+        rel_abs_value: Position,
+        rel_rel_value: Position,
+        abs_abs_reference: Position,
+        abs_rel_reference: Position,
+        rel_abs_reference: Position,
+        rel_rel_reference: Position,
         string_literal: String,
         invalidated_pos: Position,
         invalidated_range,
@@ -334,6 +355,7 @@ pub const Node = extern struct {
         function_parameter: String,
         function_capture: CaptureDeclaration,
         function_call: FunctionCall,
+        pipe_call: FunctionCall,
         local_variable: LocalVariable,
         captured_variable: CapturedVariable,
 
@@ -367,15 +389,21 @@ pub const Node = extern struct {
 
         reference,
         dereference,
+        tuple: Tuple,
     };
 
     pub const Tag = enum(u8) {
         end,
+        nil,
         number,
-        abs_abs,
-        abs_rel,
-        rel_abs,
-        rel_rel,
+        abs_abs_value,
+        abs_rel_value,
+        rel_abs_value,
+        rel_rel_value,
+        abs_abs_reference,
+        abs_rel_reference,
+        rel_abs_reference,
+        rel_rel_reference,
         string_literal,
         invalidated_pos,
         invalidated_range,
@@ -385,6 +413,7 @@ pub const Node = extern struct {
         function_parameter,
         function_capture,
         function_call,
+        pipe_call,
         local_variable,
         captured_variable,
 
@@ -412,6 +441,7 @@ pub const Node = extern struct {
         dynamic_range,
         reference,
         dereference,
+        tuple,
 
         pub fn isCommutative(t: Tag) bool {
             return switch (t) {
@@ -424,11 +454,16 @@ pub const Node = extern struct {
             return switch (t) {
                 // These aren't operators
                 .end,
+                .nil,
                 .number,
-                .abs_abs,
-                .abs_rel,
-                .rel_abs,
-                .rel_rel,
+                .abs_abs_value,
+                .abs_rel_value,
+                .rel_abs_value,
+                .rel_rel_value,
+                .abs_abs_reference,
+                .abs_rel_reference,
+                .rel_abs_reference,
+                .rel_rel_reference,
                 .builtin,
                 .invalidated_pos,
                 .string_literal,
@@ -439,6 +474,7 @@ pub const Node = extern struct {
                 .function_capture,
                 .local_variable,
                 .captured_variable,
+                .tuple,
                 => 127,
 
                 // Actual operators
@@ -464,6 +500,7 @@ pub const Node = extern struct {
                 .not_equals => -1,
                 .logical_and => -2,
                 .logical_or => -3,
+                .pipe_call => -4,
             };
         }
     };
@@ -482,284 +519,316 @@ pub fn string(ast: *const Ast, str: String) []u8 {
     return ast.strings.items[str.start..str.end];
 }
 
-pub fn printFromIndex(
+/// Prints an AST as an expression.
+///
+/// This function is non-recursive and does many small allocations. The arena is first pre-heated
+/// by allocating and immediately freeing 1024 bytes. If this allocation fails the function continues
+/// as normal and returns any other allocation errors as usual.
+pub fn print(
     ast: *const Ast,
-    index: Node.Index,
-    writer: *std.Io.Writer,
-    current_function: Node.OptionalIndex,
-) std.Io.Writer.Error!void {
-    const n = ast.nodes.get(index);
-    return ast.printFromNode(index, n, writer, current_function);
-}
-
-pub fn printFromNode(
-    ast: *const Ast,
-    index: Node.Index,
-    data: Node,
+    arena: Allocator,
+    first_node: Node.Index,
     w: *std.Io.Writer,
-    /// Index of the `function_body_start` node of the current function's defintion.
-    current_function: Node.OptionalIndex,
-) std.Io.Writer.Error!void {
-    // On the left-hand side, expressions involving operators with lower precedence need
-    // parentheses.
+) (Allocator.Error || std.Io.Writer.Error)!void {
+    if (arena.alloc(u8, 1024)) |bytes| {
+        arena.free(bytes);
+    } else |_| {}
 
-    // On the right-hand side, expressions involving operators with lower precedence, or
-    // non-commutative operators with the same precedence need to be surrounded by parentheses.
-    switch (data.get()) {
-        .function_capture => {
-            try ast.printFromIndex(index.subi(1), w, current_function);
-        },
-        .function_call => |call| {
-            const func = index.subi(call.function_index);
-            if (call.is_pipe) {
-                var iter = ast.argIteratorForwards(index.subi(call.function_index), index);
-                // Skip function
-                _ = iter.next().?;
-                // Print first argument
-                try ast.printFromIndex(iter.next().?, w, current_function);
-                try w.writeAll(" |> ");
-                iter = ast.argIteratorForwards(index.subi(call.function_index), index);
+    const Item = struct { str: []const u8, tag: Node.Tag };
+    var function_stack_allocator = std.heap.stackFallback(512, arena);
+    const fsa = function_stack_allocator.get();
+    var function_stack: std.ArrayList(Node.Index) = .empty;
+    var stack: std.ArrayList(Item) = .empty;
+    try stack.ensureTotalCapacity(arena, 128);
 
-                const needs_parentheses = ast.tag(func) != .function_call and
-                    func != ast.leftMostChild(func);
-                if (needs_parentheses) try w.writeByte('(');
-                try ast.printFromIndex(iter.next().?, w, current_function);
-                if (needs_parentheses) try w.writeByte(')');
-                // Skip first argument
-                _ = iter.next().?;
+    var i = first_node;
+    while (true) : (i = i.addi(1)) {
+        var str: std.ArrayList(u8) = .empty;
+        try str.ensureTotalCapacity(arena, 32);
+        sw: switch (ast.node(i)) {
+            .function_body_start => |f| {
+                try function_stack.ensureUnusedCapacity(fsa, 1);
+                try str.ensureTotalCapacity(arena, 2 + f.arg_count * 5);
+                str.appendAssumeCapacity('|');
+                const parameters = ast.payloads()[@intFromEnum(i.addi(1))..][0..f.arg_count];
+                if (parameters.len > 0) {
+                    for (parameters[0 .. parameters.len - 1]) |arg| {
+                        const parameter_name = ast.string(arg.function_parameter);
+                        try str.print(arena, "{s}, ", .{parameter_name});
+                    }
+                    const last_parameter = parameters[parameters.len - 1].function_parameter;
+                    try str.appendSlice(arena, ast.string(last_parameter));
+                }
+                try str.append(arena, '|');
+                function_stack.appendAssumeCapacity(i);
+            },
+            .function_parameter => continue,
+            .function_capture => continue,
+            .function_body_end => {
+                // Combine function body and function parameter list
+                const body = stack.pop().?;
+                const parameter_list = stack.pop().?;
+                try str.ensureUnusedCapacity(arena, body.str.len + 1 + parameter_list.str.len);
+                str.appendSliceAssumeCapacity(parameter_list.str);
+                str.appendAssumeCapacity(' ');
+                str.appendSliceAssumeCapacity(body.str);
+            },
+            .local_variable => |v| {
+                const current_function = function_stack.items[function_stack.items.len - 1];
+                const identifier = current_function.addi(1 + v.offset);
+                assert(ast.tag(identifier) == .function_parameter);
+                const name = ast.payload(identifier).function_parameter;
+                const bytes = ast.string(name);
+                try str.appendSlice(arena, bytes);
+            },
+            .captured_variable => |v| {
+                const parameter_index = v.scope.addi(1 + v.slot);
+                assert(ast.tag(parameter_index) == .function_parameter);
+                const name = ast.payload(parameter_index).function_parameter;
+                try str.appendSlice(arena, ast.string(name));
+            },
+            .function_call, .pipe_call => |call| {
+                const function_string = stack.items[stack.items.len - call.arg_count - 1];
+                const func = i.subi(call.function_index);
+                const needs_parentheses = switch (ast.tag(func)) {
+                    // leaf nodes
+                    .nil,
+                    .string_literal,
+                    .number,
+                    .invalidated_pos,
+                    .rel_rel_value,
+                    .rel_abs_value,
+                    .abs_rel_value,
+                    .abs_abs_value,
+                    .rel_rel_reference,
+                    .rel_abs_reference,
+                    .abs_rel_reference,
+                    .abs_abs_reference,
+                    .function_body_start,
+                    .local_variable,
+                    .captured_variable,
+                    .builtin,
+                    => false,
+                    // branch nodes
+                    .concat,
+                    .add,
+                    .sub,
+                    .mul,
+                    .div,
+                    .mod,
+                    .range,
+                    .dynamic_range,
+                    .invalidated_range,
+                    .pow,
+                    .logical_and,
+                    .logical_or,
+                    .greater_than,
+                    .less_than,
+                    .greater_equals,
+                    .less_equals,
+                    .equals,
+                    .not_equals,
+                    .minus,
+                    .plus,
+                    .not,
+                    .reference,
+                    .dereference,
+                    .assignment,
+                    .end,
+                    .function_parameter,
+                    .function_capture,
+                    .function_body_end,
+                    .function_call,
+                    .pipe_call,
+                    .tuple,
+                    => true,
+                };
 
-                try w.writeByte('(');
-                if (iter.next()) |arg_index| {
-                    try ast.printFromIndex(arg_index, w, current_function);
+                if (call.is_pipe) {
+                    const args = stack.items[stack.items.len - call.arg_count ..];
+                    try str.print(arena, "{s} |> {s}(", .{ args[0].str, function_string.str });
+                    if (args.len > 1) {
+                        for (args[1 .. args.len - 1]) |arg| {
+                            try str.print(arena, "{s}, ", .{arg.str});
+                        }
+                        try str.appendSlice(arena, stack.items[stack.items.len - 1].str);
+                    }
+                    try str.appendSlice(arena, ")");
+                } else {
+                    if (needs_parentheses) {
+                        try str.print(arena, "({s})", .{function_string.str});
+                    } else {
+                        try str.appendSlice(arena, function_string.str);
+                    }
+                    try str.append(arena, '(');
+                    if (call.arg_count > 0) {
+                        for (stack.items[stack.items.len - call.arg_count .. stack.items.len - 1]) |arg| {
+                            try str.print(arena, "{s}, ", .{arg.str});
+                        }
+                        try str.appendSlice(arena, stack.items[stack.items.len - 1].str);
+                    }
+                    try str.append(arena, ')');
+                }
+                stack.items.len = stack.items.len - call.arg_count - 1;
+            },
+            .end => break,
+            .nil => try str.appendSlice(arena, "nil"),
+            .number => |n| try str.print(arena, "{d}", .{n}),
+            .invalidated_pos,
+            .rel_rel_value,
+            .rel_rel_reference,
+            => |pos| try str.print(arena, "{f}", .{pos}),
+            .rel_abs_value,
+            .rel_abs_reference,
+            => |pos| try str.print(arena, "{f}${d}", .{
+                Position.fmtColumnAddress(pos.x),
+                pos.y,
+            }),
+            .abs_rel_value,
+            .abs_rel_reference,
+            => |pos| try str.print(arena, "${f}{d}", .{
+                Position.fmtColumnAddress(pos.x),
+                pos.y,
+            }),
+            .abs_abs_value,
+            .abs_abs_reference,
+            => |pos| try str.print(arena, "${f}${d}", .{
+                Position.fmtColumnAddress(pos.x),
+                pos.y,
+            }),
+            .string_literal => |s| try str.print(arena, "'{s}'", .{ast.string(s)}),
+            .tuple => |tuple| {
+                if (tuple.arg_count == 0) {
+                    try str.appendSlice(arena, "[]");
+                    break :sw;
                 }
 
-                while (iter.next()) |arg_index| {
-                    try w.writeAll(", ");
-                    try ast.printFromIndex(arg_index, w, current_function);
+                try str.ensureUnusedCapacity(arena, 2 + tuple.arg_count * 4);
+                str.appendAssumeCapacity('[');
+                for (stack.items[stack.items.len - tuple.arg_count ..][0 .. tuple.arg_count - 1]) |arg| {
+                    try str.print(arena, "{s}, ", .{arg.str});
                 }
-                try w.writeByte(')');
-            } else {
-                const needs_parentheses = ast.tag(func) != .function_call and
-                    func != ast.leftMostChild(func);
-
-                if (needs_parentheses) try w.writeByte('(');
-                var iter = ast.argIteratorForwards(index.subi(call.function_index), index);
-                if (iter.next()) |arg_index| {
-                    try ast.printFromIndex(arg_index, w, current_function);
+                try str.print(arena, "{s}]", .{stack.items[stack.items.len - 1].str});
+                stack.items.len -= tuple.arg_count;
+            },
+            .assignment => |pos| {
+                const arg = stack.pop().?;
+                try str.print(arena, "let {f} = {s}", .{ pos, arg.str });
+            },
+            .builtin => |b| {
+                try str.print(arena, "@{f}", .{b.tag});
+            },
+            inline .plus, .minus, .not, .reference, .dereference => |_, t| {
+                const byte = switch (t) {
+                    .plus => '+',
+                    .minus => '-',
+                    .not => '!',
+                    .reference => '&',
+                    .dereference => '*',
+                    else => comptime unreachable,
+                };
+                const rhs = stack.pop().?;
+                try str.append(arena, byte);
+                const prec = comptime t.precedence();
+                if (rhs.tag.precedence() >= prec) {
+                    try str.appendSlice(arena, rhs.str);
+                } else {
+                    try str.print(arena, "({s})", .{rhs.str});
                 }
-                if (needs_parentheses) try w.writeByte(')');
-                try w.writeByte('(');
-                if (iter.next()) |arg_index| {
-                    try ast.printFromIndex(arg_index, w, current_function);
+            },
+            inline .equals,
+            .not_equals,
+            .mul,
+            .add,
+            => |_, t| {
+                const s = switch (t) {
+                    .equals => "==",
+                    .not_equals => "!=",
+                    .add => "+",
+                    .mul => "*",
+                    else => comptime unreachable,
+                };
+
+                const rhs = stack.pop() orelse {
+                    std.debug.print("Tag: {t}\n", .{t});
+                    unreachable;
+                };
+                const lhs = stack.pop().?;
+                const prec = comptime t.precedence();
+
+                if (lhs.tag.precedence() < prec) {
+                    try str.print(arena, "({s})", .{lhs.str});
+                } else {
+                    try str.appendSlice(arena, lhs.str);
                 }
 
-                while (iter.next()) |arg_index| {
-                    try w.writeAll(", ");
-                    try ast.printFromIndex(arg_index, w, current_function);
+                try str.appendSlice(arena, " " ++ s ++ " ");
+
+                const rhs_prec = rhs.tag.precedence();
+                if (rhs_prec < prec or rhs_prec == prec and !rhs.tag.isCommutative()) {
+                    try str.print(arena, "({s})", .{rhs.str});
+                } else {
+                    try str.appendSlice(arena, rhs.str);
+                }
+            },
+            // Non-commutative operators
+            inline .sub,
+            .div,
+            .mod,
+            .pow,
+            .concat,
+            .greater_than,
+            .less_than,
+            .greater_equals,
+            .less_equals,
+            .logical_or,
+            .logical_and,
+            .range,
+            .dynamic_range,
+            .invalidated_range,
+            => |_, t| {
+                const s = switch (t) {
+                    .greater_than => " > ",
+                    .less_than => " < ",
+                    .greater_equals => " >= ",
+                    .less_equals => " <= ",
+                    .sub => " - ",
+                    .div => " / ",
+                    .mod => " % ",
+                    .pow => "^",
+                    .concat => " # ",
+                    .logical_or => " or ",
+                    .logical_and => " and ",
+                    .range, .dynamic_range, .invalidated_range => ":",
+                    else => comptime unreachable,
+                };
+
+                const rhs = stack.pop().?;
+                const lhs = stack.pop().?;
+                const prec = comptime t.precedence();
+
+                if (lhs.tag.precedence() < prec) {
+                    try str.print(arena, "({s})", .{lhs.str});
+                } else {
+                    try str.appendSlice(arena, lhs.str);
                 }
 
-                try w.writeByte(')');
-            }
-        },
-        .local_variable => |v| {
-            const identifier = current_function.unwrap().?.addi(1 + v.offset);
-            assert(ast.tag(identifier) == .function_parameter);
-            const str = ast.payload(identifier).function_parameter;
-            const bytes = ast.string(str);
-            try w.writeAll(bytes);
-        },
-        .captured_variable => |v| {
-            const parameter_index = v.scope.addi(1 + v.slot);
-            assert(ast.tag(parameter_index) == .function_parameter);
-            const str = ast.payload(parameter_index).function_parameter;
-            const bytes = ast.string(str);
-            try w.writeAll(bytes);
-        },
-        .function_body_start => |def| {
-            try w.writeByte('|');
-            const arg_index = index.addi(def.args());
-            const args = ast.nodes.subslice(@intFromEnum(arg_index), def.arg_count);
-            for (0..args.len()) |i| {
-                assert(args.item(args.index(i), .tag) == .function_parameter);
-                const str = args.item(args.index(i), .data).function_parameter;
-                const bytes = ast.string(str);
-                try w.writeAll(bytes);
-                if (i + 1 < args.len())
-                    try w.writeAll(", ");
-            }
-            try w.writeAll("| ");
-            try ast.printFromIndex(
-                index.addi(def.body()),
-                w,
-                index.toOptional(),
-            );
-        },
-        .function_body_end => |def| {
-            try w.writeByte('|');
-            const arg_index = index.subi(def.args());
-            const args = ast.nodes.subslice(@intFromEnum(arg_index), def.arg_count);
-            for (0..args.len()) |i| {
-                assert(args.item(args.index(i), .tag) == .function_parameter);
-                const str = args.item(args.index(i), .data).function_parameter;
-                const bytes = ast.string(str);
-                try w.writeAll(bytes);
-                if (i + 1 < args.len())
-                    try w.writeAll(", ");
-            }
-            try w.writeAll("| ");
-            try ast.printFromIndex(
-                index.subi(def.body()),
-                w,
-                index.subi(def.start()).toOptional(),
-            );
-        },
-        .function_parameter => unreachable,
+                try str.appendSlice(arena, s);
 
-        .number => |n| try w.print("{d}", .{n}),
-        .rel_rel => |pos| try w.print("{f}", .{pos}),
-        .rel_abs => |pos| try w.print("{f}${d}", .{
-            Position.fmtColumnAddress(pos.x), pos.y,
-        }),
-        .abs_rel => |pos| try w.print("${f}{d}", .{
-            Position.fmtColumnAddress(pos.x), pos.y,
-        }),
-        .abs_abs => |pos| try w.print("${f}${d}", .{
-            Position.fmtColumnAddress(pos.x), pos.y,
-        }),
-        .invalidated_pos => |pos| try w.print("{f}", .{pos}),
-        .string_literal => |str| {
-            try w.print("\"{s}\"", .{ast.strings.items[str.start..str.end]});
-        },
-        .end => {
-            try ast.printFromIndex(index.subi(1), w, current_function);
-        },
-        .assignment => |pos| {
-            try w.print("let {f} = ", .{pos});
-            try ast.printFromIndex(index.subi(1), w, current_function);
-        },
-        inline .plus, .minus, .not, .reference, .dereference => |_, t| {
-            const n = index.subi(1);
-            const rhs = ast.nodes.get(n);
-
-            const byte = switch (t) {
-                .plus => '+',
-                .minus => '-',
-                .not => '!',
-                .reference => '&',
-                .dereference => '*',
-                else => comptime unreachable,
-            };
-
-            try w.writeByte(byte);
-            // TODO: Remove this
-            const prec = comptime t.precedence();
-            if (rhs.tag.precedence() >= prec) {
-                try ast.printFromNode(n, rhs, w, current_function);
-            } else {
-                try w.writeByte('(');
-                try ast.printFromNode(n, rhs, w, current_function);
-                try w.writeByte(')');
-            }
-        },
-        inline .equals,
-        .not_equals,
-        .mul,
-        .add,
-        => |_, t| {
-            const str = switch (t) {
-                .equals => "==",
-                .not_equals => "!=",
-                .add => "+",
-                .mul => "*",
-                else => comptime unreachable,
-            };
-
-            const rhs = index.subi(1);
-            const lhs = ast.leftMostChild(rhs).subi(1);
-
-            const rhs_prec = ast.tag(rhs).precedence();
-            const lhs_prec = ast.tag(lhs).precedence();
-            const prec = comptime t.precedence();
-
-            if (lhs_prec < prec) {
-                try w.writeByte('(');
-                try ast.printFromIndex(lhs, w, current_function);
-                try w.writeByte(')');
-            } else {
-                try ast.printFromIndex(lhs, w, current_function);
-            }
-
-            try w.writeAll(" " ++ str ++ " ");
-
-            if (rhs_prec < prec or rhs_prec == prec and !ast.tag(rhs).isCommutative()) {
-                try w.writeByte('(');
-                try ast.printFromIndex(rhs, w, current_function);
-                try w.writeByte(')');
-            } else {
-                try ast.printFromIndex(rhs, w, current_function);
-            }
-        },
-        // Non-commutative operators
-        inline .sub,
-        .div,
-        .mod,
-        .pow,
-        .concat,
-        .greater_than,
-        .less_than,
-        .greater_equals,
-        .less_equals,
-        .logical_or,
-        .logical_and,
-        .range,
-        .dynamic_range,
-        .invalidated_range,
-        => |_, t| {
-            const str = switch (t) {
-                .greater_than => " > ",
-                .less_than => " < ",
-                .greater_equals => " >= ",
-                .less_equals => " <= ",
-                .sub => " - ",
-                .div => " / ",
-                .mod => " % ",
-                .pow => "^",
-                .concat => " # ",
-                .logical_or => " or ",
-                .logical_and => " and ",
-                .range, .dynamic_range, .invalidated_range => ":",
-                else => comptime unreachable,
-            };
-
-            const rhs = index.subi(1);
-            const lhs = ast.leftMostChild(rhs).subi(1);
-
-            const rhs_prec = ast.tag(rhs).precedence();
-            const lhs_prec = ast.tag(lhs).precedence();
-            const prec = comptime t.precedence();
-
-            if (lhs_prec < prec) {
-                try w.writeByte('(');
-                try ast.printFromIndex(lhs, w, current_function);
-                try w.writeByte(')');
-            } else {
-                try ast.printFromIndex(lhs, w, current_function);
-            }
-
-            try w.writeAll(str);
-
-            if (rhs_prec <= prec) {
-                try w.writeByte('(');
-                try ast.printFromIndex(rhs, w, current_function);
-                try w.writeByte(')');
-            } else {
-                try ast.printFromIndex(rhs, w, current_function);
-            }
-        },
-        .builtin => |b| {
-            try w.print("@{f}", .{b.tag});
-        },
+                if (rhs.tag.precedence() <= prec) {
+                    try str.print(arena, "({s})", .{rhs.str});
+                } else {
+                    try str.appendSlice(arena, rhs.str);
+                }
+            },
+        }
+        try stack.append(arena, .{
+            .str = try str.toOwnedSlice(arena),
+            .tag = ast.tag(i),
+        });
     }
+    // assert(stack.items.len == 1);
+    try w.writeAll(stack.items[0].str);
 }
 
 /// Returns the root index of each argument of a function, backwards.
@@ -855,23 +924,20 @@ pub fn exprSliceEnd(ast: *const Ast, root: Node.Index) NodeList {
 
 pub const FormatData = struct {
     ast: *const Ast,
+    arena: Allocator,
     root: Node.Index,
 };
 
-pub fn fmtExpression(ast: *const Ast, root: Node.Index) std.fmt.Alt(FormatData, format) {
-    return .{ .data = .{ .ast = ast, .root = root } };
+pub fn fmtExpression(
+    ast: *const Ast,
+    arena: Allocator,
+    root: Node.Index,
+) std.fmt.Alt(FormatData, format) {
+    return .{ .data = .{ .ast = ast, .arena = arena, .root = root } };
 }
 
 pub fn format(f: FormatData, w: *std.Io.Writer) std.Io.Writer.Error!void {
-    try f.ast.print(f.root, w);
-}
-
-pub fn print(
-    ast: *const Ast,
-    root: Node.Index,
-    writer: *std.Io.Writer,
-) std.Io.Writer.Error!void {
-    return ast.printFromIndex(root, writer, .none);
+    f.ast.print(f.arena, f.root, w) catch return error.WriteFailed;
 }
 
 pub fn leftMostChild(
@@ -880,13 +946,18 @@ pub fn leftMostChild(
 ) Node.Index {
     return switch (ast.node(index)) {
         // leaf nodes
+        .nil,
         .string_literal,
         .number,
         .invalidated_pos,
-        .rel_rel,
-        .rel_abs,
-        .abs_rel,
-        .abs_abs,
+        .rel_rel_value,
+        .rel_abs_value,
+        .abs_rel_value,
+        .abs_abs_value,
+        .rel_rel_reference,
+        .rel_abs_reference,
+        .abs_rel_reference,
+        .abs_abs_reference,
         .function_body_start,
         .local_variable,
         .captured_variable,
@@ -922,12 +993,15 @@ pub fn leftMostChild(
         .reference,
         .dereference,
         .assignment,
-        .end,
         .function_parameter,
         .function_capture,
         => ast.leftMostChild(index.subi(1)),
+        .end => |end| index.subi(end.length),
         .function_body_end => |def| index.subi(def.length() + 1),
-        .function_call => |call| ast.leftMostChild(index.subi(call.function_index)),
+        .function_call,
+        .pipe_call,
+        => |call| ast.leftMostChild(index.subi(call.function_index)),
+        .tuple => |tuple| index.subi(tuple.length),
     };
 }
 
@@ -969,6 +1043,9 @@ pub fn traverseDependencies(
     traverse.traverse(unwrapped, .value, .no_deref);
 }
 
+const CellLiteralContext = enum { value, reference };
+
+// TODO: Make this function a stack machine instead of using recursion
 fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
     return struct {
         ast: Ast,
@@ -979,7 +1056,7 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
             index: Node.Index,
             /// Whether the context treats a cell literal as a value or a reference. If treated as a value,
             /// the cell literal will be added to the dependency graph.
-            ctx: Parser.ExpressionContext,
+            ctx: CellLiteralContext,
             /// Whether the context will automatically dereference a reference. If a reference to a cell
             /// literal is automatically dereferenced, it will be added to the dependency graph.
             deref: enum { deref, no_deref },
@@ -987,15 +1064,8 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
             const ast = self.ast;
 
             switch (self.ast.node(index)) {
-                .function_capture => {
-                    std.debug.print("WHAT: {{\n", .{});
-                    for (0..self.ast.nodes.len()) |i| {
-                        std.debug.print("  {any}\n", .{self.ast.nodes.geti(i).get()});
-                    }
-                    std.debug.print("}}\n", .{});
-                    unreachable;
-                },
-                .function_call => |call| {
+                .function_capture => unreachable,
+                .function_call, .pipe_call => |call| {
                     const start = index.subi(call.function_index);
                     var iter = ast.argIteratorForwards(start, index);
                     while (iter.next()) |i| {
@@ -1003,6 +1073,13 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
                     }
                     const func_node = index.subi(call.function_index);
                     self.traverse(func_node, .value, .no_deref);
+                },
+                .tuple => |tuple| {
+                    var iter = ast.argIterator(index, index.subi(tuple.arg_count));
+                    _ = iter.next();
+                    while (iter.next()) |i| {
+                        self.traverse(i, .reference, .deref);
+                    }
                 },
                 .local_variable, .captured_variable => {},
                 // Defining a function doesn't add a dependency but calling it would
@@ -1016,13 +1093,23 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
                 .assignment, .end => {
                     self.traverse(index.subi(1), ctx, .no_deref);
                 },
+                .nil,
                 .number,
                 .string_literal,
                 .invalidated_pos,
                 .invalidated_range,
                 .builtin,
                 => {},
-                .rel_rel, .rel_abs, .abs_rel, .abs_abs => |pos| switch (ctx) {
+                // TODO
+                .rel_rel_value,
+                .rel_abs_value,
+                .abs_rel_value,
+                .abs_abs_value,
+                .rel_rel_reference,
+                .rel_abs_reference,
+                .abs_rel_reference,
+                .abs_abs_reference,
+                => |pos| switch (ctx) {
                     .reference => switch (deref) {
                         .deref => func(self.user_ctx, .initSinglePos(pos)),
                         .no_deref => {},
@@ -1044,26 +1131,50 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
                         const lhs = ast.leftMostChild(rhs).subi(1);
                         const tl = switch (ast.tag(lhs)) {
                             .reference => switch (ast.tag(lhs.subi(1))) {
-                                .rel_rel,
-                                .rel_abs,
-                                .abs_rel,
-                                .abs_abs,
-                                => ast.payload(lhs.subi(1)).rel_rel,
+                                .rel_rel_value,
+                                .rel_abs_value,
+                                .abs_rel_value,
+                                .abs_abs_value,
+                                .rel_rel_reference,
+                                .rel_abs_reference,
+                                .abs_rel_reference,
+                                .abs_abs_reference,
+                                => ast.payload(lhs.subi(1)).rel_rel_value,
                                 else => unreachable,
                             },
-                            .rel_rel, .rel_abs, .abs_rel, .abs_abs => ast.payload(lhs).rel_rel,
+                            .rel_rel_value,
+                            .rel_abs_value,
+                            .abs_rel_value,
+                            .abs_abs_value,
+                            .rel_rel_reference,
+                            .rel_abs_reference,
+                            .abs_rel_reference,
+                            .abs_abs_reference,
+                            => ast.payload(lhs).rel_rel_value,
                             else => unreachable,
                         };
                         const br = switch (ast.tag(rhs)) {
                             .reference => switch (ast.tag(rhs.subi(1))) {
-                                .rel_rel,
-                                .rel_abs,
-                                .abs_rel,
-                                .abs_abs,
-                                => ast.payload(rhs.subi(1)).rel_rel,
+                                .rel_rel_value,
+                                .rel_abs_value,
+                                .abs_rel_value,
+                                .abs_abs_value,
+                                .rel_rel_reference,
+                                .rel_abs_reference,
+                                .abs_rel_reference,
+                                .abs_abs_reference,
+                                => ast.payload(rhs.subi(1)).rel_rel_value,
                                 else => unreachable,
                             },
-                            .rel_rel, .rel_abs, .abs_rel, .abs_abs => ast.payload(rhs).rel_rel,
+                            .rel_rel_value,
+                            .rel_abs_value,
+                            .abs_rel_value,
+                            .abs_abs_value,
+                            .rel_rel_reference,
+                            .rel_abs_reference,
+                            .abs_rel_reference,
+                            .abs_abs_reference,
+                            => ast.payload(rhs).rel_rel_value,
                             else => unreachable,
                         };
                         func(self.user_ctx, .initNormalizePos(tl, br));
@@ -1115,10 +1226,26 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
 pub fn isDynamicReference(nodes: NodeList, index: Node.Index) bool {
     return switch (nodes.item(index, .tag)) {
         .reference => switch (nodes.item(index.subi(1), .tag)) {
-            .rel_rel, .rel_abs, .abs_rel, .abs_abs => false,
+            .rel_rel_value,
+            .rel_abs_value,
+            .abs_rel_value,
+            .abs_abs_value,
+            .rel_rel_reference,
+            .rel_abs_reference,
+            .abs_rel_reference,
+            .abs_abs_reference,
+            => false,
             else => true,
         },
-        .rel_rel, .rel_abs, .abs_rel, .abs_abs => false,
+        .rel_rel_value,
+        .rel_abs_value,
+        .abs_rel_value,
+        .abs_abs_value,
+        .rel_rel_reference,
+        .rel_abs_reference,
+        .abs_rel_reference,
+        .abs_abs_reference,
+        => false,
         else => true,
     };
 }
@@ -1266,7 +1393,7 @@ test "Functions on Ranges" {
 test "Print" {
     const t = std.testing;
 
-    const cases = .{
+    const normalized = .{
         .{ "1 + 2 + 3", "1 + 2 + 3" },
         .{ "1 + (2 + 3)", "1 + 2 + 3" },
         .{ "1 + 2 - 3", "1 + 2 - 3" },
@@ -1331,7 +1458,7 @@ test "Print" {
         .{ "@max(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)", "@max(A0:B0, 1, 1 + 2, 1 + 2 * 3, 1 + 2 * 3 / 4)" },
     };
 
-    const data2 = .{
+    const identical = .{
         "0 and 0",
         "0 and 1",
         "1 and 1",
@@ -1362,27 +1489,32 @@ test "Print" {
 
         "1 and 2 or 3 and 4",
         "1 and (2 or 3) and 4",
+        "A0:D10 |> @map(|x| *x) |> @sum()",
+        "1 + (A0:D10 |> @sum())",
+        "(A0:D10 |> @map(|x| *x) |> @filter(|x| x > 2) |> @sum()) / 2",
+        "1 + @sum(A0:D10)",
+        "@sum(A0:D10) + 1",
     };
 
     var sheet = try Sheet.init(t.allocator);
     defer sheet.deinit();
 
-    inline for (cases) |d| {
+    inline for (normalized) |d| {
         const src, const expected = d;
         const expr = try sheet.parseFromExpression(src);
 
         var buf: [4096]u8 = undefined;
         var fixed: std.Io.Writer = .fixed(&buf);
-        try sheet.ast.print(expr.root, &fixed);
+        try sheet.ast.print(sheet.arena.allocator(), sheet.ast.leftMostChild(expr.root), &fixed);
         try t.expectEqualStrings(expected, fixed.buffered());
     }
 
-    inline for (data2) |src| {
+    inline for (identical) |src| {
         const expr = try sheet.parseFromExpression(src);
 
         var buf: [4096]u8 = undefined;
         var fixed: std.Io.Writer = .fixed(&buf);
-        try sheet.ast.print(expr.root, &fixed);
+        try sheet.ast.print(sheet.arena.allocator(), sheet.ast.leftMostChild(expr.root), &fixed);
         try t.expectEqualStrings(src, fixed.buffered());
     }
 }

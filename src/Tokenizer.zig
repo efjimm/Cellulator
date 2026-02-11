@@ -73,6 +73,8 @@ pub const Token = struct {
 
         lparen,
         rparen,
+        lbracket,
+        rbracket,
 
         identifier,
         rel_rel,
@@ -89,6 +91,7 @@ pub const Token = struct {
         keyword_let,
         keyword_and,
         keyword_or,
+        keyword_nil,
 
         eof,
         unknown,
@@ -114,6 +117,8 @@ pub const Token = struct {
                 .hash = "'#'",
                 .lparen = "'('",
                 .rparen = "')'",
+                .lbracket = "[",
+                .rbracket = "]",
                 .identifier = "identifier",
                 .rel_rel = "cell address",
                 .rel_abs = "cell address",
@@ -127,6 +132,7 @@ pub const Token = struct {
                 .keyword_let = "'let'",
                 .keyword_and = "and",
                 .keyword_or = "or",
+                .keyword_nil = "nil",
                 .eof = "eof",
                 .caret = "^",
                 .ampersand = "&",
@@ -145,6 +151,7 @@ const keywords = std.StaticStringMap(Token.Tag).initComptime(.{
     .{ "let", .keyword_let },
     .{ "and", .keyword_and },
     .{ "or", .keyword_or },
+    .{ "nil", .keyword_nil },
 });
 
 pub fn init(reader: *std.Io.Reader) Tokenizer {
@@ -315,6 +322,14 @@ pub fn next(t: *Tokenizer) !Token {
             },
             ')' => {
                 tag = .rparen;
+                t.toss(1);
+            },
+            '[' => {
+                tag = .lbracket;
+                t.toss(1);
+            },
+            ']' => {
+                tag = .rbracket;
                 t.toss(1);
             },
             ':' => {

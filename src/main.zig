@@ -73,7 +73,6 @@ pub fn main() !void {
     defer zc.deinit();
 
     try zc.run();
-    std.process.cleanExit();
 }
 
 fn panicFn(msg: []const u8, ret_addr: ?usize) noreturn {

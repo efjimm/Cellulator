@@ -78,7 +78,7 @@ let a12 = @ceil(*b10)
 :expect-volatile a12
 
 let a12 = @width(*b10)
-:expect-non-volatile a12
+:expect-volatile a12
 
 let b11 = @sum(a10)
 :expect-non-volatile b11
@@ -124,3 +124,12 @@ let d12 = @min(*b10)
 :expect-volatile d12
 let d12 = @min(*c10)
 :expect-volatile d12
+
+let a13 = G100:Z1000 |> @map(|x| *x) |> @sum()
+:expect-non-volatile a13
+
+let a14 = G14:G25
+let b14 = *A14 |> @map(|x| *x) |> @sum()
+:expect-volatile b14
+let c14 = *a14 |> @map(|x| *x)
+:expect-non-volatile c14

@@ -42,16 +42,26 @@ let H0 = F0 # G0 -- Evaluates to "30HELLO"
 :expect-eql-string H0 "30HELLO" -- Evaluated string, not formula
 :delete D0:H0 -- Clean up for next test
 
--- Test CSV Save/Load with Empty Cells
 let I0 = "Data"
 let K0 = "More Data"
+let L0 = A5:D10 |> @filter(|x| *x % 2 == 0)
+let A5 = 4
+let A6 = 3
+let A7 = 6
 :w $BUILD_TEMP_DIR/test_empty_csv.csv
 :delete I0
 :delete K0
+:delete L0
+:delete A5
+:delete A6
+:delete A7
 :expect-non-extant I0
 :expect-non-extant K0
+:expect-non-extant L0
+:expect-non-extant A5
+:expect-non-extant A6
+:expect-non-extant A7
 :e $BUILD_TEMP_DIR/test_empty_csv.csv
 :expect-eql-string I0 "Data"
 :expect-non-extant J0 -- J0 was empty in source, should remain non-extant
 :expect-eql-string K0 "More Data"
-

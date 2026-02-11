@@ -4,6 +4,52 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 # TODO
 
+- MAKE CELL EVALUATION NON RECURSIVE!!!!
+  - AAAAAAAAAAAAAAAAH!!!!!
+- Serialize column widths
+- Serialize column precision
+- Escape single quotes in printed string values
+
+- Implement tuple indexing and functions for manipulation
+- More stream functionality
+  - @any
+  - Collect to tuple or array
+  - Generic reduce function
+  - User-defined pipeline steps
+- Number arrays with vectorized operations
+- Structs/maps/objects/records/product types/whatever
+- Regex
+- Parallel streams
+
+- Update the README
+
+- :wq command
+- :wqa command
+
+- Runtime dependency tracking
+  - Static tracking is too imprecise with features like closures, pipelines, references.
+- Re-think core data structure
+  - PH-trees are a general solution with acceptable performance for almost all operations,
+    except row/column manipulations.
+    - Row/column manipulations in large (1m+ cells) sheets have bad performance
+  - What SHOULD have been chosen was a solution with exceptional common-case performance,
+    with rarer cases mattering less.
+    - In a typical spreadsheet usecase:
+      - Setting individual cells is very common
+      - Reading invidual cells is very common
+      - Reading columns of cells is very common
+      - Inserting/removing rows is very common
+      - Other operations are less common
+  - Idea: B+tree storing blocks of rows
+    - Each row block stores a fixed amount of data in a column-major order.
+      This way columns of numbers can be stored as a dense f64 array.
+    - [1024]f64; BitSet(1024); ArrayHashMap(u10, Value);
+    - Bit set for tracking 'holes' in dense number data.
+    - ArrayHashMap for sparse data and non-number data.
+  - BENCHMARK BENCHMARK BENCHMARK
+- Format strings for functions/builtins/pipelines properly
+- Unbound keys should input their unmodified versions in command insert mode
+
 - Globals / Named cells
   - Some way to view globals
 - Aggregate types

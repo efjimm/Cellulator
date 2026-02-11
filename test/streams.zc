@@ -1,0 +1,26 @@
+:fill a0:d10 1
+:expect @sum(a0:d10) == @width(a0:d10) * @height(a0:d10)
+:expect (a0:d10 |> @sum()) == @width(a0:d10) * @height(a0:d10)
+:expect (a0:d10 |> @map(|x| *x * 2) |> @sum()) == @width(a0:d10) * @height(a0:d10) * 2
+:expect (a0:d10 |> @filter(|x| x == &a0 or x == &c3 or x == &d10 or x == &g5) |> @sum()) == 3
+let e0 = a0:d10 |> @map(|x| *x)
+
+let a1 = b100:d200 |> @map(|x| *x)
+let a2 = @sum(*a1)
+let a3 = @sum(*a1)
+:y a2
+:p a4
+:expect-eql-number a2 0
+:expect-eql-number a3 0
+:expect-eql-number a4 0
+let b100 = 5
+:expect-eql-number a2 5
+:expect-eql-number a3 5
+:expect-eql-number a4 5
+
+let a5 = [1, 2, 3, 4, 5] |> @filter(|x| x != 2) |> @count()
+:expect-eql-number a5 4
+
+:expect (@range(1, 10) |> @filter(|x| x % 2) |> @count()) == 5
+:expect (@range(1, 10) |> @count()) == 9
+:expect (@range(1, 10) |> @map(|x| x * 2) |> @sum()) == 2 * (@range(1, 10) |> @sum())
