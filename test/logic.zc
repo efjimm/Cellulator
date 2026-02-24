@@ -50,3 +50,19 @@ let a0 = 3
 
 :expect ''
 :expect !!''
+
+-- Short circuiting
+let a10 = a10
+:expect-error a10
+
+let a10 = 0 and a10
+:expect-eql-number a10 0
+
+let a10 = 1 and a10
+:expect-error a10
+
+let a10 = 0 or a10
+:expect-error a10
+
+let a10 = 1 or a10
+:expect-eql-number a10 1

@@ -281,8 +281,11 @@ fn parse(p: *Parser) ParseError!Result {
     p.locals.clearRetainingCapacity();
 
     const nodes_start = p.ast.nodes.len();
-    const index = try p.parseStatement();
-    _ = try p.addNode(.init(.end, .{ .length = @intCast(@intFromEnum(index) - nodes_start + 1) }));
+    _ = try p.parseStatement();
+    _ = try p.addNode(.init(
+        .end,
+        .{ .length = @intCast(p.ast.nodes.len() - nodes_start) },
+    ));
 
     const root_index = p.root();
     return .{
@@ -469,10 +472,13 @@ fn parseOrExpr(p: *Parser) !Intermediate {
     var index, var result_type = try p.parseAndExpr();
 
     while (p.eatToken(.keyword_or)) |_| {
+        index = try p.addNode(.init(.logical_or, 0));
+        result_type = .number;
+
         _ = try p.parseAndExpr();
 
-        index = try p.addNode(.init(.logical_or, {}));
-        result_type = .number;
+        const length = p.ast.nodes.len() - 1 - @intFromEnum(index);
+        p.ast.payloadPtr(index).logical_or = length;
     }
 
     return .{ index, result_type };
@@ -483,10 +489,13 @@ fn parseAndExpr(p: *Parser) !Intermediate {
     var index, var result_type = try p.parseEqualityExpr();
 
     while (p.eatToken(.keyword_and)) |_| {
+        index = try p.addNode(.init(.logical_and, 0));
+        result_type = .number;
+
         _ = try p.parseEqualityExpr();
 
-        index = try p.addNode(.init(.logical_and, {}));
-        result_type = .number;
+        const length = p.ast.nodes.len() - 1 - @intFromEnum(index);
+        p.ast.payloadPtr(index).logical_and = length;
     }
 
     return .{ index, result_type };
@@ -1219,10 +1228,39 @@ test "Node contents" {
         "let a0 = 1 and 2",
         &.{
             .init(.number, 1.0),
+            .init(.logical_and, 1),
             .init(.number, 2.0),
-            .init(.logical_and, {}),
             .init(.assignment, .fromValidAddress("a0")),
             .init(.end, .{ .length = 4 }),
+        },
+    );
+
+    try testNodes(
+        "1 and 2 or 3 and 4",
+        &.{
+            .init(.number, 1.0),
+            .init(.logical_and, 1),
+            .init(.number, 2.0),
+            .init(.logical_or, 3),
+            .init(.number, 3.0),
+            .init(.logical_and, 1),
+            .init(.number, 4.0),
+            .init(.end, .{ .length = 7 }),
+        },
+    );
+
+    try testNodes(
+        "let a0 = 1 and 2 or 3 and 4",
+        &.{
+            .init(.number, 1.0),
+            .init(.logical_and, 1),
+            .init(.number, 2.0),
+            .init(.logical_or, 3),
+            .init(.number, 3.0),
+            .init(.logical_and, 1),
+            .init(.number, 4.0),
+            .init(.assignment, .fromValidAddress("a0")),
+            .init(.end, .{ .length = 8 }),
         },
     );
 

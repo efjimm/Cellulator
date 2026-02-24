@@ -553,23 +553,28 @@ pub fn evaluate2(eval: *Interpreter, start: Node.Index, comptime one_func: bool)
                 }
             },
             // and/or have the same semantics as Lua's and/or operators.
-            .logical_and => {
-                const rhs = eval.pop();
+            .logical_and => |rhs_length| {
+                // const rhs = eval.pop();
                 const lhs = eval.pop();
-                const res: StackEntry =
-                    if (lhs.boolean())
-                        .{ .value = rhs }
-                    else
-                        .{ .value = .{ .number = 0 } };
 
-                try eval.push(res);
+                if (lhs.boolean()) {
+                    // Do nothing. This will evaluate the right hand side and push it to the stack.
+                } else {
+                    // Push the LHS to the stack and skip the RHS
+                    eval.push(.{ .value = lhs }) catch unreachable;
+                    eval.pc = eval.pc.addi(@intCast(rhs_length));
+                }
             },
-            .logical_or => {
-                const rhs = eval.pop();
+            .logical_or => |rhs_length| {
                 const lhs = eval.pop();
-                const res = if (lhs.boolean()) lhs else rhs;
 
-                try eval.pushv(res);
+                if (lhs.boolean()) {
+                    // Push the LHS to the stack and skip the RHS
+                    eval.push(.{ .value = lhs }) catch unreachable;
+                    eval.pc = eval.pc.addi(@intCast(rhs_length));
+                } else {
+                    // Do nothing. This will evaluate the right hand side and push it to the stack.
+                }
             },
             inline .greater_than,
             .less_than,
@@ -923,12 +928,14 @@ const MinContext = struct {
 };
 
 fn evalSum(eval: *Interpreter, arg_count: u8) !f64 {
+    std.log.debug("CALLED SUM", .{});
     var ctx: SumContext = .{};
     try eval.mapArgsNumber(arg_count, &ctx);
     return ctx.total;
 }
 
 fn evalProd(eval: *Interpreter, arg_count: u8) !f64 {
+    std.log.debug("CALLED PROD", .{});
     var ctx: ProdContext = .{};
     try eval.mapArgsNumber(arg_count, &ctx);
     return ctx.total;

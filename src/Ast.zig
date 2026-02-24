@@ -319,8 +319,10 @@ pub const Node = extern struct {
         less_equals: void,
         equals: void,
         not_equals: void,
-        logical_and: void,
-        logical_or: void,
+        /// Stores the number of nodes in the RHS expression so it can be skipped for short
+        /// circuiting.
+        logical_and: u64,
+        logical_or: u64,
 
         /// The colon operator with two static arguments.
         /// Cell value accesses through this range are non-volatile.
@@ -377,8 +379,8 @@ pub const Node = extern struct {
         less_equals,
         equals,
         not_equals,
-        logical_and,
-        logical_or,
+        logical_and: u64,
+        logical_or: u64,
 
         /// The colon operator with two static arguments.
         /// Cell value accesses through this range are non-volatile.
@@ -519,6 +521,346 @@ pub fn string(ast: *const Ast, str: String) []u8 {
     return ast.strings.items[str.start..str.end];
 }
 
+const PrintNodeResult = enum(u48) {
+    end = 0,
+    _,
+};
+
+fn printNode(
+    ast: *const Ast,
+    arena: Allocator,
+    stack: *std.ArrayList(PrintItem),
+    function_stack: *std.ArrayList(Node.Index),
+    i: Node.Index,
+) !PrintNodeResult {
+    var str: std.ArrayList(u8) = .empty;
+    try str.ensureTotalCapacity(arena, 32);
+    sw: switch (ast.node(i)) {
+        .function_body_start => |f| {
+            try function_stack.ensureUnusedCapacity(arena, 1);
+            try str.ensureTotalCapacity(arena, 2 + f.arg_count * 5);
+            str.appendAssumeCapacity('|');
+            const parameters = ast.payloads()[@intFromEnum(i.addi(1))..][0..f.arg_count];
+            if (parameters.len > 0) {
+                for (parameters[0 .. parameters.len - 1]) |arg| {
+                    const parameter_name = ast.string(arg.function_parameter);
+                    try str.print(arena, "{s}, ", .{parameter_name});
+                }
+                const last_parameter = parameters[parameters.len - 1].function_parameter;
+                try str.appendSlice(arena, ast.string(last_parameter));
+            }
+            try str.append(arena, '|');
+            function_stack.appendAssumeCapacity(i);
+        },
+        .function_parameter => return @enumFromInt(1),
+        .function_capture => return @enumFromInt(1),
+        .function_body_end => {
+            // Combine function body and function parameter list
+            const body = stack.pop().?;
+            const parameter_list = stack.pop().?;
+            try str.ensureUnusedCapacity(arena, body.str.len + 1 + parameter_list.str.len);
+            str.appendSliceAssumeCapacity(parameter_list.str);
+            str.appendAssumeCapacity(' ');
+            str.appendSliceAssumeCapacity(body.str);
+        },
+        .local_variable => |v| {
+            const current_function = function_stack.items[function_stack.items.len - 1];
+            const identifier = current_function.addi(1 + v.offset);
+            assert(ast.tag(identifier) == .function_parameter);
+            const name = ast.payload(identifier).function_parameter;
+            const bytes = ast.string(name);
+            try str.appendSlice(arena, bytes);
+        },
+        .captured_variable => |v| {
+            const parameter_index = v.scope.addi(1 + v.slot);
+            assert(ast.tag(parameter_index) == .function_parameter);
+            const name = ast.payload(parameter_index).function_parameter;
+            try str.appendSlice(arena, ast.string(name));
+        },
+        .function_call, .pipe_call => |call| {
+            const function_string = stack.items[stack.items.len - call.arg_count - 1];
+            const func = i.subi(call.function_offset);
+            const needs_parentheses = switch (ast.tag(func)) {
+                // leaf nodes
+                .nil,
+                .string_literal,
+                .number,
+                .invalidated_pos,
+                .rel_rel_value,
+                .rel_abs_value,
+                .abs_rel_value,
+                .abs_abs_value,
+                .rel_rel_reference,
+                .rel_abs_reference,
+                .abs_rel_reference,
+                .abs_abs_reference,
+                .function_body_start,
+                .local_variable,
+                .captured_variable,
+                .builtin,
+                => false,
+                // branch nodes
+                .concat,
+                .add,
+                .sub,
+                .mul,
+                .div,
+                .mod,
+                .range,
+                .dynamic_range,
+                .invalidated_range,
+                .pow,
+                .logical_and,
+                .logical_or,
+                .greater_than,
+                .less_than,
+                .greater_equals,
+                .less_equals,
+                .equals,
+                .not_equals,
+                .minus,
+                .plus,
+                .not,
+                .reference,
+                .dereference,
+                .assignment,
+                .end,
+                .function_parameter,
+                .function_capture,
+                .function_body_end,
+                .function_call,
+                .pipe_call,
+                .tuple,
+                => true,
+            };
+
+            if (call.is_pipe) {
+                const args = stack.items[stack.items.len - call.arg_count ..];
+                try str.print(arena, "{s} |> {s}(", .{ args[0].str, function_string.str });
+                if (args.len > 1) {
+                    for (args[1 .. args.len - 1]) |arg| {
+                        try str.print(arena, "{s}, ", .{arg.str});
+                    }
+                    try str.appendSlice(arena, stack.items[stack.items.len - 1].str);
+                }
+                try str.appendSlice(arena, ")");
+            } else {
+                if (needs_parentheses) {
+                    try str.print(arena, "({s})", .{function_string.str});
+                } else {
+                    try str.appendSlice(arena, function_string.str);
+                }
+                try str.append(arena, '(');
+                if (call.arg_count > 0) {
+                    for (stack.items[stack.items.len - call.arg_count .. stack.items.len - 1]) |arg| {
+                        try str.print(arena, "{s}, ", .{arg.str});
+                    }
+                    try str.appendSlice(arena, stack.items[stack.items.len - 1].str);
+                }
+                try str.append(arena, ')');
+            }
+            stack.items.len = stack.items.len - call.arg_count - 1;
+        },
+        .end => return .end,
+        .nil => try str.appendSlice(arena, "nil"),
+        .number => |n| try str.print(arena, "{d}", .{n}),
+        .invalidated_pos,
+        .rel_rel_value,
+        .rel_rel_reference,
+        => |pos| try str.print(arena, "{f}", .{pos}),
+        .rel_abs_value,
+        .rel_abs_reference,
+        => |pos| try str.print(arena, "{f}${d}", .{
+            Position.fmtColumnAddress(pos.x),
+            pos.y,
+        }),
+        .abs_rel_value,
+        .abs_rel_reference,
+        => |pos| try str.print(arena, "${f}{d}", .{
+            Position.fmtColumnAddress(pos.x),
+            pos.y,
+        }),
+        .abs_abs_value,
+        .abs_abs_reference,
+        => |pos| try str.print(arena, "${f}${d}", .{
+            Position.fmtColumnAddress(pos.x),
+            pos.y,
+        }),
+        .string_literal => |s| try str.print(arena, "'{s}'", .{ast.string(s)}),
+        .tuple => |tuple| {
+            if (tuple.arg_count == 0) {
+                try str.appendSlice(arena, "[]");
+                break :sw;
+            }
+
+            try str.ensureUnusedCapacity(arena, 2 + tuple.arg_count * 4);
+            str.appendAssumeCapacity('[');
+            for (stack.items[stack.items.len - tuple.arg_count ..][0 .. tuple.arg_count - 1]) |arg| {
+                try str.print(arena, "{s}, ", .{arg.str});
+            }
+            try str.print(arena, "{s}]", .{stack.items[stack.items.len - 1].str});
+            stack.items.len -= tuple.arg_count;
+        },
+        .assignment => |pos| {
+            const arg = stack.pop().?;
+            try str.print(arena, "let {f} = {s}", .{ pos, arg.str });
+        },
+        .builtin => |b| {
+            try str.print(arena, "@{f}", .{b.tag});
+        },
+        inline .plus, .minus, .not, .reference, .dereference => |_, t| {
+            const byte = switch (t) {
+                .plus => '+',
+                .minus => '-',
+                .not => '!',
+                .reference => '&',
+                .dereference => '*',
+                else => comptime unreachable,
+            };
+            const rhs = stack.pop().?;
+            try str.append(arena, byte);
+            const prec = comptime t.precedence();
+            if (rhs.tag.precedence() >= prec) {
+                try str.appendSlice(arena, rhs.str);
+            } else {
+                try str.print(arena, "({s})", .{rhs.str});
+            }
+        },
+        inline .equals,
+        .not_equals,
+        .mul,
+        .add,
+        => |_, t| {
+            const s = switch (t) {
+                .equals => "==",
+                .not_equals => "!=",
+                .add => "+",
+                .mul => "*",
+                else => comptime unreachable,
+            };
+
+            const rhs = stack.pop() orelse {
+                std.debug.print("Tag: {t}\n", .{t});
+                unreachable;
+            };
+            const lhs = stack.pop().?;
+            const prec = comptime t.precedence();
+
+            if (lhs.tag.precedence() < prec) {
+                try str.print(arena, "({s})", .{lhs.str});
+            } else {
+                try str.appendSlice(arena, lhs.str);
+            }
+
+            try str.appendSlice(arena, " " ++ s ++ " ");
+
+            const rhs_prec = rhs.tag.precedence();
+            if (rhs_prec < prec or rhs_prec == prec and !rhs.tag.isCommutative()) {
+                try str.print(arena, "({s})", .{rhs.str});
+            } else {
+                try str.appendSlice(arena, rhs.str);
+            }
+        },
+        inline .logical_and,
+        .logical_or,
+        => |rhs_length, t| {
+            const s = switch (t) {
+                .logical_and => " and ",
+                .logical_or => " or ",
+                else => comptime unreachable,
+            };
+
+            const lhs = stack.pop().?;
+            const stack_len = stack.items.len;
+            var j = i.addi(1);
+            const end = j.addi(@intCast(rhs_length));
+            while (j.lt(end)) {
+                const result = try ast.printNode(arena, stack, function_stack, j);
+                assert(result != .end);
+                j = j.addi(@intFromEnum(result));
+            }
+            assert(stack.items.len == stack_len + 1);
+            const rhs = stack.pop().?;
+
+            const prec = comptime t.precedence();
+
+            if (lhs.tag.precedence() < prec) {
+                try str.print(arena, "({s})", .{lhs.str});
+            } else {
+                try str.appendSlice(arena, lhs.str);
+            }
+
+            try str.appendSlice(arena, s);
+
+            if (rhs.tag.precedence() <= prec) {
+                try str.print(arena, "({s})", .{rhs.str});
+            } else {
+                try str.appendSlice(arena, rhs.str);
+            }
+
+            try stack.append(arena, .{
+                .str = try str.toOwnedSlice(arena),
+                .tag = ast.tag(i),
+            });
+            return @enumFromInt(1 + rhs_length);
+        },
+        // Non-commutative operators
+        inline .sub,
+        .div,
+        .mod,
+        .pow,
+        .concat,
+        .greater_than,
+        .less_than,
+        .greater_equals,
+        .less_equals,
+        .range,
+        .dynamic_range,
+        .invalidated_range,
+        => |_, t| {
+            const s = switch (t) {
+                .greater_than => " > ",
+                .less_than => " < ",
+                .greater_equals => " >= ",
+                .less_equals => " <= ",
+                .sub => " - ",
+                .div => " / ",
+                .mod => " % ",
+                .pow => "^",
+                .concat => " # ",
+                .range, .dynamic_range, .invalidated_range => ":",
+                else => comptime unreachable,
+            };
+
+            const rhs = stack.pop().?;
+            const lhs = stack.pop().?;
+
+            const prec = comptime t.precedence();
+
+            if (lhs.tag.precedence() < prec) {
+                try str.print(arena, "({s})", .{lhs.str});
+            } else {
+                try str.appendSlice(arena, lhs.str);
+            }
+
+            try str.appendSlice(arena, s);
+
+            if (rhs.tag.precedence() <= prec) {
+                try str.print(arena, "({s})", .{rhs.str});
+            } else {
+                try str.appendSlice(arena, rhs.str);
+            }
+        },
+    }
+    try stack.append(arena, .{
+        .str = try str.toOwnedSlice(arena),
+        .tag = ast.tag(i),
+    });
+    return @enumFromInt(1);
+}
+
+const PrintItem = struct { str: []const u8, tag: Node.Tag };
+
 /// Prints an AST as an expression.
 ///
 /// This function is non-recursive and does many small allocations. The arena is first pre-heated
@@ -534,298 +876,17 @@ pub fn print(
         arena.free(bytes);
     } else |_| {}
 
-    const Item = struct { str: []const u8, tag: Node.Tag };
-    var function_stack_allocator = std.heap.stackFallback(512, arena);
-    const fsa = function_stack_allocator.get();
     var function_stack: std.ArrayList(Node.Index) = .empty;
-    var stack: std.ArrayList(Item) = .empty;
+    var stack: std.ArrayList(PrintItem) = .empty;
     try stack.ensureTotalCapacity(arena, 128);
 
     var i = first_node;
-    while (true) : (i = i.addi(1)) {
-        var str: std.ArrayList(u8) = .empty;
-        try str.ensureTotalCapacity(arena, 32);
-        sw: switch (ast.node(i)) {
-            .function_body_start => |f| {
-                try function_stack.ensureUnusedCapacity(fsa, 1);
-                try str.ensureTotalCapacity(arena, 2 + f.arg_count * 5);
-                str.appendAssumeCapacity('|');
-                const parameters = ast.payloads()[@intFromEnum(i.addi(1))..][0..f.arg_count];
-                if (parameters.len > 0) {
-                    for (parameters[0 .. parameters.len - 1]) |arg| {
-                        const parameter_name = ast.string(arg.function_parameter);
-                        try str.print(arena, "{s}, ", .{parameter_name});
-                    }
-                    const last_parameter = parameters[parameters.len - 1].function_parameter;
-                    try str.appendSlice(arena, ast.string(last_parameter));
-                }
-                try str.append(arena, '|');
-                function_stack.appendAssumeCapacity(i);
-            },
-            .function_parameter => continue,
-            .function_capture => continue,
-            .function_body_end => {
-                // Combine function body and function parameter list
-                const body = stack.pop().?;
-                const parameter_list = stack.pop().?;
-                try str.ensureUnusedCapacity(arena, body.str.len + 1 + parameter_list.str.len);
-                str.appendSliceAssumeCapacity(parameter_list.str);
-                str.appendAssumeCapacity(' ');
-                str.appendSliceAssumeCapacity(body.str);
-            },
-            .local_variable => |v| {
-                const current_function = function_stack.items[function_stack.items.len - 1];
-                const identifier = current_function.addi(1 + v.offset);
-                assert(ast.tag(identifier) == .function_parameter);
-                const name = ast.payload(identifier).function_parameter;
-                const bytes = ast.string(name);
-                try str.appendSlice(arena, bytes);
-            },
-            .captured_variable => |v| {
-                const parameter_index = v.scope.addi(1 + v.slot);
-                assert(ast.tag(parameter_index) == .function_parameter);
-                const name = ast.payload(parameter_index).function_parameter;
-                try str.appendSlice(arena, ast.string(name));
-            },
-            .function_call, .pipe_call => |call| {
-                const function_string = stack.items[stack.items.len - call.arg_count - 1];
-                const func = i.subi(call.function_offset);
-                const needs_parentheses = switch (ast.tag(func)) {
-                    // leaf nodes
-                    .nil,
-                    .string_literal,
-                    .number,
-                    .invalidated_pos,
-                    .rel_rel_value,
-                    .rel_abs_value,
-                    .abs_rel_value,
-                    .abs_abs_value,
-                    .rel_rel_reference,
-                    .rel_abs_reference,
-                    .abs_rel_reference,
-                    .abs_abs_reference,
-                    .function_body_start,
-                    .local_variable,
-                    .captured_variable,
-                    .builtin,
-                    => false,
-                    // branch nodes
-                    .concat,
-                    .add,
-                    .sub,
-                    .mul,
-                    .div,
-                    .mod,
-                    .range,
-                    .dynamic_range,
-                    .invalidated_range,
-                    .pow,
-                    .logical_and,
-                    .logical_or,
-                    .greater_than,
-                    .less_than,
-                    .greater_equals,
-                    .less_equals,
-                    .equals,
-                    .not_equals,
-                    .minus,
-                    .plus,
-                    .not,
-                    .reference,
-                    .dereference,
-                    .assignment,
-                    .end,
-                    .function_parameter,
-                    .function_capture,
-                    .function_body_end,
-                    .function_call,
-                    .pipe_call,
-                    .tuple,
-                    => true,
-                };
-
-                if (call.is_pipe) {
-                    const args = stack.items[stack.items.len - call.arg_count ..];
-                    try str.print(arena, "{s} |> {s}(", .{ args[0].str, function_string.str });
-                    if (args.len > 1) {
-                        for (args[1 .. args.len - 1]) |arg| {
-                            try str.print(arena, "{s}, ", .{arg.str});
-                        }
-                        try str.appendSlice(arena, stack.items[stack.items.len - 1].str);
-                    }
-                    try str.appendSlice(arena, ")");
-                } else {
-                    if (needs_parentheses) {
-                        try str.print(arena, "({s})", .{function_string.str});
-                    } else {
-                        try str.appendSlice(arena, function_string.str);
-                    }
-                    try str.append(arena, '(');
-                    if (call.arg_count > 0) {
-                        for (stack.items[stack.items.len - call.arg_count .. stack.items.len - 1]) |arg| {
-                            try str.print(arena, "{s}, ", .{arg.str});
-                        }
-                        try str.appendSlice(arena, stack.items[stack.items.len - 1].str);
-                    }
-                    try str.append(arena, ')');
-                }
-                stack.items.len = stack.items.len - call.arg_count - 1;
-            },
+    while (true) {
+        const result = try ast.printNode(arena, &stack, &function_stack, i);
+        switch (result) {
             .end => break,
-            .nil => try str.appendSlice(arena, "nil"),
-            .number => |n| try str.print(arena, "{d}", .{n}),
-            .invalidated_pos,
-            .rel_rel_value,
-            .rel_rel_reference,
-            => |pos| try str.print(arena, "{f}", .{pos}),
-            .rel_abs_value,
-            .rel_abs_reference,
-            => |pos| try str.print(arena, "{f}${d}", .{
-                Position.fmtColumnAddress(pos.x),
-                pos.y,
-            }),
-            .abs_rel_value,
-            .abs_rel_reference,
-            => |pos| try str.print(arena, "${f}{d}", .{
-                Position.fmtColumnAddress(pos.x),
-                pos.y,
-            }),
-            .abs_abs_value,
-            .abs_abs_reference,
-            => |pos| try str.print(arena, "${f}${d}", .{
-                Position.fmtColumnAddress(pos.x),
-                pos.y,
-            }),
-            .string_literal => |s| try str.print(arena, "'{s}'", .{ast.string(s)}),
-            .tuple => |tuple| {
-                if (tuple.arg_count == 0) {
-                    try str.appendSlice(arena, "[]");
-                    break :sw;
-                }
-
-                try str.ensureUnusedCapacity(arena, 2 + tuple.arg_count * 4);
-                str.appendAssumeCapacity('[');
-                for (stack.items[stack.items.len - tuple.arg_count ..][0 .. tuple.arg_count - 1]) |arg| {
-                    try str.print(arena, "{s}, ", .{arg.str});
-                }
-                try str.print(arena, "{s}]", .{stack.items[stack.items.len - 1].str});
-                stack.items.len -= tuple.arg_count;
-            },
-            .assignment => |pos| {
-                const arg = stack.pop().?;
-                try str.print(arena, "let {f} = {s}", .{ pos, arg.str });
-            },
-            .builtin => |b| {
-                try str.print(arena, "@{f}", .{b.tag});
-            },
-            inline .plus, .minus, .not, .reference, .dereference => |_, t| {
-                const byte = switch (t) {
-                    .plus => '+',
-                    .minus => '-',
-                    .not => '!',
-                    .reference => '&',
-                    .dereference => '*',
-                    else => comptime unreachable,
-                };
-                const rhs = stack.pop().?;
-                try str.append(arena, byte);
-                const prec = comptime t.precedence();
-                if (rhs.tag.precedence() >= prec) {
-                    try str.appendSlice(arena, rhs.str);
-                } else {
-                    try str.print(arena, "({s})", .{rhs.str});
-                }
-            },
-            inline .equals,
-            .not_equals,
-            .mul,
-            .add,
-            => |_, t| {
-                const s = switch (t) {
-                    .equals => "==",
-                    .not_equals => "!=",
-                    .add => "+",
-                    .mul => "*",
-                    else => comptime unreachable,
-                };
-
-                const rhs = stack.pop() orelse {
-                    std.debug.print("Tag: {t}\n", .{t});
-                    unreachable;
-                };
-                const lhs = stack.pop().?;
-                const prec = comptime t.precedence();
-
-                if (lhs.tag.precedence() < prec) {
-                    try str.print(arena, "({s})", .{lhs.str});
-                } else {
-                    try str.appendSlice(arena, lhs.str);
-                }
-
-                try str.appendSlice(arena, " " ++ s ++ " ");
-
-                const rhs_prec = rhs.tag.precedence();
-                if (rhs_prec < prec or rhs_prec == prec and !rhs.tag.isCommutative()) {
-                    try str.print(arena, "({s})", .{rhs.str});
-                } else {
-                    try str.appendSlice(arena, rhs.str);
-                }
-            },
-            // Non-commutative operators
-            inline .sub,
-            .div,
-            .mod,
-            .pow,
-            .concat,
-            .greater_than,
-            .less_than,
-            .greater_equals,
-            .less_equals,
-            .logical_or,
-            .logical_and,
-            .range,
-            .dynamic_range,
-            .invalidated_range,
-            => |_, t| {
-                const s = switch (t) {
-                    .greater_than => " > ",
-                    .less_than => " < ",
-                    .greater_equals => " >= ",
-                    .less_equals => " <= ",
-                    .sub => " - ",
-                    .div => " / ",
-                    .mod => " % ",
-                    .pow => "^",
-                    .concat => " # ",
-                    .logical_or => " or ",
-                    .logical_and => " and ",
-                    .range, .dynamic_range, .invalidated_range => ":",
-                    else => comptime unreachable,
-                };
-
-                const rhs = stack.pop().?;
-                const lhs = stack.pop().?;
-                const prec = comptime t.precedence();
-
-                if (lhs.tag.precedence() < prec) {
-                    try str.print(arena, "({s})", .{lhs.str});
-                } else {
-                    try str.appendSlice(arena, lhs.str);
-                }
-
-                try str.appendSlice(arena, s);
-
-                if (rhs.tag.precedence() <= prec) {
-                    try str.print(arena, "({s})", .{rhs.str});
-                } else {
-                    try str.appendSlice(arena, rhs.str);
-                }
-            },
+            else => i = i.addi(@intFromEnum(result)),
         }
-        try stack.append(arena, .{
-            .str = try str.toOwnedSlice(arena),
-            .tag = ast.tag(i),
-        });
     }
     // assert(stack.items.len == 1);
     try w.writeAll(stack.items[0].str);
