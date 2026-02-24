@@ -245,7 +245,7 @@ pub const Node = extern struct {
         unused: u7 = 0,
         is_pipe: bool,
         arg_count: u8,
-        function_index: u48,
+        function_offset: u48,
     };
 
     pub fn init(comptime t: Tag, data: @FieldType(Payload, @tagName(t))) Node {
@@ -589,7 +589,7 @@ pub fn print(
             },
             .function_call, .pipe_call => |call| {
                 const function_string = stack.items[stack.items.len - call.arg_count - 1];
-                const func = i.subi(call.function_index);
+                const func = i.subi(call.function_offset);
                 const needs_parentheses = switch (ast.tag(func)) {
                     // leaf nodes
                     .nil,
@@ -853,51 +853,6 @@ pub fn argIterator(ast: Ast, start: Node.Index, end: Node.Index) ArgIterator {
     };
 }
 
-/// Returns the root index of each argument of a function, forwards. Prefer to use `ArgIterator`
-/// for performance reasons.
-pub const ArgIteratorForwards = struct {
-    ast: Ast,
-    end: Node.Index,
-    index: Node.Index,
-    backwards_iter: ArgIterator,
-    buffer: [256]Node.Index = undefined,
-    i: usize = 0,
-
-    pub fn next(iter: *ArgIteratorForwards) ?Node.Index {
-        if (@intFromEnum(iter.index) >= @intFromEnum(iter.end)) return null;
-        const ret = iter.index;
-
-        if (iter.i == 0) {
-            const first_item = iter.backwards_iter.next() orelse {
-                iter.index = iter.end;
-                return ret;
-            };
-
-            iter.buffer[0] = first_item;
-            iter.i = 1;
-
-            for (iter.buffer[1..]) |*d| {
-                const item = iter.backwards_iter.next() orelse break;
-                d.* = item;
-                iter.i += 1;
-            }
-        }
-        iter.index = iter.buffer[iter.i - 1];
-        iter.i -= 1;
-
-        return ret;
-    }
-};
-
-pub fn argIteratorForwards(ast: *const Ast, start: Node.Index, end: Node.Index) ArgIteratorForwards {
-    return .{
-        .ast = ast.*,
-        .end = end,
-        .index = start,
-        .backwards_iter = ast.argIterator(start.addi(1), end),
-    };
-}
-
 pub fn exprLen(ast: *const Ast, root: Node.Index) u48 {
     assert(ast.tag(root.addi(1)) == .end);
     return ast.payload(root.addi(1)).end.length;
@@ -1000,7 +955,7 @@ pub fn leftMostChild(
         .function_body_end => |def| index.subi(def.length() + 1),
         .function_call,
         .pipe_call,
-        => |call| ast.leftMostChild(index.subi(call.function_index)),
+        => |call| ast.leftMostChild(index.subi(call.function_offset)),
         .tuple => |tuple| index.subi(tuple.length),
     };
 }
@@ -1040,7 +995,7 @@ pub fn traverseDependencies(
         .ast = ast.*,
         .user_ctx = ctx,
     };
-    traverse.traverse(unwrapped, .value, .no_deref);
+    traverse.traverse(unwrapped, .no_deref);
 }
 
 const CellLiteralContext = enum { value, reference };
@@ -1054,9 +1009,6 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
         fn traverse(
             self: *const @This(),
             index: Node.Index,
-            /// Whether the context treats a cell literal as a value or a reference. If treated as a value,
-            /// the cell literal will be added to the dependency graph.
-            ctx: CellLiteralContext,
             /// Whether the context will automatically dereference a reference. If a reference to a cell
             /// literal is automatically dereferenced, it will be added to the dependency graph.
             deref: enum { deref, no_deref },
@@ -1066,32 +1018,29 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
             switch (self.ast.node(index)) {
                 .function_capture => unreachable,
                 .function_call, .pipe_call => |call| {
-                    const start = index.subi(call.function_index);
-                    var iter = ast.argIteratorForwards(start, index);
+                    const start = index.subi(call.function_offset);
+                    var iter = ast.argIterator(start, index);
                     while (iter.next()) |i| {
-                        self.traverse(i, .reference, .deref);
+                        self.traverse(i, .deref);
                     }
-                    const func_node = index.subi(call.function_index);
-                    self.traverse(func_node, .value, .no_deref);
+                    const func_node = index.subi(call.function_offset);
+                    self.traverse(func_node, .no_deref);
                 },
                 .tuple => |tuple| {
                     var iter = ast.argIterator(index, index.subi(tuple.arg_count));
                     _ = iter.next();
                     while (iter.next()) |i| {
-                        self.traverse(i, .reference, .deref);
+                        self.traverse(i, .deref);
                     }
                 },
                 .local_variable, .captured_variable => {},
-                // Defining a function doesn't add a dependency but calling it would
-                .function_body_start => |def| {
-                    self.traverse(index.addi(def.body()), .value, .no_deref);
-                },
+                .function_body_start => unreachable,
                 .function_body_end => |def| {
-                    self.traverse(index.subi(def.body()), .value, .no_deref);
+                    self.traverse(index.subi(def.capture_count + 1), .no_deref);
                 },
                 .function_parameter => unreachable,
                 .assignment, .end => {
-                    self.traverse(index.subi(1), ctx, .no_deref);
+                    self.traverse(index.subi(1), .no_deref);
                 },
                 .nil,
                 .number,
@@ -1100,101 +1049,75 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
                 .invalidated_range,
                 .builtin,
                 => {},
-                // TODO
                 .rel_rel_value,
                 .rel_abs_value,
                 .abs_rel_value,
                 .abs_abs_value,
+                => |pos| {
+                    func(self.user_ctx, .initSinglePos(pos));
+                },
                 .rel_rel_reference,
                 .rel_abs_reference,
                 .abs_rel_reference,
                 .abs_abs_reference,
-                => |pos| switch (ctx) {
-                    .reference => switch (deref) {
-                        .deref => func(self.user_ctx, .initSinglePos(pos)),
-                        .no_deref => {},
-                    },
-                    .value => {
-                        func(self.user_ctx, .initSinglePos(pos));
-                    },
+                => |pos| switch (deref) {
+                    .deref => func(self.user_ctx, .initSinglePos(pos)),
+                    .no_deref => {},
                 },
                 .range => {
-                    const add_dependency = switch (ctx) {
-                        .reference => switch (deref) {
-                            .deref => true,
-                            .no_deref => false,
+                    std.log.debug("Got here", .{});
+                    const rhs = index.subi(1);
+                    const lhs = ast.leftMostChild(rhs).subi(1);
+                    const tl = switch (ast.tag(lhs)) {
+                        .reference => switch (ast.tag(lhs.subi(1))) {
+                            .rel_rel_reference,
+                            .rel_abs_reference,
+                            .abs_rel_reference,
+                            .abs_abs_reference,
+                            => ast.payload(lhs.subi(1)).rel_rel_value,
+                            else => unreachable,
                         },
-                        .value => false,
+                        .rel_rel_reference,
+                        .rel_abs_reference,
+                        .abs_rel_reference,
+                        .abs_abs_reference,
+                        => ast.payload(lhs).rel_rel_value,
+                        else => unreachable,
                     };
-                    if (add_dependency) {
-                        const rhs = index.subi(1);
-                        const lhs = ast.leftMostChild(rhs).subi(1);
-                        const tl = switch (ast.tag(lhs)) {
-                            .reference => switch (ast.tag(lhs.subi(1))) {
-                                .rel_rel_value,
-                                .rel_abs_value,
-                                .abs_rel_value,
-                                .abs_abs_value,
-                                .rel_rel_reference,
-                                .rel_abs_reference,
-                                .abs_rel_reference,
-                                .abs_abs_reference,
-                                => ast.payload(lhs.subi(1)).rel_rel_value,
-                                else => unreachable,
-                            },
-                            .rel_rel_value,
-                            .rel_abs_value,
-                            .abs_rel_value,
-                            .abs_abs_value,
+                    std.log.debug("RHS: {t}", .{ast.tag(rhs)});
+                    const br = switch (ast.tag(rhs)) {
+                        .reference => switch (ast.tag(rhs.subi(1))) {
                             .rel_rel_reference,
                             .rel_abs_reference,
                             .abs_rel_reference,
                             .abs_abs_reference,
-                            => ast.payload(lhs).rel_rel_value,
+                            => ast.payload(rhs.subi(1)).rel_rel_value,
                             else => unreachable,
-                        };
-                        const br = switch (ast.tag(rhs)) {
-                            .reference => switch (ast.tag(rhs.subi(1))) {
-                                .rel_rel_value,
-                                .rel_abs_value,
-                                .abs_rel_value,
-                                .abs_abs_value,
-                                .rel_rel_reference,
-                                .rel_abs_reference,
-                                .abs_rel_reference,
-                                .abs_abs_reference,
-                                => ast.payload(rhs.subi(1)).rel_rel_value,
-                                else => unreachable,
-                            },
-                            .rel_rel_value,
-                            .rel_abs_value,
-                            .abs_rel_value,
-                            .abs_abs_value,
-                            .rel_rel_reference,
-                            .rel_abs_reference,
-                            .abs_rel_reference,
-                            .abs_abs_reference,
-                            => ast.payload(rhs).rel_rel_value,
-                            else => unreachable,
-                        };
-                        func(self.user_ctx, .initNormalizePos(tl, br));
-                    }
+                        },
+                        .rel_rel_reference,
+                        .rel_abs_reference,
+                        .abs_rel_reference,
+                        .abs_abs_reference,
+                        => ast.payload(rhs).rel_rel_value,
+                        else => unreachable,
+                    };
+                    func(self.user_ctx, .initNormalizePos(tl, br));
                 },
                 .dynamic_range => {
                     const rhs = index.subi(1);
                     const lhs = ast.leftMostChild(rhs).subi(1);
-                    self.traverse(lhs, .reference, .no_deref);
-                    self.traverse(rhs, .reference, .no_deref);
+                    self.traverse(lhs, .no_deref);
+                    self.traverse(rhs, .no_deref);
                 },
                 .reference => switch (deref) {
-                    .deref => self.traverse(index.subi(1), .value, .no_deref),
+                    .deref => self.traverse(index.subi(1), .no_deref),
                     .no_deref => {},
                 },
                 .dereference => {
-                    self.traverse(index.subi(1), .reference, .deref);
+                    self.traverse(index.subi(1), .deref);
                 },
                 .minus, .plus, .not => {
-                    self.traverse(index.subi(1), .value, .no_deref);
+                    self.traverse(index.subi(1), .no_deref);
                 },
                 .add,
                 .sub,
@@ -1214,8 +1137,8 @@ fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
                 => {
                     const rhs = index.subi(1);
                     const lhs = ast.leftMostChild(rhs).subi(1);
-                    self.traverse(lhs, .value, .no_deref);
-                    self.traverse(rhs, .value, .no_deref);
+                    self.traverse(lhs, .no_deref);
+                    self.traverse(rhs, .no_deref);
                 },
             }
         }

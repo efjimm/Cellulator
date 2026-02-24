@@ -428,26 +428,26 @@ fn parsePipeExpr(p: *Parser) ParseError!Intermediate {
         p.ast.nodes.shrinkRetainingCapacity(start);
 
         index, result_type = try p.parseOrExpr();
-        var function_index: u48 = undefined;
+        var function_offset: u48 = undefined;
         if (p.ast.tag(index) != .function_call) {
             index = try p.addNode(.init(.pipe_call, .{
-                .function_index = @intCast(1 + temp_tags.len),
+                .function_offset = @intCast(1 + temp_tags.len),
                 .arg_count = 1,
                 .is_pipe = true,
             }));
-            function_index = 1;
+            function_offset = 1;
         } else {
             const call = p.ast.payload(index).function_call;
             p.ast.payloadPtr(index).function_call.arg_count += 1;
-            p.ast.payloadPtr(index).function_call.function_index += @intCast(temp_tags.len);
+            p.ast.payloadPtr(index).function_call.function_offset += @intCast(temp_tags.len);
             p.ast.payloadPtr(index).function_call.is_pipe = true;
             p.ast.tagPtr(index).* = .pipe_call;
-            function_index = call.function_index;
+            function_offset = call.function_offset;
         }
 
         const dest = try p.ast.nodes.insertMany(
             p.gpa,
-            @intFromEnum(index) - (function_index - 1),
+            @intFromEnum(index) - (function_offset - 1),
             temp_tags.len,
         );
 
@@ -733,7 +733,7 @@ fn parseSuffixExpr(p: *Parser) !Intermediate {
         index = try p.addNode(.init(.function_call, .{
             .is_pipe = false,
             .arg_count = arg_count,
-            .function_index = @intCast(@intFromEnum(p.ast.lastIndex().sub(index))),
+            .function_offset = @intFromEnum(p.ast.lastIndex().sub(index)),
         }));
         result_type = .any;
     }
@@ -1245,7 +1245,7 @@ test "Node contents" {
             .init(.function_body_start, .{ .arg_count = 0, .body_length = 1, .capture_count = 0 }),
             .init(.number, 2.0),
             .init(.function_body_end, .{ .arg_count = 0, .body_length = 1, .capture_count = 0 }),
-            .init(.function_call, .{ .is_pipe = false, .arg_count = 0, .function_index = 1 }),
+            .init(.function_call, .{ .is_pipe = false, .arg_count = 0, .function_offset = 1 }),
             .init(.assignment, .fromValidAddress("a0")),
             .init(.end, .{ .length = 5 }),
         },
@@ -1316,7 +1316,7 @@ test "Node contents" {
         &.{
             .init(.rel_rel_value, .fromValidAddress("a0")),
             .init(.number, 5),
-            .init(.pipe_call, .{ .is_pipe = true, .arg_count = 1, .function_index = 2 }),
+            .init(.pipe_call, .{ .is_pipe = true, .arg_count = 1, .function_offset = 2 }),
             .init(.end, .{ .length = 3 }),
         },
     );
@@ -1328,7 +1328,7 @@ test "Node contents" {
             .init(.number, 3),
             .init(.number, 5),
             .init(.number, 10),
-            .init(.pipe_call, .{ .is_pipe = true, .arg_count = 3, .function_index = 4 }),
+            .init(.pipe_call, .{ .is_pipe = true, .arg_count = 3, .function_offset = 4 }),
             .init(.end, .{ .length = 5 }),
         },
     );
@@ -1338,10 +1338,10 @@ test "Node contents" {
         &.{
             .init(.builtin, .{ .tag = .upper }),
             .init(.rel_rel_reference, .fromValidAddress("A0")),
-            .init(.function_call, .{ .is_pipe = false, .arg_count = 1, .function_index = 2 }),
+            .init(.function_call, .{ .is_pipe = false, .arg_count = 1, .function_offset = 2 }),
             .init(.builtin, .{ .tag = .lower }),
             .init(.rel_rel_reference, .fromValidAddress("B0")),
-            .init(.function_call, .{ .is_pipe = false, .arg_count = 1, .function_index = 2 }),
+            .init(.function_call, .{ .is_pipe = false, .arg_count = 1, .function_offset = 2 }),
             .init(.concat, {}),
             .init(.end, .{ .length = 7 }),
         },
