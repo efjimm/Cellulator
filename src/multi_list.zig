@@ -56,6 +56,12 @@ pub fn MultiList(T: type, I: type) type {
                 assertValid(b);
                 return @intFromEnum(a) <= @intFromEnum(b);
             }
+
+            pub fn lt(a: Index, b: Index) bool {
+                assertValid(a);
+                assertValid(b);
+                return @intFromEnum(a) < @intFromEnum(b);
+            }
         };
 
         pub const OptionalIndex = enum(I) {

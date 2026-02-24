@@ -989,166 +989,18 @@ pub fn traverseDependencies(
     ctx: anytype,
     func: fn (@TypeOf(ctx), Rect) void,
 ) void {
-    const unwrapped = root.unwrap() orelse return;
+    const unwrapped = (root.unwrap() orelse return).addi(1);
+    const length = ast.node(unwrapped).end.length;
+    const start = unwrapped.subi(length);
 
-    var traverse: TraverseDependencies(@TypeOf(ctx), func) = .{
-        .ast = ast.*,
-        .user_ctx = ctx,
-    };
-    traverse.traverse(unwrapped, .no_deref);
-}
+    var i = start;
+    const end = start.addi(length);
 
-const CellLiteralContext = enum { value, reference };
+    var buf: [64]Position = undefined;
+    var stack: std.ArrayList(Position) = .initBuffer(&buf);
 
-// TODO: Make this function a stack machine instead of using recursion
-fn TraverseDependencies(Context: type, func: fn (Context, Rect) void) type {
-    return struct {
-        ast: Ast,
-        user_ctx: Context,
-
-        fn traverse(
-            self: *const @This(),
-            index: Node.Index,
-            /// Whether the context will automatically dereference a reference. If a reference to a cell
-            /// literal is automatically dereferenced, it will be added to the dependency graph.
-            deref: enum { deref, no_deref },
-        ) void {
-            const ast = self.ast;
-
-            switch (self.ast.node(index)) {
-                .function_capture => unreachable,
-                .function_call, .pipe_call => |call| {
-                    const start = index.subi(call.function_offset);
-                    var iter = ast.argIterator(start, index);
-                    while (iter.next()) |i| {
-                        self.traverse(i, .deref);
-                    }
-                    const func_node = index.subi(call.function_offset);
-                    self.traverse(func_node, .no_deref);
-                },
-                .tuple => |tuple| {
-                    var iter = ast.argIterator(index, index.subi(tuple.arg_count));
-                    _ = iter.next();
-                    while (iter.next()) |i| {
-                        self.traverse(i, .deref);
-                    }
-                },
-                .local_variable, .captured_variable => {},
-                .function_body_start => unreachable,
-                .function_body_end => |def| {
-                    self.traverse(index.subi(def.capture_count + 1), .no_deref);
-                },
-                .function_parameter => unreachable,
-                .assignment, .end => {
-                    self.traverse(index.subi(1), .no_deref);
-                },
-                .nil,
-                .number,
-                .string_literal,
-                .invalidated_pos,
-                .invalidated_range,
-                .builtin,
-                => {},
-                .rel_rel_value,
-                .rel_abs_value,
-                .abs_rel_value,
-                .abs_abs_value,
-                => |pos| {
-                    func(self.user_ctx, .initSinglePos(pos));
-                },
-                .rel_rel_reference,
-                .rel_abs_reference,
-                .abs_rel_reference,
-                .abs_abs_reference,
-                => |pos| switch (deref) {
-                    .deref => func(self.user_ctx, .initSinglePos(pos)),
-                    .no_deref => {},
-                },
-                .range => {
-                    std.log.debug("Got here", .{});
-                    const rhs = index.subi(1);
-                    const lhs = ast.leftMostChild(rhs).subi(1);
-                    const tl = switch (ast.tag(lhs)) {
-                        .reference => switch (ast.tag(lhs.subi(1))) {
-                            .rel_rel_reference,
-                            .rel_abs_reference,
-                            .abs_rel_reference,
-                            .abs_abs_reference,
-                            => ast.payload(lhs.subi(1)).rel_rel_value,
-                            else => unreachable,
-                        },
-                        .rel_rel_reference,
-                        .rel_abs_reference,
-                        .abs_rel_reference,
-                        .abs_abs_reference,
-                        => ast.payload(lhs).rel_rel_value,
-                        else => unreachable,
-                    };
-                    std.log.debug("RHS: {t}", .{ast.tag(rhs)});
-                    const br = switch (ast.tag(rhs)) {
-                        .reference => switch (ast.tag(rhs.subi(1))) {
-                            .rel_rel_reference,
-                            .rel_abs_reference,
-                            .abs_rel_reference,
-                            .abs_abs_reference,
-                            => ast.payload(rhs.subi(1)).rel_rel_value,
-                            else => unreachable,
-                        },
-                        .rel_rel_reference,
-                        .rel_abs_reference,
-                        .abs_rel_reference,
-                        .abs_abs_reference,
-                        => ast.payload(rhs).rel_rel_value,
-                        else => unreachable,
-                    };
-                    func(self.user_ctx, .initNormalizePos(tl, br));
-                },
-                .dynamic_range => {
-                    const rhs = index.subi(1);
-                    const lhs = ast.leftMostChild(rhs).subi(1);
-                    self.traverse(lhs, .no_deref);
-                    self.traverse(rhs, .no_deref);
-                },
-                .reference => switch (deref) {
-                    .deref => self.traverse(index.subi(1), .no_deref),
-                    .no_deref => {},
-                },
-                .dereference => {
-                    self.traverse(index.subi(1), .deref);
-                },
-                .minus, .plus, .not => {
-                    self.traverse(index.subi(1), .no_deref);
-                },
-                .add,
-                .sub,
-                .mul,
-                .div,
-                .mod,
-                .pow,
-                .logical_and,
-                .logical_or,
-                .equals,
-                .not_equals,
-                .greater_than,
-                .less_than,
-                .greater_equals,
-                .less_equals,
-                .concat,
-                => {
-                    const rhs = index.subi(1);
-                    const lhs = ast.leftMostChild(rhs).subi(1);
-                    self.traverse(lhs, .no_deref);
-                    self.traverse(rhs, .no_deref);
-                },
-            }
-        }
-    };
-}
-
-/// Returns true if the given node is a cell literal or a reference to a cell literal.
-pub fn isDynamicReference(nodes: NodeList, index: Node.Index) bool {
-    return switch (nodes.item(index, .tag)) {
-        .reference => switch (nodes.item(index.subi(1), .tag)) {
+    while (i.lt(end)) : (i = i.addi(1)) {
+        switch (ast.node(i)) {
             .rel_rel_value,
             .rel_abs_value,
             .abs_rel_value,
@@ -1157,20 +1009,30 @@ pub fn isDynamicReference(nodes: NodeList, index: Node.Index) bool {
             .rel_abs_reference,
             .abs_rel_reference,
             .abs_abs_reference,
-            => false,
-            else => true,
-        },
-        .rel_rel_value,
-        .rel_abs_value,
-        .abs_rel_value,
-        .abs_abs_value,
-        .rel_rel_reference,
-        .rel_abs_reference,
-        .abs_rel_reference,
-        .abs_abs_reference,
-        => false,
-        else => true,
-    };
+            => |pos| {
+                stack.appendBounded(pos) catch {
+                    for (stack.items) |p| {
+                        func(ctx, .initSinglePos(p));
+                    }
+                    stack.clearRetainingCapacity();
+                    stack.appendAssumeCapacity(pos);
+                };
+            },
+            .range => {
+                const tl = stack.pop().?;
+                const br = stack.pop().?;
+                func(ctx, .initNormalizePos(tl, br));
+            },
+            .invalidated_range => {
+                stack.items.len -= 2;
+            },
+            else => {},
+        }
+    }
+
+    for (stack.items) |p| {
+        func(ctx, .initSinglePos(p));
+    }
 }
 
 /// Iterates backwards over a flat list of AST nodes that contains multiple expressions in sequence.

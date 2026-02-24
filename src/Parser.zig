@@ -623,7 +623,7 @@ fn parseRangeExpr(p: *Parser) !Intermediate {
 
     // If either of the operands are anything other than a cell literal or a reference to a cell
     // literal, then this expression must be marked volatile.
-    if (p.isDynamicReference(lhs) or p.isDynamicReference(rhs)) {
+    if (p.isNotCellLiteral(lhs) or p.isNotCellLiteral(rhs)) {
         // TODO: remove dynamic range tag
         node.tag = .dynamic_range;
     }
@@ -647,7 +647,7 @@ fn parseReferenceExpr(p: *Parser) !Intermediate {
             p.setReference(operand);
 
             // Accessing the value of a cell dynamically requires volatile
-            if (p.isDynamicReference(operand))
+            if (p.isNotCellLiteral(operand))
                 p.is_volatile = true;
 
             const index = try p.addNode(.init(.dereference, {}));
@@ -657,9 +657,19 @@ fn parseReferenceExpr(p: *Parser) !Intermediate {
     };
 }
 
-/// Returns true if the given node is a cell literal or a reference to a cell literal.
-fn isDynamicReference(p: *const Parser, index: Index) bool {
-    return Ast.isDynamicReference(p.ast.nodes, index);
+fn isNotCellLiteral(p: *const Parser, index: Index) bool {
+    return switch (p.ast.tag(index)) {
+        .rel_rel_value,
+        .rel_abs_value,
+        .abs_rel_value,
+        .abs_abs_value,
+        .rel_rel_reference,
+        .rel_abs_reference,
+        .abs_rel_reference,
+        .abs_abs_reference,
+        => false,
+        else => true,
+    };
 }
 
 /// Returns true if the given node is a cell literal or a reference to a cell literal.
@@ -676,7 +686,7 @@ fn volatileAccess(p: *Parser, index: Index, result_type: Type) void {
     p.is_volatile =
         p.is_volatile or
         result_type.range_ref and p.isDynamicRange(index) or
-        result_type.cell_ref and p.isDynamicReference(index);
+        result_type.cell_ref and p.isNotCellLiteral(index);
 }
 
 /// Marks the expression as volatile if the given node could be a cell reference and is not a cell
@@ -684,7 +694,7 @@ fn volatileAccess(p: *Parser, index: Index, result_type: Type) void {
 fn volatileAccessSingle(p: *Parser, index: Index, result_type: Type) void {
     p.is_volatile =
         p.is_volatile or
-        result_type.cell_ref and p.isDynamicReference(index);
+        result_type.cell_ref and p.isNotCellLiteral(index);
 }
 
 /// If index is a cell literal, marks it as a value

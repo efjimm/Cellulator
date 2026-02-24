@@ -2645,11 +2645,11 @@ pub fn insertColsOrRows(
         if (p[dim] >= index) {
             p[dim] += n;
             p[dim + 2] += n;
-            _ = sheet.dependents.insertAssumeCapacity(p, handle);
+            sheet.dependents.insertAssumeCapacityNoClobber(p, handle);
         } else {
             assert(p[dim + 2] >= index);
             p[dim + 2] += n;
-            _ = sheet.dependents.insertAssumeCapacity(p, handle);
+            sheet.dependents.insertAssumeCapacityNoClobber(p, handle);
         }
     }
 
@@ -4037,4 +4037,17 @@ test "load csv" {
     var r: std.Io.Reader = .fixed(src);
     try sheet.loadCsv(&r);
     try sheet.update();
+}
+
+test "nuh" {
+    var sheet: Sheet = try .init(std.testing.allocator);
+    defer sheet.deinit();
+
+    try sheet.testSetCell("D3", "@sum(B3:B3)");
+    sheet.endUndoGroup();
+    try sheet.deleteColOrRowRange(1, 2, .{}, .col);
+    sheet.endUndoGroup();
+    try sheet.deleteColOrRowRange(1, 2, .{}, .col);
+    sheet.endUndoGroup();
+    try sheet.undo();
 }
