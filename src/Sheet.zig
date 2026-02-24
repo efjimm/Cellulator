@@ -1621,7 +1621,7 @@ fn updateRange(sheet: *Sheet, index: Ast.Node.Index, new_range: Rect) !void {
     try sheet.ensureUnusedUndoCapacity(1);
 
     const r = index.subi(1);
-    const l = sheet.ast.leftMostChild(r).subi(1);
+    const l = index.subi(2);
     sheet.ast.nodes.ptr(l, .data).rel_rel_value = new_range.tl;
     sheet.ast.nodes.ptr(r, .data).rel_rel_value = new_range.br;
     sheet.ast.nodes.ptr(index, .tag).* = .range;
@@ -2296,7 +2296,7 @@ pub fn deleteColOrRowRange(
             },
             .range => {
                 const rhs = i.subi(1);
-                const lhs = sheet.ast.leftMostChild(rhs).subi(1);
+                const lhs = i.subi(2);
                 const tl = sheet.ast.payload(lhs).rel_rel_value;
                 const br = sheet.ast.payload(rhs).rel_rel_value;
                 const tl_f = @field(tl, f);
@@ -2467,7 +2467,7 @@ pub fn deleteColOrRowRange(
         },
         .range => {
             const rhs = i.subi(1);
-            const lhs = sheet.ast.leftMostChild(rhs).subi(1);
+            const lhs = i.subi(2);
             const tl = &sheet.ast.nodes.ptr(lhs, .data).rel_rel_value;
             const br = &sheet.ast.nodes.ptr(rhs, .data).rel_rel_value;
             const u: Undo = .init(.update_range, .{
@@ -2570,7 +2570,7 @@ pub fn insertColsOrRows(
             .invalidated_range => iter.skip(2),
             .range => {
                 const rhs = i.subi(1);
-                const lhs = sheet.ast.leftMostChild(rhs).subi(1);
+                const lhs = i.subi(2);
                 const tl = sheet.ast.payload(lhs).rel_rel_value;
                 const br = sheet.ast.payload(rhs).rel_rel_value;
                 const tl_f = @field(tl, f);
@@ -2681,7 +2681,7 @@ pub fn insertColsOrRows(
         .invalidated_range => iter.skip(2),
         .range => {
             const rhs = i.subi(1);
-            const lhs = sheet.ast.leftMostChild(rhs).subi(1);
+            const lhs = i.subi(2);
             const tl = &nodes.ptr(lhs, .data).rel_rel_value;
             const br = &nodes.ptr(rhs, .data).rel_rel_value;
             assert(tl.x <= br.x);
@@ -2725,14 +2725,14 @@ pub fn insertRows(sheet: *Sheet, index: u32, n: u32, undo_opts: UndoOpts) !void 
     return sheet.insertColsOrRows(index, n, undo_opts, .row);
 }
 
-pub fn evaluate(sheet: *Sheet, root_node: Ast.Node.Index) !Interpreter.Value {
+pub fn evaluate(sheet: *Sheet, end_node: Ast.Node.Index) !Interpreter.Value {
     var interp: Interpreter = .{
         .arena = sheet.arena.allocator(),
         .sheet = sheet,
     };
     defer sheet.resetArena();
 
-    _ = try interp.evaluate(sheet.ast.leftMostChild(root_node));
+    _ = try interp.evaluate(sheet.ast.startFromEnd(end_node));
     const res = interp.pop();
 
     if (res == .string)
@@ -2976,7 +2976,7 @@ pub fn evalCellByHandle(
             // dependents.
             try sheet.queueDependents(sheet.rectFromCellHandle(handle));
 
-            const start = sheet.ast.leftMostChild(root);
+            const start = sheet.ast.startFromEnd(root);
             const old_volatility = eval.is_volatile;
             defer eval.is_volatile = old_volatility;
             eval.is_volatile = false;
@@ -3119,7 +3119,7 @@ pub fn printCellExpression(sheet: *Sheet, pos: Position, w: *std.Io.Writer) !voi
     }
     if (cell.root().unwrap()) |root| {
         const arena = sheet.arena.allocator();
-        try sheet.ast.print(arena, sheet.ast.leftMostChild(root.addi(1)), w);
+        try sheet.ast.print(arena, sheet.ast.startFromEnd(root.addi(1)), w);
     }
 }
 
@@ -3254,7 +3254,7 @@ pub fn copyRangeTo(sheet: *Sheet, src: Rect, dest: Rect, comptime adjust: Adjust
         const root = sheet.getCellFromHandle(cell).root().unwrap() orelse continue;
 
         const count = sheet.ast.countDependencies(root.toOptional());
-        const left = sheet.ast.leftMostChild(root);
+        const left = sheet.ast.startFromEnd(root);
         total_asts_len += @intFromEnum(root.sub(left)) + 2;
         total_deps += tile_count * count;
     }

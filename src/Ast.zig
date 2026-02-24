@@ -831,28 +831,6 @@ pub fn print(
     try w.writeAll(stack.items[0].str);
 }
 
-/// Returns the root index of each argument of a function, backwards.
-pub const ArgIterator = struct {
-    ast: Ast,
-    first_arg: Node.Index,
-    index: Node.Index,
-
-    pub fn next(iter: *ArgIterator) ?Node.Index {
-        if (iter.index.le(iter.first_arg)) return null;
-        const ret = iter.index.subi(1);
-        iter.index = iter.ast.leftMostChild(ret);
-        return ret;
-    }
-};
-
-pub fn argIterator(ast: Ast, start: Node.Index, end: Node.Index) ArgIterator {
-    return .{
-        .ast = ast,
-        .first_arg = start,
-        .index = end,
-    };
-}
-
 pub fn exprLen(ast: *const Ast, root: Node.Index) u48 {
     assert(ast.tag(root.addi(1)) == .end);
     return ast.payload(root.addi(1)).end.length;
@@ -895,69 +873,18 @@ pub fn format(f: FormatData, w: *std.Io.Writer) std.Io.Writer.Error!void {
     f.ast.print(f.arena, f.root, w) catch return error.WriteFailed;
 }
 
-pub fn leftMostChild(
+/// Returns the index of the first node in an expression, given the last or second last node.
+pub fn startFromEnd(
     ast: *const Ast,
     index: Node.Index,
 ) Node.Index {
-    return switch (ast.node(index)) {
-        // leaf nodes
-        .nil,
-        .string_literal,
-        .number,
-        .invalidated_pos,
-        .rel_rel_value,
-        .rel_abs_value,
-        .abs_rel_value,
-        .abs_abs_value,
-        .rel_rel_reference,
-        .rel_abs_reference,
-        .abs_rel_reference,
-        .abs_abs_reference,
-        .function_body_start,
-        .local_variable,
-        .captured_variable,
-        .builtin,
-        => index,
-        // branch nodes
-        .concat,
-        .add,
-        .sub,
-        .mul,
-        .div,
-        .mod,
-        .range,
-        .dynamic_range,
-        .invalidated_range,
-        .pow,
-        .logical_and,
-        .logical_or,
-        .greater_than,
-        .less_than,
-        .greater_equals,
-        .less_equals,
-        .equals,
-        .not_equals,
-        => {
-            const rhs = index.subi(1);
-            const lhs = ast.leftMostChild(rhs).subi(1);
-            return ast.leftMostChild(lhs);
+    switch (ast.node(index)) {
+        .end => |end| return index.subi(end.length),
+        else => {
+            const length = ast.node(index.addi(1)).end.length;
+            return index.subi(length - 1);
         },
-        .minus,
-        .plus,
-        .not,
-        .reference,
-        .dereference,
-        .assignment,
-        .function_parameter,
-        .function_capture,
-        => ast.leftMostChild(index.subi(1)),
-        .end => |end| index.subi(end.length),
-        .function_body_end => |def| index.subi(def.length() + 1),
-        .function_call,
-        .pipe_call,
-        => |call| ast.leftMostChild(index.subi(call.function_offset)),
-        .tuple => |tuple| index.subi(tuple.length),
-    };
+    }
 }
 
 pub const EvalError = error{
@@ -1290,7 +1217,7 @@ test "Print" {
 
         var buf: [4096]u8 = undefined;
         var fixed: std.Io.Writer = .fixed(&buf);
-        try sheet.ast.print(sheet.arena.allocator(), sheet.ast.leftMostChild(expr.root), &fixed);
+        try sheet.ast.print(sheet.arena.allocator(), sheet.ast.startFromEnd(expr.root), &fixed);
         try t.expectEqualStrings(expected, fixed.buffered());
     }
 
@@ -1299,7 +1226,7 @@ test "Print" {
 
         var buf: [4096]u8 = undefined;
         var fixed: std.Io.Writer = .fixed(&buf);
-        try sheet.ast.print(sheet.arena.allocator(), sheet.ast.leftMostChild(expr.root), &fixed);
+        try sheet.ast.print(sheet.arena.allocator(), sheet.ast.startFromEnd(expr.root), &fixed);
         try t.expectEqualStrings(src, fixed.buffered());
     }
 }
@@ -1320,6 +1247,6 @@ fn testVolatile(src: []const u8, is_volatile: bool) !void {
         .tags = sheet.ast.tags(),
         .sheet = &sheet,
     };
-    _ = try int.evaluate(sheet.ast.leftMostChild(res.root));
+    _ = try int.evaluate(sheet.ast.startFromEnd(res.root));
     try std.testing.expectEqual(is_volatile, int.is_volatile);
 }
