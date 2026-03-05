@@ -760,7 +760,14 @@ fn mapArgsNumber(eval: *Interpreter, arg_count: u8, ctx: anytype) !void {
             .pipeline => |p| {
                 const pc_start = eval.pc;
                 defer eval.pc = pc_start;
-                while (eval.evalPipeline(p)) |value| {
+                var iter: PipelineIterator = .{
+                    .eval = eval,
+                    .p = p,
+                    .i = 0,
+                    .value = undefined,
+                };
+
+                while (iter.next()) |value| {
                     const n = try eval.toNumberDeref(value);
                     try ctx.func(n);
                 } else |err| switch (err) {
@@ -782,76 +789,83 @@ fn mapArgsNumber(eval: *Interpreter, arg_count: u8, ctx: anytype) !void {
     }
 }
 
-// NOTE: This function needs to be reentrant
-/// Pulls one value from the given pipeline
-fn evalPipeline(eval: *Interpreter, p: Value.Pipeline) !Value {
-    var value: Value = undefined;
-    var i: usize = 0;
+/// Iteratively pulls values from a pipeline.
+const PipelineIterator = struct {
+    eval: *Interpreter,
+    p: Value.Pipeline,
+    i: usize,
+    value: Value,
 
-    switch (p.stages.items[0]) {
-        .range, .indirect_range => |*r| {
-            if (r.iter == null) {
-                r.iter = eval.sheet.cell_tree.iterator2(&r.min, &r.max);
-            }
-        },
-        else => {},
-    }
-
-    while (i < p.stages.items.len) {
-        switch (p.stages.items[i]) {
-            .number_range => |*r| {
-                if (r.current >= r.end) return error.EndOfStream;
-                const ret = r.current;
-                r.current += 1;
-                value = .{ .number = ret };
-            },
-            .range => |*r| {
-                const h = try r.iter.?.next() orelse return error.EndOfStream;
-                const point = eval.sheet.cell_tree.entryItem(h, .point);
-                value = .{ .cell = .fromArray(point.*) };
-            },
-            .indirect_range => |*r| {
-                // TODO: This is imprecise.
-                eval.is_volatile = true;
-                const h = try r.iter.?.next() orelse return error.EndOfStream;
-                const point = eval.sheet.cell_tree.entryItem(h, .point);
-                value = .{ .indirect_cell = .fromArray(point.*) };
-            },
-            .tuple => |*t| {
-                if (t.index >= t.values.len) return error.EndOfStream;
-                value = t.values[t.index];
-                t.index += 1;
-            },
-            .filter => |f| {
-                // Push function
-                try eval.pushv(.{ .function = f.predicate });
-                // Push arguments
-                try eval.pushv(value);
-                // Set up call stack and jump to function
-                try eval.call(1);
-                eval.pc = eval.pc.addi(1);
-                // Evaluate function
-                try eval.evaluate2(eval.pc, true);
-                // Pop return value
-                const return_value = eval.pop();
-                if (!return_value.boolean()) {
-                    i = 0;
-                    continue;
+    pub fn next(iter: *PipelineIterator) !Value {
+        const p = &iter.p;
+        const eval = iter.eval;
+        switch (p.stages.items[0]) {
+            .range, .indirect_range => |*r| {
+                if (r.iter == null) {
+                    r.iter = eval.sheet.cell_tree.iterator2(&r.min, &r.max);
                 }
             },
-            .map => |f| {
-                try eval.pushv(.{ .function = f.apply });
-                try eval.pushv(value);
-                try eval.call(1);
-                eval.pc = eval.pc.addi(1);
-                try eval.evaluate2(eval.pc, true);
-                value = eval.pop();
-            },
+            else => {},
         }
-        i += 1;
+
+        while (iter.i < p.stages.items.len) {
+            switch (p.stages.items[iter.i]) {
+                .number_range => |*r| {
+                    if (r.current >= r.end) return error.EndOfStream;
+                    const ret = r.current;
+                    r.current += 1;
+                    iter.value = .{ .number = ret };
+                },
+                .range => |*r| {
+                    const h = try r.iter.?.next() orelse return error.EndOfStream;
+                    const point = eval.sheet.cell_tree.entryItem(h, .point);
+                    iter.value = .{ .cell = .fromArray(point.*) };
+                },
+                .indirect_range => |*r| {
+                    // TODO: This is imprecise.
+                    eval.is_volatile = true;
+                    const h = try r.iter.?.next() orelse return error.EndOfStream;
+                    const point = eval.sheet.cell_tree.entryItem(h, .point);
+                    iter.value = .{ .indirect_cell = .fromArray(point.*) };
+                },
+                .tuple => |*t| {
+                    if (t.index >= t.values.len) return error.EndOfStream;
+                    iter.value = t.values[t.index];
+                    t.index += 1;
+                },
+                .filter => |f| {
+                    // Push function
+                    try eval.pushv(.{ .function = f.predicate });
+                    // Push arguments
+                    try eval.pushv(iter.value);
+                    // Set up call stack and jump to function
+                    try eval.call(1);
+                    eval.pc = eval.pc.addi(1);
+                    // Evaluate function
+                    try eval.evaluate2(eval.pc, true);
+                    // Pop return value
+                    const return_value = eval.pop();
+                    if (!return_value.boolean()) {
+                        iter.i = 0;
+                        continue;
+                    }
+                },
+                .map => |f| {
+                    try eval.pushv(.{ .function = f.apply });
+                    try eval.pushv(iter.value);
+                    try eval.call(1);
+                    eval.pc = eval.pc.addi(1);
+                    try eval.evaluate2(eval.pc, true);
+                    iter.value = eval.pop();
+                },
+            }
+            iter.i += 1;
+        }
+
+        iter.i = 0;
+        return iter.value;
     }
-    return value;
-}
+};
 
 fn evalUpper(eval: *Interpreter, arg_count: u8) ![]const u8 {
     if (arg_count != 1) return error.NotEvaluable;
@@ -1088,7 +1102,13 @@ fn countValue(
         .pipeline => |p| {
             const pc_start = eval.pc;
             defer eval.pc = pc_start;
-            while (eval.evalPipeline(p)) |value| {
+            var iter: PipelineIterator = .{
+                .eval = eval,
+                .p = p,
+                .i = 0,
+                .value = undefined,
+            };
+            while (iter.next()) |value| {
                 total += try eval.countValue(value, operation);
             } else |err| switch (err) {
                 error.EndOfStream => {},
