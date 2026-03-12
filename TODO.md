@@ -4,6 +4,7 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 # TODO
 
+- Bug: fill command doesn't update cell dependents
 - MAKE CELL EVALUATION NON RECURSIVE!!!!
   - AAAAAAAAAAAAAAAAH!!!!!
 - Serialize column widths

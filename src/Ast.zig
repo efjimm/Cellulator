@@ -193,6 +193,7 @@ pub const Node = extern struct {
         scope: Index,
     };
 
+    /// def_start args... body... captures... end
     pub const FunctionDefStart = packed struct(u64) {
         arg_count: u8,
         capture_count: u8,
@@ -1112,6 +1113,7 @@ test "Functions on Ranges" {
         }
     }.testSheetExpr;
 
+    try testSheetExpr(0, "@sum()");
     try testSheetExpr(0, "@sum(a0:a0)");
     try testSheetExpr(100, "@sum(a0:b0)");
     try testSheetExpr(500, "@sum(a0:a1)");

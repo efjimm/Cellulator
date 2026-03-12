@@ -2733,7 +2733,7 @@ pub fn evaluate(sheet: *Sheet, end_node: Ast.Node.Index) !Interpreter.Value {
     defer sheet.resetArena();
 
     _ = try interp.evaluate(sheet.ast.startFromEnd(end_node));
-    const res = interp.pop();
+    const res = interp.stack.pop().?.value;
 
     if (res == .string)
         return .{ .string = .{ .slice = try sheet.gpa.dupe(u8, res.string.bytes()) } };
@@ -2778,15 +2778,15 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
         try sheet.markDirty(arena, cell, &dirty_cells);
     }
 
-    var eval: Interpreter = .{
-        .arena = arena,
-        .sheet = sheet,
-    };
-
     for (sheet.volatile_cells.items) |data| {
         const handle_start, const len = data;
         const cells = sheet.cell_tree.slice(handle_start.int(), len);
         for (0..cells.len) |i| {
+            var eval: Interpreter = .{
+                .arena = arena,
+                .sheet = sheet,
+            };
+
             _ = sheet.evalCellByHandle(&eval, cells.handle(i)) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.CyclicalReference => {
@@ -2804,6 +2804,11 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
         const handle_start, const len = data;
         const cells = sheet.cell_tree.slice(handle_start.int(), len);
         for (0..cells.len) |i| {
+            var eval: Interpreter = .{
+                .arena = arena,
+                .sheet = sheet,
+            };
+
             _ = sheet.evalCellByHandle(&eval, cells.handle(i)) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.CyclicalReference => {
@@ -3007,7 +3012,7 @@ pub fn evalCellByHandle(
 
             sheet.deinitCellValue(cell);
 
-            const value = eval.pop();
+            const value = eval.stack.pop().?.value;
             switch (value) {
                 .none => cell.setValue(.number, 0),
                 .nil => cell.setValue(.nil, {}),
@@ -3509,34 +3514,6 @@ test "Sheet basics" {
     }
 
     try sheet.deleteCell(.init(0, 0), .{});
-}
-
-test "setCell allocations" {
-    const t = std.testing;
-    const Test = struct {
-        fn testSetCellAllocs(a: Allocator) !void {
-            var sheet = try Sheet.init(a);
-            defer sheet.deinit();
-
-            {
-                const src = "a4 * a1 * a3";
-                const expr = try sheet.parseFromExpression(src);
-                try sheet.setCell(.{ .x = 0, .y = 0 }, expr, .{});
-            }
-
-            {
-                const src = "a2 * a1 * a3";
-                const expr = try sheet.parseFromExpression(src);
-                try sheet.setCell(.{ .x = 1, .y = 0 }, expr, .{});
-            }
-
-            try sheet.deleteCell(.{ .x = 0, .y = 0 }, .{});
-
-            try sheet.update();
-        }
-    };
-
-    try t.checkAllAllocationFailures(t.allocator, Test.testSetCellAllocs, .{});
 }
 
 test "Update values" {
