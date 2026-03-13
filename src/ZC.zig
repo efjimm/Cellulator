@@ -65,6 +65,28 @@ pub const Ui = struct {
         len: usize,
     };
 
+    pub const none: Ui = .{
+        .ptr = undefined,
+        .vtable = &.{
+            .applyTheme = applyThemeStub,
+            .applyDefaultTheme = applyDefaultThemeStub,
+            .stringWidth = stringWidthStub,
+            .theme_file_extension = "",
+            .ui_name = "none",
+        },
+    };
+
+    fn applyThemeStub(_: *anyopaque, _: [:0]const u8) ApplyThemeError!void {}
+
+    fn applyDefaultThemeStub(_: *anyopaque) ApplyThemeError!void {}
+
+    fn stringWidthStub(_: *anyopaque, bytes: []const u8, opts: StringWidthOptions) StringWidthResult {
+        const res = @import("zg").display_width.strWidth(bytes, .{
+            .max_width = opts.max_width,
+        });
+        return .{ .width = @intCast(res.width), .len = res.len };
+    }
+
     // TODO: Better error handling and reporting
     pub fn applyTheme(ui: Ui, theme_filepath: [:0]const u8) ApplyThemeError!void {
         return ui.vtable.applyTheme(ui.ptr, theme_filepath);
@@ -102,7 +124,7 @@ max_sheet_n: usize = 1,
 sheets: std.StringArrayHashMapUnmanaged(Sheet),
 
 // TODO: Move all calls from this to the interface and remove this field
-ui: Tui,
+ui: ?Tui,
 ui_interface: Ui,
 
 prev_mode: Mode = .normal,
@@ -126,6 +148,7 @@ keymaps: input.KeyMaps,
 
 allocator: Allocator,
 io: std.Io,
+env: std.process.Environ,
 
 input_buf: std.Io.Writer.Allocating,
 
@@ -270,7 +293,13 @@ pub const InitOptions = struct {
 
 /// Initialises via a pointer rather than returning an instance, as we need a
 /// stable pointer to a ZC instance.
-pub fn init(zc: *ZC, allocator: Allocator, io: std.Io, options: InitOptions) !void {
+pub fn init(
+    zc: *ZC,
+    allocator: Allocator,
+    io: std.Io,
+    env: std.process.Environ,
+    options: InitOptions,
+) !void {
     errdefer zc.* = undefined;
 
     zc.allocator = allocator;
@@ -278,10 +307,13 @@ pub fn init(zc: *ZC, allocator: Allocator, io: std.Io, options: InitOptions) !vo
     var keys = try input.createKeymaps(allocator);
     errdefer keys.deinit(allocator);
 
-    var tui = try Tui.init(allocator, io);
-    errdefer tui.deinit(allocator);
+    var tui = if (options.ui)
+        try Tui.init(allocator, io, env)
+    else
+        null;
+    errdefer if (options.ui) tui.?.deinit(allocator);
 
-    if (options.ui) try tui.uncook();
+    if (options.ui) try tui.?.uncook();
 
     var lua_state = try lua.init(zc);
     errdefer lua_state.deinit();
@@ -294,6 +326,7 @@ pub fn init(zc: *ZC, allocator: Allocator, io: std.Io, options: InitOptions) !vo
         .ui_interface = undefined,
         .allocator = allocator,
         .io = io,
+        .env = env,
         .keymaps = keys,
         .arena = .init(allocator),
         .input_buf = try .initCapacity(allocator, 1),
@@ -304,7 +337,7 @@ pub fn init(zc: *ZC, allocator: Allocator, io: std.Io, options: InitOptions) !vo
     const sheet = try zc.openSheet();
     zc.setCurrentSheet(sheet);
 
-    zc.ui_interface = zc.ui.ui();
+    zc.ui_interface = if (options.ui) zc.ui.?.ui() else .none;
 
     zc.sourceLua() catch |err| log.err("Could not source init.lua: {}", .{err});
 
@@ -323,9 +356,9 @@ pub fn sourceLua(zc: *ZC) !void {
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     const allocator = fba.allocator();
 
-    const paths: []const []const u8 = if (std.posix.getenv("XDG_CONFIG_HOME")) |path|
+    const paths: []const []const u8 = if (zc.env.getPosix("XDG_CONFIG_HOME")) |path|
         &.{ path, "cellulator/init.lua" }
-    else if (std.posix.getenv("HOME")) |path|
+    else if (zc.env.getPosix("HOME")) |path|
         &.{ path, ".config/cellulator/init.lua" }
     else
         return error.CouldNotDeterminePath;
@@ -340,7 +373,8 @@ pub fn sourceLua(zc: *ZC) !void {
 }
 
 pub fn deinit(zc: *ZC) void {
-    zc.ui.deinit(zc.allocator);
+    if (zc.ui) |*ui|
+        ui.deinit(zc.allocator);
 
     // Don't need to free memory on exit, the OS will do it for us :^)
     if (!std.debug.runtime_safety) return;
@@ -446,7 +480,8 @@ fn clearInput(zc: *ZC) void {
 pub fn run(zc: *ZC) !void {
     while (zc.running) {
         try zc.updateCells();
-        try zc.ui.render(zc);
+        if (zc.ui) |*ui|
+            try ui.render(zc);
         try zc.handleInput();
     }
 }
@@ -468,7 +503,7 @@ pub fn setCell(
     if (opts.emit_event) {
         const expr_string =
             for (src, 0..) |c, i| {
-                if (c == '=') break std.mem.trimLeft(
+                if (c == '=') break std.mem.trimStart(
                     u8,
                     src[i + 1 ..],
                     &std.ascii.whitespace,
@@ -574,12 +609,12 @@ fn handleInput(zc: *ZC) !void {
 
     // TODO: Move most of this into the UI implementation.
     var buf: [256]u8 = undefined;
-    const slice = zc.ui.term.readInputSingleThreadedBlocking(&buf) catch |err| switch (err) {
+    const slice = zc.ui.?.term.readInputSingleThreadedBlocking(&buf) catch |err| switch (err) {
         error.Interrupted => &.{},
         else => |e| return e,
     };
 
-    try input.parse(&zc.ui.term, slice, &zc.input_buf.writer);
+    try input.parse(&zc.ui.?.term, slice, &zc.input_buf.writer);
     const bytes = try zc.inputSentinelSlice();
 
     switch (zc.mode) {
@@ -668,13 +703,15 @@ fn clampScreenToCommandCursor(zc: *ZC) void {
         return;
     }
 
+    const ui = &zc.ui.?;
+
     const len = zc.command.length();
     var x: u32 = zc.command.cursor;
     // Reserve either the width of the character under the cursor, or 1 column if none.
     var w: u16 = if (zc.command.cursor < len) blk: {
         const grapheme_len = zc.command.nextCharacter(x, 1);
         const grapheme_slice = zc.command.slice(x, grapheme_len);
-        break :blk @intCast(zc.ui.term.stringWidth(grapheme_slice));
+        break :blk @intCast(ui.term.stringWidth(grapheme_slice));
     } else 1;
 
     while (true) {
@@ -683,9 +720,9 @@ fn clampScreenToCommandCursor(zc: *ZC) void {
         if (prev == x or x < zc.screen_pos.x) break;
 
         const graphemeSlice = zc.command.slice(x, prev - x);
-        w += @intCast(zc.ui.term.stringWidth(graphemeSlice));
+        w += @intCast(ui.term.stringWidth(graphemeSlice));
 
-        if (w > zc.ui.term.width) {
+        if (w > ui.term.width) {
             if (prev > zc.command_screen_pos) zc.command_screen_pos = prev;
             break;
         }
@@ -1077,14 +1114,14 @@ fn populatePathCompletions(zc: *ZC, query: []const u8) !void {
         zc.completions_buffer.clearRetainingCapacity();
 
         // TODO: Update to std.Io.Dir when iterator becomes available
-        var dir = std.fs.cwd().openDir(dirname, .{ .iterate = true }) catch {
+        var dir = std.Io.Dir.cwd().openDir(zc.io, dirname, .{ .iterate = true }) catch {
             zc.last_dirname = dirname;
             return;
         };
-        defer dir.close();
+        defer dir.close(zc.io);
 
         var dir_iter = dir.iterate();
-        while (try dir_iter.next()) |entry| {
+        while (try dir_iter.next(zc.io)) |entry| {
             const start = zc.completions_buffer.items.len;
             try zc.dir_entries.ensureUnusedCapacity(zc.allocator, 1);
             try zc.completions_buffer.ensureUnusedCapacity(zc.allocator, entry.name.len + 1);
@@ -1099,7 +1136,7 @@ fn populatePathCompletions(zc: *ZC, query: []const u8) !void {
             });
         }
 
-        zc.last_dirname = std.mem.trimRight(u8, dirname, "/");
+        zc.last_dirname = std.mem.trimEnd(u8, dirname, "/");
 
         const Context = struct {
             fn lessThan(z: *ZC, a: DirEntry, b: DirEntry) bool {
@@ -1208,22 +1245,22 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
         .put_cell => try zc.put(zc.anyCursorRange(), .no_adjust),
         .put_cell_adjust => try zc.put(zc.anyCursorRange(), .adjust),
         .page_down => {
-            const n = zc.getCount() *| zc.ui.cellViewHeight();
+            const n = zc.getCount() *| zc.ui.?.cellViewHeight();
             zc.setCursor(.init(zc.cursor.x, zc.cursor.y +| n));
             zc.resetCount();
         },
         .page_up => {
-            const n = zc.getCount() *| zc.ui.cellViewHeight();
+            const n = zc.getCount() *| zc.ui.?.cellViewHeight();
             zc.setCursor(.init(zc.cursor.x, zc.cursor.y -| n));
             zc.resetCount();
         },
         .half_page_down => {
-            const n = zc.getCount() *| (zc.ui.cellViewHeight() / 2);
+            const n = zc.getCount() *| (zc.ui.?.cellViewHeight() / 2);
             zc.setCursor(.init(zc.cursor.x, zc.cursor.y +| n));
             zc.resetCount();
         },
         .half_page_up => {
-            const n = zc.getCount() *| (zc.ui.cellViewHeight() / 2);
+            const n = zc.getCount() *| (zc.ui.?.cellViewHeight() / 2);
             zc.setCursor(.init(zc.cursor.x, zc.cursor.y -| n));
             zc.resetCount();
         },
@@ -1945,15 +1982,15 @@ pub const Command = enum {
     }
 
     fn cmdSaveBinary(zc: *ZC, path: PathArg) !void {
-        const file = std.fs.cwd().createFile(path.bytes, .{}) catch |err| {
+        const file = std.Io.Dir.cwd().createFile(zc.io, path.bytes, .{}) catch |err| {
             zc.setStatusMessage(.warn, "Could not write binary file: {s}", .{
                 @errorName(err),
             });
             return;
         };
-        defer file.close();
+        defer file.close(zc.io);
 
-        try zc.currentSheet().serialize(file);
+        try zc.currentSheet().serialize(zc.io, file);
     }
 
     fn cmdLoadBinary(zc: *ZC, path: PathArg) Oom!void {
@@ -2211,9 +2248,9 @@ pub const Command = enum {
         switch (property.value) {
             .theme => try zc.setTheme(value),
             .truecolor => if (std.ascii.eqlIgnoreCase(value, "true")) {
-                zc.ui.term.terminfo.queryTrueColour();
+                zc.ui.?.term.terminfo.queryTrueColour(zc.env);
             } else if (std.ascii.eqlIgnoreCase(value, "false")) {
-                zc.ui.term.terminfo.truecolour = .none;
+                zc.ui.?.term.terminfo.truecolour = .none;
             },
         }
     }
@@ -2221,7 +2258,7 @@ pub const Command = enum {
     // TODO: Make the enum here be a subset containing only boolean properties
     fn cmdSetTrue(zc: *ZC, property: ArgEnum(SetProperty, "property")) !void {
         switch (property.value) {
-            .truecolor => zc.ui.term.terminfo.queryTrueColour(),
+            .truecolor => zc.ui.?.term.terminfo.queryTrueColour(zc.env),
             else => {
                 // TODO: Make sure this is reported correctly
                 return error.InvalidProperty;
@@ -2234,7 +2271,7 @@ pub const Command = enum {
         switch (property.value) {
             .theme => try zc.setDefaultTheme(),
             .truecolor => {
-                zc.ui.term.terminfo.truecolour = .none;
+                zc.ui.?.term.terminfo.truecolour = .none;
             },
         }
     }
@@ -2579,7 +2616,7 @@ pub fn runCommand(zc: *ZC, str: []const u8, comptime map: std.StaticStringMap(Co
 
     std.log.info("Running command '{s}'", .{str});
     const cmd_tag = map.get(cmd_str) orelse {
-        if (@import("builtin").mode != .Debug) return error.InvalidCommand;
+        if (!@import("builtin").is_test) return error.InvalidCommand;
 
         return zc.runDebugCommand(cmd_str, &iter);
     };
@@ -2654,17 +2691,21 @@ fn writeFile(zc: *ZC, maybe_filepath: ?[]const u8) !void {
 
     // TODO: Upgrade usage of atomic file whenever it gets added to std.Io
     var buf: [8192]u8 = undefined;
-    var atomic_file = try std.fs.cwd().atomicFile(filepath, .{ .write_buffer = &buf });
-    defer atomic_file.deinit();
+    var atomic_file = try std.Io.Dir.cwd().createFileAtomic(zc.io, filepath, .{
+        .replace = true,
+    });
+    defer atomic_file.deinit(zc.io);
 
-    const w = &atomic_file.file_writer.interface;
+    var writer = atomic_file.file.writer(zc.io, &buf);
+    const w = &writer.interface;
+
     if (std.mem.endsWith(u8, filepath, ".csv")) {
         try sheet.writeCsv(w);
     } else {
         try zc.writeZcHeader(w);
         try sheet.writeContents(w);
     }
-    try atomic_file.finish();
+    try atomic_file.replace(zc.io);
 
     if (maybe_filepath) |path|
         sheet.setFilePath(path);
@@ -2835,9 +2876,9 @@ fn setTheme(
     const ui_name = zc.ui_interface.getUiName();
     const extension = zc.ui_interface.getThemeFileExtension();
 
-    const dir, const subpath = if (std.posix.getenv("XDG_CONFIG_HOME")) |path|
+    const dir, const subpath = if (zc.env.getPosix("XDG_CONFIG_HOME")) |path|
         .{ path, "cellulator" }
-    else if (std.posix.getenv("HOME")) |path|
+    else if (zc.env.getPosix("HOME")) |path|
         .{ path, ".config/cellulator" }
     else
         return error.CouldNotDeterminePath;
@@ -2999,7 +3040,9 @@ pub fn selectionRight(zc: *ZC) void {
 
 // FIXME: The Y value is incorrect when clamping screen to cursor?
 pub fn leftReservedColumns(zc: *const ZC) u16 {
-    const y = zc.screen_pos.y +| zc.ui.cellViewHeight() -| 1;
+    // TODO: Ui interface
+    const ui = zc.ui orelse return 0;
+    const y = zc.screen_pos.y +| ui.cellViewHeight() -| 1;
 
     if (y == 0)
         return 2;
@@ -3013,7 +3056,9 @@ pub fn clampScreenToCursor(zc: *ZC) void {
 }
 
 pub fn clampScreenToCursorY(zc: *ZC) void {
-    const height = zc.ui.cellViewHeight();
+    // TODO: Ui interface
+    const ui = zc.ui orelse return;
+    const height = ui.cellViewHeight();
     if (height == 0) return;
 
     if (zc.cursor.y < zc.screen_pos.y) {
@@ -3031,15 +3076,18 @@ pub fn clampScreenToCursorX(zc: *ZC) void {
         return;
     }
 
+    // TODO: Ui interface
+    const ui = zc.ui orelse return;
+
     var w = zc.leftReservedColumns();
     var x = zc.cursor.x;
 
-    const view_width = zc.ui.term.width -| zc.leftReservedColumns();
+    const view_width = ui.term.width -| zc.leftReservedColumns();
     while (x >= zc.screen_pos.x) : (x -= 1) {
         const col: Sheet.Column = zc.currentSheet().getColumn(x) orelse .{};
         w += @min(view_width, col.width);
 
-        if (w > zc.ui.term.width) {
+        if (w > zc.ui.?.term.width) {
             if (x < zc.cursor.x) {
                 zc.screen_pos.x = x +| 1;
             }
@@ -3125,7 +3173,7 @@ fn widthNeededForColumn(
                 .number => std.fmt.count("{d:.[1]}", .{ cell.value.number, ctx.precision }),
                 .string => ctx.zc.ui_interface.stringWidth(
                     ctx.sheet.cellStringValue(cell),
-                    .{ .max_width = ctx.zc.ui.term.width },
+                    .{ .max_width = ctx.zc.ui.?.term.width },
                 ).width,
                 .ref_cell => std.fmt.count("{f}", .{cell.value.ref_cell}),
                 .ref_range => std.fmt.count("{f}", .{
@@ -3179,7 +3227,7 @@ pub fn expandWidthAtCursor(zc: *ZC) Oom!void {
     const handle = sheet.getColumnHandle(zc.cursor.x) orelse return;
     const col = sheet.cols.getValue(handle);
 
-    const max_width = zc.ui.term.width - zc.leftReservedColumns();
+    const max_width = zc.ui.?.term.width - zc.leftReservedColumns();
     const width_needed = try zc.widthNeededForColumn(
         sheet,
         zc.cursor.x,
@@ -3238,7 +3286,7 @@ pub fn cursorGotoCol(zc: *ZC) void {
 test "Sheet mode counts" {
     const t = std.testing;
     var zc: ZC = undefined;
-    try zc.init(t.allocator, t.io, .{ .ui = false });
+    try zc.init(t.allocator, t.io, t.environ, .{ .ui = false });
     defer zc.deinit();
 
     try t.expectEqual(Mode.normal, zc.mode);
@@ -3250,7 +3298,7 @@ test "Motions normal mode" {
     const max = std.math.maxInt(Position.Int);
 
     var zc: ZC = undefined;
-    try zc.init(t.allocator, t.io, .{ .ui = false });
+    try zc.init(t.allocator, t.io, t.environ, .{ .ui = false });
     defer zc.deinit();
 
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
@@ -3453,7 +3501,7 @@ test "Motions visual mode" {
     const max = std.math.maxInt(Position.Int);
 
     var zc: ZC = undefined;
-    try zc.init(t.allocator, t.io, .{ .ui = false });
+    try zc.init(t.allocator, t.io, t.environ, .{ .ui = false });
     defer zc.deinit();
 
     zc.setMode(.visual);
@@ -3825,7 +3873,7 @@ test "Motions visual mode" {
 // Test files at runtime so no recompilation is needed if the data changes
 fn testFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     var zc: ZC = undefined;
-    try zc.init(gpa, io, .{ .ui = false });
+    try zc.init(gpa, io, std.testing.environ, .{ .ui = false });
     defer zc.deinit();
 
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
@@ -3866,7 +3914,7 @@ test "Sheet operations" {
 
 test "Invalid reference" {
     var zc: ZC = undefined;
-    try zc.init(std.testing.allocator, std.testing.io, .{ .ui = false });
+    try zc.init(std.testing.allocator, std.testing.io, std.testing.environ, .{ .ui = false });
     defer zc.deinit();
 
     try zc.parseCommand("let a0 = &10");

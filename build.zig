@@ -151,27 +151,16 @@ fn configureTests(
     });
 
     // Create cache directory for temporarily storing files created by serialization tests
-    const test_data_subpath = "tmp" ++ std.fs.path.sep_str ++ "test-data";
-    b.cache_root.handle.makePath(test_data_subpath) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => |e| {
-            std.debug.print("unable to make tmp path '{s}': {s}\n", .{
-                test_data_subpath, @errorName(e),
-            });
-        },
-    };
-    const test_data_path = b.cache_root.join(b.allocator, &.{test_data_subpath}) catch @panic("OOM");
+    const write_files = b.addTempFiles();
+    const test_data_path = write_files.getDirectory();
 
-    opts.addOption([]const u8, "temp_dir", test_data_path);
+    opts.addOptionPath("temp_dir", test_data_path);
 
     const test_exe_step = b.step("test-exe", "Install test executable");
     const install_step = b.addInstallArtifact(tests, .{});
     test_exe_step.dependOn(&install_step.step);
 
     const test_step = b.step("test", "Run all unit tests");
-
-    const cleanup = b.addRemoveDirTree(.{ .cwd_relative = test_data_path });
-    test_step.dependOn(&cleanup.step);
 
     if (use_kcov) {
         // Tests with coverage report
@@ -186,10 +175,10 @@ fn configureTests(
             .install_subdir = "",
         });
         install_kcov_out.step.dependOn(&run_kcov.step);
-        cleanup.step.dependOn(&install_kcov_out.step);
+        test_step.dependOn(&install_kcov_out.step);
     } else {
         const run_tests = b.addRunArtifact(tests);
-        cleanup.step.dependOn(&run_tests.step);
+        test_step.dependOn(&run_tests.step);
     }
 
     return tests;

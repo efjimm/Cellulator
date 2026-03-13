@@ -217,7 +217,7 @@ pub const WordIterator = struct {
         if (self.index >= self.string.len)
             return null;
 
-        const str = std.mem.trimLeft(u8, self.string[self.index..], &std.ascii.whitespace);
+        const str = std.mem.trimStart(u8, self.string[self.index..], &std.ascii.whitespace);
         self.index = str.ptr - self.string.ptr;
 
         if (str.len == 0)

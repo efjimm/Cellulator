@@ -123,7 +123,7 @@ pub const Columns = PhTree(Column, 1, u32);
 pub const Dependents = PhTree(DepIndex, 4, usize);
 pub const CellTree = PhTree(Cell, 2, usize);
 
-pub const DepIndex = packed struct {
+pub const DepIndex = packed struct(u32) {
     n: u32,
 
     pub fn from(n: u32) DepIndex {
@@ -489,7 +489,7 @@ const SerializeHeader = extern struct {
 };
 
 // TODO: Update to use std.Io.File when writer is implemented
-pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
+pub fn serialize(sheet: *Sheet, io: std.Io, file: std.Io.File) !void {
     assert(sheet.queued_cells.items.len == 0);
 
     const header: SerializeHeader = .{
@@ -522,7 +522,7 @@ pub fn serialize(sheet: *Sheet, file: std.fs.File) !void {
         utils.multiArrayListIoVec(&sheet.undos) ++
         utils.multiArrayListIoVec(&sheet.redos);
 
-    var writer = file.writer(&.{});
+    var writer = file.writer(io, &.{});
     try writer.interface.writeVecAll(&iovecs);
 }
 
@@ -2744,14 +2744,7 @@ pub fn evaluate(sheet: *Sheet, end_node: Ast.Node.Index) !Interpreter.Value {
 pub fn update(sheet: *Sheet) Allocator.Error!void {
     if (!sheet.needsUpdate()) return;
 
-    // log.debug("Updating cells...", .{});
-    var timer = if (builtin.mode == .Debug)
-        std.time.Timer.start() catch unreachable
-    else {};
-
     defer sheet.queued_cells.clearRetainingCapacity();
-
-    // log.debug("Marking dirty cells", .{});
 
     var dirty_cells: std.ArrayList(Cell.Handle) = .empty;
     const arena = sheet.arena.allocator();
@@ -2820,12 +2813,6 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
                 else => {},
             };
         }
-    }
-
-    if (builtin.mode == .Debug) {
-        log.debug("Finished cell update in {d} ms", .{
-            @as(f64, @floatFromInt(timer.read())) / std.time.ns_per_ms,
-        });
     }
 
     sheet.needs_update = false;
@@ -3572,7 +3559,7 @@ pub fn expectRangeNonExtant(sheet: *Sheet, address: []const u8) !void {
 
     if (results.items.len != 0) {
         var buf: [4096]u8 = undefined;
-        var bw = std.fs.File.stderr().writer(&buf);
+        var bw = std.Io.File.stderr().writer(std.testing.io, &buf);
         try bw.interface.print("Expected cells {f} to not exist, found", .{r});
         for (results.items) |handle| {
             const p = sheet.cell_tree.getPoint(handle).*;

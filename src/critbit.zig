@@ -387,6 +387,6 @@ test "critbit2" {
 }
 
 test {
-    std.testing.refAllDeclsRecursive(@This());
-    std.testing.refAllDeclsRecursive(CritBitMap([]const u8, u32, StringContext));
+    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(CritBitMap([]const u8, u32, StringContext));
 }

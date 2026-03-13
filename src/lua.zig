@@ -28,7 +28,7 @@ pub fn init(zc: *ZC) !*Lua {
         {
             // Tui
             // Requires `zc` to be a stable pointer
-            state.newUserdata(*Tui, 1).* = &zc.ui;
+            state.newUserdata(*Tui, 1).* = &zc.ui.?;
 
             try createMetatable(state, "tui");
             state.setMetatable(-2);

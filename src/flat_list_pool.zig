@@ -19,7 +19,7 @@ pub fn FlatListPool(comptime T: type) type {
             offset: u32,
             capacity: u32,
 
-            pub const Index = packed struct {
+            pub const Index = packed struct(u32) {
                 n: u32,
 
                 pub const none: Index = .{ .n = std.math.maxInt(u32) };

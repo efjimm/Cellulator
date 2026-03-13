@@ -327,7 +327,7 @@ fn parseFunctionDefinition(p: *Parser) ParseError!Intermediate {
         if (p.eatToken(.pipe)) |_| break;
         const start = try p.expectTokenGet(.identifier);
         const end = p.token_starts[p.tok_i];
-        const bytes = std.mem.trimRight(u8, p.src[start..end], &std.ascii.whitespace);
+        const bytes = std.mem.trimEnd(u8, p.src[start..end], &std.ascii.whitespace);
         const string = try p.addString(bytes);
         try p.locals.append(p.gpa, .{
             .name = string,
@@ -399,7 +399,7 @@ fn parseAssignment(p: *Parser) ParseError!Index {
     const start = p.token_starts[p.tok_i];
     p.tok_i += 1;
     const raw = p.src[start..p.token_starts[p.tok_i]];
-    const text = std.mem.trimRight(u8, raw, " \t\r\n");
+    const text = std.mem.trimEnd(u8, raw, " \t\r\n");
 
     const pos = Position.fromAddress(text) catch return p.setError(
         error.InvalidCellAddress,
@@ -809,7 +809,7 @@ fn parseTuple(p: *Parser) !Intermediate {
 fn parseVariable(p: *Parser) !Intermediate {
     const start = try p.expectTokenGet(.identifier);
     const end = p.token_starts[p.tok_i];
-    const bytes = std.mem.trimRight(u8, p.src[start..end], &std.ascii.whitespace);
+    const bytes = std.mem.trimEnd(u8, p.src[start..end], &std.ascii.whitespace);
     var i = p.locals.items.len;
     while (i > 0) {
         i -= 1;
@@ -864,7 +864,7 @@ fn parseBuiltin(p: *Parser) !Intermediate {
     const start = try p.expectTokenGet(.builtin);
     const end = p.token_starts[p.tok_i];
 
-    const identifier = std.mem.trimRight(u8, p.src[start + 1 .. end], &std.ascii.whitespace);
+    const identifier = std.mem.trimEnd(u8, p.src[start + 1 .. end], &std.ascii.whitespace);
     const builtin = builtins.get(identifier) orelse return p.setError(
         error.InvalidBuiltin,
         .{ .invalid_builtin = identifier },
@@ -909,7 +909,7 @@ fn parseNumber(p: *Parser) !Intermediate {
 
     const start = try p.expectTokenGet(.number);
     const raw = p.src[start..p.token_starts[p.tok_i]];
-    const text = std.mem.trimRight(u8, raw, " \t\r\n");
+    const text = std.mem.trimEnd(u8, raw, " \t\r\n");
 
     // Correctness of the number is guaranteed because the tokenizer wouldn't have generated a
     // number token on invalid format.
@@ -958,7 +958,7 @@ fn parseCellName(p: *Parser) !Intermediate {
     const start = p.token_starts[p.tok_i];
     p.tok_i += 1;
     const raw = p.src[start..p.token_starts[p.tok_i]];
-    const text = std.mem.trimRight(u8, raw, " \t\r\n");
+    const text = std.mem.trimEnd(u8, raw, " \t\r\n");
 
     const res = Position.fromAddress2(text) catch return p.setError(
         error.InvalidCellAddress,

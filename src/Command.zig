@@ -4,10 +4,10 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 /// List of indices into the history buffer.
-history_indices: std.ArrayListUnmanaged(u32) = .{},
+history_indices: std.ArrayList(u32) = .empty,
 
 /// Append-only buffer of text, used for history items.
-history_buf: std.ArrayListUnmanaged(u8) = .{},
+history_buf: std.ArrayList(u8) = .empty,
 
 /// Byte position of the cursor in the currently selected buffer.
 cursor: u32 = 0,

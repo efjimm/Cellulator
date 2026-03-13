@@ -4,6 +4,8 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 # TODO
 
+- Bug: Expand column to width not correct with wide characters
+- Bug: Assertion trip when loading file header with empty line or something
 - Bug: fill command doesn't update cell dependents
 - MAKE CELL EVALUATION NON RECURSIVE!!!!
   - AAAAAAAAAAAAAAAAH!!!!!

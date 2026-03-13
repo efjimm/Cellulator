@@ -2,7 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Lua = @import("zlua").Lua;
 
-pub const Position = packed struct {
+pub const Position = packed struct(u64) {
     pub const Int = u32;
     pub const HashInt = u64;
 

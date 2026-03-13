@@ -24,8 +24,8 @@ pub fn deinitUnicodeData(allocator: std.mem.Allocator) void {
 }
 var zc: ZC = undefined;
 
-pub fn main() !void {
-    zc.ui.term.cooked_termios = null;
+pub fn main(init: std.process.Init.Minimal) !void {
+    // zc.ui.term.cooked_termios = null;
 
     if (logfile_path) |path| {
         logfile = try std.fs.cwd().createFile(path, .{});
@@ -35,9 +35,8 @@ pub fn main() !void {
     };
 
     var filepath: ?[]const u8 = null;
-    var iter = std.process.args();
-    _ = iter.next();
-    while (iter.next()) |arg| {
+    for (init.args.vector[1..]) |ptr| {
+        const arg = std.mem.span(ptr);
         if (arg.len == 0) continue;
 
         switch (arg[0]) {
@@ -64,12 +63,12 @@ pub fn main() !void {
 
     var threaded: std.Io.Threaded = .init_single_threaded;
     defer threaded.deinit();
-    const io = threaded.ioBasic();
+    const io = threaded.io();
 
     try initUnicodeData(gpa);
     defer if (is_debug) deinitUnicodeData(gpa);
 
-    try zc.init(gpa, io, .{ .filepath = filepath, .ui = true });
+    try zc.init(gpa, io, init.environ, .{ .filepath = filepath, .ui = true });
     defer zc.deinit();
 
     try zc.run();
@@ -77,7 +76,8 @@ pub fn main() !void {
 
 fn panicFn(msg: []const u8, ret_addr: ?usize) noreturn {
     @branchHint(.cold);
-    zc.ui.term.cook() catch {};
+    // TODO: Ui interface
+    zc.ui.?.term.cook() catch {};
     std.debug.defaultPanic(msg, ret_addr);
 }
 

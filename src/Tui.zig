@@ -319,9 +319,7 @@ pub fn stringWidthInternal(
     return .{ .width = @intCast(res.width), .len = res.len };
 }
 
-pub const InitError = Term.InitError || Term.UncookError || error{OperationNotSupported};
-
-pub fn init(allocator: std.mem.Allocator, io: std.Io) InitError!Tui {
+pub fn init(allocator: std.mem.Allocator, io: std.Io, env: std.process.Environ) !Tui {
     std.posix.sigaction(std.posix.SIG.WINCH, &.{
         .handler = .{ .handler = resizeHandler },
         .mask = std.posix.sigemptyset(),
@@ -330,7 +328,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io) InitError!Tui {
 
     try shovel.initUnicodeData(allocator);
 
-    const term: Term = try .init(allocator, io, .{
+    const term: Term = try .init(allocator, io, env, .{
         .truecolour = .check,
         .terminfo = .{
             .fallback = .@"xterm-256color",
@@ -823,7 +821,7 @@ fn writeToken(tui: *Tui, tag: Token.Tag, slice: []const u8, wr: *Screen.Writer) 
             try writer.writeAll(slice);
         },
         else => {
-            const trimmed = std.mem.trimRight(u8, slice, &std.ascii.whitespace);
+            const trimmed = std.mem.trimEnd(u8, slice, &std.ascii.whitespace);
             try writer.writeAll(trimmed);
             const whitespace = slice[trimmed.len..];
             if (whitespace.len > 0) {
