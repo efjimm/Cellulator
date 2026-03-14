@@ -12,6 +12,7 @@ might be an interesting read so I committed it. The stuff at the top is probably
 - Serialize column precision
 - Escape single quotes in printed string values
 
+- Implement integer types
 - Implement tuple indexing and functions for manipulation
 - More stream functionality
   - @any

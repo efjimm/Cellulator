@@ -2897,6 +2897,12 @@ pub fn deinitCellValue(sheet: *Sheet, cell: *Cell) void {
             const v = cell.value.tuple;
             v.deinit(sheet.gpa);
             sheet.value_pool.destroy(v);
+            for (sheet.values_to_free.items, 0..) |v2, i| {
+                if (v2 == v) {
+                    _ = sheet.values_to_free.swapRemove(i);
+                    break;
+                }
+            }
         },
         .pipeline => {
             const v = cell.value.pipeline;
@@ -3005,9 +3011,11 @@ pub fn setCellValue(
             cell.setValue(.pipeline, new_value);
         },
         .tuple => {
+            try sheet.values_to_free.ensureUnusedCapacity(sheet.gpa, 1);
             const new_value = try sheet.value_pool.create(sheet.gpa);
             errdefer sheet.value_pool.destroy(new_value);
             new_value.* = try value.clone(sheet.gpa);
+            sheet.values_to_free.appendAssumeCapacity(new_value);
             cell.setValue(.tuple, new_value);
         },
     }

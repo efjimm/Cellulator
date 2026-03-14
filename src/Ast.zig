@@ -302,6 +302,8 @@ pub const Node = extern struct {
         local_variable: LocalVariable,
         captured_variable: CapturedVariable,
 
+        index: void,
+
         assignment: Position,
         builtin: Builtin,
         minus: void,
@@ -362,6 +364,8 @@ pub const Node = extern struct {
         local_variable: LocalVariable,
         captured_variable: CapturedVariable,
 
+        index,
+
         assignment: Position,
         builtin: Builtin,
         minus,
@@ -419,6 +423,8 @@ pub const Node = extern struct {
         pipe_call,
         local_variable,
         captured_variable,
+
+        index,
 
         assignment,
         builtin,
@@ -481,7 +487,7 @@ pub const Node = extern struct {
                 => 127,
 
                 // Actual operators
-                .function_call => 6,
+                .function_call, .index => 6,
                 .reference => 5,
                 .dereference => 5,
                 .range, .dynamic_range, .invalidated_range => 4,
@@ -599,6 +605,7 @@ fn printNode(
                 .local_variable,
                 .captured_variable,
                 .builtin,
+                .index,
                 => false,
                 // branch nodes
                 .concat,
@@ -661,6 +668,11 @@ fn printNode(
                 try str.append(arena, ')');
             }
             stack.items.len = stack.items.len - call.arg_count - 1;
+        },
+        .index => {
+            const index = stack.pop().?;
+            const to_index = stack.pop().?;
+            try str.print(arena, "{s}[{s}]", .{ to_index.str, index.str });
         },
         .end => return .end,
         .nil => try str.appendSlice(arena, "nil"),

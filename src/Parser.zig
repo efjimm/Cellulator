@@ -734,26 +734,31 @@ fn parseSuffixExpr(p: *Parser) !Intermediate {
 
     while (true) {
         var arg_count: u8 = 0;
-        _ = p.eatToken(.lparen) orelse return .{ index, result_type };
-        const is_builtin = p.ast.tag(index) == .builtin;
+        if (p.eatToken(.lparen)) |_| {
+            const is_builtin = p.ast.tag(index) == .builtin;
 
-        p.setValue(index);
-        while (true) {
-            if (p.eatToken(.rparen)) |_| break;
-            // TODO: Volatility depends on the function, which is not known until evaluation time.
-            //       Volatility would need to be checked later.
-            const argument, _ = try p.parseExpression();
-            if (is_builtin)
-                p.setReference(argument);
+            p.setValue(index);
+            while (true) {
+                if (p.eatToken(.rparen)) |_| break;
+                const argument, _ = try p.parseExpression();
+                if (is_builtin)
+                    p.setReference(argument);
+                _ = p.eatToken(.comma);
+                arg_count += 1;
+            }
+
+            index = try p.addNode(.init(.function_call, .{
+                .is_pipe = false,
+                .arg_count = arg_count,
+                .function_offset = @intFromEnum(p.ast.lastIndex().sub(index)),
+            }));
+        } else if (p.eatToken(.lbracket)) |_| {
+            _ = try p.parseExpression();
             _ = p.eatToken(.comma);
-            arg_count += 1;
-        }
+            try p.expectToken(.rbracket);
 
-        index = try p.addNode(.init(.function_call, .{
-            .is_pipe = false,
-            .arg_count = arg_count,
-            .function_offset = @intFromEnum(p.ast.lastIndex().sub(index)),
-        }));
+            index = try p.addNode(.init(.index, {}));
+        } else return .{ index, result_type };
         result_type = .any;
     }
 

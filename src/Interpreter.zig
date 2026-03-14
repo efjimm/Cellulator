@@ -656,6 +656,16 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
                 };
                 continue;
             },
+            .index => {
+                const index = eval.stack.pop().?.value;
+                const to_index = eval.stack.pop().?.value;
+                if (to_index != .tuple) return error.NotEvaluable;
+                const f = try index.toNumber() orelse 0;
+                if (f < 0 or f > std.math.maxInt(u32)) return error.NotEvaluable;
+                const n: u32 = @intFromFloat(f);
+                if (n >= to_index.tuple.values.len) return error.NotEvaluable;
+                eval.stack.appendAssumeCapacity(.{ .value = to_index.tuple.values[n] });
+            },
             .local_variable => |v| {
                 // TODO: Should this resolve cell literals?
                 const frame = eval.header.unwrap().?;
