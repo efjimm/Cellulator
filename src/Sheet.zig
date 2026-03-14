@@ -74,6 +74,8 @@ values_to_free: std.ArrayList(*Interpreter.Value) = .empty,
 
 needs_update: bool = true,
 
+interpreter_stack: @import("list.zig").List(Interpreter.StackEntry, u32) = .empty,
+
 pub const RangeIndex = enum(u64) {
     invalid = std.math.maxInt(u64),
     _,
@@ -385,6 +387,7 @@ pub fn deinit(sheet: *Sheet) void {
     sheet.cell_buffer.deinit(sheet.gpa);
     sheet.text_attrs.deinit(sheet.gpa);
     sheet.closures.deinit(sheet.gpa);
+    sheet.interpreter_stack.deinit(sheet.gpa);
     sheet.arena.deinit();
 }
 
@@ -2729,6 +2732,7 @@ pub fn evaluate(sheet: *Sheet, end_node: Ast.Node.Index) !Interpreter.Value {
     var interp: Interpreter = .{
         .arena = sheet.arena.allocator(),
         .sheet = sheet,
+        .stack = &sheet.interpreter_stack,
     };
     defer sheet.resetArena();
 
@@ -2770,16 +2774,16 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
     while (dirty_cells.pop()) |cell| {
         try sheet.markDirty(arena, cell, &dirty_cells);
     }
+    var eval: Interpreter = .{
+        .arena = arena,
+        .sheet = sheet,
+        .stack = &sheet.interpreter_stack,
+    };
 
     for (sheet.volatile_cells.items) |data| {
         const handle_start, const len = data;
         const cells = sheet.cell_tree.slice(handle_start.int(), len);
         for (0..cells.len) |i| {
-            var eval: Interpreter = .{
-                .arena = arena,
-                .sheet = sheet,
-            };
-
             _ = sheet.evalCellByHandle(&eval, cells.handle(i)) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.CyclicalReference => {
@@ -2797,11 +2801,6 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
         const handle_start, const len = data;
         const cells = sheet.cell_tree.slice(handle_start.int(), len);
         for (0..cells.len) |i| {
-            var eval: Interpreter = .{
-                .arena = arena,
-                .sheet = sheet,
-            };
-
             _ = sheet.evalCellByHandle(&eval, cells.handle(i)) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.CyclicalReference => {
@@ -3033,40 +3032,27 @@ pub fn evalCellByHandle(
     const cell = sheet.getCellFromHandle(handle);
     sw: switch (cell.expr.state) {
         .up_to_date => {},
-        .computing => return error.CyclicalReference,
+        .computing => unreachable,
         .enqueued, .dirty, .@"volatile" => {
             const root = cell.root().unwrap() orelse {
                 cell.expr.state = .up_to_date;
                 break :sw;
             };
-            cell.expr.state = .computing;
 
-            const pos = sheet.posFromCellHandle(handle);
-            log.debug("eval {f}", .{pos});
+            log.debug("eval {f}", .{sheet.posFromCellHandle(handle)});
             // Queue dependents before evaluating to ensure that errors are propagated to
             // dependents.
             try sheet.queueDependents(sheet.rectFromCellHandle(handle));
 
-            const start = sheet.ast.startFromEnd(root);
-            const old_volatility = eval.is_volatile;
-            defer eval.is_volatile = old_volatility;
-            eval.is_volatile = false;
-
-            eval.evaluate(start, handle) catch |err| {
+            eval.evaluate(sheet.ast.startFromEnd(root), handle) catch |err| {
                 cell.setValue(.err, .fromError(err));
-                std.log.debug("Cell error {t}", .{err});
-
-                if (eval.is_volatile) {
+                if (eval.is_volatile)
                     try sheet.setCellVolatile(handle);
-                }
-
                 return err;
             };
 
-            if (eval.is_volatile) {
+            if (eval.is_volatile)
                 try sheet.setCellVolatile(handle);
-            }
-
             const value = eval.stack.pop().?.value;
             return try sheet.setCellValue(value, handle);
         },

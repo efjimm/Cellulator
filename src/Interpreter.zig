@@ -13,7 +13,7 @@ const Interpreter = @This();
 
 arena: Allocator,
 sheet: *Sheet,
-stack: List(StackEntry, u32) = .empty,
+stack: *List(StackEntry, u32),
 
 /// Index of the current function header in the stack
 header: StackEntry.OptionalIndex = .none,
@@ -319,7 +319,7 @@ const Direction = enum {
 };
 
 inline fn push(eval: *Interpreter, res: StackEntry) Allocator.Error!void {
-    try eval.stack.append(eval.arena, res);
+    try eval.stack.append(eval.sheet.gpa, res);
 }
 
 inline fn pushv(eval: *Interpreter, value: Value) Allocator.Error!void {
@@ -330,13 +330,21 @@ inline fn pushvAssumeCapacity(eval: *Interpreter, value: Value) void {
     eval.stack.appendAssumeCapacity(.{ .value = value });
 }
 
+pub fn reset(eval: *Interpreter) void {
+    eval.stack.clearRetainingCapacity();
+    eval.header = .none;
+    eval.call_depth = 0;
+    eval.is_volatile = false;
+    eval.pc = undefined;
+}
+
 fn reserveStack(eval: *Interpreter, n: usize) Allocator.Error!void {
-    try eval.stack.ensureUnusedCapacity(eval.arena, n);
+    try eval.stack.ensureUnusedCapacity(eval.sheet.gpa, n);
 }
 
 fn evalCellPos(eval: *Interpreter, pos: Position) !void {
     std.log.debug("EVAL {f}", .{pos});
-    try eval.stack.ensureUnusedCapacity(eval.arena, 1);
+    try eval.reserveStack(1);
     const cell_handle = eval.sheet.getCellHandleByPos(pos) orelse {
         eval.stack.appendAssumeCapacity(.{ .value = .none });
         return;
@@ -345,7 +353,7 @@ fn evalCellPos(eval: *Interpreter, pos: Position) !void {
 }
 
 fn evalCell(eval: *Interpreter, cell_handle: Sheet.Cell.Handle) !void {
-    try eval.stack.ensureUnusedCapacity(eval.arena, 1);
+    try eval.reserveStack(1);
     const cell = eval.sheet.getCellFromHandle(cell_handle);
     if (cell.expr.state == .up_to_date) {
         const value = try eval.sheet.cellValueToInterpreterValue(eval, cell);
@@ -449,7 +457,7 @@ fn call(eval: *Interpreter, arg_count: u8) error{
             const old_header = eval.header;
             eval.header = index.toOptional();
             try eval.stack.inserti(
-                eval.arena,
+                eval.sheet.gpa,
                 eval.stack.len() - 1 - arg_count,
                 .{ .function_header = .{
                     .parent = old_header,
@@ -466,7 +474,7 @@ fn call(eval: *Interpreter, arg_count: u8) error{
             const old_header = eval.header;
             eval.header = index.toOptional();
             try eval.stack.inserti(
-                eval.arena,
+                eval.sheet.gpa,
                 eval.stack.len() - 1 - arg_count,
                 .{ .builtin_header = .{
                     .parent = old_header,
@@ -498,9 +506,9 @@ fn call(eval: *Interpreter, arg_count: u8) error{
     }
 }
 
-// TODO: Don't use arena for stack
 pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.Handle) !void {
-    if (eval.call_depth >= max_depth) return error.NotEvaluable;
+    eval.reset();
+
     const ast = &eval.sheet.ast;
     try eval.push(.{ .cell_header = .{
         .parent = eval.header,
@@ -1118,7 +1126,7 @@ const PipelineIterator = struct {
                     if (!f.continuing) {
                         f.continuing = true;
 
-                        try eval.stack.ensureUnusedCapacity(eval.arena, 8);
+                        try eval.reserveStack(8);
                         eval.pushvAssumeCapacity(.{ .function = f.predicate });
                         eval.pushvAssumeCapacity(iter.value);
                         try eval.call(1);
