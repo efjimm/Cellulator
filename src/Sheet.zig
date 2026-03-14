@@ -354,6 +354,8 @@ pub fn init(gpa: Allocator) !Sheet {
     try sheet.redos.ensureTotalCapacity(gpa, 1);
     errdefer sheet.redos.deinit(gpa);
     try sheet.filepath.ensureTotalCapacityPrecise(gpa, std.fs.max_path_bytes);
+    errdefer sheet.filepath.deinit(gpa);
+    try sheet.interpreter_stack.ensureTotalCapacity(gpa, 2048);
 
     return sheet;
 }
