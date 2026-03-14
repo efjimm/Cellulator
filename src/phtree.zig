@@ -1284,9 +1284,10 @@ pub fn PhTree(
             min: Point,
             max: Point,
 
+            // TODO: Remove error condition
             pub fn next(
                 iter: *QueryIterator,
-            ) !?Entry.Handle {
+            ) error{}!?Entry.Handle {
                 if (iter.tree.root == .entry and !iter.consumed) {
                     @branchHint(.unlikely);
                     iter.consumed = true;

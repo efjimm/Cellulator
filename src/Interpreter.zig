@@ -19,6 +19,9 @@ stack: List(StackEntry, u32) = .empty,
 header: StackEntry.OptionalIndex = .none,
 is_volatile: bool = false,
 pc: Node.Index = undefined,
+call_depth: u32 = 0,
+
+pub const max_depth = 1 << 14;
 
 pub const Value = union(enum) {
     none,
@@ -224,7 +227,10 @@ pub const Value = union(enum) {
             .builtin_function,
             .pipeline,
             .tuple,
-            => error.InvalidCoercion,
+            => {
+                std.log.debug("Cannot coerce {any} to number", .{res});
+                return error.InvalidCoercion;
+            },
         };
     }
 };
@@ -236,12 +242,19 @@ pub const StackEntry = union(enum) {
     value: Value,
     function_header: FunctionHeader,
     builtin_header: BuiltinHeader,
-    cell_header: FunctionHeader,
+    cell_header: CellHeader,
 
     pub const FunctionHeader = struct {
         parent: OptionalIndex,
         /// Index of the next instruction to execute after returning from the function.
         return_address: Node.Index,
+    };
+
+    pub const CellHeader = struct {
+        parent: OptionalIndex,
+        return_address: Node.Index,
+        cell_handle: Sheet.Cell.Handle,
+        parent_is_volatile: bool,
     };
 
     pub const BuiltinHeader = struct {
@@ -260,13 +273,24 @@ pub const StackEntry = union(enum) {
         pub const ResumeState = union(enum) {
             none,
             map_args: MapArgs,
-            count: Count,
+            /// Resumable without any other state.
+            simple,
 
             pub const MapArgs = struct {
                 i: u8 = 0,
-                pipeline_i: usize = 0,
-                pipeline_value: Value = .none,
+                arg: Arg = .none,
                 op: Op,
+
+                pub const Arg = union(enum) {
+                    pipeline: struct {
+                        pipeline_i: usize = 0,
+                        pipeline_value: Value = .none,
+                        cell: bool = false,
+                    },
+                    cell,
+                    range: Sheet.CellTree.QueryIterator,
+                    none,
+                };
 
                 pub const Op = union(enum) {
                     sum: SumContext,
@@ -277,12 +301,6 @@ pub const StackEntry = union(enum) {
                     count_all: CountContextAll,
                     count_numbers: CountContextNumbers,
                 };
-            };
-
-            pub const Count = struct {
-                i: u8 = 0,
-                pipeline_i: usize = 0,
-                pipeline_value: Value = .none,
             };
         };
     };
@@ -316,14 +334,46 @@ fn reserveStack(eval: *Interpreter, n: usize) Allocator.Error!void {
     try eval.stack.ensureUnusedCapacity(eval.arena, n);
 }
 
-/// Returns the value of a cell. If the access is indirect, sets the volatile flag.
-fn evaluateCell(
-    eval: *Interpreter,
-    pos: Position,
-    comptime direct: Direction,
-) !Value {
-    if (direct == .indirect) eval.is_volatile = true;
-    return try eval.sheet.evalCellByPos(eval, pos);
+fn evalCellPos(eval: *Interpreter, pos: Position) !void {
+    std.log.debug("EVAL {f}", .{pos});
+    try eval.stack.ensureUnusedCapacity(eval.arena, 1);
+    const cell_handle = eval.sheet.getCellHandleByPos(pos) orelse {
+        eval.stack.appendAssumeCapacity(.{ .value = .none });
+        return;
+    };
+    return try eval.evalCell(cell_handle);
+}
+
+fn evalCell(eval: *Interpreter, cell_handle: Sheet.Cell.Handle) !void {
+    try eval.stack.ensureUnusedCapacity(eval.arena, 1);
+    const cell = eval.sheet.getCellFromHandle(cell_handle);
+    if (cell.expr.state == .up_to_date) {
+        const value = try eval.sheet.cellValueToInterpreterValue(eval, cell);
+        eval.stack.appendAssumeCapacity(.{ .value = value });
+        return;
+    }
+
+    const root = cell.root().unwrap() orelse {
+        // Cell doesn't have an expression, just a simple value
+        cell.expr.state = .up_to_date;
+        const value = try eval.sheet.cellValueToInterpreterValue(eval, cell);
+        eval.stack.appendAssumeCapacity(.{ .value = value });
+        return;
+    };
+
+    if (eval.call_depth >= max_depth) return error.NotEvaluable;
+
+    eval.stack.appendAssumeCapacity(.{ .cell_header = .{
+        .parent = eval.header,
+        .return_address = eval.pc.addi(1),
+        .cell_handle = cell_handle,
+        .parent_is_volatile = eval.is_volatile,
+    } });
+    eval.is_volatile = false;
+    eval.header = eval.stack.lastIndex().subi(1).toOptional();
+    eval.pc = eval.sheet.ast.startFromEnd(root);
+    eval.call_depth += 1;
+    return error.Suspended;
 }
 
 fn evaluateBuiltin(eval: *Interpreter, builtin_tag: Node.Builtin.Tag, arg_count: u8) !Value {
@@ -383,8 +433,8 @@ fn call(eval: *Interpreter, arg_count: u8) error{
     OutOfMemory,
     Suspended,
 }!void {
+    if (eval.call_depth >= max_depth) return error.NotEvaluable;
     // The arguments are at the top of the stack, with the function to call below.
-
     // Index of the value being called
     const index = eval.stack.lastIndex().subi(1).subi(arg_count);
     const callable = eval.stack.get(index).value;
@@ -408,6 +458,7 @@ fn call(eval: *Interpreter, arg_count: u8) error{
             );
             eval.pc = func.addi(def.bodyStart());
             assert(eval.pc.lt(eval.sheet.ast.lastIndex()));
+            eval.call_depth += 1;
         },
         // We don't need to insert a frame header because we don't actually 'jump'
         // anywhere in the AST to evaluate a builtin.
@@ -433,12 +484,14 @@ fn call(eval: *Interpreter, arg_count: u8) error{
                     },
                 } },
             );
+            eval.call_depth += 1;
 
             const res = try eval.evaluateBuiltin(f.tag, arg_count);
             eval.stack.shrinkRetainingCapacity(index);
             eval.pushvAssumeCapacity(res);
             eval.header = old_header;
             eval.pc = eval.pc.addi(1);
+            eval.call_depth -= 1;
             assert(eval.pc.lt(eval.sheet.ast.lastIndex()));
         },
         else => return error.NotEvaluable,
@@ -446,22 +499,28 @@ fn call(eval: *Interpreter, arg_count: u8) error{
 }
 
 // TODO: Don't use arena for stack
-pub fn evaluate(eval: *Interpreter, start: Node.Index) !void {
+pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.Handle) !void {
+    if (eval.call_depth >= max_depth) return error.NotEvaluable;
     const ast = &eval.sheet.ast;
     try eval.push(.{ .cell_header = .{
         .parent = eval.header,
         .return_address = eval.pc,
+        .cell_handle = cell_handle,
+        .parent_is_volatile = false,
     } });
     eval.header = eval.stack.lastIndex().subi(1).toOptional();
     eval.pc = start;
+    eval.call_depth += 1;
 
     while (true) {
         if (eval.header.unwrap()) |header_index| {
-            const entry = eval.stack.get(header_index);
-            if (entry == .builtin_header) {
+            const entry = eval.stack.getPtr(header_index);
+            if (entry.* == .builtin_header) {
                 const header = entry.builtin_header;
                 const index = header_index.addi(1);
                 const builtin = eval.stack.get(index).value.builtin_function;
+                if (entry.builtin_header.resume_state == .none)
+                    entry.builtin_header.resume_state = .simple;
 
                 const return_value = eval.evaluateBuiltin(
                     builtin.tag,
@@ -476,11 +535,38 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index) !void {
                 eval.pushvAssumeCapacity(return_value);
                 eval.header = header.parent;
                 eval.pc = header.return_address;
+                eval.call_depth -= 1;
             }
         }
 
+        std.log.debug("exec {t} ({d})", .{ ast.node(eval.pc), eval.pc });
         switch (ast.node(eval.pc)) {
-            .end => break,
+            .end => {
+                const header_index = eval.header.unwrap().?;
+                const header = eval.stack.get(header_index).cell_header;
+
+                const return_value = eval.stack.pop().?.value;
+                eval.stack.shrinkRetainingCapacity(header_index);
+
+                if (header.cell_handle != .none) {
+                    const adjusted_return_value = try eval.sheet.setCellValue(
+                        return_value,
+                        header.cell_handle,
+                    );
+                    eval.stack.appendAssumeCapacity(.{ .value = adjusted_return_value });
+                    if (eval.is_volatile) try eval.sheet.setCellVolatile(header.cell_handle);
+                } else {
+                    eval.stack.appendAssumeCapacity(.{ .value = return_value });
+                }
+
+                eval.header = header.parent;
+                eval.pc = header.return_address;
+                eval.is_volatile = header.parent_is_volatile;
+                eval.call_depth -= 1;
+                if (eval.header == .none)
+                    break;
+                continue;
+            },
             .nil => try eval.pushv(.nil),
             .number => |n| try eval.pushv(.{ .number = n }),
             .rel_rel_value,
@@ -488,8 +574,10 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index) !void {
             .abs_rel_value,
             .abs_abs_value,
             => |pos| {
-                const value = try eval.evaluateCell(pos, .direct);
-                try eval.pushv(value);
+                eval.evalCellPos(pos) catch |err| switch (err) {
+                    error.Suspended => continue,
+                    else => |e| return e,
+                };
             },
             .rel_rel_reference,
             .rel_abs_reference,
@@ -548,6 +636,7 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index) !void {
 
                 eval.header = header.parent;
                 eval.pc = header.return_address;
+                eval.call_depth -= 1;
                 continue;
             },
             .function_parameter => unreachable,
@@ -642,12 +731,15 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index) !void {
             },
             .dereference => {
                 const arg = eval.stack.pop().?.value;
-                const value = switch (arg) {
-                    .cell => |pos| try eval.evaluateCell(pos, .direct),
-                    .indirect_cell => |pos| try eval.evaluateCell(pos, .indirect),
+                const pos = switch (arg) {
+                    .cell, .indirect_cell => |pos| pos,
                     else => return error.NotEvaluable,
                 };
-                try eval.pushv(value);
+                if (arg == .indirect_cell) eval.is_volatile = true;
+                eval.evalCellPos(pos) catch |err| switch (err) {
+                    error.Suspended => continue,
+                    else => |e| return e,
+                };
             },
             // and/or have the same semantics as Lua's and/or operators.
             .logical_and => |rhs_length| {
@@ -764,40 +856,6 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index) !void {
         eval.pc = eval.pc.addi(1);
         assert(eval.pc.lt(ast.lastIndex()));
     }
-
-    const header_index = eval.header.unwrap().?;
-    const header = eval.stack.get(header_index).cell_header;
-
-    const return_value = eval.stack.pop().?;
-    eval.stack.shrinkRetainingCapacity(header_index);
-    eval.stack.appendAssumeCapacity(return_value);
-
-    eval.header = header.parent;
-    eval.pc = header.return_address;
-}
-
-/// Coerces `res` to a number, dereferencing one level of reference if required.
-fn toNumberDeref(eval: *Interpreter, res: Value) !?f64 {
-    return switch (res) {
-        .none => null,
-        .number => |n| n,
-        .string => |str| std.fmt.parseFloat(f64, str.bytes()) catch error.InvalidCoercion,
-        .cell => |pos| Value.toNumber(
-            try eval.evaluateCell(pos, .direct),
-        ),
-        .indirect_cell => |pos| Value.toNumber(
-            try eval.evaluateCell(pos, .indirect),
-        ),
-        .nil,
-        .err,
-        .range,
-        .indirect_range,
-        .function,
-        .builtin_function,
-        .pipeline,
-        .tuple,
-        => error.InvalidCoercion,
-    };
 }
 
 fn toPipeline(eval: *Interpreter, v: Value) !Value.Pipeline {
@@ -837,23 +895,58 @@ const MapArgsIter = struct {
     eval: *Interpreter,
     arg_count: u8,
     i: u8 = 0,
-    p_i: usize = 0,
-    p_value: Value = undefined,
-    argument: ?Value = null,
+    arg: StackEntry.BuiltinHeader.ResumeState.MapArgs.Arg = .none,
+
+    fn suspendExecution(
+        iter: *MapArgsIter,
+        header_index: StackEntry.Index,
+        arg: StackEntry.BuiltinHeader.ResumeState.MapArgs.Arg,
+        ctx: anytype,
+    ) error{Suspended} {
+        iter.eval.stack.getPtr(header_index).builtin_header.resume_state = .{
+            .map_args = .{
+                .i = iter.i,
+                .arg = arg,
+                .op = switch (@TypeOf(ctx)) {
+                    *SumContext => .{ .sum = ctx.* },
+                    *ProdContext => .{ .prod = ctx.* },
+                    *AvgContext => .{ .avg = ctx.* },
+                    *MinContext => .{ .min = ctx.* },
+                    *MaxContext => .{ .max = ctx.* },
+                    *CountContextNumbers => .{ .count_numbers = ctx.* },
+                    *CountContextAll => .{ .count_all = ctx.* },
+                    else => comptime unreachable,
+                },
+            },
+        };
+        return error.Suspended;
+    }
 
     /// Consumes arguments from the header index + 2.
     pub fn consume(iter: *MapArgsIter, ctx: anytype) !bool {
         if (iter.i >= iter.arg_count) return false;
 
-        const MapContext = struct {
-            eval: *Interpreter,
-            outer_ctx: @TypeOf(ctx),
-
-            pub fn func(inner_ctx: @This(), cell: Sheet.Cell.Handle) !void {
-                const res = try inner_ctx.eval.sheet.evalCellByHandle(inner_ctx.eval, cell);
-                try inner_ctx.outer_ctx.func(res);
-            }
-        };
+        switch (iter.arg) {
+            .cell => {
+                iter.arg = .none;
+                const arg = iter.eval.stack.pop().?.value;
+                try ctx.func(arg);
+                iter.i += 1;
+                return true;
+            },
+            .pipeline => |*p| {
+                if (p.cell) {
+                    p.cell = false;
+                    const arg = iter.eval.stack.pop().?.value;
+                    try ctx.func(arg);
+                }
+            },
+            .range => {
+                const arg = iter.eval.stack.pop().?.value;
+                try ctx.func(arg);
+            },
+            else => {},
+        }
 
         const eval = iter.eval;
         const header_index = eval.header.unwrap().?;
@@ -861,65 +954,87 @@ const MapArgsIter = struct {
         const arg = eval.stack.get(arg_index).value;
 
         switch (arg) {
-            .cell => |pos| {
-                const res = try eval.evaluateCell(pos, .direct);
-                try ctx.func(res);
-            },
-            .indirect_cell => |pos| {
-                const res = try eval.evaluateCell(pos, .indirect);
+            inline .cell, .indirect_cell => |pos, t| {
+                if (t == .indirect_cell) eval.is_volatile = true;
+                eval.evalCellPos(pos) catch |err| switch (err) {
+                    error.Suspended => {
+                        return iter.suspendExecution(header_index, .cell, ctx);
+                    },
+                    else => |e| return e,
+                };
+                const res = eval.stack.pop().?.value;
                 try ctx.func(res);
             },
             inline .range, .indirect_range => |range, t| {
                 if (t == .indirect_range) eval.is_volatile = true;
                 const rect = range.rect;
-                var map_ctx: MapContext = .{ .eval = eval, .outer_ctx = ctx };
-                try eval.sheet.cell_tree.traverse(
-                    &.{ rect.tl.x, rect.tl.y },
-                    &.{ rect.br.x, rect.br.y },
-                    &map_ctx,
-                );
+                var cell_iter = switch (eval.getBuiltinHeader().resume_state.map_args.arg) {
+                    .range => |r| r,
+                    else => eval.sheet.cell_tree.iterator2(
+                        &.{ rect.tl.x, rect.tl.y },
+                        &.{ rect.br.x, rect.br.y },
+                    ),
+                };
+                while (try cell_iter.next()) |handle| {
+                    eval.evalCell(handle) catch |err| switch (err) {
+                        error.Suspended => {
+                            return iter.suspendExecution(header_index, .{ .range = cell_iter }, ctx);
+                        },
+                        else => |e| return e,
+                    };
+                    const result = eval.stack.pop().?.value;
+                    try ctx.func(result);
+                }
             },
             .pipeline => |p| {
                 var p_iter: PipelineIterator = .{
                     .eval = eval,
                     .p = p,
-                    .i = iter.p_i,
-                    .value = iter.p_value,
+                    .i = 0,
+                    .value = undefined,
                 };
+                switch (iter.arg) {
+                    .pipeline => |p2| {
+                        p_iter.i = p2.pipeline_i;
+                        p_iter.value = p2.pipeline_value;
+                    },
+                    else => {},
+                }
 
                 while (p_iter.next()) |value| {
-                    const derefed = switch (value) {
-                        .cell => |pos| try eval.evaluateCell(pos, .direct),
-                        .indirect_cell => |pos| try eval.evaluateCell(pos, .indirect),
-                        else => value,
-                    };
-                    try ctx.func(derefed);
+                    switch (value) {
+                        inline .cell, .indirect_cell => |pos, t| {
+                            if (t == .indirect_cell) eval.is_volatile = true;
+                            eval.evalCellPos(pos) catch |err| switch (err) {
+                                error.Suspended => {
+                                    return iter.suspendExecution(header_index, .{
+                                        .pipeline = .{
+                                            .pipeline_i = p_iter.i,
+                                            .pipeline_value = p_iter.value,
+                                            .cell = true,
+                                        },
+                                    }, ctx);
+                                },
+                                else => |e| return e,
+                            };
+
+                            const result = eval.stack.pop().?.value;
+                            try ctx.func(result);
+                        },
+                        else => try ctx.func(value),
+                    }
                 } else |err| switch (err) {
                     error.EndOfStream => {},
                     error.Suspended => {
-                        const h = &eval.stack.getPtr(header_index).builtin_header.resume_state.map_args;
-                        h.* = .{
-                            .op = switch (@TypeOf(ctx)) {
-                                *SumContext => .{ .sum = ctx.* },
-                                *ProdContext => .{ .prod = ctx.* },
-                                *AvgContext => .{ .avg = ctx.* },
-                                *MinContext => .{ .min = ctx.* },
-                                *MaxContext => .{ .max = ctx.* },
-                                *CountContextNumbers => .{ .count_numbers = ctx.* },
-                                *CountContextAll => .{ .count_all = ctx.* },
-                                else => comptime unreachable,
+                        return iter.suspendExecution(header_index, .{
+                            .pipeline = .{
+                                .pipeline_i = p_iter.i,
+                                .pipeline_value = p_iter.value,
                             },
-                            .i = iter.i,
-                            .pipeline_i = p_iter.i,
-                            .pipeline_value = p_iter.value,
-                        };
-                        // Set up call stack for function....
-                        return error.Suspended;
+                        }, ctx);
                     },
                     else => |e| return e,
                 }
-                iter.p_i = 0;
-                iter.p_value = .none;
             },
             .tuple => |t| {
                 for (t.values) |v| {
@@ -932,6 +1047,8 @@ const MapArgsIter = struct {
         }
 
         iter.i += 1;
+        eval.getBuiltinHeader().resume_state.map_args.arg = .none;
+        iter.arg = .none;
         return true;
     }
 };
@@ -946,8 +1063,7 @@ fn mapArgs(
         .arg_count = arg_count,
         .eval = eval,
         .i = map.i,
-        .p_i = map.pipeline_i,
-        .p_value = map.pipeline_value,
+        .arg = map.arg,
     };
     var ctx = @field(map.op, @tagName(tag));
     while (try iter.consume(&ctx)) {}
@@ -1041,14 +1157,7 @@ const PipelineIterator = struct {
 
 fn evalUpper(eval: *Interpreter, arg_count: u8) ![]const u8 {
     if (arg_count != 1) return error.NotEvaluable;
-    const arg = blk: {
-        const arg = eval.stack.pop().?.value;
-        break :blk switch (arg) {
-            .cell => |cell| try eval.evaluateCell(cell, .direct),
-            .indirect_cell => |cell| try eval.evaluateCell(cell, .indirect),
-            else => arg,
-        };
-    };
+    const arg = try eval.functionArg(0);
     const str = try std.fmt.allocPrint(eval.arena, "{f}", .{eval.sheet.fmtInterpreterValue(arg)});
     for (str) |*c| c.* = std.ascii.toUpper(c.*);
     return str;
@@ -1056,14 +1165,7 @@ fn evalUpper(eval: *Interpreter, arg_count: u8) ![]const u8 {
 
 fn evalLower(eval: *Interpreter, arg_count: u8) ![]const u8 {
     if (arg_count != 1) return error.NotEvaluable;
-    const arg = blk: {
-        const arg = eval.stack.pop().?.value;
-        break :blk switch (arg) {
-            .cell => |cell| try eval.evaluateCell(cell, .direct),
-            .indirect_cell => |cell| try eval.evaluateCell(cell, .indirect),
-            else => arg,
-        };
-    };
+    const arg = try eval.functionArg(0);
     const str = try std.fmt.allocPrint(eval.arena, "{f}", .{eval.sheet.fmtInterpreterValue(arg)});
     for (str) |*c| c.* = std.ascii.toLower(c.*);
     return str;
@@ -1134,32 +1236,61 @@ const CountContextNumbers = struct {
     }
 };
 
+fn getBuiltinHeader(eval: *Interpreter) *StackEntry.BuiltinHeader {
+    return &eval.stack.getPtr(eval.header.unwrap().?).builtin_header;
+}
+
+fn functionArg(eval: *Interpreter, n: u8) !Value {
+    const header = eval.getBuiltinHeader().*;
+    const arg_index = eval.header.unwrap().?.addi(2 + @as(u32, n));
+    const arg = eval.stack.get(arg_index).value;
+    return switch (header.resume_state) {
+        // Initial state
+        .none => sw: switch (arg) {
+            .cell => |pos| {
+                try eval.evalCellPos(pos);
+                break :sw eval.stack.pop().?.value;
+            },
+            .indirect_cell => |pos| {
+                eval.is_volatile = true;
+                try eval.evalCellPos(pos);
+                break :sw eval.stack.pop().?.value;
+            },
+            else => arg,
+        },
+        // Resuming
+        .simple => eval.stack.pop().?.value,
+        else => unreachable,
+    };
+}
+
 fn evalSqrt(eval: *Interpreter, arg_count: u8) !f64 {
     if (arg_count != 1) return error.NotEvaluable;
-    const arg = eval.stack.pop().?.value;
-    const n = try eval.toNumberDeref(arg) orelse 0;
+
+    const arg = try eval.functionArg(0);
+    const n = try arg.toNumber() orelse 0;
     if (n < 0) return error.NotEvaluable;
     return std.math.sqrt(n);
 }
 
 fn evalRound(eval: *Interpreter, arg_count: u8) !f64 {
     if (arg_count != 1) return error.NotEvaluable;
-    const arg = eval.stack.pop().?.value;
-    const n = try eval.toNumberDeref(arg) orelse 0;
+    const arg = try eval.functionArg(0);
+    const n = try arg.toNumber() orelse 0;
     return std.math.round(n);
 }
 
 fn evalFloor(eval: *Interpreter, arg_count: u8) !f64 {
     if (arg_count != 1) return error.NotEvaluable;
-    const arg = eval.stack.pop().?.value;
-    const n = try eval.toNumberDeref(arg) orelse 0;
+    const arg = try eval.functionArg(0);
+    const n = try arg.toNumber() orelse 0;
     return @floor(n);
 }
 
 fn evalCeil(eval: *Interpreter, arg_count: u8) !f64 {
     if (arg_count != 1) return error.NotEvaluable;
-    const arg = eval.stack.pop().?.value;
-    const n = try eval.toNumberDeref(arg) orelse 0;
+    const arg = try eval.functionArg(0);
+    const n = try arg.toNumber() orelse 0;
     return @ceil(n);
 }
 
@@ -1244,15 +1375,8 @@ fn evalRange(eval: *Interpreter, arg_count: u8) !Value.Pipeline {
 
 fn evalWidth(eval: *Interpreter, arg_count: u8) !f64 {
     if (arg_count != 1) return error.NotEvaluable;
-    const res = blk: {
-        const arg = eval.stack.pop().?.value;
-        break :blk switch (arg) {
-            .cell => |cell| try eval.evaluateCell(cell, .direct),
-            .indirect_cell => |cell| try eval.evaluateCell(cell, .indirect),
-            else => arg,
-        };
-    };
-    return switch (res) {
+    const arg = try eval.functionArg(0);
+    return switch (arg) {
         .cell, .indirect_cell => 1,
         .range, .indirect_range => |r| @floatFromInt(r.rect.width2()),
         .none,
@@ -1270,15 +1394,8 @@ fn evalWidth(eval: *Interpreter, arg_count: u8) !f64 {
 
 fn evalHeight(eval: *Interpreter, arg_count: u8) !f64 {
     if (arg_count != 1) return error.NotEvaluable;
-    const res = blk: {
-        const arg = eval.stack.pop().?.value;
-        break :blk switch (arg) {
-            .cell => |cell| try eval.evaluateCell(cell, .direct),
-            .indirect_cell => |cell| try eval.evaluateCell(cell, .indirect),
-            else => arg,
-        };
-    };
-    return switch (res) {
+    const arg = try eval.functionArg(0);
+    return switch (arg) {
         .cell, .indirect_cell => 1,
         .range, .indirect_range => |r| @floatFromInt(r.rect.height2()),
         .none,

@@ -2732,7 +2732,7 @@ pub fn evaluate(sheet: *Sheet, end_node: Ast.Node.Index) !Interpreter.Value {
     };
     defer sheet.resetArena();
 
-    _ = try interp.evaluate(sheet.ast.startFromEnd(end_node));
+    _ = try interp.evaluate(sheet.ast.startFromEnd(end_node), .none);
     const res = interp.stack.pop().?.value;
 
     if (res == .string)
@@ -2946,6 +2946,85 @@ fn queueDependents(sheet: *Sheet, rect: Rect) Allocator.Error!void {
     }
 }
 
+pub fn setCellValue(
+    sheet: *Sheet,
+    value: Interpreter.Value,
+    handle: Cell.Handle,
+) !Interpreter.Value {
+    const cell = sheet.getCellFromHandle(handle);
+    sheet.deinitCellValue(cell);
+
+    switch (value) {
+        .none => cell.setValue(.number, 0),
+        .nil => cell.setValue(.nil, {}),
+        .err => cell.setValue(.err, .fromError(error.NotEvaluable)),
+        .number => |n| cell.setValue(.number, n),
+        .string => |str| {
+            const bytes = str.bytes();
+            const list = try sheet.string_values.createList(sheet.gpa);
+            errdefer sheet.string_values.destroyList(list);
+            try sheet.string_values.ensureUnusedCapacity(sheet.gpa, list, @intCast(bytes.len));
+
+            sheet.string_values.appendSliceAssumeCapacity(list, bytes);
+            cell.setValue(.string, list);
+        },
+        .cell, .indirect_cell => |p| {
+            cell.setValue(.ref_cell, p);
+            cell.expr.state = .up_to_date;
+            return .{ .indirect_cell = p };
+        },
+        .range, .indirect_range => |range| {
+            cell.setValue(.ref_range, try sheet.pushCellValueRange(range.rect));
+            cell.expr.state = .up_to_date;
+            return .{ .indirect_range = range };
+        },
+        .function => |f| {
+            if (f.captures.len > 0) {
+                const index = sheet.closures.items.len;
+                try sheet.closures.ensureUnusedCapacity(sheet.gpa, 1 + f.captures.len);
+                sheet.closures.appendAssumeCapacity(.{ .function = .{ .root = f.root } });
+                sheet.closures.appendSliceAssumeCapacity(f.captures);
+                cell.setValue(.closure, .{
+                    .len = @intCast(f.captures.len),
+                    .index = @intCast(index),
+                });
+            } else {
+                cell.setValue(.simple_function, .{ .index = f.root });
+            }
+        },
+        .builtin_function => |f| {
+            cell.setValue(.builtin_function, f.tag);
+        },
+        .pipeline => {
+            try sheet.values_to_free.ensureUnusedCapacity(sheet.gpa, 1);
+            const new_value = try sheet.value_pool.create(sheet.gpa);
+            errdefer sheet.value_pool.destroy(new_value);
+            new_value.* = try value.clone(sheet.gpa);
+            sheet.values_to_free.appendAssumeCapacity(new_value);
+            cell.setValue(.pipeline, new_value);
+        },
+        .tuple => {
+            const new_value = try sheet.value_pool.create(sheet.gpa);
+            errdefer sheet.value_pool.destroy(new_value);
+            new_value.* = try value.clone(sheet.gpa);
+            cell.setValue(.tuple, new_value);
+        },
+    }
+
+    cell.expr.state = .up_to_date;
+    return value;
+}
+
+pub fn setCellVolatile(sheet: *Sheet, handle: Cell.Handle) !void {
+    const cell = sheet.getCellFromHandle(handle);
+    cell.expr.is_volatile = true;
+    if (!cell.expr.stored_volatile) {
+        std.log.debug("Volatile cell {any}", .{handle});
+        try sheet.volatile_cells.append(sheet.gpa, .{ handle, 1 });
+        cell.expr.stored_volatile = true;
+    }
+}
+
 pub fn evalCellByHandle(
     sheet: *Sheet,
     eval: *Interpreter,
@@ -2973,95 +3052,33 @@ pub fn evalCellByHandle(
             defer eval.is_volatile = old_volatility;
             eval.is_volatile = false;
 
-            eval.evaluate(start) catch |err| {
+            eval.evaluate(start, handle) catch |err| {
                 cell.setValue(.err, .fromError(err));
+                std.log.debug("Cell error {t}", .{err});
 
                 if (eval.is_volatile) {
-                    cell.expr.is_volatile = true;
-                    if (!cell.expr.stored_volatile) {
-                        std.log.debug("Volatile cell {any}", .{handle});
-                        try sheet.volatile_cells.append(sheet.gpa, .{ handle, 1 });
-                        cell.expr.stored_volatile = true;
-                    }
+                    try sheet.setCellVolatile(handle);
                 }
 
                 return err;
             };
 
             if (eval.is_volatile) {
-                cell.expr.is_volatile = true;
-                if (!cell.expr.stored_volatile) {
-                    std.log.debug("Volatile cell {any}", .{handle});
-                    try sheet.volatile_cells.append(sheet.gpa, .{ handle, 1 });
-                    cell.expr.stored_volatile = true;
-                }
+                try sheet.setCellVolatile(handle);
             }
-
-            sheet.deinitCellValue(cell);
 
             const value = eval.stack.pop().?.value;
-            switch (value) {
-                .none => cell.setValue(.number, 0),
-                .nil => cell.setValue(.nil, {}),
-                .err => cell.setValue(.err, .fromError(error.NotEvaluable)),
-                .number => |n| cell.setValue(.number, n),
-                .string => |str| {
-                    const bytes = str.bytes();
-                    const list = try sheet.string_values.createList(sheet.gpa);
-                    errdefer sheet.string_values.destroyList(list);
-                    try sheet.string_values.ensureUnusedCapacity(sheet.gpa, list, @intCast(bytes.len));
-
-                    sheet.string_values.appendSliceAssumeCapacity(list, bytes);
-                    cell.setValue(.string, list);
-                },
-                .cell, .indirect_cell => |p| {
-                    cell.setValue(.ref_cell, p);
-                    cell.expr.state = .up_to_date;
-                    return .{ .indirect_cell = p };
-                },
-                .range, .indirect_range => |range| {
-                    cell.setValue(.ref_range, try sheet.pushCellValueRange(range.rect));
-                    cell.expr.state = .up_to_date;
-                    return .{ .indirect_range = range };
-                },
-                .function => |f| {
-                    if (f.captures.len > 0) {
-                        const index = sheet.closures.items.len;
-                        try sheet.closures.ensureUnusedCapacity(sheet.gpa, 1 + f.captures.len);
-                        sheet.closures.appendAssumeCapacity(.{ .function = .{ .root = f.root } });
-                        sheet.closures.appendSliceAssumeCapacity(f.captures);
-                        cell.setValue(.closure, .{
-                            .len = @intCast(f.captures.len),
-                            .index = @intCast(index),
-                        });
-                    } else {
-                        cell.setValue(.simple_function, .{ .index = f.root });
-                    }
-                },
-                .builtin_function => |f| {
-                    cell.setValue(.builtin_function, f.tag);
-                },
-                .pipeline => {
-                    try sheet.values_to_free.ensureUnusedCapacity(sheet.gpa, 1);
-                    const new_value = try sheet.value_pool.create(sheet.gpa);
-                    errdefer sheet.value_pool.destroy(new_value);
-                    new_value.* = try value.clone(sheet.gpa);
-                    sheet.values_to_free.appendAssumeCapacity(new_value);
-                    cell.setValue(.pipeline, new_value);
-                },
-                .tuple => {
-                    const new_value = try sheet.value_pool.create(sheet.gpa);
-                    errdefer sheet.value_pool.destroy(new_value);
-                    new_value.* = try value.clone(sheet.gpa);
-                    cell.setValue(.tuple, new_value);
-                },
-            }
-
-            cell.expr.state = .up_to_date;
-            return value;
+            return try sheet.setCellValue(value, handle);
         },
     }
 
+    return try sheet.cellValueToInterpreterValue(eval, cell);
+}
+pub fn cellValueToInterpreterValue(
+    sheet: *Sheet,
+    eval: *Interpreter,
+    cell: *Cell,
+) !Interpreter.Value {
     return switch (cell.expr.value_tag) {
         .nil => .nil,
         .number => .{ .number = cell.value.number },

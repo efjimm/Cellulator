@@ -6,7 +6,7 @@ pub const ZC = @import("ZC.zig");
 const log_level = @import("build").log_level;
 const logfile_path = @import("build").logfile_path;
 const use_logfile = logfile_path != null;
-var logfile: if (use_logfile) std.fs.File else void = undefined;
+var logfile: if (use_logfile) std.Io.File else void = undefined;
 
 const zg = @import("zg");
 
@@ -23,16 +23,10 @@ pub fn deinitUnicodeData(allocator: std.mem.Allocator) void {
     zg.deinitData(allocator, unicode_data);
 }
 var zc: ZC = undefined;
+var global_io: std.Io = undefined;
 
 pub fn main(init: std.process.Init.Minimal) !void {
     // zc.ui.term.cooked_termios = null;
-
-    if (logfile_path) |path| {
-        logfile = try std.fs.cwd().createFile(path, .{});
-    }
-    defer if (use_logfile) {
-        logfile.close();
-    };
 
     var filepath: ?[]const u8 = null;
     for (init.args.vector[1..]) |ptr| {
@@ -64,6 +58,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var threaded: std.Io.Threaded = .init_single_threaded;
     defer threaded.deinit();
     const io = threaded.io();
+    global_io = io;
+
+    if (logfile_path) |path| {
+        logfile = try std.Io.Dir.cwd().createFile(io, path, .{});
+    }
+    defer if (use_logfile) {
+        logfile.close(io);
+    };
 
     try initUnicodeData(gpa);
     defer if (is_debug) deinitUnicodeData(gpa);
@@ -100,7 +102,7 @@ pub fn log(
         else => {},
     }
     var buf: [1024]u8 = undefined;
-    var writer = logfile.writerStreaming(&buf);
+    var writer = logfile.writerStreaming(global_io, &buf);
     writer.interface.print("[{s}] {s}: ", .{ @tagName(scope), @tagName(level) }) catch {};
     writer.interface.print(format, args) catch {};
     writer.interface.writeByte('\n') catch {};
