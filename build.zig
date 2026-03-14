@@ -150,8 +150,8 @@ fn configureTests(
         "test/streams.zc",
     });
 
-    // Create cache directory for temporarily storing files created by serialization tests
-    const write_files = b.addTempFiles();
+    // Cache directory for temporarily storing files created by serialization tests
+    const write_files = b.addMutateFiles(b.path(".zig-cache/tmp/test-serialize-output-files"));
     const test_data_path = write_files.getDirectory();
 
     opts.addOptionPath("temp_dir", test_data_path);
