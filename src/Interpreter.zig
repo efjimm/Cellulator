@@ -130,31 +130,40 @@ pub const Value = union(enum) {
 
         pub const Stage = union(enum) {
             number_range: struct {
-                current: f64,
                 start: f64,
                 end: f64,
             },
             range: CellRange,
             indirect_range: CellRange,
-            tuple: struct {
-                values: []Value,
-                index: usize,
-            },
-            filter: struct {
-                predicate: Function,
-                continuing: bool,
-            },
-            map: struct {
-                apply: Function,
-                continuing: bool,
-            },
+            tuple: Tuple,
+            filter: Function,
+            map: Function,
         };
 
-        // TODO: AWFUL
         pub const CellRange = struct {
             min: Sheet.CellTree.Point,
             max: Sheet.CellTree.Point,
-            iter: ?Sheet.CellTree.QueryIterator,
+        };
+
+        /// The mutable state required when consuming a pipeline iteratively.
+        pub const State = struct {
+            /// Current stage of the pipeline being executed.
+            i: usize,
+            /// Current value of the pipeline.
+            value: Value,
+            /// True if we suspended when dereferencing a cell reference that resulted from a
+            /// pipeline.
+            cell: bool,
+            /// State for the pipeline source.
+            source: Source,
+
+            /// State for the pipeline source.
+            pub const Source = union(enum) {
+                number_range: f64,
+                range: Sheet.CellTree.QueryIterator,
+                tuple: usize,
+                none,
+            };
         };
     };
 
@@ -278,15 +287,12 @@ pub const StackEntry = union(enum) {
 
             pub const MapArgs = struct {
                 i: u8 = 0,
+                /// What kind of argument we're resuming at
                 arg: Arg = .none,
                 op: Op,
 
                 pub const Arg = union(enum) {
-                    pipeline: struct {
-                        pipeline_i: usize = 0,
-                        pipeline_value: Value = .none,
-                        cell: bool = false,
-                    },
+                    pipeline: Value.Pipeline.State,
                     cell,
                     range: Sheet.CellTree.QueryIterator,
                     none,
@@ -884,7 +890,6 @@ fn toPipeline(eval: *Interpreter, v: Value) !Value.Pipeline {
             try p.stages.append(eval.arena, .{ .indirect_range = .{
                 .min = r.rect.tl.array(),
                 .max = r.rect.br.array(),
-                .iter = null,
             } });
             return p;
         },
@@ -893,7 +898,6 @@ fn toPipeline(eval: *Interpreter, v: Value) !Value.Pipeline {
             try p.stages.append(eval.arena, .{ .range = .{
                 .min = r.rect.tl.array(),
                 .max = r.rect.br.array(),
-                .iter = null,
             } });
             return p;
         },
@@ -901,7 +905,6 @@ fn toPipeline(eval: *Interpreter, v: Value) !Value.Pipeline {
             var p: Value.Pipeline = .{};
             try p.stages.append(eval.arena, .{ .tuple = .{
                 .values = t.values,
-                .index = 0,
             } });
             return p;
         },
@@ -914,14 +917,14 @@ const MapArgsIter = struct {
     arg_count: u8,
     i: u8 = 0,
     arg: StackEntry.BuiltinHeader.ResumeState.MapArgs.Arg = .none,
+    header_index: StackEntry.Index,
 
     fn suspendExecution(
         iter: *MapArgsIter,
-        header_index: StackEntry.Index,
         arg: StackEntry.BuiltinHeader.ResumeState.MapArgs.Arg,
         ctx: anytype,
     ) error{Suspended} {
-        iter.eval.stack.getPtr(header_index).builtin_header.resume_state = .{
+        iter.eval.stack.getPtr(iter.header_index).builtin_header.resume_state = .{
             .map_args = .{
                 .i = iter.i,
                 .arg = arg,
@@ -938,6 +941,45 @@ const MapArgsIter = struct {
             },
         };
         return error.Suspended;
+    }
+
+    fn suspendPipeline(iter: *MapArgsIter, p_iter: PipelineIterator, ctx: anytype) error{Suspended} {
+        return iter.suspendExecution(.{
+            .pipeline = .{
+                .i = p_iter.i,
+                .value = p_iter.value,
+                .cell = p_iter.i == 0,
+                .source = p_iter.source,
+            },
+        }, ctx);
+    }
+
+    fn pipelineIterator(iter: *MapArgsIter, p: Value.Pipeline) PipelineIterator {
+        return switch (iter.arg) {
+            .pipeline => |p2| .{
+                .eval = iter.eval,
+                .p = p,
+                .i = p2.i,
+                .value = p2.value,
+                .source = p2.source,
+                .resuming = p2.i > 0,
+            },
+            else => .{
+                .eval = iter.eval,
+                .p = p,
+                .i = 0,
+                .value = undefined,
+                .resuming = false,
+                .source = switch (p.stages.items[0]) {
+                    .number_range => |nr| .{ .number_range = nr.start },
+                    .range, .indirect_range => |range| .{
+                        .range = iter.eval.sheet.cell_tree.iterator2(&range.min, &range.max),
+                    },
+                    .tuple => .{ .tuple = 0 },
+                    .map, .filter => unreachable,
+                },
+            },
+        };
     }
 
     /// Consumes arguments from the header index + 2.
@@ -976,7 +1018,7 @@ const MapArgsIter = struct {
                 if (t == .indirect_cell) eval.is_volatile = true;
                 eval.evalCellPos(pos) catch |err| switch (err) {
                     error.Suspended => {
-                        return iter.suspendExecution(header_index, .cell, ctx);
+                        return iter.suspendExecution(.cell, ctx);
                     },
                     else => |e| return e,
                 };
@@ -996,7 +1038,7 @@ const MapArgsIter = struct {
                 while (try cell_iter.next()) |handle| {
                     eval.evalCell(handle) catch |err| switch (err) {
                         error.Suspended => {
-                            return iter.suspendExecution(header_index, .{ .range = cell_iter }, ctx);
+                            return iter.suspendExecution(.{ .range = cell_iter }, ctx);
                         },
                         else => |e| return e,
                     };
@@ -1005,51 +1047,38 @@ const MapArgsIter = struct {
                 }
             },
             .pipeline => |p| {
-                var p_iter: PipelineIterator = .{
-                    .eval = eval,
-                    .p = p,
-                    .i = 0,
-                    .value = undefined,
-                };
-                switch (iter.arg) {
-                    .pipeline => |p2| {
-                        p_iter.i = p2.pipeline_i;
-                        p_iter.value = p2.pipeline_value;
+                var p_iter = iter.pipelineIterator(p);
+
+                // Consume values from the pipeline and apply the function to the resulting
+                // values.
+                while (p_iter.next()) |value| switch (value) {
+                    inline .cell, .indirect_cell => |pos, t| {
+                        if (t == .indirect_cell) eval.is_volatile = true;
+
+                        // Dereference any cell references resulting from the pipeline and apply the
+                        // function to the result.
+                        eval.evalCellPos(pos) catch |err| switch (err) {
+                            error.Suspended => {
+                                assert(p_iter.i == 0);
+                                // Suspend. The value resulting from evaluating this cell will be
+                                // handled at the top of this function under the `p.cell` check.
+                                return iter.suspendPipeline(p_iter, ctx);
+                            },
+                            else => |e| return e,
+                        };
+
+                        // The cell's value was already cached and we didn't need to suspend to
+                        // evaluate it.
+                        const result = eval.stack.pop().?.value;
+                        try ctx.func(result);
                     },
-                    else => {},
-                }
-
-                while (p_iter.next()) |value| {
-                    switch (value) {
-                        inline .cell, .indirect_cell => |pos, t| {
-                            if (t == .indirect_cell) eval.is_volatile = true;
-                            eval.evalCellPos(pos) catch |err| switch (err) {
-                                error.Suspended => {
-                                    return iter.suspendExecution(header_index, .{
-                                        .pipeline = .{
-                                            .pipeline_i = p_iter.i,
-                                            .pipeline_value = p_iter.value,
-                                            .cell = true,
-                                        },
-                                    }, ctx);
-                                },
-                                else => |e| return e,
-                            };
-
-                            const result = eval.stack.pop().?.value;
-                            try ctx.func(result);
-                        },
-                        else => try ctx.func(value),
-                    }
+                    else => try ctx.func(value),
                 } else |err| switch (err) {
                     error.EndOfStream => {},
                     error.Suspended => {
-                        return iter.suspendExecution(header_index, .{
-                            .pipeline = .{
-                                .pipeline_i = p_iter.i,
-                                .pipeline_value = p_iter.value,
-                            },
-                        }, ctx);
+                        // Pipeline itself suspended, likely to evaluate the function passed to
+                        // something like map/filter.
+                        return iter.suspendPipeline(p_iter, ctx);
                     },
                     else => |e| return e,
                 }
@@ -1082,6 +1111,7 @@ fn mapArgs(
         .eval = eval,
         .i = map.i,
         .arg = map.arg,
+        .header_index = eval.header.unwrap().?,
     };
     var ctx = @field(map.op, @tagName(tag));
     while (try iter.consume(&ctx)) {}
@@ -1094,75 +1124,60 @@ const PipelineIterator = struct {
     p: Value.Pipeline,
     i: usize,
     value: Value,
+    source: Value.Pipeline.State.Source,
+    resuming: bool,
 
     pub fn next(iter: *PipelineIterator) !Value {
         const p = &iter.p;
         const eval = iter.eval;
-        switch (p.stages.items[0]) {
-            .range, .indirect_range => |*r| {
-                if (r.iter == null) {
-                    r.iter = eval.sheet.cell_tree.iterator2(&r.min, &r.max);
-                }
-            },
-            else => {},
-        }
 
         while (iter.i < p.stages.items.len) {
             switch (p.stages.items[iter.i]) {
-                .number_range => |*r| {
-                    if (r.current >= r.end) return error.EndOfStream;
-                    const ret = r.current;
-                    r.current += 1;
-                    iter.value = .{ .number = ret };
+                .number_range => |r| {
+                    const current = iter.source.number_range;
+                    if (current >= r.end) return error.EndOfStream;
+                    iter.source.number_range += 1;
+                    iter.value = .{ .number = current };
                 },
-                .range => |*r| {
-                    const h = try r.iter.?.next() orelse return error.EndOfStream;
+                .range => {
+                    const h = try iter.source.range.next() orelse return error.EndOfStream;
                     const point = eval.sheet.cell_tree.entryItem(h, .point);
                     iter.value = .{ .cell = .fromArray(point.*) };
                 },
-                .indirect_range => |*r| {
-                    // TODO: This is imprecise.
-                    eval.is_volatile = true;
-                    const h = try r.iter.?.next() orelse return error.EndOfStream;
+                .indirect_range => {
+                    const h = try iter.source.range.next() orelse return error.EndOfStream;
                     const point = eval.sheet.cell_tree.entryItem(h, .point);
                     iter.value = .{ .indirect_cell = .fromArray(point.*) };
                 },
-                .tuple => |*t| {
-                    if (t.index >= t.values.len) return error.EndOfStream;
-                    iter.value = t.values[t.index];
-                    t.index += 1;
+                .tuple => |t| {
+                    const index = iter.source.tuple;
+                    if (index >= t.values.len) return error.EndOfStream;
+                    iter.value = t.values[index];
+                    iter.source.tuple += 1;
                 },
-                .filter => |*f| {
-                    if (!f.continuing) {
-                        f.continuing = true;
+                .filter => |f| if (!iter.resuming) {
+                    try eval.reserveStack(8);
+                    eval.pushvAssumeCapacity(.{ .function = f });
+                    eval.pushvAssumeCapacity(iter.value);
+                    try eval.call(1);
 
-                        try eval.reserveStack(8);
-                        eval.pushvAssumeCapacity(.{ .function = f.predicate });
-                        eval.pushvAssumeCapacity(iter.value);
-                        try eval.call(1);
-
-                        return error.Suspended;
-                    } else {
-                        f.continuing = false;
-
-                        const return_value = eval.stack.pop().?.value;
-                        if (!return_value.boolean()) {
-                            iter.i = 0;
-                            continue;
-                        }
+                    return error.Suspended;
+                } else {
+                    iter.resuming = false;
+                    const return_value = eval.stack.pop().?.value;
+                    if (!return_value.boolean()) {
+                        iter.i = 0;
+                        continue;
                     }
                 },
-                .map => |*f| {
-                    if (!f.continuing) {
-                        f.continuing = true;
-                        try eval.pushv(.{ .function = f.apply });
-                        try eval.pushv(iter.value);
-                        try eval.call(1);
-                        return error.Suspended;
-                    } else {
-                        f.continuing = false;
-                        iter.value = eval.stack.pop().?.value;
-                    }
+                .map => |f| if (!iter.resuming) {
+                    try eval.pushv(.{ .function = f });
+                    try eval.pushv(iter.value);
+                    try eval.call(1);
+                    return error.Suspended;
+                } else {
+                    iter.resuming = false;
+                    iter.value = eval.stack.pop().?.value;
                 },
             }
             iter.i += 1;
@@ -1351,9 +1366,7 @@ fn evalFilter(eval: *Interpreter, arg_count: u8) !Value.Pipeline {
     var pipeline = try eval.toPipeline(arg1);
     const predicate = arg2.function;
 
-    try pipeline.stages.append(eval.arena, .{
-        .filter = .{ .predicate = predicate, .continuing = false },
-    });
+    try pipeline.stages.append(eval.arena, .{ .filter = predicate });
 
     return pipeline;
 }
@@ -1366,9 +1379,7 @@ fn evalMap(eval: *Interpreter, arg_count: u8) !Value.Pipeline {
     var pipeline = try eval.toPipeline(arg1);
     const apply = arg2.function;
 
-    try pipeline.stages.append(eval.arena, .{
-        .map = .{ .apply = apply, .continuing = false },
-    });
+    try pipeline.stages.append(eval.arena, .{ .map = apply });
 
     return pipeline;
 }
@@ -1384,7 +1395,6 @@ fn evalRange(eval: *Interpreter, arg_count: u8) !Value.Pipeline {
     var ret: Value.Pipeline = .{};
     try ret.stages.ensureUnusedCapacity(eval.arena, 8);
     ret.stages.appendAssumeCapacity(.{ .number_range = .{
-        .current = start,
         .start = start,
         .end = end,
     } });

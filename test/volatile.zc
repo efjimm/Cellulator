@@ -131,6 +131,9 @@ let a13 = G100:Z1000 |> @map(|x| *x) |> @sum()
 
 let a14 = G14:G25
 let b14 = *A14 |> @map(|x| *x) |> @sum()
+:expect-non-volatile b14
+let G14 = 1
 :expect-volatile b14
+let g14 = 1
 let c14 = *a14 |> @map(|x| *x)
 :expect-non-volatile c14
