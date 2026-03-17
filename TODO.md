@@ -4,7 +4,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 # TODO
 
-- Refactor UI screen data handling
 - Rework cell width handling
 - Remove some unnecessary formatted printing to improve compile times
 

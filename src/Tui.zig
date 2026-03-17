@@ -1046,7 +1046,7 @@ fn renderColumnHeadings(tui: *Tui, wr: *Screen.Writer) !void {
     try wr.interface.splatByteAll(' ', tui.left);
 
     while (w < tui.term.width) : (x += 1) {
-        const col_width = tui.screen_data.widths[x - zc.screen_pos.x];
+        const col_width = tui.screen_data.cols[x - zc.screen_pos.x].width;
         var buf: [Position.max_str_len]u8 = undefined;
         const name = Position.columnAddressBuf(x, &buf);
 
@@ -1125,11 +1125,11 @@ fn renderCursor(tui: *Tui, wr: *Screen.Writer) !void {
 
     var start: usize = tui.left;
     for (0..start_x) |x| {
-        start += tui.screen_data.widths[x];
+        start += tui.screen_data.cols[x].width;
     }
     var width: usize = 0;
-    for (start_x..@min(tui.screen_data.widths.len, @as(u64, end_x) + 1)) |x|
-        width += tui.screen_data.widths[x];
+    for (start_x..@min(tui.screen_data.cols.len, @as(u64, end_x) + 1)) |x|
+        width += tui.screen_data.cols[x].width;
 
     const style: UiElement = blk: {
         if (zc.mode.isVisual())
@@ -1171,17 +1171,6 @@ fn divCeil(n: anytype, d: @TypeOf(n)) @TypeOf(n) {
     return std.math.divCeil(@TypeOf(n), n, d) catch unreachable;
 }
 
-const GetColsContext = struct {
-    widths: []u16,
-    sheet: *const Sheet,
-    screen_x: u32,
-
-    pub fn func(ctx: @This(), h: Column.Handle) !void {
-        const x = ctx.sheet.cols.getPoint(h)[0] - ctx.screen_x;
-        ctx.widths[x] = ctx.sheet.cols.getValue(h).width;
-    }
-};
-
 /// Returns the number of columns currently visible on screen.
 fn visibleColumnCount(tui: *Tui) !u16 {
     const zc = tui.zc.?;
@@ -1189,11 +1178,12 @@ fn visibleColumnCount(tui: *Tui) !u16 {
 
     const widths = try tui.arena.allocator().alloc(u16, @as(u32, tui.term.width) + 1);
     @memset(widths, Column.default_width);
-    sheet.cols.traverse(&.{zc.screen_pos.x}, &.{zc.screen_pos.x +| tui.term.width}, GetColsContext{
-        .sheet = sheet,
-        .widths = widths,
-        .screen_x = zc.screen_pos.x,
-    }) catch unreachable;
+
+    var iter = sheet.cols.queryIterator(.{zc.screen_pos.x}, .{zc.screen_pos.x +| tui.term.width});
+    while (iter.next()) |handle| {
+        const x = sheet.cols.getPoint(handle)[0] - zc.screen_pos.x;
+        widths[x] = sheet.cols.getValue(handle).width;
+    }
 
     var total_width: u16 = 0;
     var i: u16 = 0;
@@ -1230,33 +1220,9 @@ fn SheetTreeContext(comptime field_name: []const u8) type {
 }
 
 const ScreenData = struct {
-    widths: []const u16,
-    precisions: []const u8,
-    values: []const Cell.Value,
+    cols: []const Column,
+    cells: []const ?*const Cell,
     attrs: []const Sheet.TextAttrs,
-    extra: []const Extra,
-
-    const Tag = enum(u4) {
-        blank,
-        nil,
-        boolean,
-        number,
-        string,
-        err,
-        ref_cell,
-        ref_range,
-        simple_function,
-        builtin_function,
-        closure,
-        pipeline,
-        tuple,
-        table,
-    };
-
-    const Extra = packed struct {
-        is_volatile: bool,
-        tag: Tag,
-    };
 };
 
 fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !ScreenData {
@@ -1264,116 +1230,47 @@ fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !ScreenData {
     const sheet = zc.currentSheet();
     const arena = tui.arena.allocator();
 
-    const widths = try arena.alloc(u16, col_count);
-    const precisions = try arena.alloc(u8, col_count);
-    const values = try arena.alloc(Cell.Value, cell_count);
-    const extra = try arena.alloc(ScreenData.Extra, cell_count);
+    const cols = try arena.alloc(Column, col_count);
+    const cells = try arena.alloc(?*const Cell, cell_count);
     const attrs = try arena.alloc(Sheet.TextAttrs, cell_count);
 
-    @memset(widths, Column.default_width);
-    @memset(precisions, 2);
-    @memset(extra, .{ .is_volatile = false, .tag = .blank });
+    @memset(cols, .{});
+    @memset(cells, null);
     @memset(attrs, .default);
 
-    const tl: *const [2]u32 = &.{ zc.screen_pos.x, zc.screen_pos.y };
-    const br: *const [2]u32 = &.{
+    const tl: [2]u32 = .{ zc.screen_pos.x, zc.screen_pos.y };
+    const br: [2]u32 = .{
         zc.screen_pos.x +| (col_count - 1),
         zc.screen_pos.y +| (tui.cellViewHeight() - 1),
     };
 
-    const CellContext = struct {
-        values: []Cell.Value,
-        extra: []ScreenData.Extra,
-        sheet: *Sheet,
-        zc: *ZC,
-        col_count: u16,
+    var cols_iter = sheet.cols.queryIterator(.{tl[0]}, .{br[0]});
+    while (cols_iter.next()) |h| {
+        const p = sheet.cols.getPoint(h);
+        const x = p[0] - zc.screen_pos.x;
+        cols[x] = sheet.cols.getValue(h).*;
+    }
 
-        pub fn func(ctx: @This(), h: Cell.Handle) !void {
-            const p = ctx.sheet.cell_tree.getPoint(h);
-            const x = p[0] - ctx.zc.screen_pos.x;
-            const y = p[1] - ctx.zc.screen_pos.y;
-            const cell = ctx.sheet.cell_tree.getValue(h).*;
-            ctx.extra[y * ctx.col_count + x] = .{
-                .tag = switch (cell.expr.value_tag) {
-                    .nil => .nil,
-                    .boolean => .boolean,
-                    .number => .number,
-                    .string => .string,
-                    .err => .err,
-                    .ref_cell => .ref_cell,
-                    .ref_range => .ref_range,
-                    .simple_function => .simple_function,
-                    .builtin_function => .builtin_function,
-                    .closure => .closure,
-                    .tuple => .tuple,
-                    .pipeline => .pipeline,
-                    .table => .table,
-                },
-                .is_volatile = cell.expr.is_volatile,
-            };
-            ctx.values[y * ctx.col_count + x] = cell.value;
-        }
-    };
+    var cell_iter = sheet.cell_tree.queryIterator(tl, br);
+    while (cell_iter.next()) |h| {
+        const p = sheet.cell_tree.getPoint(h);
+        const x = p[0] - zc.screen_pos.x;
+        const y = p[1] - zc.screen_pos.y;
+        const cell = sheet.getCellFromHandle(h);
+        cells[y * col_count + x] = cell;
+    }
 
-    const AttrContext = struct {
-        attrs: []Sheet.TextAttrs,
-        sheet: *Sheet,
-        zc: *ZC,
-        col_count: u16,
-
-        pub fn func(ctx: @This(), h: Sheet.TextAttrs.Handle) !void {
-            const p = ctx.sheet.text_attrs.getPoint(h);
-            const x = p[0] - ctx.zc.screen_pos.x;
-            const y = p[1] - ctx.zc.screen_pos.y;
-            ctx.attrs[y * ctx.col_count + x] = ctx.sheet.text_attrs.getValue(h).*;
-        }
-    };
-
-    const ColContext = struct {
-        widths: []u16,
-        precisions: []u8,
-        sheet: *Sheet,
-        zc: *ZC,
-        col_count: u16,
-
-        pub fn func(ctx: @This(), h: Column.Handle) !void {
-            const p = ctx.sheet.cols.getPoint(h);
-            const x = p[0] - ctx.zc.screen_pos.x;
-            const col = ctx.sheet.cols.getValue(h);
-            ctx.widths[x] = col.width;
-            ctx.precisions[x] = col.precision;
-        }
-    };
-
-    sheet.cols.traverse(&.{tl[0]}, &.{br[0]}, ColContext{
-        .widths = widths,
-        .precisions = precisions,
-        .sheet = sheet,
-        .zc = zc,
-        .col_count = col_count,
-    }) catch unreachable;
-
-    // sheet.cell_tree.queryWindow(tl, br, &cells) catch unreachable;
-    sheet.cell_tree.traverse(tl, br, CellContext{
-        .extra = extra,
-        .values = values,
-        .sheet = sheet,
-        .zc = zc,
-        .col_count = col_count,
-    }) catch unreachable;
-
-    sheet.text_attrs.traverse(tl, br, AttrContext{
-        .attrs = attrs,
-        .sheet = sheet,
-        .zc = zc,
-        .col_count = col_count,
-    }) catch unreachable;
+    var attrs_iter = sheet.text_attrs.queryIterator(tl, br);
+    while (attrs_iter.next()) |h| {
+        const p = sheet.text_attrs.getPoint(h);
+        const x = p[0] - zc.screen_pos.x;
+        const y = p[1] - zc.screen_pos.y;
+        attrs[y * col_count + x] = sheet.text_attrs.getValue(h).*;
+    }
 
     return .{
-        .widths = widths,
-        .precisions = precisions,
-        .values = values,
-        .extra = extra,
+        .cols = cols,
+        .cells = cells,
         .attrs = attrs,
     };
 }
@@ -1409,17 +1306,20 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
             x += 1;
             i += 1;
         }) {
-            const width = @min(data.widths[x], wr.rect.width -| w);
+            const width = @min(data.cols[x].width, wr.rect.width -| w);
             if (width == 0) continue;
+            w += width;
+
+            const cell = data.cells[i] orelse {
+                try tui.setStyle(.cell_blank_unselected, wr);
+                try wr.interface.splatByteAll(' ', width);
+                continue;
+            };
 
             // TODO: This whole thing sucks
             var buf: [512]u8 = undefined;
-            switch (data.extra[i].tag) {
+            switch (cell.expr.value_tag) {
                 // NOTE: `ZC.widthNeededForCell` needs to be updated if these change
-                .blank => {
-                    try tui.setStyle(.cell_blank_unselected, wr);
-                    try wr.interface.splatByteAll(' ', width);
-                },
                 .nil => {
                     try tui.setStyle(.cell_error_unselected, wr);
                     try wr.interface.print("{s: >[1]}", .{ "nil", width });
@@ -1427,7 +1327,7 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                 .tuple => {
                     try tui.setStyle(.cell_number_unselected, wr);
                     var bw: std.Io.Writer = .fixed(&buf);
-                    sheet.formatCellValue(.tuple, data.values[i], &bw) catch {};
+                    sheet.formatCellValue(.tuple, cell.value, &bw) catch {};
 
                     const str = bw.buffered();
                     try shovel.writeTruncating(
@@ -1441,7 +1341,7 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                 .pipeline => {
                     try tui.setStyle(.cell_text_unselected, wr);
                     const str = std.fmt.bufPrint(&buf, "<{d}>", .{
-                        data.values[i].pipeline.stages.items.len,
+                        cell.value.pipeline.stages.items.len,
                     }) catch unreachable;
 
                     try shovel.writeTruncating(
@@ -1453,7 +1353,7 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                     );
                 },
                 .boolean => {
-                    const string = switch (data.values[i].boolean) {
+                    const string = switch (cell.value.boolean) {
                         false => "false",
                         true => "true",
                     };
@@ -1469,9 +1369,9 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                     try tui.setStyle(.cell_number_unselected, wr);
                     var bw: std.Io.Writer = .fixed(&buf);
                     bw.print("{d: >[1].[2]}", .{
-                        data.values[i].number,
+                        cell.value.number,
                         width,
-                        data.precisions[x],
+                        data.cols[x].precision,
                     }) catch {};
                     if (bw.end > width) {
                         bw.end = width - 1;
@@ -1482,7 +1382,7 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                 .string => {
                     try tui.setStyle(.cell_text_unselected, wr);
 
-                    const text = data.values[i].string.bytes();
+                    const text = cell.value.string.bytes();
                     const alignment = utils.enumFromEnum(
                         shovel.TextAlignment,
                         data.attrs[i].alignment,
@@ -1501,7 +1401,7 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                 },
                 .ref_cell => {
                     try tui.setStyle(.cell_ref_unselected, wr);
-                    const slice = std.fmt.bufPrint(&buf, "{f}", .{data.values[i].ref_cell}) catch
+                    const slice = std.fmt.bufPrint(&buf, "{f}", .{cell.value.ref_cell}) catch
                         unreachable;
                     try shovel.writeTruncating(
                         slice,
@@ -1513,7 +1413,7 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                 },
                 .ref_range => {
                     try tui.setStyle(.cell_range_unselected, wr);
-                    const range = data.values[i].ref_range.*;
+                    const range = cell.value.ref_range.*;
 
                     const slice = std.fmt.bufPrint(&buf, "{f}", .{range}) catch unreachable;
                     try shovel.writeTruncating(
@@ -1527,7 +1427,7 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                 .simple_function => {
                     try tui.setStyle(.cell_number_unselected, wr);
                     // TODO: Syntax highlight these
-                    const root = data.values[i].simple_function.index;
+                    const root = cell.value.simple_function.index;
                     const slice = try std.fmt.allocPrint(
                         tui.arena.allocator(),
                         "{f}",
@@ -1544,7 +1444,7 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                 .builtin_function => {
                     try tui.setStyle(.cell_number_unselected, wr);
                     // TODO: Syntax highlight these
-                    const tag = data.values[i].builtin_function;
+                    const tag = cell.value.builtin_function;
                     const slice = try std.fmt.allocPrint(tui.arena.allocator(), "{f}", .{tag});
                     try shovel.writeTruncating(
                         slice,
@@ -1557,7 +1457,7 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                 .closure => {
                     try tui.setStyle(.cell_number_unselected, wr);
                     // TODO: Syntax highlight these
-                    const root = data.values[i].closure.root;
+                    const root = cell.value.closure.root;
                     const slice = try std.fmt.allocPrint(
                         tui.arena.allocator(),
                         "{f}",
@@ -1582,7 +1482,6 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                     );
                 },
             }
-            w += width;
         }
         try wr.flush();
     }
