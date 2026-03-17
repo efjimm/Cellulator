@@ -99,6 +99,15 @@ pub const Value = union(enum) {
             .table => |t| {
                 const new_t = try arena.create(Table);
                 const new_map = try t.map.clone(arena);
+                for (
+                    new_map.keys(),
+                    new_map.values(),
+                    t.map.keys(),
+                    t.map.values(),
+                ) |*key_dest, *value_dest, key, value| {
+                    key_dest.* = try arena.dupe(u8, key);
+                    value_dest.* = try value.clone(arena);
+                }
                 new_t.* = .{ .map = new_map };
                 return .{ .table = new_t };
             },
