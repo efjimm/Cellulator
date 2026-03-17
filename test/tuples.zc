@@ -57,4 +57,9 @@ let a2 = @range(1, 10) |> @filter(|x| x % 2 == 0)
 
 :expect [1, 2, 'howdy', 4][2] == 'howdy'
 let a3 = [1,] -- Trailing comma
-:expect a3[0] == 1
+
+-- Make sure tuples get cleaned up properly, even on error
+let g0 = [1]
+let g0 = @upper([1])
+let g0 = @lower([1])
+let g0 = @filter([1] |x| 1)

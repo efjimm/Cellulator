@@ -28,19 +28,20 @@ pub const Value = union(enum) {
     nil,
     err,
     number: f64,
-    string: String,
+    string: *String,
     cell: Position,
     range: Range,
     function: Function,
+    closure: *Closure,
     builtin_function: BuiltinFunction,
     indirect_range: Range,
     indirect_cell: Position,
-    pipeline: Pipeline,
-    tuple: Tuple,
+    pipeline: *Pipeline,
+    tuple: *Tuple,
 
     /// Returns a deep copy of the given value. Avoid when possible. Currently only used for
     /// storing tuples and pipelines in cells, which is a relatively rare use case.
-    pub fn clone(v: Value, gpa: anytype) Allocator.Error!Value {
+    pub fn clone(v: Value, arena: Allocator) Allocator.Error!Value {
         switch (v) {
             .none,
             .nil,
@@ -48,96 +49,92 @@ pub const Value = union(enum) {
             .number,
             .cell,
             .range,
+            .function,
             .builtin_function,
             .indirect_range,
             .indirect_cell,
             => return v,
-            .string => |s| switch (s) {
-                .cell => return v,
-                .slice => |slice| return .{ .string = .{ .slice = try gpa.dupe(u8, slice) } },
+            .string => |s| {
+                return .{ .string = try .dupe(arena, s.bytes()) };
             },
-            .function => |f| {
-                const caps = try gpa.dupe(Value, f.captures);
-                errdefer gpa.free(caps);
+            .closure => |f| {
+                const new_closure: *Value.Closure = try .create(arena, f.root, f.len);
+                const captures = new_closure.captures();
 
-                for (caps, 0..) |*cap, i| {
-                    errdefer for (caps[0..i -| 1]) |cap2| cap2.deinit(gpa);
-                    cap.* = try cap.clone(gpa);
+                for (captures, f.captures()) |*new_capture, old_capture| {
+                    new_capture.* = try old_capture.clone(arena);
                 }
-                return .{ .function = .{ .root = f.root, .captures = caps } };
+                return .{ .closure = new_closure };
             },
             .pipeline => |p| {
-                const stages = try gpa.dupe(Pipeline.Stage, p.stages.items);
-                return .{ .pipeline = .{ .stages = .fromOwnedSlice(stages) } };
-            },
-            .tuple => |t| {
-                const values = try gpa.dupe(Value, t.values);
-                errdefer gpa.free(values);
-
-                for (values, 0..) |*value, i| {
-                    errdefer for (values[0..i -| 1]) |duped_value|
-                        duped_value.deinit(gpa);
-                    value.* = try value.clone(gpa);
+                const ret = try arena.create(Pipeline);
+                const stages = try arena.dupe(Pipeline.Stage, p.stages.items);
+                for (stages, p.stages.items) |*stage, old_stage| {
+                    stage.* = switch (old_stage) {
+                        .number_range,
+                        .range,
+                        .indirect_range,
+                        => old_stage,
+                        .tuple => |t| .{
+                            .tuple = (try clone(.{ .tuple = t }, arena)).tuple,
+                        },
+                        .filter => |v2| .{ .filter = try v2.clone(arena) },
+                        .map => |v2| .{ .map = try v2.clone(arena) },
+                    };
                 }
-                return .{ .tuple = .{ .values = values } };
-            },
-        }
-    }
-
-    /// Free a cloned value.
-    pub fn deinit(v: Value, gpa: Allocator) void {
-        switch (v) {
-            .none,
-            .nil,
-            .err,
-            .number,
-            .cell,
-            .range,
-            .builtin_function,
-            .indirect_range,
-            .indirect_cell,
-            => {},
-            .string => |s| switch (s) {
-                .cell => {},
-                .slice => |slice| {
-                    gpa.free(slice);
-                },
-            },
-            .function => |f| {
-                for (f.captures) |cap|
-                    cap.deinit(gpa);
-                gpa.free(f.captures);
-            },
-            .pipeline => |p| {
-                var temp = p.stages;
-                temp.deinit(gpa);
+                ret.* = .{ .stages = .fromOwnedSlice(stages) };
+                return .{ .pipeline = ret };
             },
             .tuple => |t| {
-                for (t.values) |value|
-                    value.deinit(gpa);
-                gpa.free(t.values);
+                const new_t: *Value.Tuple = try .create(arena, t.len);
+
+                for (new_t.values(), t.values()) |*new_value, old_value| {
+                    new_value.* = try old_value.clone(arena);
+                }
+                return .{ .tuple = new_t };
             },
         }
     }
 
     pub const Tuple = struct {
-        values: []Value,
+        len: u32,
+
+        const alignment: std.mem.Alignment = .max(.of(Tuple), .of(Value));
+        const header_size = alignment.forward(@sizeOf(Tuple));
+
+        pub fn create(gpa: Allocator, len: u32) Allocator.Error!*Tuple {
+            const size = header_size + @sizeOf(Value) * @as(usize, len);
+            const bytes = try gpa.alignedAlloc(u8, alignment, size);
+            const ptr: *Tuple = @ptrCast(bytes);
+            ptr.* = .{ .len = len };
+            return ptr;
+        }
+
+        pub fn destroy(t: *Tuple, gpa: Allocator) void {
+            const size = header_size + @sizeOf(Value) * @as(usize, t.len);
+            const bytes: [*]align(alignment.toByteUnits()) u8 = @ptrCast(@alignCast(t));
+            const slice = bytes[0..size];
+            gpa.free(slice);
+        }
+
+        pub fn values(t: *Tuple) []Value {
+            const ptr: [*]Value = @ptrFromInt(@intFromPtr(t) + header_size);
+            return ptr[0..t.len];
+        }
     };
 
     // Range/map/filter functions return a new pipeline
     pub const Pipeline = struct {
+        slopped: bool = true,
         stages: std.ArrayList(Stage) = .empty,
 
         pub const Stage = union(enum) {
-            number_range: struct {
-                start: f64,
-                end: f64,
-            },
+            number_range: struct { start: f64, end: f64 },
             range: CellRange,
             indirect_range: CellRange,
-            tuple: Tuple,
-            filter: Function,
-            map: Function,
+            tuple: *Tuple,
+            filter: Value,
+            map: Value,
         };
 
         pub const CellRange = struct {
@@ -167,25 +164,78 @@ pub const Value = union(enum) {
         };
     };
 
-    pub const String = union(enum) {
-        slice: []const u8,
-        cell: struct {
-            sheet: *Sheet,
-            list_index: @FieldType(Sheet, "string_values").List.Index,
-        },
+    pub const String = struct {
+        len: u32,
 
-        pub fn bytes(self: *const String) []const u8 {
-            return switch (self.*) {
-                .slice => |s| s,
-                .cell => |s| s.sheet.string_values.items(s.list_index),
-            };
+        const alignment: std.mem.Alignment = .max(.of(String), .of(u8));
+        const header_size: usize = @sizeOf(String);
+
+        pub fn create(gpa: Allocator, len: u32) Allocator.Error!*String {
+            const size = header_size + len;
+            const slice = try gpa.alignedAlloc(u8, alignment, size);
+            const ret: *String = @ptrCast(slice.ptr);
+            ret.* = .{ .len = len };
+            return ret;
+        }
+
+        pub fn destroy(s: *String, gpa: Allocator) void {
+            const ptr: [*]align(alignment.toByteUnits()) u8 = @ptrCast(s);
+            const slice = ptr[0 .. header_size + s.len];
+            gpa.free(slice);
+        }
+
+        pub fn bytes(s: *String) []u8 {
+            const ptr: [*]u8 = @ptrCast(s);
+            return ptr[header_size..][0..s.len];
+        }
+
+        pub fn dupe(gpa: Allocator, text: []const u8) Allocator.Error!*String {
+            const ret = try create(gpa, @intCast(text.len));
+            @memcpy(ret.bytes(), text);
+            return ret;
+        }
+
+        pub fn allocPrint(gpa: Allocator, comptime fmt: []const u8, args: anytype) Allocator.Error!*String {
+            const size = std.fmt.count(fmt, args);
+            const str = try create(gpa, @intCast(size));
+            const slice = std.fmt.bufPrint(str.bytes(), fmt, args) catch unreachable;
+            assert(slice.len == str.len);
+            return str;
+        }
+    };
+
+    pub const Closure = struct {
+        /// Index of the `function_body_start` node.
+        root: Node.Index,
+        len: u32,
+
+        const alignment: std.mem.Alignment = .max(.of(Closure), .of(Value));
+        const header_size = alignment.forward(@sizeOf(Closure));
+
+        pub fn create(gpa: Allocator, root: Node.Index, capture_count: u32) Allocator.Error!*Closure {
+            const size = header_size + @sizeOf(Value) * @as(usize, capture_count);
+            const bytes = try gpa.alignedAlloc(u8, alignment, size);
+            const ptr: *Closure = @ptrCast(bytes.ptr);
+            ptr.* = .{ .root = root, .len = capture_count };
+            return ptr;
+        }
+
+        pub fn destroy(c: *Closure, gpa: Allocator) void {
+            const size = header_size + @sizeOf(Value) * @as(usize, c.len);
+            const ptr: [*]align(alignment.toByteUnits()) u8 = @ptrCast(@alignCast(c));
+            const bytes = ptr[0..size];
+            gpa.free(bytes);
+        }
+
+        pub fn captures(c: *Closure) []Value {
+            const ptr: [*]Value = @ptrFromInt(@intFromPtr(c) + header_size);
+            return ptr[0..c.len];
         }
     };
 
     pub const Function = struct {
         /// Index of the `function_body_start` node.
         root: Node.Index,
-        captures: []Value = &.{},
     };
 
     pub const BuiltinFunction = struct {
@@ -213,7 +263,7 @@ pub const Value = union(enum) {
             .string => true,
             .cell, .indirect_cell => true,
             .range, .indirect_range => true,
-            .function, .builtin_function => true,
+            .function, .closure, .builtin_function => true,
             .pipeline => true,
             .tuple => true,
         };
@@ -233,6 +283,7 @@ pub const Value = union(enum) {
             .range,
             .indirect_range,
             .function,
+            .closure,
             .builtin_function,
             .pipeline,
             .tuple,
@@ -362,7 +413,7 @@ fn evalCell(eval: *Interpreter, cell_handle: Sheet.Cell.Handle) !void {
     try eval.reserveStack(1);
     const cell = eval.sheet.getCellFromHandle(cell_handle);
     if (cell.expr.state == .up_to_date) {
-        const value = try eval.sheet.cellValueToInterpreterValue(eval, cell);
+        const value = Sheet.interpreterValueFromCell(cell.expr.value_tag, cell.value);
         eval.stack.appendAssumeCapacity(.{ .value = value });
         return;
     }
@@ -370,7 +421,7 @@ fn evalCell(eval: *Interpreter, cell_handle: Sheet.Cell.Handle) !void {
     const root = cell.root().unwrap() orelse {
         // Cell doesn't have an expression, just a simple value
         cell.expr.state = .up_to_date;
-        const value = try eval.sheet.cellValueToInterpreterValue(eval, cell);
+        const value = Sheet.interpreterValueFromCell(cell.expr.value_tag, cell.value);
         eval.stack.appendAssumeCapacity(.{ .value = value });
         return;
     };
@@ -402,8 +453,8 @@ fn evaluateBuiltin(eval: *Interpreter, builtin_tag: Node.Builtin.Tag, arg_count:
         },
         .max => .{ .number = (try eval.mapArgs(arg_count, .max)).max orelse 0 },
         .min => .{ .number = (try eval.mapArgs(arg_count, .min)).min orelse 0 },
-        .upper => .{ .string = .{ .slice = try eval.evalUpper(arg_count) } },
-        .lower => .{ .string = .{ .slice = try eval.evalLower(arg_count) } },
+        .upper => .{ .string = try eval.evalUpper(arg_count) },
+        .lower => .{ .string = try eval.evalLower(arg_count) },
         .sqrt => .{ .number = try eval.evalSqrt(arg_count) },
         .round => .{ .number = try eval.evalRound(arg_count) },
         .floor => .{ .number = try eval.evalFloor(arg_count) },
@@ -453,8 +504,8 @@ fn call(eval: *Interpreter, arg_count: u8) error{
     const index = eval.stack.lastIndex().subi(1).subi(arg_count);
     const callable = eval.stack.get(index).value;
     switch (callable) {
-        .function => {
-            const func = callable.function.root;
+        .function, .closure => {
+            const func = if (callable == .function) callable.function.root else callable.closure.root;
             assert(eval.sheet.ast.tag(func) == .function_body_start);
             const def = eval.sheet.ast.payload(func).function_body_start;
             if (def.arg_count != arg_count)
@@ -601,43 +652,56 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
                 try eval.pushv(.{ .cell = pos });
             },
             .string_literal => |str| {
-                try eval.pushv(.{ .string = .{ .slice = ast.string(str) } });
+                try eval.reserveStack(1);
+                eval.pushvAssumeCapacity(.{ .string = try .dupe(eval.arena, ast.string(str)) });
             },
             .tuple => |tuple| {
                 assert(eval.stack.len() >= tuple.arg_count);
                 if (tuple.arg_count == 0)
                     try eval.reserveStack(1);
 
-                const values = try eval.arena.alloc(Value, tuple.arg_count);
-                for (values, eval.stack.items()[eval.stack.len() - tuple.arg_count ..]) |*dest, src| {
+                const t: *Value.Tuple = try .create(eval.arena, tuple.arg_count);
+                for (t.values(), eval.stack.items()[eval.stack.len() - tuple.arg_count ..]) |*dest, src| {
                     dest.* = src.value;
                 }
                 eval.stack.shrinkRetainingCapacity(@enumFromInt(eval.stack.len() - tuple.arg_count));
 
-                eval.pushvAssumeCapacity(.{ .tuple = .{ .values = values } });
+                eval.pushvAssumeCapacity(.{ .tuple = t });
             },
             .invalidated_pos, .invalidated_range => return error.NotEvaluable,
             .function_body_start => |def| {
                 // Capture any necessary values
-                const captures = ast.nodes.subsliceIndex(eval.pc.addi(def.captures()), def.capture_count);
-                const cap_slice = try eval.arena.alloc(Value, def.capture_count);
-                for (cap_slice, captures.items(.data)) |*dest, data| {
-                    const cap = data.function_capture;
-                    var frame = eval.header;
-                    while (frame.unwrap()) |f| : (frame = eval.stack.get(f).function_header.parent) {
-                        const func = eval.stack.get(f.addi(1)).value;
-                        if (func.function.root == cap.scope) {
-                            // Found the value
-                            const value = eval.stack.get(f.addi(2).addi(cap.offset)).value;
-                            dest.* = value;
-                            break;
-                        }
-                    } else unreachable;
-                }
+                try eval.reserveStack(1);
+                if (def.capture_count == 0) {
+                    eval.pushvAssumeCapacity(.{ .function = .{ .root = eval.pc } });
+                } else {
+                    const captures = ast.nodes.subsliceIndex(
+                        eval.pc.addi(def.captures()),
+                        def.capture_count,
+                    );
+                    const c: *Value.Closure = try .create(eval.arena, eval.pc, def.capture_count);
+                    for (c.captures(), captures.items(.data)) |*dest, data| {
+                        const cap = data.function_capture;
+                        var frame = eval.header;
+                        while (frame.unwrap()) |f| : (frame = eval.stack.get(f).function_header.parent) {
+                            const func = eval.stack.get(f.addi(1)).value;
+                            const root = switch (func) {
+                                .function => |f2| f2.root,
+                                .closure => |c2| c2.root,
+                                else => unreachable,
+                            };
+                            if (root == cap.scope) {
+                                // Found the value
+                                const value = eval.stack.get(f.addi(2).addi(cap.offset)).value;
+                                dest.* = value;
+                                break;
+                            }
+                        } else unreachable;
+                    }
 
-                try eval.pushv(.{ .function = .{ .root = eval.pc, .captures = cap_slice } });
+                    eval.pushvAssumeCapacity(.{ .closure = c });
+                }
                 eval.pc = eval.pc.addi(1 + def.length());
-                assert(eval.pc.lt(eval.sheet.ast.lastIndex()));
             },
             .function_body_end => {
                 // Return from the function
@@ -669,8 +733,8 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
                 const f = try index.toNumber() orelse 0;
                 if (f < 0 or f > std.math.maxInt(u32)) return error.NotEvaluable;
                 const n: u32 = @intFromFloat(f);
-                if (n >= to_index.tuple.values.len) return error.NotEvaluable;
-                eval.stack.appendAssumeCapacity(.{ .value = to_index.tuple.values[n] });
+                if (n >= to_index.tuple.len) return error.NotEvaluable;
+                eval.stack.appendAssumeCapacity(.{ .value = to_index.tuple.values()[n] });
             },
             .local_variable => |v| {
                 // TODO: Should this resolve cell literals?
@@ -682,8 +746,8 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
             },
             .captured_variable => |v| {
                 const frame = eval.header.unwrap().?;
-                const func = eval.stack.get(frame.addi(1)).value.function;
-                const value = func.captures[v.offset];
+                const closure = eval.stack.get(frame.addi(1)).value.closure;
+                const value = closure.captures()[v.offset];
                 try eval.pushv(value);
             },
 
@@ -706,18 +770,14 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
                 });
             },
             .concat => {
+                try eval.reserveStack(1);
                 const rhs = eval.stack.pop().?.value;
                 const lhs = eval.stack.pop().?.value;
-                var aw: std.Io.Writer.Allocating = .init(eval.arena);
-                eval.sheet.formatInterpreterValue(lhs, &aw.writer) catch |err| switch (err) {
-                    error.WriteFailed => return error.OutOfMemory,
-                    else => |e| return e,
-                };
-                eval.sheet.formatInterpreterValue(rhs, &aw.writer) catch |err| switch (err) {
-                    error.WriteFailed => return error.OutOfMemory,
-                    else => |e| return e,
-                };
-                try eval.pushv(.{ .string = .{ .slice = try aw.toOwnedSlice() } });
+
+                eval.pushvAssumeCapacity(.{ .string = try .allocPrint(eval.arena, "{f}{f}", .{
+                    eval.sheet.fmtInterpreterValue(lhs),
+                    eval.sheet.fmtInterpreterValue(rhs),
+                }) });
             },
             inline .add, .sub, .mul, .pow => |_, t| {
                 const rhs = eval.stack.pop().?.value;
@@ -847,6 +907,10 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
                         .function => |f2| f1.root == f2.root,
                         else => false,
                     },
+                    .closure => |f1| switch (rhs) {
+                        .closure => |f2| f1.root == f2.root,
+                        else => false,
+                    },
                     .builtin_function => |f1| switch (rhs) {
                         .builtin_function => |f2| f1.tag == f2.tag,
                         else => false,
@@ -882,11 +946,12 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
     }
 }
 
-fn toPipeline(eval: *Interpreter, v: Value) !Value.Pipeline {
+fn toPipeline(eval: *Interpreter, v: Value) !*Value.Pipeline {
     switch (v) {
-        .pipeline => |p| return p,
+        .pipeline => return (try v.clone(eval.arena)).pipeline,
         .indirect_range => |r| {
-            var p: Value.Pipeline = .{};
+            const p = try eval.arena.create(Value.Pipeline);
+            p.* = .{};
             try p.stages.append(eval.arena, .{ .indirect_range = .{
                 .min = r.rect.tl.array(),
                 .max = r.rect.br.array(),
@@ -894,7 +959,8 @@ fn toPipeline(eval: *Interpreter, v: Value) !Value.Pipeline {
             return p;
         },
         .range => |r| {
-            var p: Value.Pipeline = .{};
+            const p = try eval.arena.create(Value.Pipeline);
+            p.* = .{};
             try p.stages.append(eval.arena, .{ .range = .{
                 .min = r.rect.tl.array(),
                 .max = r.rect.br.array(),
@@ -902,10 +968,9 @@ fn toPipeline(eval: *Interpreter, v: Value) !Value.Pipeline {
             return p;
         },
         .tuple => |t| {
-            var p: Value.Pipeline = .{};
-            try p.stages.append(eval.arena, .{ .tuple = .{
-                .values = t.values,
-            } });
+            const p = try eval.arena.create(Value.Pipeline);
+            p.* = .{};
+            try p.stages.append(eval.arena, .{ .tuple = t });
             return p;
         },
         else => return error.NotEvaluable,
@@ -954,7 +1019,7 @@ const MapArgsIter = struct {
         }, ctx);
     }
 
-    fn pipelineIterator(iter: *MapArgsIter, p: Value.Pipeline) PipelineIterator {
+    fn pipelineIterator(iter: *MapArgsIter, p: *Value.Pipeline) PipelineIterator {
         return switch (iter.arg) {
             .pipeline => |p2| .{
                 .eval = iter.eval,
@@ -973,7 +1038,7 @@ const MapArgsIter = struct {
                 .source = switch (p.stages.items[0]) {
                     .number_range => |nr| .{ .number_range = nr.start },
                     .range, .indirect_range => |range| .{
-                        .range = iter.eval.sheet.cell_tree.iterator2(&range.min, &range.max),
+                        .range = iter.eval.sheet.cell_tree.queryIterator(range.min, range.max),
                     },
                     .tuple => .{ .tuple = 0 },
                     .map, .filter => unreachable,
@@ -1030,12 +1095,12 @@ const MapArgsIter = struct {
                 const rect = range.rect;
                 var cell_iter = switch (eval.getBuiltinHeader().resume_state.map_args.arg) {
                     .range => |r| r,
-                    else => eval.sheet.cell_tree.iterator2(
-                        &.{ rect.tl.x, rect.tl.y },
-                        &.{ rect.br.x, rect.br.y },
+                    else => eval.sheet.cell_tree.queryIterator(
+                        .{ rect.tl.x, rect.tl.y },
+                        .{ rect.br.x, rect.br.y },
                     ),
                 };
-                while (try cell_iter.next()) |handle| {
+                while (cell_iter.next()) |handle| {
                     eval.evalCell(handle) catch |err| switch (err) {
                         error.Suspended => {
                             return iter.suspendExecution(.{ .range = cell_iter }, ctx);
@@ -1084,7 +1149,7 @@ const MapArgsIter = struct {
                 }
             },
             .tuple => |t| {
-                for (t.values) |v| {
+                for (t.values()) |v| {
                     try ctx.func(v);
                 }
             },
@@ -1121,14 +1186,14 @@ fn mapArgs(
 /// Iteratively pulls values from a pipeline.
 const PipelineIterator = struct {
     eval: *Interpreter,
-    p: Value.Pipeline,
+    p: *Value.Pipeline,
     i: usize,
     value: Value,
     source: Value.Pipeline.State.Source,
     resuming: bool,
 
     pub fn next(iter: *PipelineIterator) !Value {
-        const p = &iter.p;
+        const p = iter.p;
         const eval = iter.eval;
 
         while (iter.i < p.stages.items.len) {
@@ -1140,24 +1205,24 @@ const PipelineIterator = struct {
                     iter.value = .{ .number = current };
                 },
                 .range => {
-                    const h = try iter.source.range.next() orelse return error.EndOfStream;
+                    const h = iter.source.range.next() orelse return error.EndOfStream;
                     const point = eval.sheet.cell_tree.entryItem(h, .point);
                     iter.value = .{ .cell = .fromArray(point.*) };
                 },
                 .indirect_range => {
-                    const h = try iter.source.range.next() orelse return error.EndOfStream;
+                    const h = iter.source.range.next() orelse return error.EndOfStream;
                     const point = eval.sheet.cell_tree.entryItem(h, .point);
                     iter.value = .{ .indirect_cell = .fromArray(point.*) };
                 },
                 .tuple => |t| {
                     const index = iter.source.tuple;
-                    if (index >= t.values.len) return error.EndOfStream;
-                    iter.value = t.values[index];
+                    if (index >= t.len) return error.EndOfStream;
+                    iter.value = t.values()[index];
                     iter.source.tuple += 1;
                 },
                 .filter => |f| if (!iter.resuming) {
                     try eval.reserveStack(8);
-                    eval.pushvAssumeCapacity(.{ .function = f });
+                    eval.pushvAssumeCapacity(f);
                     eval.pushvAssumeCapacity(iter.value);
                     try eval.call(1);
 
@@ -1171,8 +1236,9 @@ const PipelineIterator = struct {
                     }
                 },
                 .map => |f| if (!iter.resuming) {
-                    try eval.pushv(.{ .function = f });
-                    try eval.pushv(iter.value);
+                    try eval.reserveStack(8);
+                    eval.pushvAssumeCapacity(f);
+                    eval.pushvAssumeCapacity(iter.value);
                     try eval.call(1);
                     return error.Suspended;
                 } else {
@@ -1188,19 +1254,19 @@ const PipelineIterator = struct {
     }
 };
 
-fn evalUpper(eval: *Interpreter, arg_count: u8) ![]const u8 {
+fn evalUpper(eval: *Interpreter, arg_count: u8) !*Value.String {
     if (arg_count != 1) return error.NotEvaluable;
     const arg = try eval.functionArg(0);
-    const str = try std.fmt.allocPrint(eval.arena, "{f}", .{eval.sheet.fmtInterpreterValue(arg)});
-    for (str) |*c| c.* = std.ascii.toUpper(c.*);
+    const str: *Value.String = try .allocPrint(eval.arena, "{f}", .{eval.sheet.fmtInterpreterValue(arg)});
+    for (str.bytes()) |*c| c.* = std.ascii.toUpper(c.*);
     return str;
 }
 
-fn evalLower(eval: *Interpreter, arg_count: u8) ![]const u8 {
+fn evalLower(eval: *Interpreter, arg_count: u8) !*Value.String {
     if (arg_count != 1) return error.NotEvaluable;
     const arg = try eval.functionArg(0);
-    const str = try std.fmt.allocPrint(eval.arena, "{f}", .{eval.sheet.fmtInterpreterValue(arg)});
-    for (str) |*c| c.* = std.ascii.toLower(c.*);
+    const str: *Value.String = try .allocPrint(eval.arena, "{f}", .{eval.sheet.fmtInterpreterValue(arg)});
+    for (str.bytes()) |*c| c.* = std.ascii.toLower(c.*);
     return str;
 }
 
@@ -1351,6 +1417,7 @@ fn evalStringLen(eval: *Interpreter, arg_count: u8) !f64 {
         .indirect_range,
         => |value| @floatFromInt(std.fmt.count("{f}", .{value})),
         .function,
+        .closure,
         .builtin_function,
         .pipeline,
         .tuple,
@@ -1358,33 +1425,31 @@ fn evalStringLen(eval: *Interpreter, arg_count: u8) !f64 {
     };
 }
 
-fn evalFilter(eval: *Interpreter, arg_count: u8) !Value.Pipeline {
+fn evalFilter(eval: *Interpreter, arg_count: u8) !*Value.Pipeline {
     if (arg_count != 2) return error.NotEvaluable;
     const arg2 = eval.stack.pop().?.value;
     const arg1 = eval.stack.pop().?.value;
-    if (arg2 != .function) return error.NotEvaluable;
-    var pipeline = try eval.toPipeline(arg1);
-    const predicate = arg2.function;
+    if (arg2 != .function and arg2 != .closure)
+        return error.NotEvaluable;
+    const pipeline = try eval.toPipeline(arg1);
 
-    try pipeline.stages.append(eval.arena, .{ .filter = predicate });
-
+    try pipeline.stages.append(eval.arena, .{ .filter = arg2 });
     return pipeline;
 }
 
-fn evalMap(eval: *Interpreter, arg_count: u8) !Value.Pipeline {
+fn evalMap(eval: *Interpreter, arg_count: u8) !*Value.Pipeline {
     if (arg_count != 2) return error.NotEvaluable;
     const arg2 = eval.stack.pop().?.value;
     const arg1 = eval.stack.pop().?.value;
-    if (arg2 != .function) return error.NotEvaluable;
-    var pipeline = try eval.toPipeline(arg1);
-    const apply = arg2.function;
+    if (arg2 != .function and arg2 != .closure)
+        return error.NotEvaluable;
+    const pipeline = try eval.toPipeline(arg1);
 
-    try pipeline.stages.append(eval.arena, .{ .map = apply });
-
+    try pipeline.stages.append(eval.arena, .{ .map = arg2 });
     return pipeline;
 }
 
-fn evalRange(eval: *Interpreter, arg_count: u8) !Value.Pipeline {
+fn evalRange(eval: *Interpreter, arg_count: u8) !*Value.Pipeline {
     if (arg_count != 2) return error.NotEvaluable;
     const end_result = eval.stack.pop().?.value;
     const start_result = eval.stack.pop().?.value;
@@ -1392,7 +1457,8 @@ fn evalRange(eval: *Interpreter, arg_count: u8) !Value.Pipeline {
     const start = try start_result.toNumber() orelse return error.NotEvaluable;
     if (start > end)
         return error.NotEvaluable;
-    var ret: Value.Pipeline = .{};
+    const ret = try eval.arena.create(Value.Pipeline);
+    ret.* = .{};
     try ret.stages.ensureUnusedCapacity(eval.arena, 8);
     ret.stages.appendAssumeCapacity(.{ .number_range = .{
         .start = start,
@@ -1413,6 +1479,7 @@ fn evalWidth(eval: *Interpreter, arg_count: u8) !f64 {
         .number,
         .string,
         .function,
+        .closure,
         .builtin_function,
         .pipeline,
         .tuple,
@@ -1432,6 +1499,7 @@ fn evalHeight(eval: *Interpreter, arg_count: u8) !f64 {
         .number,
         .string,
         .function,
+        .closure,
         .builtin_function,
         .pipeline,
         .tuple,

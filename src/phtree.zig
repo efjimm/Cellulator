@@ -1258,8 +1258,11 @@ pub fn PhTree(
             }
         }
 
-        // TODO: Pass min/max by value
-        pub fn iterator2(tree: *const @This(), min: *const Point, max: *const Point) QueryIterator {
+        pub fn queryWindowRectIterator(
+            tree: *const @This(),
+            min: [2]u32,
+            max: [2]u32,
+        ) QueryIterator {
             return .{
                 .tree = tree,
                 .handle = switch (tree.root) {
@@ -1270,8 +1273,24 @@ pub fn PhTree(
                 .depths = @splat(0),
                 .depth = 0,
                 .consumed = false,
-                .min = min.*,
-                .max = max.*,
+                .min = .{ 0, 0, min[0], min[1] },
+                .max = .{ max[0], max[1], std.math.maxInt(u32), std.math.maxInt(u32) },
+            };
+        }
+
+        pub fn queryIterator(tree: *const @This(), min: Point, max: Point) QueryIterator {
+            return .{
+                .tree = tree,
+                .handle = switch (tree.root) {
+                    .entry => .none,
+                    .node => |h| h,
+                    .none => .none,
+                },
+                .depths = @splat(0),
+                .depth = 0,
+                .consumed = false,
+                .min = min,
+                .max = max,
             };
         }
 
@@ -1287,7 +1306,7 @@ pub fn PhTree(
             // TODO: Remove error condition
             pub fn next(
                 iter: *QueryIterator,
-            ) error{}!?Entry.Handle {
+            ) ?Entry.Handle {
                 if (iter.tree.root == .entry and !iter.consumed) {
                     @branchHint(.unlikely);
                     iter.consumed = true;
@@ -1513,8 +1532,8 @@ test "query iterator" {
     defer tree.deinit(gpa);
 
     // Empty tree
-    var iter = tree.iterator2(&.{ 0, 0 }, &.{ std.math.maxInt(u32), std.math.maxInt(u32) });
-    try std.testing.expectEqual(null, try iter.next());
+    var iter = tree.queryIterator(.{ 0, 0 }, .{ std.math.maxInt(u32), std.math.maxInt(u32) });
+    try std.testing.expectEqual(null, iter.next());
 
     _ = try tree.getOrPut(gpa, &.{ 0, 0 });
     _ = try tree.getOrPut(gpa, &.{ 1, 10 });
@@ -1527,28 +1546,28 @@ test "query iterator" {
     _ = try tree.getOrPut(gpa, &.{ 5, 5 });
     _ = try tree.getOrPut(gpa, &.{ 3, 3 });
 
-    iter = tree.iterator2(&.{ 1, 1 }, &.{ 5, 5 });
+    iter = tree.queryIterator(.{ 1, 1 }, .{ 5, 5 });
     // Morton order
-    try std.testing.expectEqual(.{ 2, 1 }, tree.entryItem((try iter.next()).?, .point).*);
-    try std.testing.expectEqual(.{ 3, 3 }, tree.entryItem((try iter.next()).?, .point).*);
-    try std.testing.expectEqual(.{ 1, 5 }, tree.entryItem((try iter.next()).?, .point).*);
-    try std.testing.expectEqual(.{ 5, 1 }, tree.entryItem((try iter.next()).?, .point).*);
-    try std.testing.expectEqual(.{ 5, 5 }, tree.entryItem((try iter.next()).?, .point).*);
-    try std.testing.expectEqual(null, try iter.next());
+    try std.testing.expectEqual(.{ 2, 1 }, tree.entryItem((iter.next()).?, .point).*);
+    try std.testing.expectEqual(.{ 3, 3 }, tree.entryItem((iter.next()).?, .point).*);
+    try std.testing.expectEqual(.{ 1, 5 }, tree.entryItem((iter.next()).?, .point).*);
+    try std.testing.expectEqual(.{ 5, 1 }, tree.entryItem((iter.next()).?, .point).*);
+    try std.testing.expectEqual(.{ 5, 5 }, tree.entryItem((iter.next()).?, .point).*);
+    try std.testing.expectEqual(null, iter.next());
 
-    iter = tree.iterator2(&.{ 10, 10 }, &.{ 50, 50 });
-    try std.testing.expectEqual(null, try iter.next());
+    iter = tree.queryIterator(.{ 10, 10 }, .{ 50, 50 });
+    try std.testing.expectEqual(null, iter.next());
 
     tree.clearRetainingCapacity();
 
     // Single item tree
     _ = try tree.getOrPut(gpa, &.{ 2, 2 });
-    iter = tree.iterator2(&.{ 1, 1 }, &.{ 5, 5 });
-    try std.testing.expectEqual(.{ 2, 2 }, tree.entryItem((try iter.next()).?, .point).*);
-    try std.testing.expectEqual(null, try iter.next());
+    iter = tree.queryIterator(.{ 1, 1 }, .{ 5, 5 });
+    try std.testing.expectEqual(.{ 2, 2 }, tree.entryItem((iter.next()).?, .point).*);
+    try std.testing.expectEqual(null, iter.next());
 
-    iter = tree.iterator2(&.{ 10, 10 }, &.{ 50, 50 });
-    try std.testing.expectEqual(null, try iter.next());
+    iter = tree.queryIterator(.{ 10, 10 }, .{ 50, 50 });
+    try std.testing.expectEqual(null, iter.next());
 }
 
 export fn zig_fuzz_init() void {}

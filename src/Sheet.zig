@@ -16,8 +16,8 @@ const Ast = @import("Ast.zig");
 const Interpreter = @import("Interpreter.zig");
 const Parser = @import("Parser.zig");
 const NodeList = Ast.NodeList;
-const FlatListPool = @import("flat_list_pool.zig").FlatListPool;
 const PhTree = @import("phtree.zig").PhTree;
+const List = @import("list.zig").List;
 
 const Sheet = @This();
 
@@ -46,8 +46,6 @@ cell_tree: CellTree,
 
 ast: Ast,
 
-string_values: FlatListPool(u8),
-
 cols: Columns,
 
 undos: std.MultiArrayList(Undo),
@@ -56,47 +54,25 @@ redos: std.MultiArrayList(Undo),
 /// Stores cell handles referenced in bulk cell insert/delete undos.
 cell_buffer: std.ArrayList(Cell.Handle) = .empty,
 
-search_buffer: std.ArrayList(Dependents.Entry.Handle),
-
 filepath: std.ArrayList(u8),
-
-arena: std.heap.ArenaAllocator,
 
 text_attrs: PhTree(TextAttrs, 2, Cell.Handle.Int),
 
-lua_point_trees: std.StringHashMapUnmanaged(LuaDataPointTree) = .empty,
-
-cell_value_ranges: std.ArrayList(Rect) = .empty,
-closures: std.ArrayList(Interpreter.Value) = .empty,
-
-value_pool: std.heap.MemoryPool(Interpreter.Value) = .empty,
-values_to_free: std.ArrayList(*Interpreter.Value) = .empty,
-
 needs_update: bool = true,
 
-interpreter_stack: @import("list.zig").List(Interpreter.StackEntry, u32) = .empty,
+interpreter_stack: List(Interpreter.StackEntry, u32) = .empty,
 
-pub const RangeIndex = enum(u64) {
-    invalid = std.math.maxInt(u64),
-    _,
-};
+arena: std.heap.ArenaAllocator,
 
-pub fn cellValueRange(sheet: *const Sheet, index: RangeIndex) *Rect {
-    const n: usize = @intCast(@intFromEnum(index));
-    return &sheet.cell_value_ranges.items[n];
-}
+/// Non-trivial cached cell values are allocated using this arena. Cell values allocated with
+/// a per-update arena and when assigned to a cell they get deep copied using this arena. The
+/// `live_values` field contains the set of all cells with a cached value allocated using this
+/// arena. When the number of live cells is less than 50% of the number of values allocated by this
+/// arena, all live values get copied into a new arena and this one is freed.
+value_arena: std.heap.ArenaAllocator,
 
-pub fn pushCellValueRange(sheet: *Sheet, range: Rect) !RangeIndex {
-    const n: u64 = @intCast(sheet.cell_value_ranges.items.len);
-    try sheet.cell_value_ranges.append(sheet.gpa, range);
-    return @enumFromInt(n);
-}
-
-// TODO: Expose 1 and 4 dimensional trees to Lua
-
-/// Maps 2D points to lua tables. Can be created by lua scripts to store arbitrary Lua data in
-/// PhTrees implemented in native code with high performance.
-const LuaDataPointTree = PhTree(i32, 2, u32);
+live_values: std.AutoArrayHashMapUnmanaged(Cell.Handle, void) = .empty,
+total_value_count: usize = 0,
 
 pub const TextAttrs = extern struct {
     alignment: Alignment,
@@ -179,26 +155,19 @@ pub const Cell = extern struct {
     // So we use an extern union here.
     pub const Value = extern union {
         number: f64,
-        string: FlatListPool(u8).List.Index,
+        string: *Interpreter.Value.String,
         err: Error,
         ref_cell: Position,
-        ref_range: RangeIndex,
+        ref_range: *Rect,
         simple_function: packed struct(u64) {
             unused: u16 = 0,
             index: Ast.Node.Index,
         },
         builtin_function: Ast.Node.Builtin.Tag,
-        closure: packed struct(u64) {
-            unused: u8 = 0,
-            len: u8,
-            /// Index into the `closures` array. The element at this index is a `function` value
-            /// with no captures, storing the index of the function body. The next `len` elements
-            /// are the captured values.
-            index: u48,
-        },
+        closure: *Interpreter.Value.Closure,
         nil: void,
-        tuple: *Interpreter.Value,
-        pipeline: *Interpreter.Value,
+        tuple: *Interpreter.Value.Tuple,
+        pipeline: *Interpreter.Value.Pipeline,
 
         pub const Tag = utils.FieldEnum(Value, u8);
     };
@@ -334,19 +303,14 @@ pub fn init(gpa: Allocator) !Sheet {
 
         .cell_tree = .empty,
         .dependents = .empty,
-        .ast = .empty,
-        .string_values = .empty,
-
         .cols = .empty,
-
-        .search_buffer = .empty,
+        .ast = .empty,
 
         .arena = .init(gpa),
         .filepath = .empty,
 
         .text_attrs = .empty,
-
-        .lua_point_trees = .empty,
+        .value_arena = .init(gpa),
     };
 
     try sheet.undos.ensureTotalCapacity(gpa, 1);
@@ -361,10 +325,8 @@ pub fn init(gpa: Allocator) !Sheet {
 }
 
 pub fn deinit(sheet: *Sheet) void {
-    sheet.search_buffer.deinit(sheet.gpa);
-    sheet.lua_point_trees.deinit(sheet.gpa);
     sheet.filepath.deinit(sheet.gpa);
-    sheet.cell_value_ranges.deinit(sheet.gpa);
+    sheet.live_values.deinit(sheet.gpa);
 
     sheet.clearUndos(.undo);
     sheet.clearUndos(.redo);
@@ -376,21 +338,72 @@ pub fn deinit(sheet: *Sheet) void {
     sheet.undos.deinit(sheet.gpa);
     sheet.redos.deinit(sheet.gpa);
 
-    for (sheet.values_to_free.items) |v| {
-        v.deinit(sheet.gpa);
-    }
-    sheet.values_to_free.deinit(sheet.gpa);
-    sheet.value_pool.deinit(sheet.gpa);
-
     sheet.cols.deinit(sheet.gpa);
     sheet.ast.deinit(sheet.gpa);
-    sheet.string_values.deinit(sheet.gpa);
     sheet.deps.deinit(sheet.gpa);
     sheet.cell_buffer.deinit(sheet.gpa);
     sheet.text_attrs.deinit(sheet.gpa);
-    sheet.closures.deinit(sheet.gpa);
     sheet.interpreter_stack.deinit(sheet.gpa);
     sheet.arena.deinit();
+    sheet.value_arena.deinit();
+}
+
+pub fn compactCachedCellValues(sheet: *Sheet) Allocator.Error!void {
+    errdefer @panic(""); // TODO
+    var new_arena: std.heap.ArenaAllocator = .init(sheet.gpa);
+    const arena = new_arena.allocator();
+
+    const preheat = try arena.alloc(
+        Interpreter.Value,
+        sheet.live_values.entries.len * 4,
+    );
+    arena.free(preheat);
+
+    for (sheet.live_values.keys()) |handle| {
+        const cell = sheet.getCellFromHandle(handle);
+        switch (cell.expr.value_tag) {
+            .number,
+            .err,
+            .ref_cell,
+            .simple_function,
+            .builtin_function,
+            .nil,
+            => {},
+            .string => {
+                cell.value.string = (try Interpreter.Value.clone(
+                    .{ .string = cell.value.string },
+                    arena,
+                )).string;
+            },
+            .ref_range => {
+                const new_value: *Rect = try arena.create(Rect);
+                new_value.* = cell.value.ref_range.*;
+                cell.value.ref_range = new_value;
+            },
+            .closure => {
+                cell.value.closure = (try Interpreter.Value.clone(
+                    .{ .closure = cell.value.closure },
+                    arena,
+                )).closure;
+            },
+            .tuple => {
+                cell.value.tuple = (try Interpreter.Value.clone(
+                    .{ .tuple = cell.value.tuple },
+                    arena,
+                )).tuple;
+            },
+            .pipeline => {
+                cell.value.pipeline = (try Interpreter.Value.clone(
+                    .{ .pipeline = cell.value.pipeline },
+                    arena,
+                )).pipeline;
+            },
+        }
+    }
+
+    sheet.value_arena.deinit();
+    sheet.value_arena = new_arena;
+    sheet.total_value_count = sheet.live_values.entries.len;
 }
 
 pub fn exprSlice(sheet: *const Sheet, root: Ast.Node.Index) NodeList {
@@ -478,8 +491,6 @@ const SerializeHeader = extern struct {
     ast_nodes_len: u32,
     ast_nodes_cap: u32,
 
-    string_values: FlatListPool(u8).Header,
-
     cols: Columns.Header,
 
     cells_buffer_len: u32,
@@ -490,10 +501,9 @@ const SerializeHeader = extern struct {
     redos_cap: u32,
 
     const magic_number: u32 = @bitCast([4]u8{ 'Z', 'C', 'Z', 'C' });
-    const binary_version = 10;
+    const binary_version = 11;
 };
 
-// TODO: Update to use std.Io.File when writer is implemented
 pub fn serialize(sheet: *Sheet, io: std.Io, file: std.Io.File) !void {
     assert(sheet.queued_cells.items.len == 0);
 
@@ -505,7 +515,6 @@ pub fn serialize(sheet: *Sheet, io: std.Io, file: std.Io.File) !void {
         .cell_tree = sheet.cell_tree.getHeader(),
         .ast_nodes_len = @intCast(sheet.ast.nodes.len()),
         .ast_nodes_cap = @intCast(sheet.ast.nodes.capacity()),
-        .string_values = sheet.string_values.getHeader(),
         .cols = sheet.cols.getHeader(),
         .cells_buffer_len = @intCast(sheet.cell_buffer.items.len),
         .undos_len = @intCast(sheet.undos.len),
@@ -514,14 +523,13 @@ pub fn serialize(sheet: *Sheet, io: std.Io, file: std.Io.File) !void {
         .redos_cap = @intCast(sheet.redos.capacity),
     };
 
-    var iovecs: [36][]const u8 =
+    var iovecs: [34][]const u8 =
         utils.ptrToIoVec(&header) ++
         utils.ptrToIoVec(sheet.ast.strings.items) ++
         sheet.dependents.iovecs() ++
         utils.ptrToIoVec(sheet.deps.items) ++
         sheet.cell_tree.iovecs() ++
         utils.multiArrayListSliceIoVec(&sheet.ast.nodes) ++
-        sheet.string_values.iovecs() ++
         sheet.cols.iovecs() ++
         utils.ptrToIoVec(sheet.cell_buffer.items) ++
         utils.multiArrayListIoVec(&sheet.undos) ++
@@ -554,7 +562,6 @@ pub fn deserialize(sheet: *Sheet, gpa: Allocator, io: std.Io, file: std.Io.File)
     try sheet.dependents.initFromHeader(gpa, header.dependents);
     try sheet.cell_tree.initFromHeader(gpa, header.cell_tree);
     try sheet.ast.nodes.setAndExpandCapacity(gpa, header.ast_nodes_len, header.ast_nodes_cap);
-    try sheet.string_values.initFromHeader(gpa, header.string_values);
     try sheet.cols.initFromHeader(gpa, header.cols);
     try utils.setAndExpandCapacity(&sheet.undos, gpa, header.undos_len, header.undos_cap);
     try utils.setAndExpandCapacity(&sheet.redos, gpa, header.redos_len, header.redos_cap);
@@ -565,7 +572,6 @@ pub fn deserialize(sheet: *Sheet, gpa: Allocator, io: std.Io, file: std.Io.File)
         utils.ptrToIoVec(sheet.deps.items) ++
         sheet.cell_tree.iovecs() ++
         utils.multiArrayListSliceIoVec(&sheet.ast.nodes) ++
-        sheet.string_values.iovecs() ++
         sheet.cols.iovecs() ++
         utils.ptrToIoVec(sheet.cell_buffer.items) ++
         utils.multiArrayListIoVec(&sheet.undos) ++
@@ -581,7 +587,6 @@ pub fn clearRetainingCapacity(sheet: *Sheet) void {
     sheet.cell_tree.clearRetainingCapacity();
 
     sheet.dependents.clearRetainingCapacity();
-    sheet.string_values.clearRetainingCapacity();
 
     sheet.undos.len = 0;
     sheet.redos.len = 0;
@@ -870,7 +875,7 @@ pub fn loadCsv(sheet: *Sheet, r: *std.Io.Reader) !void {
                 if (std.fmt.parseFloat(f64, field)) |f| {
                     ass.f = f;
                 } else |_| {
-                    // TODO: Don't make these into ASTs, just set the Cell's value.
+                    // TODO: Don't make these into ASTs, just set the cell value.
                     try sheet.ast.nodes.ensureUnusedCapacity(sheet.gpa, 2);
                     try sheet.ast.strings.ensureUnusedCapacity(sheet.gpa, field.len);
                     const string_start = sheet.ast.strings.items.len;
@@ -1017,7 +1022,7 @@ pub fn formatCellValue(
     value: Cell.Value,
     w: *std.Io.Writer,
 ) !void {
-    const interpreter_value = sheet.interpreterValueFromCell(tag, value);
+    const interpreter_value = interpreterValueFromCell(tag, value);
     return try sheet.formatInterpreterValue(interpreter_value, w);
 }
 
@@ -1053,13 +1058,7 @@ pub fn formatInterpreterValue(
         .number => {
             try w.print("{d}", .{value.number});
         },
-        .string => |s| switch (s) {
-            .slice => |slice| try w.writeAll(slice),
-            .cell => |c| {
-                const string = c.sheet.string_values.items(c.list_index);
-                try w.writeAll(string);
-            },
-        },
+        .string => |s| try w.writeAll(s.bytes()),
         .err => {
             try w.writeAll("ERROR");
         },
@@ -1073,6 +1072,10 @@ pub fn formatInterpreterValue(
             const arena = sheet.arena.allocator();
             sheet.ast.print(arena, f.root, w) catch return error.WriteFailed;
         },
+        .closure => |f| {
+            const arena = sheet.arena.allocator();
+            sheet.ast.print(arena, f.root, w) catch return error.WriteFailed;
+        },
         .builtin_function => |b| {
             try w.print("@{f}", .{b.tag});
         },
@@ -1080,14 +1083,14 @@ pub fn formatInterpreterValue(
             try w.print("<{d}>", .{p.stages.items.len});
         },
         .tuple => |t| {
-            if (t.values.len == 0) {
+            if (t.len == 0) {
                 try w.writeAll("[]");
             } else {
                 try w.writeAll("[");
-                for (t.values[0 .. t.values.len - 1]) |v| {
+                for (t.values()[0 .. t.len - 1]) |v| {
                     try w.print("{f}, ", .{sheet.fmtInterpreterValue(v)});
                 }
-                try w.print("{f}]", .{sheet.fmtInterpreterValue(t.values[t.values.len - 1])});
+                try w.print("{f}]", .{sheet.fmtInterpreterValue(t.values()[t.len - 1])});
             }
         },
     }
@@ -1536,7 +1539,7 @@ fn bulkDeleteCellHandles(sheet: *Sheet, handles: []const Cell.Handle) void {
         const cell = sheet.getCellFromHandle(handle);
         // TODO: Doing this in a separate loop from removeHandle might be better
         sheet.removeCellAsDependentOfExpr(handle, cell.root(), true);
-        sheet.setCellError(cell);
+        sheet.setCellError(handle);
         sheet.cell_tree.removeHandle(handle);
         cell.expr.state = .enqueued;
         sheet.queued_cells.appendAssumeCapacity(.{ handle, 1 });
@@ -1549,7 +1552,7 @@ fn bulkDeleteCellHandlesContiguous(sheet: *Sheet, start: Cell.Handle.Int, end: C
         const handle = cells.handle(i);
         // TODO: Doing this in a separate loop from removeHandle might be better
         sheet.removeCellAsDependentOfExpr(handle, cell.root(), true);
-        sheet.setCellError(cell);
+        sheet.setCellError(handle);
         sheet.cell_tree.removeHandle(handle);
     }
 }
@@ -1880,7 +1883,7 @@ fn deleteCellRangeAssumeCapacity(sheet: *Sheet, range: Rect, opts: UndoOpts) u32
         const old_cell = sheet.getCellFromHandle(cell_handle);
         sheet.removeCellAsDependentOfExpr(cell_handle, old_cell.root(), true);
         sheet.cell_tree.removeHandle(cell_handle);
-        sheet.setCellError(old_cell);
+        sheet.setCellError(cell_handle);
         old_cell.expr.state = .enqueued;
     }
 
@@ -2149,7 +2152,7 @@ fn insertCellNode(
         sheet.removeCellAsDependentOfExpr(old_handle, old_cell_ptr.root(), true);
         sheet.addCellAsDependentOfExprRanges(handle, cell_ptr.root());
 
-        sheet.setCellError(old_cell_ptr);
+        sheet.setCellError(old_handle);
 
         u = .init(.set_cell, old_handle);
     }
@@ -2171,7 +2174,7 @@ fn deleteCellByHandle(
     try sheet.enqueueUpdate(handle);
     sheet.removeCellAsDependentOfExpr(handle, cell.root(), true);
 
-    sheet.setCellError(cell);
+    sheet.setCellError(handle);
     _ = sheet.cell_tree.removeHandle(handle);
 
     sheet.pushUndo(.init(.set_cell, handle), undo_opts) catch unreachable;
@@ -2741,10 +2744,7 @@ pub fn evaluate(sheet: *Sheet, end_node: Ast.Node.Index) !Interpreter.Value {
     _ = try interp.evaluate(sheet.ast.startFromEnd(end_node), .none);
     const res = interp.stack.pop().?.value;
 
-    if (res == .string)
-        return .{ .string = .{ .slice = try sheet.gpa.dupe(u8, res.string.bytes()) } };
-
-    return res;
+    return try res.clone(sheet.value_arena.allocator());
 }
 
 pub fn update(sheet: *Sheet) Allocator.Error!void {
@@ -2817,6 +2817,12 @@ pub fn update(sheet: *Sheet) Allocator.Error!void {
     }
 
     sheet.needs_update = false;
+
+    const live_entries = sheet.live_values.entries.len;
+    if (live_entries > 0 and sheet.total_value_count > live_entries * 2) {
+        std.log.debug("Compacting sheet value arena", .{});
+        try sheet.compactCachedCellValues();
+    }
 }
 
 pub fn enqueueUpdate(
@@ -2836,18 +2842,10 @@ fn markDirty(
     handle: Cell.Handle,
     dirty_cells: *std.ArrayList(Cell.Handle),
 ) Allocator.Error!void {
-    sheet.search_buffer.clearRetainingCapacity();
-
-    const list = &sheet.search_buffer;
     const pos = sheet.posFromCellHandle(handle);
-    try sheet.dependents.queryWindowRect(
-        sheet.gpa,
-        pos.array(),
-        pos.array(),
-        list,
-    );
+    var iter = sheet.dependents.queryWindowRectIterator(pos.array(), pos.array());
 
-    for (list.items) |dependent_handle| {
+    while (iter.next()) |dependent_handle| {
         const head = sheet.dependents.getValue(dependent_handle).*;
         var index = head;
         while (index.isValid()) : (index = sheet.deps.items[index.n].next) {
@@ -2878,68 +2876,23 @@ pub fn setFilePath(sheet: *Sheet, filepath: []const u8) void {
     sheet.filepath.appendSliceAssumeCapacity(filepath);
 }
 
-pub fn cellStringValue(sheet: *const Sheet, cell: *const Cell) []const u8 {
-    assert(cell.expr.value_tag == .string);
-    return sheet.string_values.items(cell.value.string);
-}
-
-pub fn setCellError(sheet: *Sheet, cell: *Cell) void {
+pub fn setCellError(sheet: *Sheet, handle: Cell.Handle) void {
+    const cell = sheet.getCellFromHandle(handle);
     if (cell.root() == .none) return;
-    sheet.deinitCellValue(cell);
+    sheet.deinitCellValue(handle);
 
     cell.setValue(.err, .fromError(error.NotEvaluable));
 }
 
-pub fn deinitCellValue(sheet: *Sheet, cell: *Cell) void {
-    switch (cell.expr.value_tag) {
-        .string => sheet.string_values.destroyList(cell.value.string),
-        .tuple => {
-            const v = cell.value.tuple;
-            v.deinit(sheet.gpa);
-            sheet.value_pool.destroy(v);
-            for (sheet.values_to_free.items, 0..) |v2, i| {
-                if (v2 == v) {
-                    _ = sheet.values_to_free.swapRemove(i);
-                    break;
-                }
-            }
-        },
-        .pipeline => {
-            const v = cell.value.pipeline;
-            v.deinit(sheet.gpa);
-            sheet.value_pool.destroy(v);
-            for (sheet.values_to_free.items, 0..) |v2, i| {
-                if (v2 == v) {
-                    _ = sheet.values_to_free.swapRemove(i);
-                    break;
-                }
-            }
-        },
-        .err,
-        .ref_cell,
-        .ref_range,
-        .simple_function,
-        .builtin_function,
-        .closure,
-        .nil,
-        .number,
-        => {},
-    }
+pub fn deinitCellValue(sheet: *Sheet, handle: Cell.Handle) void {
+    _ = sheet.live_values.swapRemove(handle);
 }
 
 /// Queues the dependents of `ref` for update.
 fn queueDependents(sheet: *Sheet, rect: Rect) Allocator.Error!void {
-    sheet.search_buffer.clearRetainingCapacity();
+    var iter = sheet.dependents.queryWindowRectIterator(rect.tl.array(), rect.br.array());
 
-    const list = &sheet.search_buffer;
-    try sheet.dependents.queryWindowRect(
-        sheet.gpa,
-        rect.tl.array(),
-        rect.br.array(),
-        list,
-    );
-
-    for (list.items) |dependent_handle| {
+    while (iter.next()) |dependent_handle| {
         const head = sheet.dependents.getValue(dependent_handle).*;
         var index = head;
         while (index.isValid()) : (index = sheet.deps.items[index.n].next) {
@@ -2953,13 +2906,24 @@ fn queueDependents(sheet: *Sheet, rect: Rect) Allocator.Error!void {
     }
 }
 
+fn putLiveValue(sheet: *Sheet, handle: Cell.Handle) void {
+    // TODO: This is a workaround for cells that were just deleted.
+    //       Cells that were just deleted actually get re-evaluated once like normal,
+    //       so this checks if the cell is actually part of the tree or has been deleted.
+    if (sheet.cell_tree.entryItem(handle, .parent).* == .none) return;
+    const res = sheet.live_values.fetchPutAssumeCapacity(handle, {});
+    if (res == null) sheet.total_value_count += 1;
+}
+
 pub fn setCellValue(
     sheet: *Sheet,
     value: Interpreter.Value,
     handle: Cell.Handle,
 ) !Interpreter.Value {
     const cell = sheet.getCellFromHandle(handle);
-    sheet.deinitCellValue(cell);
+    sheet.deinitCellValue(handle);
+
+    std.log.debug("Set cell value {}: {any}", .{ handle, value });
 
     switch (value) {
         .none => cell.setValue(.number, 0),
@@ -2967,13 +2931,14 @@ pub fn setCellValue(
         .err => cell.setValue(.err, .fromError(error.NotEvaluable)),
         .number => |n| cell.setValue(.number, n),
         .string => |str| {
-            const bytes = str.bytes();
-            const list = try sheet.string_values.createList(sheet.gpa);
-            errdefer sheet.string_values.destroyList(list);
-            try sheet.string_values.ensureUnusedCapacity(sheet.gpa, list, @intCast(bytes.len));
-
-            sheet.string_values.appendSliceAssumeCapacity(list, bytes);
-            cell.setValue(.string, list);
+            try sheet.live_values.ensureUnusedCapacity(sheet.gpa, 1);
+            const new_str: *Interpreter.Value.String = try .create(
+                sheet.value_arena.allocator(),
+                str.len,
+            );
+            @memcpy(new_str.bytes(), str.bytes());
+            cell.setValue(.string, new_str);
+            sheet.putLiveValue(handle);
         },
         .cell, .indirect_cell => |p| {
             cell.setValue(.ref_cell, p);
@@ -2981,42 +2946,39 @@ pub fn setCellValue(
             return .{ .indirect_cell = p };
         },
         .range, .indirect_range => |range| {
-            cell.setValue(.ref_range, try sheet.pushCellValueRange(range.rect));
+            try sheet.live_values.ensureUnusedCapacity(sheet.gpa, 1);
+
+            const r = try sheet.value_arena.allocator().create(Rect);
+            r.* = range.rect;
+            cell.setValue(.ref_range, r);
             cell.expr.state = .up_to_date;
+
+            sheet.putLiveValue(handle);
             return .{ .indirect_range = range };
         },
         .function => |f| {
-            if (f.captures.len > 0) {
-                const index = sheet.closures.items.len;
-                try sheet.closures.ensureUnusedCapacity(sheet.gpa, 1 + f.captures.len);
-                sheet.closures.appendAssumeCapacity(.{ .function = .{ .root = f.root } });
-                sheet.closures.appendSliceAssumeCapacity(f.captures);
-                cell.setValue(.closure, .{
-                    .len = @intCast(f.captures.len),
-                    .index = @intCast(index),
-                });
-            } else {
-                cell.setValue(.simple_function, .{ .index = f.root });
-            }
+            cell.setValue(.simple_function, .{ .index = f.root });
+        },
+        .closure => {
+            try sheet.live_values.ensureUnusedCapacity(sheet.gpa, 1);
+            const new_value = try value.clone(sheet.value_arena.allocator());
+            cell.setValue(.closure, new_value.closure);
+            sheet.putLiveValue(handle);
         },
         .builtin_function => |f| {
             cell.setValue(.builtin_function, f.tag);
         },
         .pipeline => {
-            try sheet.values_to_free.ensureUnusedCapacity(sheet.gpa, 1);
-            const new_value = try sheet.value_pool.create(sheet.gpa);
-            errdefer sheet.value_pool.destroy(new_value);
-            new_value.* = try value.clone(sheet.gpa);
-            sheet.values_to_free.appendAssumeCapacity(new_value);
-            cell.setValue(.pipeline, new_value);
+            try sheet.live_values.ensureUnusedCapacity(sheet.gpa, 1);
+            const new_value = try value.clone(sheet.value_arena.allocator());
+            cell.setValue(.pipeline, new_value.pipeline);
+            sheet.putLiveValue(handle);
         },
         .tuple => {
-            try sheet.values_to_free.ensureUnusedCapacity(sheet.gpa, 1);
-            const new_value = try sheet.value_pool.create(sheet.gpa);
-            errdefer sheet.value_pool.destroy(new_value);
-            new_value.* = try value.clone(sheet.gpa);
-            sheet.values_to_free.appendAssumeCapacity(new_value);
-            cell.setValue(.tuple, new_value);
+            try sheet.live_values.ensureUnusedCapacity(sheet.gpa, 1);
+            const new_value = try value.clone(sheet.value_arena.allocator());
+            cell.setValue(.tuple, new_value.tuple);
+            sheet.putLiveValue(handle);
         },
     }
 
@@ -3038,7 +3000,7 @@ pub fn evalCellByHandle(
     sheet: *Sheet,
     eval: *Interpreter,
     handle: Cell.Handle,
-) Ast.EvalError!Interpreter.Value {
+) Ast.EvalError!void {
     const cell = sheet.getCellFromHandle(handle);
     sw: switch (cell.expr.state) {
         .up_to_date => {},
@@ -3063,48 +3025,9 @@ pub fn evalCellByHandle(
 
             if (eval.is_volatile)
                 try sheet.setCellVolatile(handle);
-            const value = eval.stack.pop().?.value;
-            return try sheet.setCellValue(value, handle);
+            _ = eval.stack.pop().?.value;
         },
     }
-
-    return try sheet.cellValueToInterpreterValue(eval, cell);
-}
-pub fn cellValueToInterpreterValue(
-    sheet: *Sheet,
-    eval: *Interpreter,
-    cell: *Cell,
-) !Interpreter.Value {
-    return switch (cell.expr.value_tag) {
-        .nil => .nil,
-        .number => .{ .number = cell.value.number },
-        .string => .{
-            .string = .{
-                .cell = .{
-                    .sheet = sheet,
-                    .list_index = cell.value.string,
-                },
-            },
-        },
-        .err => cell.value.err.getError(),
-        .ref_cell => .{ .indirect_cell = cell.value.ref_cell },
-        .ref_range => .{ .indirect_range = .{ .rect = sheet.cellValueRange(cell.value.ref_range).* } },
-        .simple_function => .{ .function = .{ .root = cell.value.simple_function.index } },
-        .builtin_function => .{ .builtin_function = .{ .tag = cell.value.builtin_function } },
-        .closure => {
-            const closure = cell.value.closure;
-            const captured = sheet.closures.items[closure.index + 1 ..][0..closure.len];
-            const copied = try eval.arena.dupe(Interpreter.Value, captured);
-            const root = sheet.closures.items[closure.index].function.root;
-            return .{ .function = .{ .root = root, .captures = copied } };
-        },
-        .tuple => {
-            return try cell.value.tuple.clone(eval.arena);
-        },
-        .pipeline => {
-            return try cell.value.pipeline.clone(eval.arena);
-        },
-    };
 }
 
 pub fn evalCellByPos(sheet: *Sheet, eval: *Interpreter, pos: Position) Ast.EvalError!Interpreter.Value {
@@ -3130,35 +3053,19 @@ pub fn printCellExpression(sheet: *Sheet, pos: Position, w: *std.Io.Writer) !voi
 
 /// Turns a cached cell value into an interpreter value. Any heap allocated data is *shallow*
 /// copied.
-pub fn interpreterValueFromCell(
-    sheet: *Sheet,
-    tag: Cell.Value.Tag,
-    value: Cell.Value,
-) Interpreter.Value {
+pub fn interpreterValueFromCell(tag: Cell.Value.Tag, value: Cell.Value) Interpreter.Value {
     return switch (tag) {
         .nil => .nil,
         .number => .{ .number = value.number },
-        .string => .{
-            .string = .{
-                .cell = .{
-                    .sheet = sheet,
-                    .list_index = value.string,
-                },
-            },
-        },
+        .string => .{ .string = value.string },
         .err => .err,
         .ref_cell => .{ .indirect_cell = value.ref_cell },
-        .ref_range => .{ .indirect_range = .{ .rect = sheet.cellValueRange(value.ref_range).* } },
+        .ref_range => .{ .indirect_range = .{ .rect = value.ref_range.* } },
         .simple_function => .{ .function = .{ .root = value.simple_function.index } },
         .builtin_function => .{ .builtin_function = .{ .tag = value.builtin_function } },
-        .closure => {
-            const closure = value.closure;
-            const captured = sheet.closures.items[closure.index + 1 ..][0..closure.len];
-            const root = sheet.closures.items[closure.index].function.root;
-            return .{ .function = .{ .root = root, .captures = captured } };
-        },
-        .tuple => value.tuple.*,
-        .pipeline => value.pipeline.*,
+        .closure => .{ .closure = value.closure },
+        .tuple => .{ .tuple = value.tuple },
+        .pipeline => .{ .pipeline = value.pipeline },
     };
 }
 
@@ -3621,7 +3528,7 @@ pub fn expectCellEqualsString(sheet: *Sheet, address: []const u8, expected_value
         });
         return error.TestExpectedCellsEqlStrings;
     }
-    const str = sheet.string_values.items(cell.value.string);
+    const str = cell.value.string.bytes();
     if (!std.mem.eql(u8, expected_value, str)) {
         std.debug.print("Cell {f} does not have expected string value\n", .{pos});
         return std.testing.expectEqualStrings(expected_value, str);

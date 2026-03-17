@@ -24,3 +24,7 @@ let a5 = [1, 2, 3, 4, 5] |> @filter(|x| x != 2) |> @count()
 :expect (@range(1, 10) |> @filter(|x| x % 2) |> @count()) == 5
 :expect (@range(1, 10) |> @count()) == 9
 :expect (@range(1, 10) |> @map(|x| x * 2) |> @sum()) == 2 * (@range(1, 10) |> @sum())
+
+let a10 = (|x| |y| x + y)(3)
+let b10 = [1, 2, 3] |> @filter(*a10) |> @sum()
+:expect-eql-number b10 6

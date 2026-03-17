@@ -1435,7 +1435,7 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                 .pipeline => {
                     try tui.setStyle(.cell_text_unselected, wr);
                     const str = std.fmt.bufPrint(&buf, "<{d}>", .{
-                        data.values[i].pipeline.pipeline.stages.items.len,
+                        data.values[i].pipeline.stages.items.len,
                     }) catch unreachable;
 
                     try shovel.writeTruncating(
@@ -1463,7 +1463,7 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                 .string => {
                     try tui.setStyle(.cell_text_unselected, wr);
 
-                    const text = sheet.string_values.items(data.values[i].string);
+                    const text = data.values[i].string.bytes();
                     const alignment = utils.enumFromEnum(
                         shovel.TextAlignment,
                         data.attrs[i].alignment,
@@ -1494,7 +1494,7 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                 },
                 .ref_range => {
                     try tui.setStyle(.cell_range_unselected, wr);
-                    const range = sheet.cellValueRange(data.values[i].ref_range).*;
+                    const range = data.values[i].ref_range.*;
 
                     const slice = std.fmt.bufPrint(&buf, "{f}", .{range}) catch unreachable;
                     try shovel.writeTruncating(
@@ -1538,8 +1538,7 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                 .closure => {
                     try tui.setStyle(.cell_number_unselected, wr);
                     // TODO: Syntax highlight these
-                    const index = data.values[i].closure.index;
-                    const root = sheet.closures.items[index].function.root;
+                    const root = data.values[i].closure.root;
                     const slice = try std.fmt.allocPrint(
                         tui.arena.allocator(),
                         "{f}",

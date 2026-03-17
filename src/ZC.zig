@@ -2543,7 +2543,6 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
             const src = iter.string[iter.index..];
             const expr = try sheet.parseFromExpression(src);
             const res = try sheet.evaluate(expr.root);
-            defer if (res == .string and res.string == .slice) sheet.gpa.free(res.string.slice);
 
             if (!res.boolean()) {
                 return error.UnexpectedResult;
@@ -3168,17 +3167,15 @@ fn widthNeededForColumn(
                 .nil => 3,
                 .tuple => 5,
                 .pipeline => std.fmt.count("<[{d}]>", .{
-                    cell.value.pipeline.pipeline.stages.items.len,
+                    cell.value.pipeline.stages.items.len,
                 }),
                 .number => std.fmt.count("{d:.[1]}", .{ cell.value.number, ctx.precision }),
                 .string => ctx.zc.ui_interface.stringWidth(
-                    ctx.sheet.cellStringValue(cell),
+                    cell.value.string.bytes(),
                     .{ .max_width = ctx.zc.ui.?.term.width },
                 ).width,
                 .ref_cell => std.fmt.count("{f}", .{cell.value.ref_cell}),
-                .ref_range => std.fmt.count("{f}", .{
-                    ctx.sheet.cellValueRange(cell.value.ref_range).*,
-                }),
+                .ref_range => std.fmt.count("{f}", .{cell.value.ref_range.*}),
                 .simple_function => std.fmt.count("{f}", .{
                     ctx.sheet.ast.fmtExpression(
                         ctx.sheet.arena.allocator(),
@@ -3187,7 +3184,7 @@ fn widthNeededForColumn(
                 }),
                 .builtin_function => std.fmt.count("@{f}", .{cell.value.builtin_function}),
                 .closure => {
-                    const root = ctx.sheet.closures.items[cell.value.closure.index].function.root;
+                    const root = cell.value.closure.root;
                     break :sw std.fmt.count("{f}", .{
                         ctx.sheet.ast.fmtExpression(ctx.sheet.arena.allocator(), root),
                     });

@@ -4,6 +4,7 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 # TODO
 
+- Bug: Cells are unnecessarily evaluated once after deletion.
 - Bug: Cell expression not shown for cells with simple values and no AST
 - Bug: Expand column to width not correct with wide characters
 - Bug: Assertion trip when loading file header with empty line or something
