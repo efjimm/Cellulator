@@ -391,6 +391,7 @@ pub const StackEntry = union(enum) {
                     count_all: CountContextAll,
                     count_numbers: CountContextNumbers,
                     any: AnyContext,
+                    collect: CollectContext,
                 };
             };
         };
@@ -537,6 +538,13 @@ fn evaluateBuiltin(eval: *Interpreter, builtin_tag: Node.Builtin.Tag, arg_count:
             }) {}
             return .nil;
         },
+        .collect => {
+            // TODO: Find a way to re-use the memory from the `.values` list in the context.
+            const result = try eval.mapArgs(arg_count, .collect);
+            const t: *Value.Tuple = try .create(eval.arena, @intCast(result.values.items.len));
+            @memcpy(t.values(), result.values.items);
+            return .{ .tuple = t };
+        },
     };
 }
 
@@ -598,6 +606,7 @@ fn call(eval: *Interpreter, arg_count: u8) error{
                         .count_all => .{ .map_args = .{ .op = .{ .count_all = .{} } } },
                         .count => .{ .map_args = .{ .op = .{ .count_numbers = .{} } } },
                         .any => .{ .map_args = .{ .op = .{ .any = .{} } } },
+                        .collect => .{ .map_args = .{ .op = .{ .collect = .{ .arena = eval.arena } } } },
                         else => .none,
                     },
                 } },
@@ -1122,6 +1131,7 @@ const MapArgsIter = struct {
                     *CountContextNumbers => .{ .count_numbers = ctx.* },
                     *CountContextAll => .{ .count_all = ctx.* },
                     *AnyContext => .{ .any = ctx.* },
+                    *CollectContext => .{ .collect = ctx.* },
                     else => comptime unreachable,
                 },
             },
@@ -1412,6 +1422,15 @@ const ProdContext = struct {
     fn func(ctx: *ProdContext, v: Value) !void {
         const n = try v.toNumber();
         ctx.total *= n orelse 1;
+    }
+};
+
+const CollectContext = struct {
+    arena: Allocator,
+    values: std.ArrayList(Value) = .empty,
+
+    fn func(ctx: *CollectContext, v: Value) !void {
+        try ctx.values.append(ctx.arena, v);
     }
 };
 
