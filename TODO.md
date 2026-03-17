@@ -4,6 +4,7 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 # TODO
 
+- Add TUI styles for different cell values
 - Rework cell width handling
 - Remove some unnecessary formatted printing to improve compile times
 

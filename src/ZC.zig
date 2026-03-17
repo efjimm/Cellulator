@@ -1415,6 +1415,7 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
         error.InvalidCellAddress,
         error.InvalidBuiltin,
         error.InvalidEscapeSequence,
+        error.UnboundVariable,
         => {
             zc.setStatusMessage(.err, "{f}", .{diagnostics});
             return;
@@ -1945,6 +1946,7 @@ pub const Command = enum {
                     error.InvalidCellAddress,
                     error.InvalidBuiltin,
                     error.InvalidEscapeSequence,
+                    error.UnboundVariable,
                     => {
                         try zc.status.msg.print(zc.allocator, "{f}", .{diagnostics});
                         return err;

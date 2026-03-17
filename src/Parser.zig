@@ -97,6 +97,7 @@ pub const Diagnostics = struct {
         invalid_builtin: []const u8,
         invalid_cell_address: []const u8,
         invalid_escape_sequence: []const u8,
+        unbound_variable: []const u8,
     };
 
     pub fn format(info: *const Diagnostics, writer: *std.Io.Writer) !void {
@@ -128,10 +129,17 @@ pub const Diagnostics = struct {
             },
             .invalid_escape_sequence => |str| {
                 if (str.len == 0) {
-                    try writer.print("Unterminated escape sequence at end of string", .{});
+                    try writer.writeAll("Unterminated escape sequence at end of string");
                 } else {
-                    try writer.print("invalid escape sequence '{s}'", .{str});
+                    try writer.writeAll("invalid escape sequence '");
+                    try writer.writeAll(str);
+                    try writer.writeByte('\'');
                 }
+            },
+            .unbound_variable => |str| {
+                try writer.writeAll("Use of unbound variable '");
+                try writer.writeAll(str);
+                try writer.writeByte('\'');
             },
         }
     }
@@ -166,6 +174,7 @@ pub const ParseError = error{
     InvalidCellAddress,
     InvalidBuiltin,
     InvalidEscapeSequence,
+    UnboundVariable,
 } || Allocator.Error;
 
 pub const Options = struct {
@@ -367,7 +376,9 @@ fn parseStatement(p: *Parser) ParseError!Index {
 fn parseAssignment(p: *Parser) ParseError!Index {
     switch (p.token_tags[p.tok_i]) {
         .rel_rel, .rel_abs, .abs_rel, .abs_abs => {},
-        else => return error.UnexpectedToken,
+        else => return p.setError(error.UnexpectedToken, .{
+            .expected_string = "cell address",
+        }),
     }
     const start = p.token_starts[p.tok_i];
     p.tok_i += 1;
@@ -841,7 +852,9 @@ fn parseVariable(p: *Parser) !Index {
         // if (std.mem.eql(u8, a: []const T, b: []const T))
     }
 
-    return error.UnexpectedToken; // TODO: Global variables
+    return p.setError(error.UnboundVariable, .{
+        .unbound_variable = bytes,
+    });
 }
 
 /// Builtin <- builtin ('(' ArgList? ')')?
@@ -1099,7 +1112,7 @@ test "parser" {
 
     try testParser("let a0 = 'this is epic' # ' and nice'", &.{ .string_literal, .string_literal, .concat, .assignment, .end });
 
-    try testParseError("unga bunga", error.UnexpectedToken);
+    try testParseError("unga bunga", error.UnboundVariable);
     try testParseError("let", error.UnexpectedToken);
     try testParseError("let a0 = ", error.UnexpectedToken);
     try testParseError("a0 = 5", error.UnexpectedToken);
@@ -1145,9 +1158,9 @@ test "parser" {
     try testParseError("let crxp0 = 5", null);
     try testParseError("let crxp0 = 'string'", null);
 
-    try testParseError("let a0 = n", error.UnexpectedToken);
-    try testParseError("let a0 = global", error.UnexpectedToken);
-    try testParseError("let a0 = |x| y", error.UnexpectedToken);
+    try testParseError("let a0 = n", error.UnboundVariable);
+    try testParseError("let a0 = global", error.UnboundVariable);
+    try testParseError("let a0 = |x| y", error.UnboundVariable);
 }
 
 test "Node contents" {
