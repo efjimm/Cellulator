@@ -732,7 +732,7 @@ fn printNode(
                 str.appendSliceAssumeCapacity(name);
                 str.appendSliceAssumeCapacity(" = ");
                 str.appendSliceAssumeCapacity(expr);
-                str.appendAssumeCapacity(',');
+                str.appendSliceAssumeCapacity(" }");
                 stack.shrinkRetainingCapacity(args_start);
             } else {
                 try str.appendSlice(arena, "{}");
@@ -741,7 +741,7 @@ fn printNode(
         .table_assignment => |s| try str.appendSlice(arena, ast.string(s)),
         .end => return .end,
         .false => try str.appendSlice(arena, "false"),
-        .true => try str.appendSlice(arena, "false"),
+        .true => try str.appendSlice(arena, "true"),
         .nil => try str.appendSlice(arena, "nil"),
         .number => |n| try str.print(arena, "{d}", .{n}),
         .invalidated_pos,

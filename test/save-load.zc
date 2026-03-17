@@ -129,6 +129,15 @@ let e0 = '\\'
 :expect d0 == '"nice"'
 :expect e0 == '\\'
 
+-- Booleans
+:e
+let a0 = true
+let b0 = false
+:w $BUILD_TEMP_DIR/booleans.zc
+:e $BUILD_TEMP_DIR/booleans.zc
+:expect a0 == true
+:expect b0 == false
+
 -- Tuples
 :e
 let a0 = []
@@ -137,3 +146,13 @@ let a2 = [1, 2, 3]
 let a3 = [|x| x, |x| [x]]
 :w $BUILD_TEMP_DIR/tuples.zc
 :e $BUILD_TEMP_DIR/tuples.zc
+
+-- Tables
+:e
+let a0 = { identity = |x| x, double = |x| x * 2, triple = |x| x * 3, square = |x| x * x }
+:w $BUILD_TEMP_DIR/maps.zc
+:e $BUILD_TEMP_DIR/maps.zc
+:expect a0.identity(5) == 5
+:expect a0.double(5) == 10
+:expect a0.triple(5) == 15
+:expect a0.square(5) == 25
