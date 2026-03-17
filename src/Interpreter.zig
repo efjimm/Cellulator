@@ -81,6 +81,9 @@ pub const Value = union(enum) {
                         .tuple => |t| .{
                             .tuple = (try clone(.{ .tuple = t }, arena)).tuple,
                         },
+                        .table => |t| .{
+                            .table = (try clone(.{ .table = t }, arena)).table,
+                        },
                         .filter => |v2| .{ .filter = try v2.clone(arena) },
                         .map => |v2| .{ .map = try v2.clone(arena) },
                     };
@@ -105,7 +108,8 @@ pub const Value = union(enum) {
                     t.map.keys(),
                     t.map.values(),
                 ) |*key_dest, *value_dest, key, value| {
-                    key_dest.* = try arena.dupe(u8, key);
+                    const key_string: *Value.String = try .dupe(arena, key);
+                    key_dest.* = key_string.bytes();
                     value_dest.* = try value.clone(arena);
                 }
                 new_t.* = .{ .map = new_map };
@@ -115,6 +119,7 @@ pub const Value = union(enum) {
     }
 
     pub const Table = struct {
+        /// NOTE: The keys MUST be a heap allocated `String` type.
         map: std.StringArrayHashMapUnmanaged(Value),
     };
 
@@ -155,6 +160,8 @@ pub const Value = union(enum) {
             range: CellRange,
             indirect_range: CellRange,
             tuple: *Tuple,
+            table: *Table,
+
             filter: Value,
             map: Value,
         };
@@ -1059,6 +1066,12 @@ fn toPipeline(eval: *Interpreter, v: Value) !*Value.Pipeline {
             try p.stages.append(eval.arena, .{ .tuple = t });
             return p;
         },
+        .table => |t| {
+            const p = try eval.arena.create(Value.Pipeline);
+            p.* = .{};
+            try p.stages.append(eval.arena, .{ .table = t });
+            return p;
+        },
         else => return error.NotEvaluable,
     }
 }
@@ -1126,7 +1139,7 @@ const MapArgsIter = struct {
                     .range, .indirect_range => |range| .{
                         .range = iter.eval.sheet.cell_tree.queryIterator(range.min, range.max),
                     },
-                    .tuple => .{ .tuple = 0 },
+                    .tuple, .table => .{ .tuple = 0 },
                     .map, .filter => unreachable,
                 },
             },
@@ -1304,6 +1317,21 @@ const PipelineIterator = struct {
                     const index = iter.source.tuple;
                     if (index >= t.len) return error.EndOfStream;
                     iter.value = t.values()[index];
+                    iter.source.tuple += 1;
+                },
+                .table => |t| {
+                    const index = iter.source.tuple;
+                    if (index >= t.map.entries.len) return error.EndOfStream;
+                    const tuple: *Value.Tuple = try .create(eval.arena, 2);
+                    const bytes = t.map.keys()[index];
+                    const key: *Value.String = @ptrCast(@alignCast(
+                        @constCast(bytes.ptr) - Value.String.header_size,
+                    ));
+                    tuple.values()[0..2].* = .{
+                        .{ .string = key },
+                        t.map.values()[index],
+                    };
+                    iter.value = .{ .tuple = tuple };
                     iter.source.tuple += 1;
                 },
                 .filter => |f| if (!iter.resuming) {
