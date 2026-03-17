@@ -672,6 +672,7 @@ fn bulkParse(
             error.UnexpectedToken,
             error.InvalidCellAddress,
             error.InvalidBuiltin,
+            error.InvalidEscapeSequence,
             => {
                 @branchHint(.unlikely);
                 p.tok_i += 1;

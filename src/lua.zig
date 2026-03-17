@@ -288,6 +288,7 @@ const metatables = .{
                 error.InvalidCellAddress,
                 error.UnexpectedToken,
                 error.InvalidBuiltin,
+                error.InvalidEscapeSequence,
                 => {
                     var buf: [1024]u8 = undefined;
                     var w: std.Io.Writer = .fixed(&buf);

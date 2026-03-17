@@ -1414,6 +1414,7 @@ fn parseCommand(zc: *ZC, str: []const u8) !void {
         error.UnexpectedToken,
         error.InvalidCellAddress,
         error.InvalidBuiltin,
+        error.InvalidEscapeSequence,
         => {
             zc.setStatusMessage(.err, "{f}", .{diagnostics});
             return;
@@ -1943,6 +1944,7 @@ pub const Command = enum {
                     error.UnexpectedToken,
                     error.InvalidCellAddress,
                     error.InvalidBuiltin,
+                    error.InvalidEscapeSequence,
                     => {
                         try zc.status.msg.print(zc.allocator, "{f}", .{diagnostics});
                         return err;

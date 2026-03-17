@@ -11,7 +11,6 @@ might be an interesting read so I committed it. The stuff at the top is probably
 - Bug: fill command doesn't update cell dependents
 - Serialize column widths
 - Serialize column precision
-- Escape single quotes in printed string values
 
 - Implement integer types
 - Implement tuple indexing and functions for manipulation
@@ -61,11 +60,8 @@ might be an interesting read so I committed it. The stuff at the top is probably
   - Native arrays
     - Array of "native" float/integer types instead of any type
   - Structs
-- Streams
-  - map filter reduce
 - Anonymous functions with implicit arguments (placeholders)
 - Maybe remove @ prefix from builtins
-- Vet cell literal boundaries in evaluation
 - Update README
 - Tests
 

@@ -127,6 +127,7 @@ pub const Diagnostics = struct {
         expected_string: []const u8,
         invalid_builtin: []const u8,
         invalid_cell_address: []const u8,
+        invalid_escape_sequence: []const u8,
     };
 
     pub fn format(info: *const Diagnostics, writer: *std.Io.Writer) !void {
@@ -155,6 +156,13 @@ pub const Diagnostics = struct {
             },
             .invalid_cell_address => |str| {
                 try writer.print("invalid cell address '{s}'", .{str});
+            },
+            .invalid_escape_sequence => |str| {
+                if (str.len == 0) {
+                    try writer.print("Unterminated escape sequence at end of string", .{});
+                } else {
+                    try writer.print("invalid escape sequence '{s}'", .{str});
+                }
             },
         }
     }
@@ -189,6 +197,7 @@ pub const ParseError = error{
     UnexpectedToken,
     InvalidCellAddress,
     InvalidBuiltin,
+    InvalidEscapeSequence,
 } || Allocator.Error;
 
 pub const Options = struct {
@@ -938,15 +947,11 @@ fn parseStringLiteral(p: *Parser, comptime expected_tag: Token.Tag) ParseError!I
     const end = try p.expectTokenGet(end_tag);
 
     const bytes = p.src[start + 1 .. end];
-    const string_start = p.ast.strings.items.len;
-    try p.ast.strings.appendSlice(p.gpa, bytes);
+    const string = try p.addEscapedString(bytes);
 
     // TODO: Handle escapes of quotes
     const index = try p.addNode(
-        .init(.string_literal, .{
-            .start = @intCast(string_start),
-            .end = @intCast(string_start + bytes.len),
-        }),
+        .init(.string_literal, string),
     );
     return .{ index, .string };
 }
@@ -987,6 +992,37 @@ fn parseCellName(p: *Parser) !Intermediate {
 
 fn addNode(p: *Parser, node: Node) Allocator.Error!Index {
     return try p.ast.nodes.append(p.gpa, node);
+}
+
+fn addEscapedString(p: *Parser, bytes: []const u8) !Ast.String {
+    const start = p.ast.strings.items.len;
+    try p.ast.strings.ensureUnusedCapacity(p.gpa, bytes.len);
+
+    var i: usize = 0;
+    while (i < bytes.len) : (i += 1) {
+        if (bytes[i] != '\\') {
+            p.ast.strings.appendAssumeCapacity(bytes[i]);
+            continue;
+        }
+        i += 1;
+        if (i >= bytes.len) {
+            @branchHint(.unlikely);
+            return p.setError(error.InvalidEscapeSequence, .{
+                .invalid_escape_sequence = "",
+            });
+        }
+
+        switch (bytes[i]) {
+            '\\' => p.ast.strings.appendAssumeCapacity('\\'),
+            '\'' => p.ast.strings.appendAssumeCapacity('\''),
+            '"' => p.ast.strings.appendAssumeCapacity('"'),
+            else => return p.setError(error.InvalidEscapeSequence, .{
+                .invalid_escape_sequence = bytes[i..][0..1],
+            }),
+        }
+    }
+
+    return .{ .start = @intCast(start), .end = @intCast(p.ast.strings.items.len) };
 }
 
 fn addString(p: *Parser, bytes: []const u8) !Ast.String {

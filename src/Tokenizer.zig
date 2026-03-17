@@ -423,6 +423,21 @@ pub fn next(t: *Tokenizer) !Token {
         },
         .single_string_literal => {
             switch (try t.byte()) {
+                '\\' => {
+                    t.toss(1);
+                    switch (try t.byte()) {
+                        '\'',
+                        'n',
+                        => {
+                            t.toss(1);
+                        },
+                        else => {
+                            // TODO: Signal an unknown escape sequence error
+                        },
+                    }
+
+                    continue :state .single_string_literal;
+                },
                 '\'' => {
                     tag = .single_string_literal_end;
                     start = t.pos;
@@ -441,6 +456,21 @@ pub fn next(t: *Tokenizer) !Token {
         },
         .double_string_literal => {
             switch (try t.byte()) {
+                '\\' => {
+                    t.toss(1);
+                    switch (try t.byte()) {
+                        '"',
+                        'n',
+                        => {
+                            t.toss(1);
+                        },
+                        else => {
+                            // TODO: Signal an unknown escape sequence error
+                        },
+                    }
+
+                    continue :state .double_string_literal;
+                },
                 '"' => {
                     tag = .double_string_literal_end;
                     start = t.pos;

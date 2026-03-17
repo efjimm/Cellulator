@@ -539,7 +539,7 @@ fn printNode(
     stack: *std.ArrayList(PrintItem),
     function_stack: *std.ArrayList(Node.Index),
     i: Node.Index,
-) !PrintNodeResult {
+) Allocator.Error!PrintNodeResult {
     var str: std.ArrayList(u8) = .empty;
     try str.ensureTotalCapacity(arena, 32);
     sw: switch (ast.node(i)) {
@@ -699,7 +699,41 @@ fn printNode(
             Position.fmtColumnAddress(pos.x),
             pos.y,
         }),
-        .string_literal => |s| try str.print(arena, "'{s}'", .{ast.string(s)}),
+        .string_literal => |s| {
+            const bytes = ast.string(s);
+            try str.ensureUnusedCapacity(arena, bytes.len * 2 + 2);
+
+            var have_single_quotes = false;
+            var have_double_quotes = false;
+            for (bytes) |c| {
+                if (c == '\'') have_single_quotes = true;
+                if (c == '"') have_double_quotes = true;
+            }
+
+            var j: usize = 0;
+            // If the string contains single quotes but no double quotes then we can just use
+            // quotes to avoid needing to escape single quotes.
+            if (have_single_quotes and !have_double_quotes) {
+                str.appendAssumeCapacity('"');
+                while (j < bytes.len) : (j += 1) {
+                    switch (bytes[j]) {
+                        '\\' => str.appendSliceAssumeCapacity("\\"),
+                        else => str.appendAssumeCapacity(bytes[j]),
+                    }
+                }
+                str.appendAssumeCapacity('"');
+            } else {
+                str.appendAssumeCapacity('\'');
+                while (j < bytes.len) : (j += 1) {
+                    switch (bytes[j]) {
+                        '\'' => str.appendSliceAssumeCapacity("\\'"),
+                        '\\' => str.appendSliceAssumeCapacity("\\"),
+                        else => str.appendAssumeCapacity(bytes[j]),
+                    }
+                }
+                str.appendAssumeCapacity('\'');
+            }
+        },
         .tuple => |tuple| {
             if (tuple.arg_count == 0) {
                 try str.appendSlice(arena, "[]");
