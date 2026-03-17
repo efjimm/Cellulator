@@ -167,6 +167,7 @@ const builtins = std.StaticStringMap(Builtin.Tag).initComptime(.{
     .{ "range", .range },
     .{ "filter", .filter },
     .{ "map", .map },
+    .{ "any", .any },
 });
 
 pub const ParseError = error{

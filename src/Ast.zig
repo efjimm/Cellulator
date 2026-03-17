@@ -166,6 +166,7 @@ pub const Node = extern struct {
             range,
             filter,
             map,
+            any,
 
             pub fn format(t: Builtin.Tag, w: *std.Io.Writer) !void {
                 switch (t) {

@@ -32,3 +32,19 @@ let b10 = [1, 2, 3] |> @filter(*a10) |> @sum()
 let A0={ identity = |x| x, double = |x| x * 2, triple = |x| x * 3 , square = |x| x * x}
 let B0=A0 |> @filter(|x| x[0] == 'double' or x[0] == 'triple') |> @map(|x| x[1](4)) |> @sum()
 :expect B0 == 20
+
+:e
+let a0 = b0:d10 |> @filter(|x| *x % 2 == 0) |> @any()
+:expect a0 == nil
+let b0 = 5
+:expect a0 == nil
+let d5 = 3
+:expect a0 == nil
+let d5 = 4
+:expect a0 == 4
+let d5 = 5
+:expect a0 == nil
+
+:expect @any() == nil
+:expect @any(1) == 1
+:expect @any(5, 4, 3, 2, 1) != nil

@@ -390,6 +390,7 @@ pub const StackEntry = union(enum) {
                     max: MaxContext,
                     count_all: CountContextAll,
                     count_numbers: CountContextNumbers,
+                    any: AnyContext,
                 };
             };
         };
@@ -517,6 +518,25 @@ fn evaluateBuiltin(eval: *Interpreter, builtin_tag: Node.Builtin.Tag, arg_count:
         .range => .{ .pipeline = try eval.evalRange(arg_count) },
         .filter => .{ .pipeline = try eval.evalFilter(arg_count) },
         .map => .{ .pipeline = try eval.evalMap(arg_count) },
+        .any => {
+            const map = eval.stack.get(eval.header.unwrap().?).builtin_header.resume_state.map_args;
+            var iter: MapArgsIter = .{
+                .arg_count = arg_count,
+                .eval = eval,
+                .i = map.i,
+                .arg = map.arg,
+                .header_index = eval.header.unwrap().?,
+            };
+            var ctx: AnyContext = .{};
+            while (iter.consume(&ctx) catch |err| switch (err) {
+                error.Suspended => return error.Suspended,
+                error.AnyContextFinished => {
+                    return ctx.value;
+                },
+                else => |e| return e,
+            }) {}
+            return .nil;
+        },
     };
 }
 
@@ -577,6 +597,7 @@ fn call(eval: *Interpreter, arg_count: u8) error{
                         .max => .{ .map_args = .{ .op = .{ .max = .{} } } },
                         .count_all => .{ .map_args = .{ .op = .{ .count_all = .{} } } },
                         .count => .{ .map_args = .{ .op = .{ .count_numbers = .{} } } },
+                        .any => .{ .map_args = .{ .op = .{ .any = .{} } } },
                         else => .none,
                     },
                 } },
@@ -1100,6 +1121,7 @@ const MapArgsIter = struct {
                     *MaxContext => .{ .max = ctx.* },
                     *CountContextNumbers => .{ .count_numbers = ctx.* },
                     *CountContextAll => .{ .count_all = ctx.* },
+                    *AnyContext => .{ .any = ctx.* },
                     else => comptime unreachable,
                 },
             },
@@ -1390,6 +1412,15 @@ const ProdContext = struct {
     fn func(ctx: *ProdContext, v: Value) !void {
         const n = try v.toNumber();
         ctx.total *= n orelse 1;
+    }
+};
+
+const AnyContext = struct {
+    value: Value = .nil,
+
+    fn func(ctx: *AnyContext, v: Value) !void {
+        ctx.value = v;
+        return error.AnyContextFinished;
     }
 };
 
