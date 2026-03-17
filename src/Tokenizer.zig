@@ -427,6 +427,7 @@ pub fn next(t: *Tokenizer) !Token {
                     t.toss(1);
                     switch (try t.byte()) {
                         '\'',
+                        '\\',
                         'n',
                         => {
                             t.toss(1);
@@ -460,6 +461,7 @@ pub fn next(t: *Tokenizer) !Token {
                     t.toss(1);
                     switch (try t.byte()) {
                         '"',
+                        '\\',
                         'n',
                         => {
                             t.toss(1);

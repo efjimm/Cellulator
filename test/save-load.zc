@@ -120,9 +120,11 @@ let a0 = '"nice"'
 let b0 = "'nice'"
 let c0 = '\'nice\''
 let d0 = "\"nice\""
+let e0 = '\\'
 :w $BUILD_TEMP_DIR/string-escape.zc
 :e $BUILD_TEMP_DIR/string-escape.zc
 :expect a0 == '"nice"'
 :expect b0 == "'nice'"
 :expect c0 == "'nice'"
 :expect d0 == '"nice"'
+:expect e0 == '\\'

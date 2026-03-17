@@ -5,6 +5,7 @@ let a1 = a0 < b0
 let b1 = a0 > b0
 let c1 = a0 == b0
 let d1 = a0 < b0 and 'less' or a0 > b0 and 'more' or 'equal'
+:expect (g10 == []) == 0
 
 :expect-eql-number a0 1
 :expect-eql-number b0 2

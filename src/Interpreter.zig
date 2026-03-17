@@ -878,7 +878,7 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
 
                 // TODO: Vet equality semantics
                 const n = switch (lhs) {
-                    .none => true,
+                    .none => false,
                     .nil => switch (rhs) {
                         .nil => true,
                         else => false,

@@ -717,7 +717,7 @@ fn printNode(
                 str.appendAssumeCapacity('"');
                 while (j < bytes.len) : (j += 1) {
                     switch (bytes[j]) {
-                        '\\' => str.appendSliceAssumeCapacity("\\"),
+                        '\\' => str.appendSliceAssumeCapacity("\\\\"),
                         else => str.appendAssumeCapacity(bytes[j]),
                     }
                 }
@@ -727,7 +727,7 @@ fn printNode(
                 while (j < bytes.len) : (j += 1) {
                     switch (bytes[j]) {
                         '\'' => str.appendSliceAssumeCapacity("\\'"),
-                        '\\' => str.appendSliceAssumeCapacity("\\"),
+                        '\\' => str.appendSliceAssumeCapacity("\\\\"),
                         else => str.appendAssumeCapacity(bytes[j]),
                     }
                 }
