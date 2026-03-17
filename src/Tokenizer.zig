@@ -92,6 +92,8 @@ pub const Token = struct {
         keyword_and,
         keyword_or,
         keyword_nil,
+        keyword_false,
+        keyword_true,
 
         eof,
         unknown,
@@ -133,6 +135,8 @@ pub const Token = struct {
                 .keyword_and = "and",
                 .keyword_or = "or",
                 .keyword_nil = "nil",
+                .keyword_false = "false",
+                .keyword_true = "true",
                 .eof = "eof",
                 .caret = "^",
                 .ampersand = "&",
@@ -152,6 +156,8 @@ const keywords = std.StaticStringMap(Token.Tag).initComptime(.{
     .{ "and", .keyword_and },
     .{ "or", .keyword_or },
     .{ "nil", .keyword_nil },
+    .{ "false", .keyword_false },
+    .{ "true", .keyword_true },
 });
 
 pub fn init(reader: *std.Io.Reader) Tokenizer {

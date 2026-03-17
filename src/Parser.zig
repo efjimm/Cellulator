@@ -797,6 +797,16 @@ fn parsePrimaryExpr(p: *Parser) !Intermediate {
             const index = try p.addNode(.init(.nil, {}));
             return .{ index, .any };
         },
+        .keyword_false => {
+            p.expectToken(.keyword_false) catch unreachable;
+            const index = try p.addNode(.init(.false, {}));
+            return .{ index, .any };
+        },
+        .keyword_true => {
+            p.expectToken(.keyword_true) catch unreachable;
+            const index = try p.addNode(.init(.true, {}));
+            return .{ index, .any };
+        },
         .lbracket => try p.parseTuple(),
         else => p.setError(error.UnexpectedToken, .{ .expected_string = "expression" }),
     };

@@ -1138,6 +1138,7 @@ fn renderCursor(tui: *Tui, wr: *Screen.Writer) !void {
         const cell = zc.currentSheet().getCellPtr(range.tl) orelse break :blk .cell_blank_selected;
         break :blk switch (cell.expr.value_tag) {
             .nil => .cell_error_selected,
+            .boolean => .cell_number_selected,
             .number => .cell_number_selected,
             .tuple => .cell_number_selected,
             .pipeline => .cell_number_selected,
@@ -1237,6 +1238,7 @@ const ScreenData = struct {
     const Tag = enum(u4) {
         blank,
         nil,
+        boolean,
         number,
         string,
         err,
@@ -1292,6 +1294,7 @@ fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !ScreenData {
             ctx.extra[y * ctx.col_count + x] = .{
                 .tag = switch (cell.expr.value_tag) {
                     .nil => .nil,
+                    .boolean => .boolean,
                     .number => .number,
                     .string => .string,
                     .err => .err,
@@ -1442,6 +1445,19 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                         str,
                         width,
                         .center,
+                        tui.term.grapheme_clustering_mode,
+                        &wr.interface,
+                    );
+                },
+                .boolean => {
+                    const string = switch (data.values[i].boolean) {
+                        false => "false",
+                        true => "true",
+                    };
+                    try shovel.writeTruncating(
+                        string,
+                        width,
+                        .left,
                         tui.term.grapheme_clustering_mode,
                         &wr.interface,
                     );

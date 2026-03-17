@@ -2546,7 +2546,7 @@ fn runDebugCommand(zc: *ZC, cmd_str: []const u8, iter: *utils.WordIterator) !voi
             const expr = try sheet.parseFromExpression(src);
             const res = try sheet.evaluate(expr.root);
 
-            if (!res.boolean()) {
+            if (!res.toBoolean()) {
                 return error.UnexpectedResult;
             }
         },
@@ -3164,13 +3164,17 @@ fn widthNeededForColumn(
         pub fn func(ctx: *@This(), handle: Sheet.Cell.Handle) !void {
             const cell = ctx.sheet.getCellFromHandle(handle);
             // TODO: Make all widths u32
-            const w = sw: switch (cell.expr.value_tag) {
+            const w: usize = sw: switch (cell.expr.value_tag) {
                 .err => 0,
                 .nil => 3,
                 .tuple => 5,
                 .pipeline => std.fmt.count("<[{d}]>", .{
                     cell.value.pipeline.stages.items.len,
                 }),
+                .boolean => switch (cell.value.boolean) {
+                    false => 5,
+                    true => 4,
+                },
                 .number => std.fmt.count("{d:.[1]}", .{ cell.value.number, ctx.precision }),
                 .string => ctx.zc.ui_interface.stringWidth(
                     cell.value.string.bytes(),

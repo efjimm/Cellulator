@@ -154,6 +154,7 @@ pub const Cell = extern struct {
     // Non-extern unions get a hidden tag in safe builds which makes serialising them annoying.
     // So we use an extern union here.
     pub const Value = extern union {
+        boolean: bool,
         number: f64,
         string: *Interpreter.Value.String,
         err: Error,
@@ -362,6 +363,7 @@ pub fn compactCachedCellValues(sheet: *Sheet) Allocator.Error!void {
     for (sheet.live_values.keys()) |handle| {
         const cell = sheet.getCellFromHandle(handle);
         switch (cell.expr.value_tag) {
+            .boolean,
             .number,
             .err,
             .ref_cell,
@@ -1055,6 +1057,13 @@ pub fn formatInterpreterValue(
         .none => {},
         .nil => {
             try w.writeAll("nil");
+        },
+        .boolean => |b| {
+            const str = switch (b) {
+                false => "false",
+                true => "true",
+            };
+            try w.writeAll(str);
         },
         .number => {
             try w.print("{d}", .{value.number});
@@ -2930,6 +2939,7 @@ pub fn setCellValue(
         .none => cell.setValue(.number, 0),
         .nil => cell.setValue(.nil, {}),
         .err => cell.setValue(.err, .fromError(error.NotEvaluable)),
+        .boolean => |b| cell.setValue(.boolean, b),
         .number => |n| cell.setValue(.number, n),
         .string => |str| {
             try sheet.live_values.ensureUnusedCapacity(sheet.gpa, 1);
@@ -3057,6 +3067,7 @@ pub fn printCellExpression(sheet: *Sheet, pos: Position, w: *std.Io.Writer) !voi
 pub fn interpreterValueFromCell(tag: Cell.Value.Tag, value: Cell.Value) Interpreter.Value {
     return switch (tag) {
         .nil => .nil,
+        .boolean => .{ .boolean = value.boolean },
         .number => .{ .number = value.number },
         .string => .{ .string = value.string },
         .err => .err,
@@ -3269,7 +3280,7 @@ fn createCellCopiesContiguous(
 
                 // Cell does not have AST, so it can only be a simple value
                 switch (src_cell.expr.value_tag) {
-                    .number, .string, .err, .nil => {},
+                    .number, .boolean, .string, .err, .nil => {},
                     .ref_cell,
                     .ref_range,
                     .simple_function,

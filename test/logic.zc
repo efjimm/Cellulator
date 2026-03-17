@@ -1,11 +1,30 @@
+:expect true == true
+:expect true != false
+:expect false != true
+:expect false == false
+:expect (true == true) == true
+:expect true == (true == true)
+:expect (false == false) == true
+:expect true == (false == false)
+:expect (false != false) == false
+:expect false == (false != false)
+
 let a0 = 1
 let b0 = 2
 
 let a1 = a0 < b0
+:expect a1 == true
+:expect true == a1
 let b1 = a0 > b0
+:expect b1 == false
+:expect false == b1
 let c1 = a0 == b0
+:expect c1 == false
+:expect c1 != true
 let d1 = a0 < b0 and 'less' or a0 > b0 and 'more' or 'equal'
-:expect (g10 == []) == 0
+:expect (g10 == []) == false
+:expect (g10 == '') == false
+:expect (g10 == 'string') == false
 
 :expect-eql-number a0 1
 :expect-eql-number b0 2
@@ -43,11 +62,12 @@ let a0 = 3
 :expect a1 or b1 or c1
 :expect-eql-string d1 'more'
 
-:expect !0 != 0
-:expect !1 == 0
-:expect !10 == 0
-:expect (!'string') == 0
-:expect !'' == 0
+:expect !0 != false
+:expect !0 == true
+:expect !1 == false
+:expect !10 == false
+:expect (!'string') == false
+:expect !'' == false
 
 :expect ''
 :expect !!''

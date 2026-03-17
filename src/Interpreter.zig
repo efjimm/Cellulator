@@ -38,6 +38,7 @@ pub const Value = union(enum) {
     indirect_cell: Position,
     pipeline: *Pipeline,
     tuple: *Tuple,
+    boolean: bool,
 
     /// Returns a deep copy of the given value. Avoid when possible. Currently only used for
     /// storing tuples and pipelines in cells, which is a relatively rare use case.
@@ -46,6 +47,7 @@ pub const Value = union(enum) {
             .none,
             .nil,
             .err,
+            .boolean,
             .number,
             .cell,
             .range,
@@ -254,11 +256,12 @@ pub const Value = union(enum) {
         }
     };
 
-    pub fn boolean(res: Value) bool {
+    pub fn toBoolean(res: Value) bool {
         return switch (res) {
             .none => false,
             .nil => false,
             .err => false,
+            .boolean => |b| b,
             .number => |n| n != 0,
             .string => true,
             .cell, .indirect_cell => true,
@@ -274,6 +277,7 @@ pub const Value = union(enum) {
     fn toNumber(res: Value) !?f64 {
         return switch (res) {
             .none => null,
+            .boolean => |b| @intFromBool(b),
             .number => |n| n,
             .string => |str| std.fmt.parseFloat(f64, str.bytes()) catch error.InvalidCoercion,
             .nil,
@@ -633,6 +637,8 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
                 continue;
             },
             .nil => try eval.pushv(.nil),
+            .false => try eval.pushv(.{ .boolean = false }),
+            .true => try eval.pushv(.{ .boolean = true }),
             .number => |n| try eval.pushv(.{ .number = n }),
             .rel_rel_value,
             .rel_abs_value,
@@ -766,7 +772,7 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
             .not => {
                 const rhs = eval.stack.pop().?.value;
                 try eval.pushv(.{
-                    .number = @floatFromInt(@intFromBool(!rhs.boolean())),
+                    .boolean = !rhs.toBoolean(),
                 });
             },
             .concat => {
@@ -830,7 +836,7 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
                 // const rhs = eval.stack.pop().?.value;
                 const lhs = eval.stack.pop().?.value;
 
-                if (lhs.boolean()) {
+                if (lhs.toBoolean()) {
                     // Do nothing. This will evaluate the right hand side and push it to the stack.
                 } else {
                     // Push the LHS to the stack and skip the RHS
@@ -842,7 +848,7 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
             .logical_or => |rhs_length| {
                 const lhs = eval.stack.pop().?.value;
 
-                if (lhs.boolean()) {
+                if (lhs.toBoolean()) {
                     // Push the LHS to the stack and skip the RHS
                     eval.push(.{ .value = lhs }) catch unreachable;
                     eval.pc = eval.pc.addi(@intCast(rhs_length));
@@ -870,7 +876,7 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
                     else => comptime unreachable,
                 };
 
-                try eval.pushv(.{ .number = @floatFromInt(@intFromBool(n)) });
+                try eval.pushv(.{ .boolean = n });
             },
             inline .equals, .not_equals => |_, t| {
                 const rhs = eval.stack.pop().?.value;
@@ -885,6 +891,10 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
                     },
                     .err => switch (rhs) {
                         .err => true,
+                        else => false,
+                    },
+                    .boolean => |b1| switch (rhs) {
+                        .boolean => |b2| b1 == b2,
                         else => false,
                     },
                     .number => |n1| switch (rhs) {
@@ -924,7 +934,7 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
                     .not_equals => !n,
                     else => comptime unreachable,
                 };
-                try eval.pushv(.{ .number = @floatFromInt(@intFromBool(b)) });
+                try eval.pushv(.{ .boolean = b });
             },
             .range, .dynamic_range => {
                 const rhs = eval.stack.pop().?.value;
@@ -1230,7 +1240,7 @@ const PipelineIterator = struct {
                 } else {
                     iter.resuming = false;
                     const return_value = eval.stack.pop().?.value;
-                    if (!return_value.boolean()) {
+                    if (!return_value.toBoolean()) {
                         iter.i = 0;
                         continue;
                     }
@@ -1401,6 +1411,10 @@ fn evalStringLen(eval: *Interpreter, arg_count: u8) !f64 {
         .none => 0,
         .nil => 3,
         .err => 5,
+        .boolean => |b| switch (b) {
+            false => 5,
+            true => 4,
+        },
         .number => |n|
         // TODO: This should account for the current precision of the cell
         @floatFromInt(std.fmt.count("{d}", .{n})),
@@ -1476,6 +1490,7 @@ fn evalWidth(eval: *Interpreter, arg_count: u8) !f64 {
         .none,
         .nil,
         .err,
+        .boolean,
         .number,
         .string,
         .function,
@@ -1497,6 +1512,7 @@ fn evalHeight(eval: *Interpreter, arg_count: u8) !f64 {
         .nil,
         .err,
         .number,
+        .boolean,
         .string,
         .function,
         .closure,

@@ -280,6 +280,8 @@ pub const Node = extern struct {
     pub const Payload = extern union {
         end: End,
         nil: void,
+        false: void,
+        true: void,
         number: f64,
         abs_abs_value: Position,
         abs_rel_value: Position,
@@ -342,6 +344,8 @@ pub const Node = extern struct {
     pub const Tagged = union(Tag) {
         end: End,
         nil,
+        false,
+        true,
         number: f64,
         abs_abs_value: Position,
         abs_rel_value: Position,
@@ -402,6 +406,8 @@ pub const Node = extern struct {
     pub const Tag = enum(u8) {
         end,
         nil,
+        false,
+        true,
         number,
         abs_abs_value,
         abs_rel_value,
@@ -464,6 +470,8 @@ pub const Node = extern struct {
                 // These aren't operators
                 .end,
                 .nil,
+                .false,
+                .true,
                 .number,
                 .abs_abs_value,
                 .abs_rel_value,
@@ -591,6 +599,8 @@ fn printNode(
                 // leaf nodes
                 .nil,
                 .string_literal,
+                .false,
+                .true,
                 .number,
                 .invalidated_pos,
                 .rel_rel_value,
@@ -675,6 +685,8 @@ fn printNode(
             try str.print(arena, "{s}[{s}]", .{ to_index.str, index.str });
         },
         .end => return .end,
+        .false => try str.appendSlice(arena, "false"),
+        .true => try str.appendSlice(arena, "false"),
         .nil => try str.appendSlice(arena, "nil"),
         .number => |n| try str.print(arena, "{d}", .{n}),
         .invalidated_pos,
