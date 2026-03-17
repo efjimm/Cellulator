@@ -70,11 +70,14 @@ pub const Token = struct {
         ampersand,
         pipe,
         pipe_to,
+        dot,
 
         lparen,
         rparen,
         lbracket,
         rbracket,
+        lbrace,
+        rbrace,
 
         identifier,
         rel_rel,
@@ -121,6 +124,8 @@ pub const Token = struct {
                 .rparen = "')'",
                 .lbracket = "[",
                 .rbracket = "]",
+                .lbrace = "{",
+                .rbrace = "}",
                 .identifier = "identifier",
                 .rel_rel = "cell address",
                 .rel_abs = "cell address",
@@ -142,6 +147,7 @@ pub const Token = struct {
                 .ampersand = "&",
                 .pipe = "|",
                 .pipe_to = "|>",
+                .dot = ".",
                 .unknown = "",
             });
 
@@ -219,7 +225,9 @@ pub fn next(t: *Tokenizer) !Token {
                         tag = .number;
                         continue :state .decimal_number;
                     },
-                    else => {},
+                    else => {
+                        tag = .dot;
+                    },
                 }
             },
             '&' => {
@@ -336,6 +344,14 @@ pub fn next(t: *Tokenizer) !Token {
             },
             ']' => {
                 tag = .rbracket;
+                t.toss(1);
+            },
+            '{' => {
+                tag = .lbrace;
+                t.toss(1);
+            },
+            '}' => {
+                tag = .rbrace;
                 t.toss(1);
             },
             ':' => {

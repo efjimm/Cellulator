@@ -3195,6 +3195,7 @@ fn widthNeededForColumn(
                         ctx.sheet.ast.fmtExpression(ctx.sheet.arena.allocator(), root),
                     });
                 },
+                .table => 5,
             };
             if (w > ctx.width) {
                 ctx.width = @intCast(w);
@@ -3996,6 +3997,10 @@ test "streams.zc" {
 
 test "tuples.zc" {
     try testFile(std.testing.allocator, std.testing.io, "test/tuples.zc");
+}
+
+test "table.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/table.zc");
 }
 
 test "Invalid reference" {

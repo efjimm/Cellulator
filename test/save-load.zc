@@ -128,3 +128,12 @@ let e0 = '\\'
 :expect c0 == "'nice'"
 :expect d0 == '"nice"'
 :expect e0 == '\\'
+
+-- Tuples
+:e
+let a0 = []
+let a1 = [1]
+let a2 = [1, 2, 3]
+let a3 = [|x| x, |x| [x]]
+:w $BUILD_TEMP_DIR/tuples.zc
+:e $BUILD_TEMP_DIR/tuples.zc

@@ -27,6 +27,7 @@ pub const Value = union(enum) {
     none,
     nil,
     err,
+    boolean: bool,
     number: f64,
     string: *String,
     cell: Position,
@@ -38,7 +39,7 @@ pub const Value = union(enum) {
     indirect_cell: Position,
     pipeline: *Pipeline,
     tuple: *Tuple,
-    boolean: bool,
+    table: *Table,
 
     /// Returns a deep copy of the given value. Avoid when possible. Currently only used for
     /// storing tuples and pipelines in cells, which is a relatively rare use case.
@@ -95,8 +96,18 @@ pub const Value = union(enum) {
                 }
                 return .{ .tuple = new_t };
             },
+            .table => |t| {
+                const new_t = try arena.create(Table);
+                const new_map = try t.map.clone(arena);
+                new_t.* = .{ .map = new_map };
+                return .{ .table = new_t };
+            },
         }
     }
+
+    pub const Table = struct {
+        map: std.StringArrayHashMapUnmanaged(Value),
+    };
 
     pub const Tuple = struct {
         len: u32,
@@ -269,6 +280,7 @@ pub const Value = union(enum) {
             .function, .closure, .builtin_function => true,
             .pipeline => true,
             .tuple => true,
+            .table => true,
         };
     }
 
@@ -291,6 +303,7 @@ pub const Value = union(enum) {
             .builtin_function,
             .pipeline,
             .tuple,
+            .table,
             => {
                 std.log.debug("Cannot coerce {any} to number", .{res});
                 return error.InvalidCoercion;
@@ -463,7 +476,6 @@ fn evaluateBuiltin(eval: *Interpreter, builtin_tag: Node.Builtin.Tag, arg_count:
         .round => .{ .number = try eval.evalRound(arg_count) },
         .floor => .{ .number = try eval.evalFloor(arg_count) },
         .ceil => .{ .number = try eval.evalCeil(arg_count) },
-        .len => .{ .number = try eval.evalStringLen(arg_count) },
         .count => .{ .number = @floatFromInt((try eval.mapArgs(arg_count, .count_numbers)).total) },
         .count_all => .{ .number = @floatFromInt((try eval.mapArgs(arg_count, .count_all)).total) },
         .log => {
@@ -657,9 +669,21 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
             => |pos| {
                 try eval.pushv(.{ .cell = pos });
             },
-            .string_literal => |str| {
+            .string_literal, .table_assignment => |str| {
                 try eval.reserveStack(1);
                 eval.pushvAssumeCapacity(.{ .string = try .dupe(eval.arena, ast.string(str)) });
+            },
+            .table => |t| {
+                try eval.reserveStack(1);
+                const table = try eval.arena.create(Value.Table);
+                table.* = .{ .map = .empty };
+                try table.map.ensureUnusedCapacity(eval.arena, t.arg_count);
+                for (0..t.arg_count) |_| {
+                    const value = eval.stack.pop().?.value;
+                    const name = eval.stack.pop().?.value.string;
+                    table.map.putAssumeCapacity(name.bytes(), value);
+                }
+                eval.pushvAssumeCapacity(.{ .table = table });
             },
             .tuple => |tuple| {
                 assert(eval.stack.len() >= tuple.arg_count);
@@ -735,12 +759,54 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
             .index => {
                 const index = eval.stack.pop().?.value;
                 const to_index = eval.stack.pop().?.value;
-                if (to_index != .tuple) return error.NotEvaluable;
-                const f = try index.toNumber() orelse 0;
-                if (f < 0 or f > std.math.maxInt(u32)) return error.NotEvaluable;
-                const n: u32 = @intFromFloat(f);
-                if (n >= to_index.tuple.len) return error.NotEvaluable;
-                eval.stack.appendAssumeCapacity(.{ .value = to_index.tuple.values()[n] });
+                switch (to_index) {
+                    .tuple => {
+                        const f = try index.toNumber() orelse 0;
+                        if (f < 0 or f > std.math.maxInt(u32)) return error.NotEvaluable;
+                        const n: u32 = @intFromFloat(f);
+                        if (n >= to_index.tuple.len) return error.NotEvaluable;
+                        eval.stack.appendAssumeCapacity(.{ .value = to_index.tuple.values()[n] });
+                    },
+                    .table => |t| {
+                        if (index != .string) return error.NotEvaluable;
+                        const value = t.map.get(index.string.bytes()) orelse .nil;
+                        eval.pushvAssumeCapacity(value);
+                    },
+                    else => return error.NotEvaluable,
+                }
+            },
+            .field => |field_name_str| {
+                const lhs = eval.stack.pop().?.value;
+                const rhs = eval.sheet.ast.string(field_name_str);
+                switch (lhs) {
+                    .table => |t| {
+                        if (std.mem.eql(u8, rhs, "size")) {
+                            eval.pushvAssumeCapacity(.{
+                                .number = @floatFromInt(t.map.entries.len),
+                            });
+                        } else {
+                            const value = t.map.get(rhs) orelse .nil;
+                            eval.pushvAssumeCapacity(value);
+                        }
+                    },
+                    .tuple => |t| {
+                        if (std.mem.eql(u8, rhs, "len")) {
+                            eval.pushvAssumeCapacity(.{ .number = t.len });
+                        } else {
+                            return error.NotEvaluable;
+                        }
+                    },
+                    .string => |str| {
+                        // TODO: Add `.graphemes`
+
+                        if (std.mem.eql(u8, rhs, "size")) {
+                            eval.pushvAssumeCapacity(.{ .number = str.len });
+                        } else {
+                            return error.NotEvaluable;
+                        }
+                    },
+                    else => return error.NotEvaluable,
+                }
             },
             .local_variable => |v| {
                 // TODO: Should this resolve cell literals?
@@ -927,6 +993,7 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
                     },
                     .pipeline => false,
                     .tuple => false, // TODO
+                    .table => false,
                 };
 
                 const b = switch (t) {
@@ -1403,42 +1470,6 @@ fn evalCeil(eval: *Interpreter, arg_count: u8) !f64 {
     return @ceil(n);
 }
 
-fn evalStringLen(eval: *Interpreter, arg_count: u8) !f64 {
-    if (arg_count != 1) return error.NotEvaluable;
-    const arg = eval.stack.pop().?.value;
-    return switch (arg) {
-        // TODO: This sucks
-        .none => 0,
-        .nil => 3,
-        .err => 5,
-        .boolean => |b| switch (b) {
-            false => 5,
-            true => 4,
-        },
-        .number => |n|
-        // TODO: This should account for the current precision of the cell
-        @floatFromInt(std.fmt.count("{d}", .{n})),
-        .string => |str| {
-            const zg = @import("zg");
-            var iter = zg.graphemes.iterator(str.bytes());
-            var count: usize = 0;
-            while (iter.next()) |_| count += 1;
-            return @floatFromInt(count);
-        },
-        inline .cell,
-        .indirect_cell,
-        .range,
-        .indirect_range,
-        => |value| @floatFromInt(std.fmt.count("{f}", .{value})),
-        .function,
-        .closure,
-        .builtin_function,
-        .pipeline,
-        .tuple,
-        => error.NotEvaluable,
-    };
-}
-
 fn evalFilter(eval: *Interpreter, arg_count: u8) !*Value.Pipeline {
     if (arg_count != 2) return error.NotEvaluable;
     const arg2 = eval.stack.pop().?.value;
@@ -1498,6 +1529,7 @@ fn evalWidth(eval: *Interpreter, arg_count: u8) !f64 {
         .builtin_function,
         .pipeline,
         .tuple,
+        .table,
         => return error.NotEvaluable,
     };
 }
@@ -1519,6 +1551,7 @@ fn evalHeight(eval: *Interpreter, arg_count: u8) !f64 {
         .builtin_function,
         .pipeline,
         .tuple,
+        .table,
         => return error.NotEvaluable,
     };
 }

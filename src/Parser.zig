@@ -149,7 +149,6 @@ const builtins = std.StaticStringMap(Builtin.Tag).initComptime(.{
     .{ "round", .round },
     .{ "floor", .floor },
     .{ "ceil", .ceil },
-    .{ "len", .len },
     .{ "count", .count },
     .{ "countAll", .count_all },
     .{ "log", .log },
@@ -677,31 +676,45 @@ fn parseSuffixExpr(p: *Parser) !Index {
 
     while (true) {
         var arg_count: u8 = 0;
-        if (p.eatToken(.lparen)) |_| {
-            const is_builtin = p.ast.tag(index) == .builtin;
+        switch (p.token_tags[p.tok_i]) {
+            .lparen => {
+                p.expectToken(.lparen) catch unreachable;
+                const is_builtin = p.ast.tag(index) == .builtin;
 
-            p.setValue(index);
-            while (true) {
-                if (p.eatToken(.rparen)) |_| break;
-                const argument = try p.parseExpression();
-                if (is_builtin)
-                    p.setReference(argument);
+                p.setValue(index);
+                while (true) {
+                    if (p.eatToken(.rparen)) |_| break;
+                    const argument = try p.parseExpression();
+                    if (is_builtin)
+                        p.setReference(argument);
+                    _ = p.eatToken(.comma);
+                    arg_count += 1;
+                }
+
+                index = try p.addNode(.init(.function_call, .{
+                    .is_pipe = false,
+                    .arg_count = arg_count,
+                    .function_offset = @intFromEnum(p.ast.lastIndex().sub(index)),
+                }));
+            },
+            .lbracket => {
+                p.expectToken(.lbracket) catch unreachable;
+                _ = try p.parseExpression();
                 _ = p.eatToken(.comma);
-                arg_count += 1;
-            }
+                try p.expectToken(.rbracket);
 
-            index = try p.addNode(.init(.function_call, .{
-                .is_pipe = false,
-                .arg_count = arg_count,
-                .function_offset = @intFromEnum(p.ast.lastIndex().sub(index)),
-            }));
-        } else if (p.eatToken(.lbracket)) |_| {
-            _ = try p.parseExpression();
-            _ = p.eatToken(.comma);
-            try p.expectToken(.rbracket);
-
-            index = try p.addNode(.init(.index, {}));
-        } else return index;
+                index = try p.addNode(.init(.index, {}));
+            },
+            .dot => {
+                p.expectToken(.dot) catch unreachable;
+                const start = p.expectTokenGet(.identifier) catch
+                    return p.setError(error.UnexpectedToken, .{ .expected_token = .identifier });
+                const end = p.token_starts[p.tok_i];
+                const bytes = std.mem.trimEnd(u8, p.src[start..end], " \t\r\n");
+                index = try p.addNode(.init(.field, try p.addString(bytes)));
+            },
+            else => return index,
+        }
     }
 
     return index;
@@ -738,6 +751,7 @@ fn parsePrimaryExpr(p: *Parser) !Index {
             return try p.addNode(.init(.true, {}));
         },
         .lbracket => try p.parseTuple(),
+        .lbrace => try p.parseTable(),
         else => p.setError(error.UnexpectedToken, .{ .expected_string = "expression" }),
     };
 }
@@ -756,6 +770,26 @@ fn parseTuple(p: *Parser) !Index {
     return try p.addNode(.init(.tuple, .{
         .arg_count = arg_count,
         .length = @intCast(len),
+    }));
+}
+
+fn parseTable(p: *Parser) !Index {
+    var arg_count: u32 = 0;
+    _ = p.eatToken(.lbrace) orelse unreachable;
+    while (true) {
+        if (p.eatToken(.rbrace)) |_| break;
+        const start = try p.expectTokenGet(.identifier);
+        const end = try p.expectTokenGet(.equals_sign);
+        const identifier = std.mem.trimEnd(u8, p.src[start..end], " \t\r\n");
+        const str = try p.addString(identifier);
+        _ = try p.addNode(.init(.table_assignment, str));
+        _ = try p.parseExpression();
+        arg_count += 1;
+        _ = p.eatToken(.comma);
+    }
+
+    return try p.addNode(.init(.table, .{
+        .arg_count = arg_count,
     }));
 }
 

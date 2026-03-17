@@ -1149,6 +1149,7 @@ fn renderCursor(tui: *Tui, wr: *Screen.Writer) !void {
             .simple_function => .cell_number_selected,
             .builtin_function => .cell_number_selected,
             .closure => .cell_number_selected,
+            .table => .cell_ref_selected,
         };
     };
 
@@ -1247,8 +1248,9 @@ const ScreenData = struct {
         simple_function,
         builtin_function,
         closure,
-        tuple,
         pipeline,
+        tuple,
+        table,
     };
 
     const Extra = packed struct {
@@ -1305,6 +1307,7 @@ fn screenData(tui: *Tui, col_count: u16, cell_count: u16) !ScreenData {
                     .closure => .closure,
                     .tuple => .tuple,
                     .pipeline => .pipeline,
+                    .table => .table,
                 },
                 .is_volatile = cell.expr.is_volatile,
             };
@@ -1564,6 +1567,16 @@ fn renderCells(tui: *Tui, wr: *Screen.Writer) !void {
                         slice,
                         width,
                         .right,
+                        tui.term.grapheme_clustering_mode,
+                        &wr.interface,
+                    );
+                },
+                .table => {
+                    try tui.setStyle(.cell_ref_unselected, wr);
+                    try shovel.writeTruncating(
+                        "{...}",
+                        width,
+                        .center,
                         tui.term.grapheme_clustering_mode,
                         &wr.interface,
                     );

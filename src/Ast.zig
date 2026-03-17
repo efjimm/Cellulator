@@ -156,7 +156,6 @@ pub const Node = extern struct {
             round,
             floor,
             ceil,
-            len,
             count,
             count_all,
             log,
@@ -277,6 +276,11 @@ pub const Node = extern struct {
         length: u48,
     };
 
+    pub const Table = packed struct(u64) {
+        unused: u32 = 0,
+        arg_count: u32,
+    };
+
     pub const Payload = extern union {
         end: End,
         nil: void,
@@ -303,8 +307,11 @@ pub const Node = extern struct {
         pipe_call: FunctionCall,
         local_variable: LocalVariable,
         captured_variable: CapturedVariable,
+        table_assignment: String,
+        table: Table,
 
         index: void,
+        field: String,
 
         assignment: Position,
         builtin: Builtin,
@@ -367,8 +374,11 @@ pub const Node = extern struct {
         pipe_call: FunctionCall,
         local_variable: LocalVariable,
         captured_variable: CapturedVariable,
+        table_assignment: String,
+        table: Table,
 
         index,
+        field: String,
 
         assignment: Position,
         builtin: Builtin,
@@ -429,8 +439,11 @@ pub const Node = extern struct {
         pipe_call,
         local_variable,
         captured_variable,
+        table_assignment,
+        table,
 
         index,
+        field,
 
         assignment,
         builtin,
@@ -492,10 +505,12 @@ pub const Node = extern struct {
                 .local_variable,
                 .captured_variable,
                 .tuple,
+                .table,
+                .table_assignment,
                 => 127,
 
                 // Actual operators
-                .function_call, .index => 6,
+                .function_call, .index, .field => 6,
                 .reference => 5,
                 .dereference => 5,
                 .range, .dynamic_range, .invalidated_range => 4,
@@ -616,6 +631,7 @@ fn printNode(
                 .captured_variable,
                 .builtin,
                 .index,
+                .field,
                 => false,
                 // branch nodes
                 .concat,
@@ -649,6 +665,8 @@ fn printNode(
                 .function_call,
                 .pipe_call,
                 .tuple,
+                .table,
+                .table_assignment,
                 => true,
             };
 
@@ -684,6 +702,43 @@ fn printNode(
             const to_index = stack.pop().?;
             try str.print(arena, "{s}[{s}]", .{ to_index.str, index.str });
         },
+        .field => |f| {
+            const lhs = stack.pop().?.str;
+            const rhs = ast.string(f);
+            try str.ensureUnusedCapacity(arena, lhs.len + 1 + rhs.len);
+            str.appendSliceAssumeCapacity(lhs);
+            str.appendAssumeCapacity('.');
+            str.appendSliceAssumeCapacity(rhs);
+        },
+        .table => |t| {
+            if (t.arg_count > 0) {
+                try str.appendSlice(arena, "{");
+                const args_start = stack.items.len - t.arg_count * 2;
+                const args = stack.items[args_start..];
+                for (0..t.arg_count - 1) |j| {
+                    const name = args[j * 2].str;
+                    const expr = args[j * 2 + 1].str;
+                    try str.ensureUnusedCapacity(arena, name.len + 5 + expr.len);
+                    str.appendAssumeCapacity(' ');
+                    str.appendSliceAssumeCapacity(name);
+                    str.appendSliceAssumeCapacity(" = ");
+                    str.appendSliceAssumeCapacity(expr);
+                    str.appendAssumeCapacity(',');
+                }
+                const expr = stack.pop().?.str;
+                const name = stack.pop().?.str;
+                try str.ensureUnusedCapacity(arena, name.len + 5 + expr.len);
+                str.appendAssumeCapacity(' ');
+                str.appendSliceAssumeCapacity(name);
+                str.appendSliceAssumeCapacity(" = ");
+                str.appendSliceAssumeCapacity(expr);
+                str.appendAssumeCapacity(',');
+                stack.shrinkRetainingCapacity(args_start);
+            } else {
+                try str.appendSlice(arena, "{}");
+            }
+        },
+        .table_assignment => |s| try str.appendSlice(arena, ast.string(s)),
         .end => return .end,
         .false => try str.appendSlice(arena, "false"),
         .true => try str.appendSlice(arena, "false"),

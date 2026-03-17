@@ -4,6 +4,15 @@ let B0 = 'World'
 :expect-eql-string A0 "Hello"
 :expect-eql-string B0 "World"
 
+-- Lengths
+:expect ''.size == 0
+:expect "".size == 0
+:expect '\\'.size == 1
+:expect "\\".size == 1
+:expect 'string'.size == 6
+:expect ['str'][0].size == 3
+:expect A0.size == @upper(A0).size
+
 -- Test string concatenation with other strings
 let C0 = A0 # " " # B0
 :expect-eql-string C0 "Hello World"

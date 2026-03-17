@@ -169,6 +169,7 @@ pub const Cell = extern struct {
         nil: void,
         tuple: *Interpreter.Value.Tuple,
         pipeline: *Interpreter.Value.Pipeline,
+        table: *Interpreter.Value.Table,
 
         pub const Tag = utils.FieldEnum(Value, u8);
     };
@@ -388,17 +389,23 @@ pub fn compactCachedCellValues(sheet: *Sheet) Allocator.Error!void {
                     arena,
                 )).closure;
             },
+            .pipeline => {
+                cell.value.pipeline = (try Interpreter.Value.clone(
+                    .{ .pipeline = cell.value.pipeline },
+                    arena,
+                )).pipeline;
+            },
             .tuple => {
                 cell.value.tuple = (try Interpreter.Value.clone(
                     .{ .tuple = cell.value.tuple },
                     arena,
                 )).tuple;
             },
-            .pipeline => {
-                cell.value.pipeline = (try Interpreter.Value.clone(
-                    .{ .pipeline = cell.value.pipeline },
+            .table => {
+                cell.value.table = (try Interpreter.Value.clone(
+                    .{ .table = cell.value.table },
                     arena,
-                )).pipeline;
+                )).table;
             },
         }
     }
@@ -1102,6 +1109,17 @@ pub fn formatInterpreterValue(
                 }
                 try w.print("{f}]", .{sheet.fmtInterpreterValue(t.values()[t.len - 1])});
             }
+        },
+        .table => |t| {
+            try w.writeAll("{ ");
+            var iter = t.map.iterator();
+            while (iter.next()) |entry| {
+                try w.print("{s} = {f}", .{
+                    entry.key_ptr.*,
+                    sheet.fmtInterpreterValue(entry.value_ptr.*),
+                });
+            }
+            try w.writeByte('}');
         },
     }
 }
@@ -2991,6 +3009,12 @@ pub fn setCellValue(
             cell.setValue(.tuple, new_value.tuple);
             sheet.putLiveValue(handle);
         },
+        .table => {
+            try sheet.live_values.ensureUnusedCapacity(sheet.gpa, 1);
+            const new_value = try value.clone(sheet.value_arena.allocator());
+            cell.setValue(.table, new_value.table);
+            sheet.putLiveValue(handle);
+        },
     }
 
     cell.expr.state = .up_to_date;
@@ -3076,8 +3100,9 @@ pub fn interpreterValueFromCell(tag: Cell.Value.Tag, value: Cell.Value) Interpre
         .simple_function => .{ .function = .{ .root = value.simple_function.index } },
         .builtin_function => .{ .builtin_function = .{ .tag = value.builtin_function } },
         .closure => .{ .closure = value.closure },
-        .tuple => .{ .tuple = value.tuple },
         .pipeline => .{ .pipeline = value.pipeline },
+        .tuple => .{ .tuple = value.tuple },
+        .table => .{ .table = value.table },
     };
 }
 
@@ -3286,8 +3311,9 @@ fn createCellCopiesContiguous(
                     .simple_function,
                     .builtin_function,
                     .closure,
-                    .tuple,
                     .pipeline,
+                    .tuple,
+                    .table,
                     => unreachable,
                 }
 

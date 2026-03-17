@@ -4,6 +4,10 @@ might be an interesting read so I committed it. The stuff at the top is probably
 
 # TODO
 
+- Refactor UI screen data handling
+- Rework cell width handling
+- Remove some unnecessary formatted printing to improve compile times
+
 - Bug: Cells are unnecessarily evaluated once after deletion.
 - Bug: Cell expression not shown for cells with simple values and no AST
 - Bug: Expand column to width not correct with wide characters
