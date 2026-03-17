@@ -1,0 +1,38 @@
+let a0 = {}
+:expect a0.size == 0
+:expect a0[''] == nil
+:expect a0['key'] == nil
+:expect a0.something == nil
+let a0 = { lol = 1 + 2 * 3 }
+:expect a0.size == 1
+:expect a0.lol == 1 + 2 * 3
+:expect a0['lol'] == 1 + 2 * 3
+:expect a0.nothing == nil
+:expect a0['nothing'] == nil
+let a1 = 'lol'
+:expect a0[a1] == 1 + 2 * 3
+:expect a0['l' # 'o' # 'l'] == 1 + 2 * 3
+
+let a0 = { identity = |x| x, double = |x| x * 2, triple = |x| x * 3 }
+:expect a0.identity(3) == 3
+:expect a0.identity('five') == 'five'
+:expect a0.double(2) == 4
+:expect a0.triple(3) == 9
+
+let a0 = { id = 1, child = { id = 2, child = { id = 3, data = 'guh' } } }
+:expect a0.child.child.data == 'guh'
+:expect a0.id == 1
+:expect a0['child'].child.data == 'guh'
+:expect a0['child']['child'].data == 'guh'
+:expect a0['child']['child']['data'] == 'guh'
+:expect a0.child['child']['data'] == 'guh'
+:expect a0.child.id == 2
+:expect a0.child.child.id == 3
+
+:expect {}.size == 0
+:expect { one = 1, two = 2, three = 3, three = 3 }.size == 3
+
+-- The size of the map should only be accessible through the `.` operator.
+-- A user-defined key with the same name can be accessed with the `[index]` syntax.
+:expect { size = 5 }.size == 1
+:expect { size = 5 }['size'] == 5
