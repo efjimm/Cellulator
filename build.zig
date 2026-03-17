@@ -125,32 +125,6 @@ fn configureTests(
         .filters = &.{test_filter orelse ""},
     });
 
-    opts.addOption([]const []const u8, "test_files", &.{
-        "test/general.zc",
-        "test/undo-redo.zc",
-        "test/string.zc",
-        "test/fill.zc",
-        "test/fill-expr.zc",
-        "test/binary-serialize.zc",
-        "test/save-load.zc",
-        "test/delete-cols.zc",
-        "test/delete-rows.zc",
-        "test/yank-put.zc",
-        "test/yank-put-adjust.zc",
-        "test/paste.zc",
-        "test/unary-plus-minus.zc",
-        "test/csv.zc",
-        "test/absolute-cell-references.zc",
-        "test/logic.zc",
-        "test/average.zc",
-        "test/references.zc",
-        "test/volatile.zc",
-        "test/functions.zc",
-        "test/count.zc",
-        "test/streams.zc",
-        "test/tuples.zc",
-    });
-
     // Cache directory for temporarily storing files created by serialization tests
     const write_files = b.addMutateFiles(b.path(".zig-cache/tmp/test-serialize-output-files"));
     const test_data_path = write_files.getDirectory();

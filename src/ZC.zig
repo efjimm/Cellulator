@@ -3900,13 +3900,96 @@ fn testFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     if (has_errors) return error.Failed;
 }
 
-test "Sheet operations" {
-    for (build.test_files) |path| {
-        testFile(std.testing.allocator, std.testing.io, path) catch |err| {
-            std.debug.print("Error running {s}", .{path});
-            return err;
-        };
-    }
+test "general.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/general.zc");
+}
+
+test "undo-redo.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/undo-redo.zc");
+}
+
+test "string.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/string.zc");
+}
+
+test "fill.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/fill.zc");
+}
+
+test "fill-expr.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/fill-expr.zc");
+}
+
+test "binary-serialize.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/binary-serialize.zc");
+}
+
+test "save-load.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/save-load.zc");
+}
+
+test "delete-cols.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/delete-cols.zc");
+}
+
+test "delete-rows.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/delete-rows.zc");
+}
+
+test "yank-put.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/yank-put.zc");
+}
+
+test "yank-put-adjust.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/yank-put-adjust.zc");
+}
+
+test "paste.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/paste.zc");
+}
+
+test "unary-plus-minus.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/unary-plus-minus.zc");
+}
+
+test "csv.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/csv.zc");
+}
+
+test "absolute-cell-references.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/absolute-cell-references.zc");
+}
+
+test "logic.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/logic.zc");
+}
+
+test "average.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/average.zc");
+}
+
+test "references.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/references.zc");
+}
+
+test "volatile.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/volatile.zc");
+}
+
+test "functions.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/functions.zc");
+}
+
+test "count.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/count.zc");
+}
+
+test "streams.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/streams.zc");
+}
+
+test "tuples.zc" {
+    try testFile(std.testing.allocator, std.testing.io, "test/tuples.zc");
 }
 
 test "Invalid reference" {
