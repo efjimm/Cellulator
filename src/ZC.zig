@@ -287,7 +287,7 @@ pub const Mode = enum {
 };
 
 pub const InitOptions = struct {
-    filepath: ?[]const u8 = null,
+    filepaths: []const []const u8 = &.{},
     ui: bool = true,
 };
 
@@ -343,8 +343,10 @@ pub fn init(
 
     zc.emitEvent("Init", .{});
 
-    if (options.filepath) |filepath| {
-        try zc.loadFile(zc.current_sheet, filepath);
+    if (options.filepaths.len > 0) {
+        // try zc.loadFile(zc.current_sheet, options.filepaths[0]);
+        for (options.filepaths) |filepath|
+            try Command.cmdLoad(zc, .{ .bytes = filepath });
     }
 
     log.debug("Finished init", .{});
@@ -2030,7 +2032,10 @@ pub const Command = enum {
     }
 
     fn cmdLoad(zc: *ZC, path: PathArg) Oom!void {
-        if (zc.sheets.entries.len == 1 and zc.currentSheet().ast.nodes.len() == 0) {
+        if (zc.sheets.entries.len == 1 and
+            zc.currentSheet().has_changes == false and
+            zc.currentSheet().filepath.items.len == 0)
+        {
             zc.loadFile(0, path.bytes) catch |err| {
                 zc.setStatusMessage(.err, "Could not open file: {s}", .{@errorName(err)});
                 return;

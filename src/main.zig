@@ -26,24 +26,6 @@ var zc: ZC = undefined;
 var global_io: std.Io = undefined;
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    // zc.ui.term.cooked_termios = null;
-
-    var filepath: ?[]const u8 = null;
-    for (init.args.vector[1..]) |ptr| {
-        const arg = std.mem.span(ptr);
-        if (arg.len == 0) continue;
-
-        switch (arg[0]) {
-            '-' => {},
-            else => {
-                if (filepath) |_| {
-                    return error.InvalidArguments;
-                }
-                filepath = arg;
-            },
-        }
-    }
-
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
     const gpa, const is_debug = gpa: {
@@ -54,6 +36,24 @@ pub fn main(init: std.process.Init.Minimal) !void {
         };
     };
     defer _ = if (is_debug) debug_allocator.deinit();
+
+    var filepaths: std.ArrayList([]const u8) = .empty;
+    defer filepaths.deinit(gpa);
+    var allow_flags = true;
+
+    for (init.args.vector[1..]) |ptr| {
+        const arg = std.mem.span(ptr);
+        if (arg.len == 0) continue;
+
+        if (allow_flags and arg[0] == '-') {
+            if (arg.len == 2 and arg[1] == '-') {
+                allow_flags = false;
+            }
+            // No flags are implemented yet
+        } else {
+            try filepaths.append(gpa, arg);
+        }
+    }
 
     var threaded: std.Io.Threaded = .init_single_threaded;
     defer threaded.deinit();
@@ -70,7 +70,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     try initUnicodeData(gpa);
     defer if (is_debug) deinitUnicodeData(gpa);
 
-    try zc.init(gpa, io, init.environ, .{ .filepath = filepath, .ui = true });
+    try zc.init(gpa, io, init.environ, .{ .filepaths = filepaths.items, .ui = true });
     defer zc.deinit();
 
     try zc.run();
