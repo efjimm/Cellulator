@@ -1562,8 +1562,10 @@ pub const Command = enum {
     pub const map = std.StaticStringMap(Command).initComptime(.{
         .{ "w", .save },
         .{ "e", .load_force },
-        .{ "q", .quit },
-        .{ "q!", .quit_force },
+        .{ "q", .close_sheet },
+        .{ "q!", .close_sheet_force },
+        .{ "qa", .quit },
+        .{ "qa!", .quit_force },
         .{ "fill", .fill },
         .{ "fill-expr", .fill_expr },
         .{ "bw", .binary_save },
@@ -2842,8 +2844,7 @@ fn closeSheet(zc: *ZC, index: usize) !void {
     zc.sheets.orderedRemoveAt(index);
     sheet.deinit();
     if (zc.sheets.entries.len == 0) {
-        const new_sheet = try zc.openSheet();
-        zc.setCurrentSheet(new_sheet);
+        zc.running = false;
     } else if (zc.current_sheet == index) {
         zc.prevSheet();
     }
