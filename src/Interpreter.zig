@@ -1049,7 +1049,7 @@ pub fn evaluate(eval: *Interpreter, start: Node.Index, cell_handle: Sheet.Cell.H
                 };
                 try eval.pushv(.{ .boolean = b });
             },
-            .range, .dynamic_range => {
+            .range => {
                 const rhs = eval.stack.pop().?.value;
                 const lhs = eval.stack.pop().?.value;
                 const a = switch (lhs) {

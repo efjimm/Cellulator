@@ -602,17 +602,7 @@ fn parseRangeExpr(p: *Parser) !Index {
     p.setReference(lhs);
     const rhs = try p.parseReferenceExpr();
     p.setReference(rhs);
-
-    var node: Node = .init(.range, {});
-
-    // If either of the operands are anything other than a cell literal or a reference to a cell
-    // literal, then this expression must be marked volatile.
-    if (p.isNotCellLiteral(lhs) or p.isNotCellLiteral(rhs)) {
-        // TODO: remove dynamic range tag
-        node.tag = .dynamic_range;
-    }
-
-    return try p.addNode(node);
+    return try p.addNode(.init(.range, {}));
 }
 
 fn parseReferenceExpr(p: *Parser) !Index {
@@ -650,14 +640,6 @@ fn isNotCellLiteral(p: *const Parser, index: Index) bool {
         .abs_abs_reference,
         => false,
         else => true,
-    };
-}
-
-/// Returns true if the given node is a cell literal or a reference to a cell literal.
-fn isDynamicRange(p: *const Parser, index: Index) bool {
-    return switch (p.ast.nodes.item(index, .tag)) {
-        .dynamic_range => true,
-        else => false,
     };
 }
 
@@ -1289,7 +1271,7 @@ test "Node contents" {
             .init(.dereference, {}),
             .init(.dereference, {}),
             .init(.rel_rel_reference, .fromValidAddress("b0")),
-            .init(.dynamic_range, {}),
+            .init(.range, {}),
             .init(.end, .{ .length = 5 }),
         },
     );

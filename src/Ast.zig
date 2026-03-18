@@ -338,12 +338,7 @@ pub const Node = extern struct {
         logical_and: u64,
         logical_or: u64,
 
-        /// The colon operator with two static arguments.
-        /// Cell value accesses through this range are non-volatile.
         range: void,
-        /// The colon operator with one or more dynamic arguments.
-        /// Cell value accesses through this range are volatile.
-        dynamic_range: void,
 
         reference: void,
         dereference: void,
@@ -406,9 +401,6 @@ pub const Node = extern struct {
         /// The colon operator with two static arguments.
         /// Cell value accesses through this range are non-volatile.
         range,
-        /// The colon operator with one or more dynamic arguments.
-        /// Cell value accesses through this range are volatile.
-        dynamic_range,
 
         reference,
         dereference,
@@ -468,7 +460,6 @@ pub const Node = extern struct {
         logical_and,
         logical_or,
         range,
-        dynamic_range,
         reference,
         dereference,
         tuple,
@@ -515,7 +506,7 @@ pub const Node = extern struct {
                 .function_call, .index, .field => 6,
                 .reference => 5,
                 .dereference => 5,
-                .range, .dynamic_range, .invalidated_range => 4,
+                .range, .invalidated_range => 4,
                 .minus => 3,
                 .plus => 3,
                 .not => 3,
@@ -643,7 +634,6 @@ fn printNode(
                 .div,
                 .mod,
                 .range,
-                .dynamic_range,
                 .invalidated_range,
                 .pow,
                 .logical_and,
@@ -931,7 +921,6 @@ fn printNode(
         .greater_equals,
         .less_equals,
         .range,
-        .dynamic_range,
         .invalidated_range,
         => |_, t| {
             const s = switch (t) {
@@ -944,7 +933,7 @@ fn printNode(
                 .mod => " % ",
                 .pow => "^",
                 .concat => " # ",
-                .range, .dynamic_range, .invalidated_range => ":",
+                .range, .invalidated_range => ":",
                 else => comptime unreachable,
             };
 
