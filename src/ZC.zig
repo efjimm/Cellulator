@@ -1531,10 +1531,13 @@ pub fn resetCount(zc: *ZC) void {
 pub const Command = enum {
     save,
     save_force,
+    save_all,
     load,
     load_force,
     quit,
     quit_force,
+    quit_save,
+    quit_save_all,
     fill,
     fill_expr,
     binary_save,
@@ -1561,11 +1564,14 @@ pub const Command = enum {
     /// Maps the string versions of commands to their corresponding enum tag.
     pub const map = std.StaticStringMap(Command).initComptime(.{
         .{ "w", .save },
+        .{ "wa", .save_all },
         .{ "e", .load_force },
         .{ "q", .close_sheet },
         .{ "q!", .close_sheet_force },
         .{ "qa", .quit },
         .{ "qa!", .quit_force },
+        .{ "wq", .quit_save },
+        .{ "wqa", .quit_save_all },
         .{ "fill", .fill },
         .{ "fill-expr", .fill_expr },
         .{ "bw", .binary_save },
@@ -1624,6 +1630,10 @@ pub const Command = enum {
                 .{ cmdSave, cmdSavePath },
                 \\Save to the given filepath, or to the sheet's filepath if not specified.
             },
+            .save_all => .{
+                .{cmdSaveAll},
+                \\Save all open sheets to disk.
+            },
             .quit => .{
                 .{cmdQuit},
                 "Quit the program only if there are no unsaved changes. Use :q! to discard unsaved changes.",
@@ -1631,6 +1641,14 @@ pub const Command = enum {
             .quit_force => .{
                 .{cmdQuitForce},
                 "Quit the program, discarding any unsaved changes.",
+            },
+            .quit_save => .{
+                .{cmdQuitSave},
+                \\Save the current sheet and close it.
+            },
+            .quit_save_all => .{
+                .{cmdQuitAllSave},
+                \\Save all open sheets and quit the program.
             },
             .fill => .{
                 .{ cmdFill, cmdFillIncrement },
@@ -1788,6 +1806,7 @@ pub const Command = enum {
 
         for (&argv) |*p| {
             p.* = iter.next() orelse break;
+            // TODO: Make flags escapable
             if (std.mem.eql(u8, p.*, "-h")) {
                 // Got a -h flag, print help and exit
                 try setCommandUsage(zc, name, description, funcs);
@@ -1801,6 +1820,12 @@ pub const Command = enum {
         zc.status.usage.clearRetainingCapacity();
 
         if (!variadic and iter.peek() != null) {
+            const str = iter.peek().?;
+            if (std.mem.eql(u8, str, "-h")) {
+                try setCommandUsage(zc, name, description, funcs);
+                return;
+            }
+
             try zc.status.msg.appendSlice(zc.allocator, "Too many arguments");
             try setCommandError(
                 zc,
@@ -1874,21 +1899,19 @@ pub const Command = enum {
         zc.status.tag = .cmd_info;
         zc.status.cmd_description = description;
 
-        var w: std.Io.Writer.Allocating = .fromArrayList(zc.allocator, &zc.status.usage);
-        defer zc.status.usage = w.toArrayList();
-
+        const s = &zc.status.usage;
         inline for (funcs, 0..) |func, i| {
-            w.writer.print("  :{s}", .{name}) catch return error.OutOfMemory;
+            s.print(zc.allocator, "  :{s}", .{name}) catch return error.OutOfMemory;
             inline for (@typeInfo(@TypeOf(func)).@"fn".params[1..]) |p| {
                 const arg_type_name = switch (p.type.?) {
                     []const u8 => "STRING",
                     f64 => "NUMBER",
                     else => p.type.?.type_name,
                 };
-                w.writer.print(" {s}", .{arg_type_name}) catch return error.OutOfMemory;
+                s.print(zc.allocator, " {s}", .{arg_type_name}) catch return error.OutOfMemory;
             }
             if (i < funcs.len - 1)
-                w.writer.writeByte('\n') catch return error.OutOfMemory;
+                s.append(zc.allocator, '\n') catch return error.OutOfMemory;
         }
     }
 
@@ -1909,21 +1932,18 @@ pub const Command = enum {
         s.err_offset = err_offset;
         s.err_size = err_size;
 
-        var w: std.Io.Writer.Allocating = .fromArrayList(zc.allocator, &s.usage);
-        defer s.usage = w.toArrayList();
-
         inline for (funcs, 0..) |func, i| {
-            w.writer.print("  :{s}", .{name}) catch {};
+            s.usage.print(zc.allocator, "  :{s}", .{name}) catch {};
             inline for (@typeInfo(@TypeOf(func)).@"fn".params[1..]) |p| {
                 const arg_type_name = switch (p.type.?) {
                     []const u8 => "STRING",
                     f64 => "NUMBER",
                     else => p.type.?.type_name,
                 };
-                w.writer.print(" {s}", .{arg_type_name}) catch {};
+                s.usage.print(zc.allocator, " {s}", .{arg_type_name}) catch {};
             }
             if (i < funcs.len - 1)
-                w.writer.writeByte('\n') catch {};
+                s.usage.append(zc.allocator, '\n') catch {};
         }
     }
 
@@ -2010,6 +2030,14 @@ pub const Command = enum {
     }
 
     fn cmdLoad(zc: *ZC, path: PathArg) Oom!void {
+        if (zc.sheets.entries.len == 1 and zc.currentSheet().ast.nodes.len() == 0) {
+            zc.loadFile(0, path.bytes) catch |err| {
+                zc.setStatusMessage(.err, "Could not open file: {s}", .{@errorName(err)});
+                return;
+            };
+            return;
+        }
+
         zc.loadCmd(path.bytes) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             else => {
@@ -2037,6 +2065,26 @@ pub const Command = enum {
 
     fn cmdQuitForce(zc: *ZC) void {
         zc.running = false;
+    }
+
+    fn cmdQuitSave(zc: *ZC) void {
+        cmdSave(zc);
+        cmdQuit(zc);
+    }
+
+    fn cmdQuitAllSave(zc: *ZC) !void {
+        cmdSaveAll(zc);
+        cmdQuit(zc);
+    }
+
+    fn cmdSaveAll(zc: *ZC) void {
+        for (zc.sheets.values()) |*sheet| {
+            zc.writeSheet(sheet, null) catch |err| {
+                zc.setStatusMessage(.warn, "Could not write file: {s}", .{@errorName(err)});
+                return;
+            };
+            sheet.has_changes = false;
+        }
     }
 
     fn cmdFill(zc: *ZC, r: RangeOrPointArg, n: NumberArg("initial_number")) Oom!void {
@@ -2688,8 +2736,7 @@ pub fn loadCmd(zc: *ZC, filepath: []const u8) !void {
     zc.setCurrentSheet(new_sheet);
 }
 
-fn writeFile(zc: *ZC, maybe_filepath: ?[]const u8) !void {
-    const sheet = zc.currentSheet();
+fn writeSheet(zc: *ZC, sheet: *Sheet, maybe_filepath: ?[]const u8) !void {
     const filepath = maybe_filepath orelse sheet.filepath.items;
     if (filepath.len == 0)
         return error.EmptyFileName;
@@ -2714,6 +2761,10 @@ fn writeFile(zc: *ZC, maybe_filepath: ?[]const u8) !void {
 
     if (maybe_filepath) |path|
         sheet.setFilePath(path);
+}
+
+fn writeFile(zc: *ZC, maybe_filepath: ?[]const u8) !void {
+    try zc.writeSheet(zc.currentSheet(), maybe_filepath);
 }
 
 fn writeZcHeader(zc: *ZC, w: *std.Io.Writer) !void {
