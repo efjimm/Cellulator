@@ -1,7 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const ZC = @import("ZC.zig");
+const ZC = @import("ZC.zig");
+const Tui = @import("Tui.zig");
+const Repl = @import("Repl.zig");
+const Ui = @import("Ui.zig");
 
 const log_level = @import("build").log_level;
 const logfile_path = @import("build").logfile_path;
@@ -22,10 +25,16 @@ pub fn initUnicodeData(allocator: std.mem.Allocator) !void {
 pub fn deinitUnicodeData(allocator: std.mem.Allocator) void {
     zg.deinitData(allocator, unicode_data);
 }
+
 var zc: ZC = undefined;
 var global_io: std.Io = undefined;
 
-pub fn main(init: std.process.Init.Minimal) !void {
+const UiType = enum {
+    tui,
+    repl,
+};
+
+pub fn main(init: std.process.Init.Minimal) !u8 {
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
     const gpa, const is_debug = gpa: {
@@ -41,6 +50,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer filepaths.deinit(gpa);
     var allow_flags = true;
 
+    var ui_type: UiType = .tui;
+
     for (init.args.vector[1..]) |ptr| {
         const arg = std.mem.span(ptr);
         if (arg.len == 0) continue;
@@ -48,8 +59,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
         if (allow_flags and arg[0] == '-') {
             if (arg.len == 2 and arg[1] == '-') {
                 allow_flags = false;
+            } else if (std.mem.eql(u8, arg, "--repl")) {
+                ui_type = .repl;
             }
-            // No flags are implemented yet
         } else {
             try filepaths.append(gpa, arg);
         }
@@ -60,26 +72,43 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const io = threaded.io();
     global_io = io;
 
-    if (logfile_path) |path| {
+    if (logfile_path) |path|
         logfile = try std.Io.Dir.cwd().createFile(io, path, .{});
-    }
-    defer if (use_logfile) {
-        logfile.close(io);
-    };
+    defer if (use_logfile) logfile.close(io);
 
     try initUnicodeData(gpa);
-    defer if (is_debug) deinitUnicodeData(gpa);
+    defer deinitUnicodeData(gpa);
 
-    try zc.init(gpa, io, init.environ, .{ .filepaths = filepaths.items, .ui = true });
+    switch (ui_type) {
+        .tui => {
+            var tui: Tui = try .init(gpa, io, init.environ);
+            try tui.uncook();
+            return try run(tui.ui(), gpa, io, init.environ, filepaths.items);
+        },
+        .repl => {
+            var repl = try @import("Repl.zig").init(gpa, io, init.environ);
+            return try run(repl.ui(), gpa, io, init.environ, filepaths.items);
+        },
+    }
+}
+
+fn run(
+    ui: Ui,
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    env: std.process.Environ,
+    filepaths: []const []const u8,
+) !u8 {
+    try zc.init(ui, gpa, io, env, .{ .filepaths = filepaths });
     defer zc.deinit();
 
-    try zc.run();
+    const exit_code = zc.run();
+    if (builtin.mode == .Debug) return exit_code;
+    std.process.exit(exit_code);
 }
 
 fn panicFn(msg: []const u8, ret_addr: ?usize) noreturn {
     @branchHint(.cold);
-    // TODO: Ui interface
-    zc.ui.?.term.cook() catch {};
     std.debug.defaultPanic(msg, ret_addr);
 }
 

@@ -18,6 +18,7 @@ const Parser = @import("Parser.zig");
 const NodeList = Ast.NodeList;
 const PhTree = @import("phtree.zig").PhTree;
 const List = @import("list.zig").List;
+const Ui = @import("Ui.zig");
 
 const Sheet = @This();
 
@@ -203,12 +204,11 @@ pub const Cell = extern struct {
 };
 
 pub const Column = extern struct {
-    pub const default_width = 10;
-
-    width: u16 = default_width,
-    precision: u8 = 2,
+    width: u16,
+    precision: u8 = default_precision,
 
     pub const Handle = Columns.Entry.Handle;
+    pub const default_precision = 2;
 };
 
 /// This is an extern struct instead of a tagged union for serialization purposes.
@@ -1743,6 +1743,7 @@ pub fn setColWidth(
 
 pub fn incWidth(
     sheet: *Sheet,
+    ui: Ui,
     column_index: Position.Int,
     n: u16,
     opts: UndoOpts,
@@ -1751,13 +1752,16 @@ pub fn incWidth(
     try sheet.ensureUnusedUndoCapacity(1);
 
     const res = try sheet.cols.getOrPut(sheet.gpa, &.{column_index});
-    if (!res.found_existing) res.value_ptr.* = .{};
+    if (!res.found_existing) res.value_ptr.* = .{
+        .width = ui.defaultWidth(),
+    };
 
     try sheet.setColWidth(res.handle, column_index, res.value_ptr.width +| n, opts);
 }
 
 pub fn decWidth(
     sheet: *Sheet,
+    ui: Ui,
     column_index: Position.Int,
     n: u16,
     opts: UndoOpts,
@@ -1766,7 +1770,9 @@ pub fn decWidth(
     try sheet.ensureUnusedUndoCapacity(1);
 
     const res = try sheet.cols.getOrPut(sheet.gpa, &.{column_index});
-    if (!res.found_existing) res.value_ptr.* = .{};
+    if (!res.found_existing) res.value_ptr.* = .{
+        .width = ui.defaultWidth(),
+    };
 
     try sheet.setColWidth(res.handle, column_index, res.value_ptr.width -| n, opts);
 }
@@ -1802,6 +1808,7 @@ pub fn setColPrecision(
 
 pub fn incPrecision(
     sheet: *Sheet,
+    ui: Ui,
     column_index: Position.Int,
     n: u8,
     opts: UndoOpts,
@@ -1810,13 +1817,16 @@ pub fn incPrecision(
     try sheet.ensureUnusedUndoCapacity(1);
 
     const res = try sheet.cols.getOrPut(sheet.gpa, &.{column_index});
-    if (!res.found_existing) res.value_ptr.* = .{};
+    if (!res.found_existing) res.value_ptr.* = .{
+        .width = ui.defaultWidth(),
+    };
 
     try sheet.setColPrecision(res.handle, column_index, res.value_ptr.precision +| n, opts);
 }
 
 pub fn decPrecision(
     sheet: *Sheet,
+    ui: Ui,
     column_index: Position.Int,
     n: u8,
     opts: UndoOpts,
@@ -1825,7 +1835,9 @@ pub fn decPrecision(
     try sheet.ensureUnusedUndoCapacity(1);
 
     const res = try sheet.cols.getOrPut(sheet.gpa, &.{column_index});
-    if (!res.found_existing) res.value_ptr.* = .{};
+    if (!res.found_existing) res.value_ptr.* = .{
+        .width = ui.defaultWidth(),
+    };
 
     try sheet.setColPrecision(res.handle, column_index, res.value_ptr.precision -| n, opts);
 }

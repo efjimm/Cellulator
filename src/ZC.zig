@@ -23,97 +23,13 @@ const text = @import("text.zig");
 const Motion = text.Motion;
 const Tui = @import("Tui.zig");
 const utils = @import("utils.zig");
+const Ui = @import("Ui.zig");
 
 const Oom = Allocator.Error;
 
 const log = std.log.scoped(.zc);
 
 const ZC = @This();
-
-pub const Ui = struct {
-    ptr: *anyopaque,
-    vtable: *const Vtable,
-
-    pub const ApplyThemeError = error{
-        Unsupported,
-        Failed,
-    };
-
-    pub const Vtable = struct {
-        /// When a user sets a theme, the path
-        /// `${XDG_CONFIG_HOME}/cellulator/themes/${UI}/${THEME_NAME}` is passed to this function.
-        /// The UI backend is then responsible for applying the theme in this file.
-        applyTheme: *const fn (*anyopaque, [:0]const u8) ApplyThemeError!void,
-
-        /// Apply the default theme.
-        applyDefaultTheme: *const fn (*anyopaque) ApplyThemeError!void,
-
-        stringWidth: *const fn (*anyopaque, []const u8, StringWidthOptions) StringWidthResult,
-
-        // Yes these are a little bit cursed to put in a vtable but this is better than calling
-        // a virtual function to get these.
-        theme_file_extension: []const u8,
-        ui_name: []const u8,
-    };
-
-    pub const StringWidthOptions = struct {
-        max_width: u32 = std.math.maxInt(u32),
-    };
-
-    pub const StringWidthResult = struct {
-        width: u32,
-        len: usize,
-    };
-
-    pub const none: Ui = .{
-        .ptr = undefined,
-        .vtable = &.{
-            .applyTheme = applyThemeStub,
-            .applyDefaultTheme = applyDefaultThemeStub,
-            .stringWidth = stringWidthStub,
-            .theme_file_extension = "",
-            .ui_name = "none",
-        },
-    };
-
-    fn applyThemeStub(_: *anyopaque, _: [:0]const u8) ApplyThemeError!void {}
-
-    fn applyDefaultThemeStub(_: *anyopaque) ApplyThemeError!void {}
-
-    fn stringWidthStub(_: *anyopaque, bytes: []const u8, opts: StringWidthOptions) StringWidthResult {
-        const res = @import("zg").display_width.strWidth(bytes, .{
-            .max_width = opts.max_width,
-        });
-        return .{ .width = @intCast(res.width), .len = res.len };
-    }
-
-    // TODO: Better error handling and reporting
-    pub fn applyTheme(ui: Ui, theme_filepath: [:0]const u8) ApplyThemeError!void {
-        return ui.vtable.applyTheme(ui.ptr, theme_filepath);
-    }
-
-    pub fn applyDefaultTheme(ui: Ui) ApplyThemeError!void {
-        return ui.vtable.applyDefaultTheme(ui.ptr);
-    }
-
-    /// Returns the file extension for the theme files used by this UI backend. Returned memory
-    /// should be statically allocated.
-    pub fn getThemeFileExtension(ui: Ui) []const u8 {
-        return ui.vtable.theme_file_extension;
-    }
-
-    pub fn getUiName(ui: Ui) []const u8 {
-        return ui.vtable.ui_name;
-    }
-
-    pub fn stringWidth(
-        ui: Ui,
-        bytes: []const u8,
-        opts: StringWidthOptions,
-    ) StringWidthResult {
-        return ui.vtable.stringWidth(ui.ptr, bytes, opts);
-    }
-};
 
 lua_ptr: *Lua,
 
@@ -123,14 +39,10 @@ current_sheet: usize,
 max_sheet_n: usize = 1,
 sheets: std.StringArrayHashMapUnmanaged(Sheet),
 
-// TODO: Move all calls from this to the interface and remove this field
-ui: ?Tui,
-ui_interface: Ui,
+ui: Ui,
 
 prev_mode: Mode = .normal,
 mode: Mode = .normal,
-
-screen_pos: Position = .origin,
 
 anchor: Position = .origin,
 
@@ -141,7 +53,6 @@ cursor: Position = .origin,
 
 count: u32 = 0,
 
-command_screen_pos: u32 = 0,
 command: CommandLine = .{},
 
 keymaps: input.KeyMaps,
@@ -288,13 +199,13 @@ pub const Mode = enum {
 
 pub const InitOptions = struct {
     filepaths: []const []const u8 = &.{},
-    ui: bool = true,
 };
 
 /// Initialises via a pointer rather than returning an instance, as we need a
 /// stable pointer to a ZC instance.
 pub fn init(
     zc: *ZC,
+    ui: Ui,
     allocator: Allocator,
     io: std.Io,
     env: std.process.Environ,
@@ -307,14 +218,6 @@ pub fn init(
     var keys = try input.createKeymaps(allocator);
     errdefer keys.deinit(allocator);
 
-    var tui = if (options.ui)
-        try Tui.init(allocator, io, env)
-    else
-        null;
-    errdefer if (options.ui) tui.?.deinit(allocator);
-
-    if (options.ui) try tui.?.uncook();
-
     var lua_state = try lua.init(zc);
     errdefer lua_state.deinit();
 
@@ -322,8 +225,7 @@ pub fn init(
         .current_sheet = 0,
         .sheets = .empty,
         .lua_ptr = lua_state,
-        .ui = tui,
-        .ui_interface = undefined,
+        .ui = ui,
         .allocator = allocator,
         .io = io,
         .env = env,
@@ -336,8 +238,6 @@ pub fn init(
     errdefer for (zc.sheets.values()) |*sheet| sheet.deinit();
     const sheet = try zc.openSheet();
     zc.setCurrentSheet(sheet);
-
-    zc.ui_interface = if (options.ui) zc.ui.?.ui() else .none;
 
     zc.sourceLua() catch |err| log.err("Could not source init.lua: {}", .{err});
 
@@ -375,9 +275,6 @@ pub fn sourceLua(zc: *ZC) !void {
 }
 
 pub fn deinit(zc: *ZC) void {
-    if (zc.ui) |*ui|
-        ui.deinit(zc.allocator);
-
     // Don't need to free memory on exit, the OS will do it for us :^)
     if (!std.debug.runtime_safety) return;
 
@@ -479,13 +376,8 @@ fn clearInput(zc: *ZC) void {
     zc.input_buf.writer.end = 0;
 }
 
-pub fn run(zc: *ZC) !void {
-    while (zc.running) {
-        try zc.updateCells();
-        if (zc.ui) |*ui|
-            try ui.render(zc);
-        try zc.handleInput();
-    }
+pub fn run(zc: *ZC) u8 {
+    return zc.ui.run(zc);
 }
 
 pub const ChangeCellOpts = struct {
@@ -580,10 +472,6 @@ pub fn setMode(zc: *ZC, new_mode: Mode) void {
     zc.anchor = zc.cursor;
     zc.mode = new_mode;
     zc.resetCount();
-
-    if (new_mode.isCommandMode()) {
-        zc.clampCommandCursor();
-    }
 }
 
 pub fn getKeymap(zc: *ZC, comptime mode: Mode) switch (mode) {
@@ -605,18 +493,7 @@ pub fn getKeymap(zc: *ZC, comptime mode: Mode) switch (mode) {
     };
 }
 
-fn handleInput(zc: *ZC) !void {
-    assert(zc.currentSheet().undos.len == 0 or zc.currentSheet().undos.items(.tag)[zc.currentSheet().undos.len - 1] == .sentinel);
-    assert(zc.currentSheet().redos.len == 0 or zc.currentSheet().redos.items(.tag)[zc.currentSheet().redos.len - 1] == .sentinel);
-
-    // TODO: Move most of this into the UI implementation.
-    var buf: [256]u8 = undefined;
-    const slice = zc.ui.?.term.readInputSingleThreadedBlocking(&buf) catch |err| switch (err) {
-        error.Interrupted => &.{},
-        else => |e| return e,
-    };
-
-    try input.parse(&zc.ui.?.term, slice, &zc.input_buf.writer);
+pub fn doInput(zc: *ZC) !void {
     const bytes = try zc.inputSentinelSlice();
 
     switch (zc.mode) {
@@ -670,7 +547,6 @@ fn handleInput(zc: *ZC) !void {
 }
 
 pub fn doCommandMode(zc: *ZC, action: CommandAction, keys: []const u8) !void {
-    defer zc.clampScreenToCommandCursor();
     switch (zc.mode) {
         .command_normal => try zc.doCommandNormalMode(action),
         .command_insert => try zc.doCommandInsertMode(action, keys),
@@ -688,49 +564,6 @@ pub inline fn doCommandNormalMotion(zc: *ZC, range: text.Range) void {
     zc.setCommandCursor(if (range.start == zc.command.cursor) range.end else range.start);
 }
 
-fn clampCommandCursor(zc: *ZC) void {
-    if (zc.mode == .command_normal) {
-        const len = zc.command.length();
-        if (zc.command.cursor == len) {
-            const new = len - text.prevCharacter(zc.command, len, 1);
-            zc.command.setCursor(new);
-        }
-    }
-}
-
-// TODO: Move this to the tui
-fn clampScreenToCommandCursor(zc: *ZC) void {
-    if (zc.command.cursor < zc.command_screen_pos) {
-        zc.command_screen_pos = zc.command.cursor;
-        return;
-    }
-
-    const ui = &zc.ui.?;
-
-    const len = zc.command.length();
-    var x: u32 = zc.command.cursor;
-    // Reserve either the width of the character under the cursor, or 1 column if none.
-    var w: u16 = if (zc.command.cursor < len) blk: {
-        const grapheme_len = zc.command.nextCharacter(x, 1);
-        const grapheme_slice = zc.command.slice(x, grapheme_len);
-        break :blk @intCast(ui.term.stringWidth(grapheme_slice));
-    } else 1;
-
-    while (true) {
-        const prev = x;
-        x -= text.prevCharacter(&zc.command, x, 1);
-        if (prev == x or x < zc.screen_pos.x) break;
-
-        const graphemeSlice = zc.command.slice(x, prev - x);
-        w += @intCast(ui.term.stringWidth(graphemeSlice));
-
-        if (w > ui.term.width) {
-            if (prev > zc.command_screen_pos) zc.command_screen_pos = prev;
-            break;
-        }
-    }
-}
-
 /// Doesn't wrap Command.Writer to avoid an unnecessary layer of indirection.
 const CommandWriter = struct {
     interface: std.Io.Writer,
@@ -738,8 +571,6 @@ const CommandWriter = struct {
 
     pub fn drain(io_writer: *std.Io.Writer, data: []const []const u8, splat: usize) !usize {
         const w: *CommandWriter = @fieldParentPtr("interface", io_writer);
-        defer w.zc.clampCommandCursor();
-        defer w.zc.clampScreenToCommandCursor();
 
         const buffered = w.interface.buffered();
         if (buffered.len > 0) {
@@ -787,8 +618,6 @@ pub fn commandWriter(zc: *ZC, buffer: []u8) CommandWriter {
 
 pub fn setCommandCursor(zc: *ZC, pos: u32) void {
     zc.command.setCursor(pos);
-    zc.clampCommandCursor();
-    zc.clampScreenToCommandCursor();
 }
 
 pub fn submitCompletion(zc: *ZC, index: usize) !void {
@@ -830,6 +659,7 @@ pub fn submitCommand(zc: *ZC) !void {
     const slice = try zc.command.submit(zc.allocator);
     defer zc.commandHistoryNext();
     try zc.parseCommand(slice);
+    zc.ui.submitCommand(slice);
 }
 
 pub fn commandHistoryNext(zc: *ZC) void {
@@ -945,7 +775,6 @@ pub fn doCommandNormalMode(zc: *ZC, action: CommandAction) !void {
             const len = text.nextCharacter(zc.command, zc.command.cursor, 1);
             try zc.command.replaceRange(zc.allocator, zc.command.cursor, len, &.{});
             if (a == .change_char) zc.setMode(.command_insert);
-            zc.clampCommandCursor();
         },
         .change_to_eol => {
             try zc.command.copyIfNeeded(zc.allocator);
@@ -999,7 +828,6 @@ fn completionPrev(zc: *ZC) void {
 }
 
 fn doCommandInsertMode(zc: *ZC, action: CommandAction, keys: []const u8) !void {
-    defer zc.clampScreenToCommandCursor();
     switch (action) {
         .none => {
             var writer = zc.commandWriter(&.{});
@@ -1225,7 +1053,9 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
             wr.interface.print("let {f} = ", .{zc.cursor}) catch return error.OutOfMemory;
             zc.currentSheet().printCellExpression(zc.cursor, &wr.interface) catch return error.OutOfMemory;
         },
-        .fit_text => try zc.expandWidthAtCursor(),
+        .fit_text => {
+            try zc.expandWidthAtCursor();
+        },
         .enter_visual_mode => zc.setMode(.visual),
         .enter_normal_mode => {},
         .dismiss_count_or_status_message => {
@@ -1247,22 +1077,22 @@ pub fn doNormalMode(zc: *ZC, action: Action) !void {
         .put_cell => try zc.put(zc.anyCursorRange(), .no_adjust),
         .put_cell_adjust => try zc.put(zc.anyCursorRange(), .adjust),
         .page_down => {
-            const n = zc.getCount() *| zc.ui.?.cellViewHeight();
+            const n = zc.getCount() *| zc.ui.visibleRowCount();
             zc.setCursor(.init(zc.cursor.x, zc.cursor.y +| n));
             zc.resetCount();
         },
         .page_up => {
-            const n = zc.getCount() *| zc.ui.?.cellViewHeight();
+            const n = zc.getCount() *| zc.ui.visibleRowCount();
             zc.setCursor(.init(zc.cursor.x, zc.cursor.y -| n));
             zc.resetCount();
         },
         .half_page_down => {
-            const n = zc.getCount() *| (zc.ui.?.cellViewHeight() / 2);
+            const n = zc.getCount() *| (zc.ui.visibleRowCount() / 2);
             zc.setCursor(.init(zc.cursor.x, zc.cursor.y +| n));
             zc.resetCount();
         },
         .half_page_up => {
-            const n = zc.getCount() *| (zc.ui.?.cellViewHeight() / 2);
+            const n = zc.getCount() *| (zc.ui.visibleRowCount() / 2);
             zc.setCursor(.init(zc.cursor.x, zc.cursor.y -| n));
             zc.resetCount();
         },
@@ -2306,10 +2136,12 @@ pub const Command = enum {
     fn cmdSet(zc: *ZC, property: ArgEnum(SetProperty, "property"), value: []const u8) !void {
         switch (property.value) {
             .theme => try zc.setTheme(value),
-            .truecolor => if (std.ascii.eqlIgnoreCase(value, "true")) {
-                zc.ui.?.term.terminfo.queryTrueColour(zc.env);
-            } else if (std.ascii.eqlIgnoreCase(value, "false")) {
-                zc.ui.?.term.terminfo.truecolour = .none;
+            .truecolor => {
+                if (std.ascii.eqlIgnoreCase(value, "true")) {
+                    zc.ui.setTrueColour(zc, true);
+                } else if (std.ascii.eqlIgnoreCase(value, "false")) {
+                    zc.ui.setTrueColour(zc, false);
+                }
             },
         }
     }
@@ -2317,7 +2149,7 @@ pub const Command = enum {
     // TODO: Make the enum here be a subset containing only boolean properties
     fn cmdSetTrue(zc: *ZC, property: ArgEnum(SetProperty, "property")) !void {
         switch (property.value) {
-            .truecolor => zc.ui.?.term.terminfo.queryTrueColour(zc.env),
+            .truecolor => zc.ui.setTrueColour(zc, true),
             else => {
                 // TODO: Make sure this is reported correctly
                 return error.InvalidProperty;
@@ -2330,7 +2162,7 @@ pub const Command = enum {
         switch (property.value) {
             .theme => try zc.setDefaultTheme(),
             .truecolor => {
-                zc.ui.?.term.terminfo.truecolour = .none;
+                zc.ui.setTrueColour(zc, false);
             },
         }
     }
@@ -2904,6 +2736,7 @@ fn closeSheet(zc: *ZC, index: usize) !void {
     } else if (zc.current_sheet == index) {
         zc.prevSheet();
     }
+    zc.setStatusMessage(.info, "Closed {s}", .{name});
 }
 
 fn renameSheet(zc: *ZC, index: usize, new_name: []const u8) !void {
@@ -2925,7 +2758,7 @@ fn renameSheet(zc: *ZC, index: usize, new_name: []const u8) !void {
 }
 
 fn setDefaultTheme(zc: *ZC) !void {
-    try zc.ui_interface.applyDefaultTheme();
+    try zc.ui.applyDefaultTheme();
 }
 
 fn setTheme(
@@ -2933,8 +2766,8 @@ fn setTheme(
     /// Base name of the theme file to set.
     theme_name: []const u8,
 ) !void {
-    const ui_name = zc.ui_interface.getUiName();
-    const extension = zc.ui_interface.getThemeFileExtension();
+    const ui_name = zc.ui.getUiName();
+    const extension = zc.ui.getThemeFileExtension();
 
     const dir, const subpath = if (zc.env.getPosix("XDG_CONFIG_HOME")) |path|
         .{ path, "cellulator" }
@@ -2954,7 +2787,7 @@ fn setTheme(
         extension,
     }) catch return error.NameTooLong;
 
-    try zc.ui_interface.applyTheme(path.items[0 .. path.items.len - 1 :0]);
+    try zc.ui.applyTheme(path.items[0 .. path.items.len - 1 :0]);
 }
 
 fn put(zc: *ZC, dest: Rect, comptime adjust: Sheet.Adjust) !void {
@@ -3007,7 +2840,7 @@ pub fn deleteCellRange(zc: *ZC, rect: Rect) Oom!void {
 pub fn setCursor(zc: *ZC, new_pos: Position) void {
     zc.prev_cursor = zc.cursor;
     zc.cursor = new_pos;
-    zc.clampScreenToCursor();
+    // zc.clampScreenToCursor(); // TODO
 }
 
 pub fn cursorUp(zc: *ZC) void {
@@ -3097,77 +2930,18 @@ pub fn selectionRight(zc: *ZC) void {
     }
     zc.resetCount();
 }
-
-// FIXME: The Y value is incorrect when clamping screen to cursor?
-pub fn leftReservedColumns(zc: *const ZC) u16 {
-    // TODO: Ui interface
-    const ui = zc.ui orelse return 0;
-    const y = zc.screen_pos.y +| ui.cellViewHeight() -| 1;
-
-    if (y == 0)
-        return 2;
-
-    return @intCast(std.math.log10(y) + 2);
-}
-
-pub fn clampScreenToCursor(zc: *ZC) void {
-    zc.clampScreenToCursorY();
-    zc.clampScreenToCursorX();
-}
-
-pub fn clampScreenToCursorY(zc: *ZC) void {
-    // TODO: Ui interface
-    const ui = zc.ui orelse return;
-    const height = ui.cellViewHeight();
-    if (height == 0) return;
-
-    if (zc.cursor.y < zc.screen_pos.y) {
-        zc.screen_pos.y = zc.cursor.y;
-    } else if (zc.cursor.y - zc.screen_pos.y >= height) {
-        zc.screen_pos.y = zc.cursor.y - (height - 1);
-    } else {
-        return;
-    }
-}
-
-pub fn clampScreenToCursorX(zc: *ZC) void {
-    if (zc.cursor.x < zc.screen_pos.x) {
-        zc.screen_pos.x = zc.cursor.x;
-        return;
-    }
-
-    // TODO: Ui interface
-    const ui = zc.ui orelse return;
-
-    var w = zc.leftReservedColumns();
-    var x = zc.cursor.x;
-
-    const view_width = ui.term.width -| zc.leftReservedColumns();
-    while (x >= zc.screen_pos.x) : (x -= 1) {
-        const col: Sheet.Column = zc.currentSheet().getColumn(x) orelse .{};
-        w += @min(view_width, col.width);
-
-        if (w > zc.ui.?.term.width) {
-            if (x < zc.cursor.x) {
-                zc.screen_pos.x = x +| 1;
-            }
-            break;
-        }
-        if (x == 0) break;
-    }
-}
 pub fn setPrecision(zc: *ZC, column: Position.Int, new_precision: u8) Oom!void {
     try zc.currentSheet().setPrecision(column, new_precision, .{});
     zc.currentSheet().endUndoGroup();
 }
 
 pub fn incPrecision(zc: *ZC, column: Position.Int, count: u8) Oom!void {
-    try zc.currentSheet().incPrecision(column, count, .{});
+    try zc.currentSheet().incPrecision(zc.ui, column, count, .{});
     zc.currentSheet().endUndoGroup();
 }
 
 pub fn decPrecision(zc: *ZC, column: Position.Int, count: u8) Oom!void {
-    try zc.currentSheet().decPrecision(column, count, .{});
+    try zc.currentSheet().decPrecision(zc.ui, column, count, .{});
     zc.currentSheet().endUndoGroup();
 }
 
@@ -3184,12 +2958,12 @@ pub inline fn cursorDecPrecision(zc: *ZC) Oom!void {
 }
 
 pub fn incWidth(zc: *ZC, column: Position.Int, n: u8) Oom!void {
-    try zc.currentSheet().incWidth(column, n, .{});
+    try zc.currentSheet().incWidth(zc.ui, column, n, .{});
     zc.currentSheet().endUndoGroup();
 }
 
 pub fn decWidth(zc: *ZC, column: Position.Int, n: u8) Oom!void {
-    try zc.currentSheet().decWidth(column, n, .{});
+    try zc.currentSheet().decWidth(zc.ui, column, n, .{});
     zc.currentSheet().endUndoGroup();
 }
 
@@ -3197,106 +2971,28 @@ pub inline fn cursorIncWidth(zc: *ZC) Oom!void {
     const count: u8 = @intCast(@min(std.math.maxInt(u8), zc.getCount()));
     try zc.incWidth(zc.cursor.x, count);
     zc.resetCount();
-    zc.clampScreenToCursorX();
+    // zc.clampScreenToCursorX(); // TODO
 }
 
 pub inline fn cursorDecWidth(zc: *ZC) Oom!void {
     const count: u8 = @intCast(@min(std.math.maxInt(u8), zc.getCount()));
     try zc.decWidth(zc.cursor.x, count);
-    zc.resetCount();
+    // zc.resetCount(); // TODO
 }
 
-fn widthNeededForColumn(
-    zc: *ZC,
-    sheet: *Sheet,
-    column_index: Position.Int,
-    precision: u8,
-    max_width: u16,
-) !u16 {
-    const Context = struct {
-        width: u16,
-        max_width: u16,
-        precision: u8,
-        sheet: *Sheet,
-        zc: *ZC,
-
-        pub fn func(ctx: *@This(), handle: Sheet.Cell.Handle) !void {
-            const cell = ctx.sheet.getCellFromHandle(handle);
-            // TODO: Make all widths u32
-            const w: usize = sw: switch (cell.expr.value_tag) {
-                .err => 0,
-                .nil => 3,
-                .tuple => 5,
-                .pipeline => std.fmt.count("<[{d}]>", .{
-                    cell.value.pipeline.stages.items.len,
-                }),
-                .boolean => switch (cell.value.boolean) {
-                    false => 5,
-                    true => 4,
-                },
-                .number => std.fmt.count("{d:.[1]}", .{ cell.value.number, ctx.precision }),
-                .string => ctx.zc.ui_interface.stringWidth(
-                    cell.value.string.bytes(),
-                    .{ .max_width = ctx.zc.ui.?.term.width },
-                ).width,
-                .ref_cell => std.fmt.count("{f}", .{cell.value.ref_cell}),
-                .ref_range => std.fmt.count("{f}", .{cell.value.ref_range.*}),
-                .simple_function => std.fmt.count("{f}", .{
-                    ctx.sheet.ast.fmtExpression(
-                        ctx.sheet.arena.allocator(),
-                        cell.value.simple_function.index,
-                    ),
-                }),
-                .builtin_function => std.fmt.count("@{f}", .{cell.value.builtin_function}),
-                .closure => {
-                    const root = cell.value.closure.root;
-                    break :sw std.fmt.count("{f}", .{
-                        ctx.sheet.ast.fmtExpression(ctx.sheet.arena.allocator(), root),
-                    });
-                },
-                .table => 5,
-            };
-            if (w > ctx.width) {
-                ctx.width = @intCast(w);
-                if (ctx.width >= ctx.max_width) return error.Stopped;
-            }
-        }
-    };
-
-    var ctx: Context = .{
-        .width = Sheet.Column.default_width,
-        .max_width = max_width,
-        .precision = precision,
-        .sheet = sheet,
-        .zc = zc,
-    };
-
-    sheet.cell_tree.traverse(
-        &.{ column_index, 0 },
-        &.{ column_index, std.math.maxInt(u32) },
-        &ctx,
-    ) catch return max_width;
-    return ctx.width;
-}
-
-pub fn expandWidthAtCursor(zc: *ZC) Oom!void {
+pub fn expandWidthAtCursor(zc: *ZC) !void {
     const sheet = zc.currentSheet();
     if (!sheet.columnIsPopulated(zc.cursor.x)) return;
     try sheet.ensureUnusedUndoCapacity(1);
 
     const res = try sheet.cols.getOrPut(sheet.gpa, &.{zc.cursor.x});
-    if (!res.found_existing) res.value_ptr.* = .{};
+    if (!res.found_existing) res.value_ptr.* = .{
+        .width = zc.ui.defaultWidth(),
+    };
 
     const handle = sheet.getColumnHandle(zc.cursor.x) orelse return;
     const col = sheet.cols.getValue(handle);
-
-    const max_width = zc.ui.?.term.width - zc.leftReservedColumns();
-    const width_needed = try zc.widthNeededForColumn(
-        sheet,
-        zc.cursor.x,
-        col.precision,
-        max_width,
-    );
+    const width_needed = zc.ui.widthNeededForColumn(zc, sheet, zc.cursor.x);
 
     std.log.debug("Width needed for {f}: {d}", .{
         Position.fmtColumnAddress(zc.cursor.x),
@@ -3311,7 +3007,7 @@ pub fn expandWidthAtCursor(zc: *ZC) Oom!void {
     }), .{}) catch unreachable;
 
     sheet.endUndoGroup();
-    zc.clampScreenToCursorX();
+    // zc.clampScreenToCursorX();
 }
 
 pub fn cursorToFirstCellInRow(zc: *ZC) void {
@@ -3349,7 +3045,7 @@ pub fn cursorGotoCol(zc: *ZC) void {
 test "Sheet mode counts" {
     const t = std.testing;
     var zc: ZC = undefined;
-    try zc.init(t.allocator, t.io, t.environ, .{ .ui = false });
+    try zc.init(.none, t.allocator, t.io, t.environ, .{});
     defer zc.deinit();
 
     try t.expectEqual(Mode.normal, zc.mode);
@@ -3361,7 +3057,7 @@ test "Motions normal mode" {
     const max = std.math.maxInt(Position.Int);
 
     var zc: ZC = undefined;
-    try zc.init(t.allocator, t.io, t.environ, .{ .ui = false });
+    try zc.init(.none, t.allocator, t.io, t.environ, .{});
     defer zc.deinit();
 
     try t.expectEqual(Position{ .x = 0, .y = 0 }, zc.cursor);
@@ -3564,7 +3260,7 @@ test "Motions visual mode" {
     const max = std.math.maxInt(Position.Int);
 
     var zc: ZC = undefined;
-    try zc.init(t.allocator, t.io, t.environ, .{ .ui = false });
+    try zc.init(.none, t.allocator, t.io, t.environ, .{});
     defer zc.deinit();
 
     zc.setMode(.visual);
@@ -3936,7 +3632,7 @@ test "Motions visual mode" {
 // Test files at runtime so no recompilation is needed if the data changes
 fn testFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     var zc: ZC = undefined;
-    try zc.init(gpa, io, std.testing.environ, .{ .ui = false });
+    try zc.init(.none, gpa, io, std.testing.environ, .{});
     defer zc.deinit();
 
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
@@ -4064,7 +3760,7 @@ test "table.zc" {
 
 test "Invalid reference" {
     var zc: ZC = undefined;
-    try zc.init(std.testing.allocator, std.testing.io, std.testing.environ, .{ .ui = false });
+    try zc.init(.none, std.testing.allocator, std.testing.io, std.testing.environ, .{});
     defer zc.deinit();
 
     try zc.parseCommand("let a0 = &10");

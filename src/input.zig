@@ -3,9 +3,6 @@ const utils = @import("utils.zig");
 const Allocator = std.mem.Allocator;
 const Motion = @import("text.zig").Motion;
 const critbit = @import("critbit.zig");
-const shovel = @import("shovel");
-const inputParser = shovel.inputParser;
-const Term = shovel.Term;
 
 const assert = std.debug.assert;
 
@@ -56,75 +53,6 @@ pub fn createKeymaps(allocator: Allocator) !KeyMaps {
     }
 
     return ret;
-}
-
-/// Parses the raw terminal input in `bytes` into a readable format for keybindings, outputting
-/// the results to the given writer.
-pub fn parse(
-    term: *Term,
-    bytes: []const u8,
-    w: *std.Io.Writer,
-) !void {
-    var iter = inputParser(bytes, term);
-
-    while (iter.next()) |in| {
-        var special = false;
-        if (in.mod_ctrl and in.mod_alt) {
-            special = true;
-            try w.writeAll("<C-M-");
-        } else if (in.mod_ctrl) {
-            special = true;
-            try w.writeAll("<C-");
-        } else if (in.mod_alt) {
-            special = true;
-            try w.writeAll("<M-");
-        } else if (in.mod_shift) {
-            special = true;
-            try w.writeAll("<S-");
-        }
-
-        switch (in.content) {
-            .escape => try w.writeAll("<Escape>"),
-            .arrow_up => try w.writeAll("<Up>"),
-            .arrow_down => try w.writeAll("<Down>"),
-            .arrow_left => try w.writeAll("<Left>"),
-            .arrow_right => try w.writeAll("<Right>"),
-            .home => try w.writeAll("<Home>"),
-            .end => try w.writeAll("<End>"),
-            .begin => try w.writeAll("<Begin>"),
-            .page_up => try w.writeAll("<PageUp>"),
-            .page_down => try w.writeAll("<PageDown>"),
-            .delete => try w.writeAll("<Delete>"),
-            .insert => try w.writeAll("<Insert>"),
-            .print => try w.writeAll("<Print>"),
-            .scroll_lock => try w.writeAll("<Scroll>"),
-            .pause => try w.writeAll("<Pause>"),
-            .function => |function| try w.print("<F{d}>", .{function}),
-            .enter => try w.writeAll("<Return>"),
-            .command => {},
-            .tab => try w.writeAll("<Tab>"),
-            .backspace => try w.writeAll("<Delete>"),
-            .codepoint => |cp| switch (cp) {
-                '<' => try w.writeAll("<<"),
-                127 => try w.writeAll("<Delete>"),
-                0...'\n' - 1, '\n' + 1...'\r' - 1, '\r' + 1...31 => {},
-                '\n', '\r', 32...'<' - 1, '<' + 1...126 => {
-                    @branchHint(.likely);
-                    try w.writeByte(@intCast(cp));
-                },
-                else => {
-                    var buf: [4]u8 = undefined;
-                    const len = std.unicode.utf8Encode(cp, &buf) catch continue;
-                    try w.writeAll(buf[0..len]);
-                },
-            },
-            .mouse, .unknown => {},
-        }
-
-        if (special) {
-            try w.writeByte('>');
-        }
-    }
 }
 
 pub const Action = union(enum) {

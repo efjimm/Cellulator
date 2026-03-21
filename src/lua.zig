@@ -28,11 +28,11 @@ pub fn init(zc: *ZC) !*Lua {
         {
             // Tui
             // Requires `zc` to be a stable pointer
-            state.newUserdata(*Tui, 1).* = &zc.ui.?;
+            // state.newUserdata(*Tui, 1).* = &zc.tui.?;
 
-            try createMetatable(state, "tui");
-            state.setMetatable(-2);
-            state.setField(-2, "tui");
+            // try createMetatable(state, "tui");
+            // state.setMetatable(-2);
+            // state.setField(-2, "tui");
         }
 
         state.setMetatable(1);
